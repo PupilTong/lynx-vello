@@ -15,8 +15,8 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 use terminus::link::NodeId;
 use terminus::link::html::canvas::{
-    CanvasError, CompositeOp, Direction, FillRule, Gradient, Image, LineCap, LineJoin, Path,
-    Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
+    CanvasError, CompositeOp, Direction, FillRule, Gradient, Image, LineCap, LineJoin,
+    OffscreenCanvas, Path, Pattern, Repetition, SmoothingQuality, Style, TextAlign, TextBaseline,
 };
 
 use super::css::{parse_color, parse_font, serialize_color};
@@ -54,12 +54,13 @@ macro_rules! members {
 }
 
 /// Runs `$call` on the path the id `$id` names: a canvas's current default
-/// path, or a `Path2D`. Both have the builder methods under the same names.
+/// path, through its 2D context, or a `Path2D`. Both have the builder
+/// methods under the same names.
 macro_rules! on_path {
     ($table:ident, $id:ident, |$path:ident| $call:expr) => {
         match $table.entries().get_mut(&$id) {
             Some(Entry::Canvas(entry)) => {
-                let $path = entry.canvas();
+                let $path = &mut entry.canvas().context_2d();
                 Ok($call)
             }
             Some(Entry::Path($path)) => Ok($call),
@@ -123,6 +124,11 @@ fn install_transfer(
 }
 
 #[expect(clippy::too_many_lines, reason = "one member per context method")]
+#[expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "a `Context2d` method's path names one context lifetime, and the helpers take a \
+              closure over any"
+)]
 fn install_context_members(
     engine: &ScriptEngine,
     table: &Rc<CanvasTable>,
@@ -184,77 +190,77 @@ fn install_context_members(
 
         // The state stack.
         fn canvasSave(target: id) |this| {
-            this.canvas(target, terminus::link::html::canvas::Canvas::save).map(undefined)
+            this.context(target, |context| context.save()).map(undefined)
         }
         fn canvasRestore(target: id) |this| {
-            this.canvas(target, terminus::link::html::canvas::Canvas::restore).map(undefined)
+            this.context(target, |context| context.restore()).map(undefined)
         }
         fn canvasReset(target: id) |this| {
-            this.draw(target, terminus::link::html::canvas::Canvas::reset).map(undefined)
+            this.draw(target, |context| context.reset()).map(undefined)
         }
 
         // Transformations.
         fn canvasScale(target: id, x: number, y: number) |this| {
-            this.canvas(target, |canvas| canvas.scale(x, y)).map(undefined)
+            this.context(target, |context| context.scale(x, y)).map(undefined)
         }
         fn canvasRotate(target: id, angle: number) |this| {
-            this.canvas(target, |canvas| canvas.rotate(angle)).map(undefined)
+            this.context(target, |context| context.rotate(angle)).map(undefined)
         }
         fn canvasTranslate(target: id, x: number, y: number) |this| {
-            this.canvas(target, |canvas| canvas.translate(x, y)).map(undefined)
+            this.context(target, |context| context.translate(x, y)).map(undefined)
         }
         fn canvasTransform(target: id, a: number, b: number, c: number, d: number, e: number,
             f: number) |this| {
-            this.canvas(target, |canvas| canvas.transform(a, b, c, d, e, f)).map(undefined)
+            this.context(target, |context| context.transform(a, b, c, d, e, f)).map(undefined)
         }
         fn canvasSetTransform(target: id, a: number, b: number, c: number, d: number,
             e: number, f: number) |this| {
-            this.canvas(target, |canvas| canvas.set_transform(a, b, c, d, e, f)).map(undefined)
+            this.context(target, |context| context.set_transform(a, b, c, d, e, f)).map(undefined)
         }
         fn canvasGetTransform(target: id) |this| {
-            this.canvas(target, |canvas| float_bytes(&canvas.get_transform()))
+            this.context(target, |context| float_bytes(&context.get_transform()))
         }
         fn canvasResetTransform(target: id) |this| {
-            this.canvas(target, terminus::link::html::canvas::Canvas::reset_transform).map(undefined)
+            this.context(target, |context| context.reset_transform()).map(undefined)
         }
 
         // Numeric, keyword and boolean attributes.
         fn canvasGetNumber(target: id, which: selector) |this| {
-            this.canvas(target, |canvas| {
+            this.context(target, |context| {
                 HostValue::Number(match which {
-                    GLOBAL_ALPHA => canvas.global_alpha(),
-                    SHADOW_BLUR => canvas.shadow_blur(),
-                    SHADOW_OFFSET_X => canvas.shadow_offset_x(),
-                    SHADOW_OFFSET_Y => canvas.shadow_offset_y(),
-                    LINE_WIDTH => canvas.line_width(),
-                    MITER_LIMIT => canvas.miter_limit(),
-                    _ => canvas.line_dash_offset(),
+                    GLOBAL_ALPHA => context.global_alpha(),
+                    SHADOW_BLUR => context.shadow_blur(),
+                    SHADOW_OFFSET_X => context.shadow_offset_x(),
+                    SHADOW_OFFSET_Y => context.shadow_offset_y(),
+                    LINE_WIDTH => context.line_width(),
+                    MITER_LIMIT => context.miter_limit(),
+                    _ => context.line_dash_offset(),
                 })
             })
         }
         fn canvasSetNumber(target: id, which: selector, value: number) |this| {
-            this.canvas(target, |canvas| match which {
-                GLOBAL_ALPHA => canvas.set_global_alpha(value),
-                SHADOW_BLUR => canvas.set_shadow_blur(value),
-                SHADOW_OFFSET_X => canvas.set_shadow_offset_x(value),
-                SHADOW_OFFSET_Y => canvas.set_shadow_offset_y(value),
-                LINE_WIDTH => canvas.set_line_width(value),
-                MITER_LIMIT => canvas.set_miter_limit(value),
-                _ => canvas.set_line_dash_offset(value),
+            this.context(target, |context| match which {
+                GLOBAL_ALPHA => context.set_global_alpha(value),
+                SHADOW_BLUR => context.set_shadow_blur(value),
+                SHADOW_OFFSET_X => context.set_shadow_offset_x(value),
+                SHADOW_OFFSET_Y => context.set_shadow_offset_y(value),
+                LINE_WIDTH => context.set_line_width(value),
+                MITER_LIMIT => context.set_miter_limit(value),
+                _ => context.set_line_dash_offset(value),
             })
             .map(undefined)
         }
         fn canvasGetKeyword(target: id, which: selector) |this| {
-            this.canvas(target, |canvas| {
+            this.context(target, |context| {
                 HostValue::String(
                     match which {
-                        COMPOSITE => canvas.global_composite_operation().name(),
-                        SMOOTHING_QUALITY => canvas.image_smoothing_quality().name(),
-                        LINE_CAP => canvas.line_cap().name(),
-                        LINE_JOIN => canvas.line_join().name(),
-                        TEXT_ALIGN => canvas.text_align().name(),
-                        TEXT_BASELINE => canvas.text_baseline().name(),
-                        _ => canvas.direction().name(),
+                        COMPOSITE => context.global_composite_operation().name(),
+                        SMOOTHING_QUALITY => context.image_smoothing_quality().name(),
+                        LINE_CAP => context.line_cap().name(),
+                        LINE_JOIN => context.line_join().name(),
+                        TEXT_ALIGN => context.text_align().name(),
+                        TEXT_BASELINE => context.text_baseline().name(),
+                        _ => context.direction().name(),
                     }
                     .to_owned(),
                 )
@@ -262,25 +268,25 @@ fn install_context_members(
         }
         fn canvasSetKeyword(target: id, which: selector, value: text) |this| {
             // A string the attribute does not take is ignored.
-            this.canvas(target, |canvas| match which {
+            this.context(target, |context| match which {
                 COMPOSITE => CompositeOp::from_name(value)
-                    .map(|op| canvas.set_global_composite_operation(op)),
+                    .map(|op| context.set_global_composite_operation(op)),
                 SMOOTHING_QUALITY => SmoothingQuality::from_name(value)
-                    .map(|quality| canvas.set_image_smoothing_quality(quality)),
-                LINE_CAP => LineCap::from_name(value).map(|cap| canvas.set_line_cap(cap)),
-                LINE_JOIN => LineJoin::from_name(value).map(|join| canvas.set_line_join(join)),
-                TEXT_ALIGN => TextAlign::from_name(value).map(|align| canvas.set_text_align(align)),
+                    .map(|quality| context.set_image_smoothing_quality(quality)),
+                LINE_CAP => LineCap::from_name(value).map(|cap| context.set_line_cap(cap)),
+                LINE_JOIN => LineJoin::from_name(value).map(|join| context.set_line_join(join)),
+                TEXT_ALIGN => TextAlign::from_name(value).map(|align| context.set_text_align(align)),
                 TEXT_BASELINE => TextBaseline::from_name(value)
-                    .map(|baseline| canvas.set_text_baseline(baseline)),
-                _ => Direction::from_name(value).map(|direction| canvas.set_direction(direction)),
+                    .map(|baseline| context.set_text_baseline(baseline)),
+                _ => Direction::from_name(value).map(|direction| context.set_direction(direction)),
             })
             .map(undefined)
         }
         fn canvasGetSmoothing(target: id) |this| {
-            this.canvas(target, |canvas| HostValue::Boolean(canvas.image_smoothing_enabled()))
+            this.context(target, |context| HostValue::Boolean(context.image_smoothing_enabled()))
         }
         fn canvasSetSmoothing(target: id, enabled: flag) |this| {
-            this.canvas(target, |canvas| canvas.set_image_smoothing_enabled(enabled))
+            this.context(target, |context| context.set_image_smoothing_enabled(enabled))
                 .map(undefined)
         }
 
@@ -290,10 +296,10 @@ fn install_context_members(
                 // Not a color: the attribute keeps its value.
                 return Ok(HostValue::Undefined);
             };
-            this.canvas(target, |canvas| match which {
-                FILL => canvas.set_fill_style(Style::Color(color)),
-                STROKE => canvas.set_stroke_style(Style::Color(color)),
-                _ => canvas.set_shadow_color(color),
+            this.context(target, |context| match which {
+                FILL => context.set_fill_style(Style::Color(color)),
+                STROKE => context.set_stroke_style(Style::Color(color)),
+                _ => context.set_shadow_color(color),
             })?;
             Ok(HostValue::String(serialize_color(color)))
         }
@@ -303,11 +309,11 @@ fn install_context_members(
                 Some(Entry::Pattern(pattern)) => Style::Pattern(pattern.clone()),
                 _ => return Err(no_such("gradient or pattern", paint)),
             };
-            this.canvas(target, |canvas| {
+            this.context(target, |context| {
                 if which == FILL {
-                    canvas.set_fill_style(style);
+                    context.set_fill_style(style);
                 } else {
-                    canvas.set_stroke_style(style);
+                    context.set_stroke_style(style);
                 }
             })
             .map(undefined)
@@ -348,18 +354,18 @@ fn install_context_members(
 
         // Rectangles.
         fn canvasClearRect(target: id, x: number, y: number, w: number, h: number) |this| {
-            this.draw(target, |canvas| canvas.clear_rect(x, y, w, h)).map(undefined)
+            this.draw(target, |context| context.clear_rect(x, y, w, h)).map(undefined)
         }
         fn canvasFillRect(target: id, x: number, y: number, w: number, h: number) |this| {
-            this.draw(target, |canvas| canvas.fill_rect(x, y, w, h)).map(undefined)
+            this.draw(target, |context| context.fill_rect(x, y, w, h)).map(undefined)
         }
         fn canvasStrokeRect(target: id, x: number, y: number, w: number, h: number) |this| {
-            this.draw(target, |canvas| canvas.stroke_rect(x, y, w, h)).map(undefined)
+            this.draw(target, |context| context.stroke_rect(x, y, w, h)).map(undefined)
         }
 
         // Building paths, on a canvas's default path or a `Path2D`.
         fn canvasBeginPath(target: id) |this| {
-            this.canvas(target, terminus::link::html::canvas::Canvas::begin_path).map(undefined)
+            this.context(target, |context| context.begin_path()).map(undefined)
         }
         fn canvasClosePath(target: id) |this| {
             on_path!(this, target, |path| path.close_path()).map(undefined)
@@ -411,54 +417,54 @@ fn install_context_members(
         // Drawing paths. A path id of 0 is the current default path.
         fn canvasFill(target: id, path: optional_id, rule: fill_rule) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
-            this.draw(target, |canvas| match &path {
-                Some(path) => canvas.fill_path(path, rule),
-                None => canvas.fill(rule),
+            this.draw(target, |context| match &path {
+                Some(path) => context.fill_path(path, rule),
+                None => context.fill(rule),
             })
             .map(undefined)
         }
         fn canvasStroke(target: id, path: optional_id) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
-            this.draw(target, |canvas| match &path {
-                Some(path) => canvas.stroke_path(path),
-                None => canvas.stroke(),
+            this.draw(target, |context| match &path {
+                Some(path) => context.stroke_path(path),
+                None => context.stroke(),
             })
             .map(undefined)
         }
         fn canvasClip(target: id, path: optional_id, rule: fill_rule) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
-            this.canvas(target, |canvas| match &path {
-                Some(path) => canvas.clip_path(path, rule),
-                None => canvas.clip(rule),
+            this.context(target, |context| match &path {
+                Some(path) => context.clip_path(path, rule),
+                None => context.clip(rule),
             })
             .map(undefined)
         }
         fn canvasIsPointInPath(target: id, path: optional_id, x: number, y: number,
             rule: fill_rule) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
-            this.canvas(target, |canvas| {
+            this.context(target, |context| {
                 HostValue::Boolean(match &path {
-                    Some(path) => canvas.is_point_in_path2d(path, x, y, rule),
-                    None => canvas.is_point_in_path(x, y, rule),
+                    Some(path) => context.is_point_in_path2d(path, x, y, rule),
+                    None => context.is_point_in_path(x, y, rule),
                 })
             })
         }
         fn canvasIsPointInStroke(target: id, path: optional_id, x: number, y: number) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
-            this.canvas(target, |canvas| {
+            this.context(target, |context| {
                 HostValue::Boolean(match &path {
-                    Some(path) => canvas.is_point_in_stroke_path(path, x, y),
-                    None => canvas.is_point_in_stroke(x, y),
+                    Some(path) => context.is_point_in_stroke_path(path, x, y),
+                    None => context.is_point_in_stroke(x, y),
                 })
             })
         }
 
         // Line styles.
         fn canvasSetLineDash(target: id, segments: rest) |this| {
-            this.canvas(target, |canvas| canvas.set_line_dash(&segments)).map(undefined)
+            this.context(target, |context| context.set_line_dash(&segments)).map(undefined)
         }
         fn canvasGetLineDash(target: id) |this| {
-            this.canvas(target, |canvas| float_bytes(canvas.line_dash()))
+            this.context(target, |context| float_bytes(context.line_dash()))
         }
 
         // Text.
@@ -466,26 +472,26 @@ fn install_context_members(
             let Some(parsed) = parse_font(css) else {
                 return Ok(HostValue::Undefined);
             };
-            this.canvas(target, |canvas| canvas.set_font(parsed.font))?;
+            this.context(target, |context| context.set_font(parsed.font))?;
             Ok(HostValue::String(parsed.css))
         }
         fn canvasFillText(target: id, content: text, x: number, y: number,
             max_width: optional_number) |this| {
-            this.text(target, |canvas, fonts| {
-                canvas.fill_text(fonts, content, x, y, max_width);
+            this.text(target, |context, fonts| {
+                context.fill_text(fonts, content, x, y, max_width);
             })?;
             Ok(HostValue::Undefined)
         }
         fn canvasStrokeText(target: id, content: text, x: number, y: number,
             max_width: optional_number) |this| {
-            this.text(target, |canvas, fonts| {
-                canvas.stroke_text(fonts, content, x, y, max_width);
+            this.text(target, |context, fonts| {
+                context.stroke_text(fonts, content, x, y, max_width);
             })?;
             Ok(HostValue::Undefined)
         }
         fn canvasMeasureText(target: id, content: text) |this| {
             let metrics = this
-                .text(target, |canvas, fonts| canvas.measure_text(fonts, content))?
+                .text(target, |context, fonts| context.measure_text(fonts, content))?
                 .unwrap_or_default();
             Ok(float_bytes(&[
                 metrics.width,
@@ -506,11 +512,11 @@ fn install_context_members(
         // Images and pixels.
         fn canvasDrawImage(target: id, source: id, rects: rest) |this| {
             let image = this.image(source)?;
-            this.draw(target, |canvas| match *rects.as_slice() {
-                [dx, dy] => canvas.draw_image(&image, dx, dy),
-                [dx, dy, dw, dh] => canvas.draw_image_scaled(&image, dx, dy, dw, dh),
+            this.draw(target, |context| match *rects.as_slice() {
+                [dx, dy] => context.draw_image(&image, dx, dy),
+                [dx, dy, dw, dh] => context.draw_image_scaled(&image, dx, dy, dw, dh),
                 [sx, sy, sw, sh, dx, dy, dw, dh] => {
-                    canvas.draw_image_subrect(&image, sx, sy, sw, sh, dx, dy, dw, dh)
+                    context.draw_image_subrect(&image, sx, sy, sw, sh, dx, dy, dw, dh)
                 }
                 _ => Err(CanvasError::Type),
             })
@@ -519,7 +525,7 @@ fn install_context_members(
         fn canvasGetImageData(target: id, sx: long, sy: long, sw: long, sh: long) |this| {
             // The read is issued under the table's borrow and waited on
             // after it.
-            let read = this.canvas(target, |canvas| canvas.read_image_data(sx, sy, sw, sh))?;
+            let read = this.context(target, |context| context.read_image_data(sx, sy, sw, sh))?;
             Ok(match read.and_then(|read| this.reads.wait(read)) {
                 Ok(pixels) => HostValue::Bytes(pixels.into_boxed_slice()),
                 Err(error) => error_value(error),
@@ -533,11 +539,11 @@ fn install_context_members(
                 [x, y, w, h] => Some([x, y, w, h].map(to_long)),
                 _ => return Err(format!("{NAME} takes four dirty-rectangle numbers or none")),
             };
-            this.draw(target, |canvas| canvas.put_image_data(pixels, width, height, dx, dy, dirty))
+            this.draw(target, |context| context.put_image_data(pixels, width, height, dx, dy, dirty))
                 .map(outcome)
         }
         fn canvasTransferToBitmap(target: id) |this| {
-            let image = this.draw(target, terminus::link::html::canvas::Canvas::take_image)?;
+            let image = this.draw_canvas(target, OffscreenCanvas::take_image)?;
             Ok(id_value(this.insert(Entry::Bitmap(image))))
         }
         fn canvasBitmapFrom(source: id, crop: rest) |this| {
@@ -707,11 +713,11 @@ impl CanvasTable {
         &self,
         id: u64,
         call: impl FnOnce(
-            &mut terminus::link::html::canvas::Canvas,
+            &mut terminus::link::html::canvas::Context2d<'_>,
             &mut terminus::link::TextContext,
         ) -> R,
     ) -> Result<Option<R>, String> {
-        self.draw(id, |canvas| self.with_fonts(|fonts| call(canvas, fonts)))
+        self.draw(id, |context| self.with_fonts(|fonts| call(context, fonts)))
     }
 }
 

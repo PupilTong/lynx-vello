@@ -27,7 +27,7 @@
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rustc_hash::FxHashMap;
-use terminus::link::html::canvas::{Canvas, CanvasFrames, InvalidState};
+use terminus::link::html::canvas::{CanvasFrames, InvalidState, OffscreenCanvas};
 use terminus::link::{
     FrameImage, FrameImages, FrameWriter, ImageSizeHint, NodeId, PictureId, PictureKey, TakenFrame,
 };
@@ -98,10 +98,11 @@ impl CanvasPresenter {
     }
 
     /// HTML's update of the placeholder: `canvas`, with every draw recorded
-    /// on it, becomes what the placeholder shows (`Canvas::commit`). Nothing
-    /// is queued: a wake is asked for only when the painter has described
-    /// every earlier commit, and a resize sent only when none is pending.
-    pub(crate) fn commit(&self, canvas: &mut Canvas) {
+    /// on it, becomes what the placeholder shows
+    /// (`OffscreenCanvas::commit`). Nothing is queued: a wake is asked for
+    /// only when the painter has described every earlier commit, and a
+    /// resize sent only when none is pending.
+    pub(crate) fn commit(&self, canvas: &mut OffscreenCanvas) {
         let Some(entry) = self.0.upgrade() else {
             return;
         };

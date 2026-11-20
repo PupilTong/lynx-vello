@@ -348,7 +348,8 @@ struct PatternData {
 
 impl Pattern {
     /// `createPattern`. `InvalidState` for an image with no pixels. A
-    /// canvas's current pixels ([`super::Canvas::image`]) are copied as they
+    /// canvas's current pixels
+    /// ([`OffscreenCanvas::image`](crate::html::canvas::OffscreenCanvas::image)) are copied as they
     /// are now.
     pub fn new(image: Image, repetition: Repetition) -> Result<Self, CanvasError> {
         if image.is_empty() {
