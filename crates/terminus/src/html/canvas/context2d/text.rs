@@ -5,8 +5,8 @@
 use std::borrow::Cow;
 
 use seldon::text::{
-    FontMetrics, GenericFamily, LineOptions, LineWhiteSpace, ResolvedFamily, ResolvedFont,
-    ResolvedFontStyle, ShapedLine, TextContext, font_metrics, shape_line,
+    FontMetrics, GenericFamily, LineOptions, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
+    ShapedLine, TextContext, font_metrics, shape_line,
 };
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -79,7 +79,6 @@ impl Line {
             } else {
                 seldon::text::paragraph::Direction::Ltr
             }),
-            white_space: LineWhiteSpace::Preserve,
         };
         let shaped = shape_line(context, &text, font, options);
         // Text with no glyph run (empty text) names no font: the first
