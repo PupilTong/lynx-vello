@@ -21,7 +21,6 @@ use parley::fontique::Attributes;
 use parley::{
     BaseDirection, FontFamily, FontFamilyName, FontStyle as ParleyFontStyle,
     FontWeight as ParleyFontWeight, FontWidth, GenericFamily, PositionedLayoutItem, StyleProperty,
-    WhiteSpaceCollapse,
 };
 
 use super::TextContext;
@@ -88,27 +87,6 @@ pub struct LineOptions {
     /// The bidi paragraph level: `None` takes the direction of the text's
     /// first strong character, as parley does by default.
     pub direction: Option<Direction>,
-    pub white_space: LineWhiteSpace,
-}
-
-/// Which parley `white-space-collapse` style [`shape_line`] shapes under.
-///
-/// Either way the text is shaped as given, every space and tab included:
-/// parley's one-style builder collapses nothing, so a caller that collapses
-/// white space does it before shaping (as SVG's parse does). What differs is
-/// white space at the line's end.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LineWhiteSpace {
-    /// White space at the line's end hangs past the line's end edge
-    /// (css-text-4 §4.3.2), so on a right-to-left line it lies left of
-    /// x = 0.
-    #[default]
-    Collapse,
-    /// White space at the line's end stays inside the line, as css-text-4
-    /// keeps preserved white space before a forced break, so a line's glyphs
-    /// start at x = 0 in either direction. A newline still ends a line, so a
-    /// caller that wants one line replaces newlines first.
-    Preserve,
 }
 
 /// One shaped line: its glyph runs and the metrics a caller places and
@@ -177,6 +155,13 @@ pub struct ShapedGlyph {
 /// Shapes `text` as one line under `font`, laid out as `options` says,
 /// through the fonts `context` knows.
 ///
+/// The text is shaped as given, every space and tab included: parley's
+/// builder collapses no white space, so a caller that collapses it does so
+/// before shaping (as SVG's parse does). White space at the line's end stays
+/// inside the line, so the glyphs start at x = 0 in either direction. A
+/// newline still ends a line, so a caller that wants one line replaces
+/// newlines first.
+///
 /// Empty text shapes to an empty line without touching parley.
 #[must_use]
 pub fn shape_line(
@@ -211,12 +196,6 @@ pub fn shape_line(
     builder.push_default(StyleProperty::FontStyle(attributes.style));
     builder.push_default(StyleProperty::FontWidth(attributes.width));
     builder.push_default(StyleProperty::LetterSpacing(options.letter_spacing));
-    builder.push_default(StyleProperty::WhiteSpaceCollapse(
-        match options.white_space {
-            LineWhiteSpace::Collapse => WhiteSpaceCollapse::Collapse,
-            LineWhiteSpace::Preserve => WhiteSpaceCollapse::Preserve,
-        },
-    ));
     builder.set_base_direction(match options.direction {
         None => BaseDirection::Auto,
         Some(Direction::Ltr) => BaseDirection::Ltr,
@@ -401,7 +380,6 @@ mod tests {
         let font = ahem(10.0);
         let preserved = |direction| LineOptions {
             direction,
-            white_space: LineWhiteSpace::Preserve,
             ..LineOptions::default()
         };
         let ltr = shape_line(&mut context, "a ", &font, preserved(Some(Direction::Ltr)));
@@ -422,32 +400,28 @@ mod tests {
         assert_eq!(rtl.advance, 20.0);
     }
 
-    /// Both styles shape every space; on a right-to-left line the trailing
-    /// spaces of `"a  "` hang left of x = 0 under `Collapse` and stay inside
-    /// the line under `Preserve`.
+    /// Every space is shaped, and white space at the end of a right-to-left
+    /// line stays inside the line: the glyphs of `"a  "` start at x = 0, as
+    /// they do left to right.
     #[test]
-    fn white_space_is_shaped_as_given_and_hangs_or_stays() {
+    fn white_space_is_shaped_as_given_and_stays_inside_the_line() {
         let mut context = ahem_context();
         let font = ahem(10.0);
-        let shape = |context: &mut TextContext, text, direction, white_space| {
+        let shape = |context: &mut TextContext, text, direction| {
             let options = LineOptions {
                 direction,
-                white_space,
                 ..LineOptions::default()
             };
             shape_line(context, text, &font, options)
         };
-        for white_space in [LineWhiteSpace::Collapse, LineWhiteSpace::Preserve] {
-            let line = shape(&mut context, "a  b", None, white_space);
-            assert_eq!(line.advance, 40.0, "{white_space:?}");
-            assert_eq!(xs(&line), [0.0, 10.0, 20.0, 30.0], "{white_space:?}");
+        let line = shape(&mut context, "a  b", None);
+        assert_eq!(line.advance, 40.0);
+        assert_eq!(xs(&line), [0.0, 10.0, 20.0, 30.0]);
+        for direction in [Direction::Ltr, Direction::Rtl] {
+            let line = shape(&mut context, "a  ", Some(direction));
+            assert_eq!(xs(&line), [0.0, 10.0, 20.0], "{direction:?}");
+            assert_eq!(line.advance, 30.0, "{direction:?}");
         }
-        let rtl = Some(Direction::Rtl);
-        let hanging = shape(&mut context, "a  ", rtl, LineWhiteSpace::Collapse);
-        let kept = shape(&mut context, "a  ", rtl, LineWhiteSpace::Preserve);
-        assert_eq!(xs(&hanging), [-20.0, -10.0, 0.0]);
-        assert_eq!(xs(&kept), [0.0, 10.0, 20.0]);
-        assert_eq!((hanging.advance, kept.advance), (30.0, 30.0));
     }
 
     /// The first run's font reports Ahem's ascent of 0.8 em and descent of

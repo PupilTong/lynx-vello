@@ -206,6 +206,62 @@ fn dashes() {
     assert_eq!(canvas.line_dash(), [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
 }
 
+/// A dash list that would cut the path into more than a million dashes is
+/// not applied and the path is stroked solid (Skia's `SkDashPath` limit):
+/// a 100-unit line under a 9e-5 period would be 1.1 million dashes. A
+/// period ten times longer still dashes.
+#[test]
+fn a_dash_past_a_million_dashes_strokes_solid() {
+    let fine = [4e-5, 5e-5];
+    let coarse = [4e-4, 5e-4];
+    // The middle of a gap of either list, on the line's axis.
+    let gap = |dash: [f64; 2]| dash[0] + dash[1] / 2.0;
+    let mut line = Path::new();
+    line.move_to(0.0, 5.0);
+    line.line_to(100.0, 5.0);
+
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    assert!(canvas.is_point_in_stroke_path(&line, gap(fine), 5.0));
+    canvas.move_to(0.0, 5.0);
+    canvas.line_to(100.0, 5.0);
+    assert!(canvas.is_point_in_stroke(gap(fine), 5.0));
+    canvas.set_line_dash(&coarse);
+    assert!(!canvas.is_point_in_stroke_path(&line, gap(coarse), 5.0));
+    assert!(!canvas.is_point_in_stroke(gap(coarse), 5.0));
+    // A period of 2e-300: 5e301 dashes.
+    canvas.set_line_dash(&[1e-300]);
+    assert!(canvas.is_point_in_stroke_path(&line, 50.0, 5.0));
+
+    // Under the fine list every form strokes a solid line: full alpha in
+    // the middle of the line, where the dashes would cover under half.
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke();
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "stroke()");
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_path(&line);
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "stroke(path)");
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&fine);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_rect(0.0, 5.0, 100.0, 0.0);
+    assert_eq!(pixel(&mut canvas, 50, 5), RED, "strokeRect");
+    // The coarse list dashes at the same place: under half the pixel.
+    let mut canvas = Canvas::new(100, 10);
+    canvas.set_line_width(4.0);
+    canvas.set_line_dash(&coarse);
+    canvas.set_stroke_style(solid(RED));
+    canvas.stroke_path(&line);
+    let [_, _, _, a] = pixel(&mut canvas, 50, 5);
+    assert!(a < 160, "dashed, alpha {a}");
+}
+
 #[test]
 fn dash_offset_shifts_the_pattern() {
     let mut canvas = Canvas::new(40, 10);
@@ -484,6 +540,27 @@ fn composite_source_in_clears_outside_the_shape() {
     assert_eq!(pixel(&mut canvas, 15, 10), CLEAR);
 }
 
+/// HTML `fillRect` step 2: a zero width or height returns before anything
+/// is painted, so not even a destructive operation clears the canvas.
+#[test]
+fn a_zero_size_fill_rect_has_no_effect() {
+    for op in [
+        CompositeOp::Copy,
+        CompositeOp::SourceIn,
+        CompositeOp::DestinationIn,
+        CompositeOp::SourceOut,
+        CompositeOp::DestinationAtop,
+    ] {
+        let mut canvas = filled(20, 20, RED);
+        canvas.set_global_composite_operation(op);
+        canvas.set_fill_style(solid(BLUE));
+        canvas.fill_rect(0.0, 0.0, 0.0, 10.0);
+        canvas.fill_rect(0.0, 0.0, 10.0, 0.0);
+        canvas.fill_rect(5.0, 5.0, -0.0, -0.0);
+        assert_eq!(pixel(&mut canvas, 10, 10), RED, "{op:?}");
+    }
+}
+
 #[test]
 fn composite_copy_respects_the_clip() {
     let mut canvas = filled(20, 20, BLUE);
@@ -673,6 +750,45 @@ fn image_bitmaps_from_pixels_and_canvases_crop() {
     assert_eq!((from_canvas.width(), from_canvas.height()), (2, 1));
 }
 
+/// `createImageBitmap`'s crop: a zero side is `RangeError` and a side past
+/// the longest texture is `InvalidStateError`, from every kind of image and
+/// before anything is allocated; an origin far outside the image crops
+/// transparent black.
+#[test]
+fn image_bitmap_crop_sizes_are_checked_first() {
+    let mut canvas = filled(4, 4, BLUE);
+    let mut taken = filled(4, 4, BLUE);
+    let images = [image(4, 4, RED), canvas.image(), taken.take_image()];
+    for (i, image) in images.iter().enumerate() {
+        for size in [(0, 16), (16, 0), (0, 0)] {
+            assert_eq!(
+                image.crop(Some((0, 0, size.0, size.1))).err(),
+                Some(CanvasError::Range),
+                "image {i}, {size:?}"
+            );
+        }
+        for size in [(20_000, 16), (16, 8193), (u32::MAX, u32::MAX)] {
+            assert_eq!(
+                image.crop(Some((0, 0, size.0, size.1))).err(),
+                Some(CanvasError::InvalidState),
+                "image {i}, {size:?}"
+            );
+        }
+        for origin in [(i64::MAX, i64::MAX), (i64::MIN, i64::MIN)] {
+            let far = image
+                .crop(Some((origin.0, origin.1, 2, 1)))
+                .unwrap_or_else(|error| panic!("image {i}, {origin:?}: {error:?}"));
+            assert_eq!(far.read().unwrap(), [CLEAR, CLEAR].concat(), "image {i}");
+        }
+        let edge = image.crop(Some((3, 0, 8192, 1))).unwrap();
+        assert_eq!(edge.width(), 8192, "image {i}");
+    }
+    assert_eq!(
+        Canvas::new(0, 0).image().crop(Some((0, 0, 0, 1))).err(),
+        Some(CanvasError::Range)
+    );
+}
+
 #[test]
 fn a_long_recording_is_replayed_before_a_read() {
     // Enough draws to pass the recording bound several times over.
@@ -760,6 +876,65 @@ fn shadows() {
     assert_eq!(pixel(&mut canvas, 35, 25), CLEAR);
 }
 
+/// A shadow blur or offset past what the GPU can filter is limited, not an
+/// error: the shape is drawn whatever finite values the script set, on any
+/// canvas up to the longest side, and the attributes read back as set.
+#[test]
+fn a_shadow_past_the_device_limits_still_draws_the_shape() {
+    let draw = |canvas: &mut Canvas, blur: f64, offset: f64, rect: [f64; 4]| {
+        canvas.set_shadow_color(color(BLUE));
+        canvas.set_shadow_blur(blur);
+        canvas.set_shadow_offset_x(offset);
+        canvas.set_shadow_offset_y(offset);
+        canvas.set_fill_style(solid(RED));
+        canvas.fill_rect(rect[0], rect[1], rect[2], rect[3]);
+    };
+    for (blur, offset) in [
+        (20_000.0, 0.0),
+        (1e308, 0.0),
+        (f64::MAX, 0.0),
+        (2.0, 1e300),
+        (2.0, -1e300),
+        (2.0, 6000.0),
+        (1e308, 1e308),
+    ] {
+        let mut canvas = Canvas::new(16, 16);
+        draw(&mut canvas, blur, offset, [4.0, 4.0, 4.0, 4.0]);
+        assert_eq!(canvas.shadow_blur(), blur);
+        assert_eq!(canvas.shadow_offset_x(), offset);
+        assert_eq!(
+            pixel(&mut canvas, 5, 5),
+            RED,
+            "blur {blur}, offset {offset}"
+        );
+    }
+    // A shape across the longest canvas side.
+    for blur in [2.0, 20_000.0] {
+        let mut canvas = Canvas::new(8192, 4);
+        draw(&mut canvas, blur, 0.0, [0.0, 0.0, 8192.0, 4.0]);
+        assert_eq!(pixel(&mut canvas, 8000, 2), RED, "blur {blur}");
+    }
+    // A shape far past the canvas under the largest blur.
+    let mut canvas = Canvas::new(16, 16);
+    draw(&mut canvas, 20_000.0, 0.0, [-1e6, -1e6, 2e6, 2e6]);
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+}
+
+/// A draw that needs the bitmap as its backdrop, with a shadow blur far
+/// past what a render takes, keeps what the canvas held: `destination-over`
+/// under opaque red changes no pixel.
+#[test]
+fn a_large_shadow_blur_under_a_backdrop_draw_keeps_the_bitmap() {
+    let mut canvas = filled(16, 16, RED);
+    canvas.set_shadow_color(color(BLUE));
+    canvas.set_shadow_blur(20_000.0);
+    canvas.set_global_composite_operation(CompositeOp::DestinationOver);
+    canvas.set_fill_style(solid(GREEN));
+    canvas.fill_rect(4.0, 4.0, 4.0, 4.0);
+    assert_eq!(pixel(&mut canvas, 12, 12), RED);
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+}
+
 #[test]
 fn shadow_blur_spreads_and_is_clipped() {
     let mut canvas = Canvas::new(60, 80);
@@ -803,6 +978,54 @@ fn hit_tests() {
     canvas.reset_transform();
     assert!(canvas.is_point_in_stroke(10.0, 15.0));
     assert!(!canvas.is_point_in_stroke(15.0, 15.0));
+}
+
+/// HTML "is point in path": points on the path itself are inside it, under
+/// either fill rule and for either form; points just off it are not.
+#[test]
+fn points_on_the_path_are_inside_it() {
+    let mut canvas = Canvas::new(40, 40);
+    canvas.rect(0.0, 0.0, 10.0, 10.0);
+    let mut path = Path::new();
+    path.rect(0.0, 0.0, 10.0, 10.0);
+    let on = [
+        (0.0, 0.0),
+        (5.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 5.0),
+        (10.0, 10.0),
+        (5.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 5.0),
+    ];
+    let off = [(5.0, -0.01), (10.01, 5.0), (5.0, 10.01), (-0.01, 5.0)];
+    for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+        for (x, y) in on {
+            assert!(canvas.is_point_in_path(x, y, rule), "({x}, {y}) {rule:?}");
+            assert!(
+                canvas.is_point_in_path2d(&path, x, y, rule),
+                "({x}, {y}) {rule:?}"
+            );
+        }
+        for (x, y) in off {
+            assert!(!canvas.is_point_in_path(x, y, rule), "({x}, {y}) {rule:?}");
+            assert!(
+                !canvas.is_point_in_path2d(&path, x, y, rule),
+                "({x}, {y}) {rule:?}"
+            );
+        }
+    }
+    // HTML "is point in stroke": points on the traced outline are inside
+    // too. A 2 px butt stroke of a horizontal line is the rectangle from
+    // y = 4 to y = 6.
+    let mut line = Path::new();
+    line.move_to(0.0, 5.0);
+    line.line_to(10.0, 5.0);
+    canvas.set_line_width(2.0);
+    for (x, y) in [(5.0, 4.0), (5.0, 6.0), (0.0, 5.0), (10.0, 5.0)] {
+        assert!(canvas.is_point_in_stroke_path(&line, x, y), "({x}, {y})");
+    }
+    assert!(!canvas.is_point_in_stroke_path(&line, 5.0, 6.01));
 }
 
 #[test]
@@ -930,6 +1153,29 @@ fn path2d_from_svg_and_add_path() {
     assert_eq!(pixel(&mut canvas, 5, 5), RED);
     assert_eq!(pixel(&mut canvas, 25, 5), BLUE);
     assert_eq!(pixel(&mut canvas, 15, 5), CLEAR);
+}
+
+/// SVG path data error handling, which `new Path2D(d)` follows: the path up
+/// to the last correct segment is kept.
+#[test]
+fn path2d_from_svg_keeps_the_segments_before_an_error() {
+    let mut canvas = Canvas::new(40, 20);
+    canvas.set_fill_style(solid(RED));
+    canvas.fill_path(
+        &Path::from_svg("M0 0 L10 0 L10 10 L0 10 Z X"),
+        FillRule::NonZero,
+    );
+    canvas.fill_path(
+        &Path::from_svg("M20 0 h10 v10 h-10 z M30 0 L 40"),
+        FillRule::NonZero,
+    );
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+    assert_eq!(pixel(&mut canvas, 25, 5), RED);
+    assert_eq!(pixel(&mut canvas, 35, 15), CLEAR);
+    // Data that does not start with a move is in error from its first
+    // segment.
+    canvas.fill_path(&Path::from_svg("L0 0 L40 0 L40 20"), FillRule::NonZero);
+    assert_eq!(pixel(&mut canvas, 35, 5), CLEAR);
 }
 
 #[test]

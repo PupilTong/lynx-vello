@@ -913,7 +913,8 @@ the element's.
   (skrifa outlines of the shaped runs). Each run's synthetic bold and oblique are drawn as the
   text painter draws them (`paint::display_list::synthesized_outlines`).
 - `Path` (`path.rs`) is `Path2D` and shares its builder with the context's default path
-  (`path::builder_methods!`).
+  (`path::builder_methods!`). `Path::from_svg` parses with SVG's own path data parser
+  (`render::svg::path_data`), which keeps the segments before the first one in error.
 - `Gradient` and `Pattern` (`style.rs`) are shared by reference (`Arc<Mutex<_>>`): a stop or
   pattern transform set later shows in draws recorded after it.
 - `Image` (`image.rs`) is what `drawImage` and patterns sample: pixels not uploaded yet
@@ -973,6 +974,21 @@ Decisions the standard leaves open, or where this differs from it:
 - A zero side, or a side over 8,192 px (`MAX_SURFACE_SIDE`), has no bitmap: draws do nothing and
   reads answer transparent black. `getImageData` over 2^28 px is `RangeError`. An image made from
   pixels with a side over 8,192 px is `InvalidStateError`.
+- A dash list that would cut the stroked path into more than 1,000,000 dashes (its length, in
+  the space the stroke is computed in, over the dash period) is not applied: the path is stroked
+  undashed, by `stroke`, `strokeRect`, `strokeText` and `isPointInStroke` alike. This is Skia's
+  `SkDashPath` limit (`kMaxDashCount`); the standard sets none. A curve's length is the mean of
+  its chord and control polygon; `strokeText` counts the glyph outlines at the font size times
+  the transform's scale.
+- A shadow's standard deviation (half `shadowBlur`) is limited so its drop-shadow filter layer fits
+  the device's 8,192 px texture side, since `vello_gpu` fails a render with a larger intermediate
+  and the whole batch, the shape included, would be lost. Along each axis the layer is under the
+  canvas side + 2(a + R) + max(0, R − a) + 16 px for a reach R = 3σ and an offset a, and has 6 px
+  of atlas padding on each side; σ is kept to the largest value for which that is at most 8,163 px
+  (`shadow_filter`, `canvas.rs`), so a 16 px canvas with no offset keeps σ up to about 905. When
+  not even an unblurred shadow fits (an offset over half of 8,163 px less the side, or a side over
+  8,163 px) the shadow is not drawn. `shadowBlur` and the offsets read back as set. Browsers bound
+  the blur too (Skia limits its σ).
 - A readback the GPU does not answer (no device, or the Render Worker dropped it on wasm32) is
   `InvalidStateError`.
 - `measureText` baselines the standard leaves to the font: em square split in the ratio of the
@@ -983,7 +999,6 @@ Decisions the standard leaves open, or where this differs from it:
   other.
 - A shadow under a composite operation other than `source-over` and two or more clip paths is
   cast by the shape cut to every clip path but the innermost.
-- `Path::from_svg` with a syntax error is an empty path (the standard keeps the valid prefix).
 - Glyphs draw as outlines: bitmap color glyphs (`sbix`/`CBDT` emoji) draw nothing.
 
 The tests are `tests/canvas_draw.rs` and `tests/canvas_text.rs`, against the
@@ -1006,7 +1021,8 @@ one `Op` applied by `apply`:
 - `Surface::draw(list, init, keep)` replays a `DisplayList` whose clips and layers are all
   closed: `Init::Load` over the texture (`TargetInit::SrcOver`), `Init::Clear` over a transparent
   clear, `Init::Backdrop` into the surface's second texture over a clear with the first bound
-  under the surface's id, after which the two change places. The list is emptied; `keep` holds the
+  under the surface's id, after which the two change places unless the render failed, which leaves
+  the content as it was. The list is emptied; `keep` holds the
   `SurfaceImage`s it draws until the replay. Every `Paint::Texture` the list draws is looked up in
   the canvas table and bound for the render (`SparseBackend::render_onto`'s `sources`); pixel images
   are uploaded through the bitmap table like any `ImageRef`.
