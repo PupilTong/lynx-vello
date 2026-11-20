@@ -1,28 +1,26 @@
-//! [`Canvas`]: the drawing state, and the raster that records draws into a
-//! display list and replays it onto the canvas's GPU texture.
+//! [`Context2d`]: HTML's `OffscreenCanvasRenderingContext2D` of one
+//! [`OffscreenCanvas`](crate::html::canvas::OffscreenCanvas), with the
+//! drawing state `save()` pushes and the current default path. Its draws
+//! are recorded through the canvas's [`Raster`].
 
 use std::sync::Arc;
 
-use seldon::text::{ResolvedFont, ShapedLine, TextContext};
+use seldon::text::{ResolvedFont, TextContext};
 
-use super::image::Source;
 use super::path::{self, builder_methods};
-use super::style::{Paint, canvas_rect, image_quality};
+use super::pixels::{ImageDataRead, Placement, RegionRead, index, normalize, premultiply, to_u32};
+use super::raster::{ClipNode, Outline, Raster};
+use super::style::{Paint, image_quality};
 use super::text::{self, Line};
 use super::{
     CanvasError, CompositeOp, Direction, FillRule, Image, LineCap, LineJoin, Path,
     SmoothingQuality, Style, TextAlign, TextBaseline, TextMetrics,
 };
-use crate::html::canvas::{CanvasFrames, Committed};
 use crate::kurbo::{
     self, Affine, BezPath, Cap, Join, ParamCurveNearest, PathEl, Point, Rect, Shape, Stroke,
     StrokeOpts,
 };
-use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
-use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
-use crate::render::canvas::{
-    Init, MAX_SURFACE_SIDE, PendingRead, Surface, SurfaceError, SurfaceImage,
-};
+use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageSampler, Mix};
 
 /// The largest `getImageData` area allocated, in pixels.
 const MAX_AREA: u64 = 1 << 28;
@@ -35,40 +33,66 @@ const ON_PATH_TOLERANCE: f64 = 1e-9;
 /// stroked undashed. Skia's `SkDashPath` limit (`kMaxDashCount`), which
 /// Chromium's canvas follows; the standard sets none.
 const MAX_DASH_COUNT: f64 = 1_000_000.0;
-/// How many bytes of draws are recorded before they are replayed with no
-/// read asking: Chromium's bound on a canvas's recorded ops, 2 MiB.
-const MAX_RECORDED_BYTES: usize = 2 << 20;
 
-/// A canvas bitmap with its `CanvasRenderingContext2D`.
-///
-/// The bitmap is premultiplied RGBA8 in a GPU texture, initially
-/// transparent black. A size of zero or a side over 8,192 px (the longest
-/// texture the device makes, `MAX_SURFACE_SIDE`)
-/// has no bitmap: draws do nothing and reads answer transparent black.
+/// What an `OffscreenCanvas` keeps of its 2D context between two
+/// [`Context2d`] borrows: the current drawing state, the stack of drawing
+/// states `save()` pushes, the current default path, and a scratch path.
 #[derive(Debug)]
-pub struct Canvas {
-    width: u32,
-    height: u32,
+pub(in crate::html::canvas) struct Context2dData {
     state: State,
     stack: Vec<State>,
     /// The current default path, in canvas space.
     path: Path,
-    raster: Option<Raster>,
     /// Reused for a path taken to user space.
     scratch: BezPath,
-    /// The bitmap may have changed since the last commit.
-    changed: bool,
+}
+
+impl Context2dData {
+    /// A context in the default state, with an empty path.
+    pub(in crate::html::canvas) fn new() -> Self {
+        Self {
+            state: State::default(),
+            stack: Vec::new(),
+            path: Path::new(),
+            scratch: BezPath::new(),
+        }
+    }
+}
+
+/// HTML's `OffscreenCanvasRenderingContext2D`: every attribute and method
+/// of the 2D context of one `OffscreenCanvas`, one call each.
+///
+/// A `Context2d` is a borrow of its canvas
+/// ([`OffscreenCanvas::context_2d`](crate::html::canvas::OffscreenCanvas::context_2d)):
+/// the context's own state and the canvas's bitmap, so it draws on no other
+/// canvas. The bitmap is premultiplied RGBA8 in a GPU texture, initially
+/// transparent black. A size of zero or a side over 8,192 px (the longest
+/// texture the device makes, `MAX_SURFACE_SIDE`) has no bitmap: draws do
+/// nothing and reads answer transparent black.
+#[derive(Debug)]
+pub struct Context2d<'a> {
+    width: u32,
+    height: u32,
+    raster: &'a mut Option<Raster>,
+    /// The canvas's flag: the bitmap may have changed since the last commit.
+    changed: &'a mut bool,
+    state: &'a mut State,
+    stack: &'a mut Vec<State>,
+    /// The current default path, in canvas space.
+    path: &'a mut Path,
+    /// Reused for a path taken to user space.
+    scratch: &'a mut BezPath,
 }
 
 /// The drawing state (HTML "The canvas state").
 #[derive(Clone, Debug)]
-struct State {
+pub(super) struct State {
     transform: Affine,
-    clip: Option<Arc<ClipNode>>,
+    pub(super) clip: Option<Arc<ClipNode>>,
     fill_style: Style,
     stroke_style: Style,
     global_alpha: f64,
-    composite: CompositeOp,
+    pub(super) composite: CompositeOp,
     smoothing: bool,
     smoothing_quality: SmoothingQuality,
     line_width: f64,
@@ -77,10 +101,10 @@ struct State {
     miter_limit: f64,
     line_dash: Vec<f64>,
     line_dash_offset: f64,
-    shadow_color: Color,
-    shadow_blur: f64,
-    shadow_offset_x: f64,
-    shadow_offset_y: f64,
+    pub(super) shadow_color: Color,
+    pub(super) shadow_blur: f64,
+    pub(super) shadow_offset_x: f64,
+    pub(super) shadow_offset_y: f64,
     /// Shared by the states `save` pushes, so a save copies no font.
     font: Arc<ResolvedFont>,
     text_align: TextAlign,
@@ -160,7 +184,7 @@ impl State {
 
     /// Whether a draw casts a shadow (HTML "Shadows"): the color is not
     /// transparent and the blur or an offset is not zero.
-    fn casts_shadow(&self) -> bool {
+    pub(super) fn casts_shadow(&self) -> bool {
         self.shadow_color.components[3] > 0.0
             && (self.shadow_blur > 0.0
                 || self.shadow_offset_x != 0.0
@@ -168,429 +192,48 @@ impl State {
     }
 }
 
-/// One clip path in canvas space, intersected with every clip before it.
-#[derive(Debug)]
-struct ClipNode {
-    path: BezPath,
-    rule: Fill,
-    /// Number of nodes on the chain, this one included.
-    depth: usize,
-    parent: Option<Arc<ClipNode>>,
-}
-
-/// What a draw outlines: a fill, a stroke, or glyphs.
-enum Outline<'a> {
-    Fill(&'a BezPath, Fill),
-    Stroke(&'a BezPath, &'a Stroke),
-    Rect(Rect),
-    Glyphs {
-        line: &'a ShapedLine,
-        stroke: Option<&'a Stroke>,
-    },
-}
-
-/// The bitmap's texture and the draws recorded and not yet replayed onto
-/// it.
-///
-/// Draws are recorded into `list`; [`Raster::flush`] hands it to the
-/// surface, which replays it as `init` says. A batch of `source-over` draws
-/// is replayed onto the bitmap as it is. A draw composited by any other
-/// operation, or one that samples the canvas itself, needs the bitmap as
-/// its backdrop: `vello_gpu` composites such a layer at the root into a
-/// transparent intermediate and cannot sample the texture it renders into.
-/// That batch starts with the bitmap drawn as its first item and is
-/// rendered into the surface's second texture ([`Init::Backdrop`]). A batch
-/// that starts by clearing the canvas holds all of its content and needs
-/// neither.
-#[derive(Debug)]
-struct Raster {
-    surface: Surface,
-    list: DisplayList,
-    init: Init,
-    /// The images `list` draws, kept until it is replayed.
-    keep: Vec<SurfaceImage>,
-    /// The clip paths open in `list`, outermost first.
-    clips: Vec<Arc<ClipNode>>,
-    clip_scratch: Vec<Arc<ClipNode>>,
-    /// The canvas rectangle.
-    size: Rect,
-}
-
-impl Raster {
-    fn new(width: u32, height: u32) -> Option<Self> {
-        Some(Self {
-            surface: Surface::new(width, height)?,
-            list: DisplayList::new(),
-            init: Init::Load,
-            keep: Vec::new(),
-            clips: Vec::new(),
-            clip_scratch: Vec::new(),
-            size: canvas_rect(width, height),
-        })
-    }
-
-    fn pending(&self) -> bool {
-        self.init != Init::Load || !self.list.is_empty()
-    }
-
-    /// Replays the recorded draws onto the bitmap.
-    fn flush(&mut self) {
-        if !self.pending() {
-            return;
-        }
-        for _ in self.clips.drain(..) {
-            self.list.pop_layer();
-        }
-        self.surface.draw(&mut self.list, self.init, &mut self.keep);
-        self.init = Init::Load;
-    }
-
-    /// Replays the recording when it has grown past [`MAX_RECORDED_BYTES`].
-    fn bound(&mut self) {
-        if self.list.recorded_bytes() > MAX_RECORDED_BYTES {
-            self.flush();
-        }
-    }
-
-    /// Drops the recording: the bitmap is cleared to transparent black first
-    /// at the next replay.
-    fn clear(&mut self) {
-        self.list.reset();
-        self.keep.clear();
-        self.clips.clear();
-        self.init = Init::Clear;
-    }
-
-    /// Makes the batch one that reads the bitmap: draws recorded so far are
-    /// replayed, and the next batch starts with the bitmap drawn under the
-    /// surface's own id.
-    fn ensure_backdrop(&mut self) {
-        if self.init != Init::Load {
-            return;
-        }
-        self.flush();
-        self.init = Init::Backdrop;
-        let own = ListPaint::texture(
-            self.surface.texture(),
-            ImageSampler::new()
-                .with_extend(Extend::Pad)
-                .with_quality(ImageQuality::Low),
-        );
-        self.list
-            .fill_with(Fill::NonZero, Affine::IDENTITY, &own, None, &self.size);
-    }
-
-    /// Makes the clips open in the recording the chain ending at `clip`.
-    fn sync_clips(&mut self, clip: Option<&Arc<ClipNode>>) {
-        let depth = clip.map_or(0, |node| node.depth);
-        if depth == self.clips.len()
-            && clip.is_none_or(|node| Arc::ptr_eq(node, &self.clips[depth - 1]))
-        {
-            return;
-        }
-        // Walk up from `clip` to the deepest node already open.
-        self.clip_scratch.clear();
-        let mut node = clip;
-        let keep = loop {
-            let Some(current) = node else { break 0 };
-            if current.depth <= self.clips.len()
-                && Arc::ptr_eq(current, &self.clips[current.depth - 1])
-            {
-                break current.depth;
-            }
-            self.clip_scratch.push(Arc::clone(current));
-            node = current.parent.as_ref();
-        };
-        while self.clips.len() > keep {
-            self.list.pop_layer();
-            self.clips.pop();
-        }
-        while let Some(node) = self.clip_scratch.pop() {
-            self.list
-                .push_backdrop_clip(node.rule, Affine::IDENTITY, &node.path);
-            self.clips.push(node);
-        }
-    }
-
-    /// Records one draw (HTML "Drawing model"): the shadow, then the shape,
-    /// each composited with the state's operation inside the clip.
-    ///
-    /// `geometry` maps the shape's coordinates to canvas space. `paint` of
-    /// `None` paints transparent black, which still composites.
-    fn draw(
-        &mut self,
-        state: &State,
-        paint: Option<&Paint>,
-        geometry: Affine,
-        shape: &Outline<'_>,
-    ) {
-        let op = state.composite;
-        if op == CompositeOp::SourceOver && paint.is_none() {
-            return;
-        }
-        let live = paint.and_then(|paint| paint.live);
-        if op != CompositeOp::SourceOver
-            || live.is_some_and(|texture| texture.id() == self.surface.texture().id())
-        {
-            self.ensure_backdrop();
-        }
-        let blend = op.blend();
-        let visible = paint.filter(|_| geometry.determinant() != 0.0);
-        if let Some(paint) = visible
-            && state.casts_shadow()
-            && let Some(filter) = shadow_filter(state, self.size)
-        {
-            self.shadow(state, blend, filter, paint, geometry, shape);
-        }
-        self.sync_clips(state.clip.as_ref());
-        let layered = op != CompositeOp::SourceOver;
-        if layered {
-            self.list
-                .push_layer(Fill::NonZero, blend, 1.0, Affine::IDENTITY, &self.size);
-        }
-        if let Some(paint) = visible {
-            self.paint_shape(paint, geometry, shape);
-        }
-        if layered {
-            self.list.pop_layer();
-        }
-        if let Some(keep) = paint.and_then(|paint| paint.keep.clone()) {
-            self.keep.push(keep);
-        }
-        if live.is_some() {
-            // The canvas it read may change before this one replays.
-            self.flush();
-        } else {
-            self.bound();
-        }
-    }
-
-    /// Records the shadow of a draw: cast by the unclipped shape, composited
-    /// by `blend` inside the clip region.
-    ///
-    /// Clip paths applied to a layer's region cut what the layer composites
-    /// and not what is drawn in it, while an open clip cuts both. Under
-    /// `source-over` every clip path is a layer region of its own. Under
-    /// another operation the blend has to read the bitmap, so the innermost
-    /// path is the blend layer's region and the paths around it stay open
-    /// clips, which cut the shape casting the shadow too.
-    fn shadow(
-        &mut self,
-        state: &State,
-        blend: BlendMode,
-        filter: ShadowFilter,
-        paint: &Paint,
-        geometry: Affine,
-        shape: &Outline<'_>,
-    ) {
-        let mut layers = 0;
-        if state.composite == CompositeOp::SourceOver {
-            self.sync_clips(None);
-            let mut chain = Vec::new();
-            let mut node = state.clip.as_ref();
-            while let Some(current) = node {
-                chain.push(Arc::clone(current));
-                node = current.parent.as_ref();
-            }
-            for node in chain.iter().rev() {
-                self.list.push_layer(
-                    node.rule,
-                    BlendMode::default(),
-                    1.0,
-                    Affine::IDENTITY,
-                    &node.path,
-                );
-                layers += 1;
-            }
-        } else {
-            let innermost = state.clip.as_ref();
-            self.sync_clips(innermost.and_then(|node| node.parent.as_ref()));
-            match innermost {
-                Some(node) => {
-                    self.list
-                        .push_layer(node.rule, blend, 1.0, Affine::IDENTITY, &node.path);
-                }
-                None => {
-                    self.list
-                        .push_layer(Fill::NonZero, blend, 1.0, Affine::IDENTITY, &self.size);
-                }
-            }
-            layers += 1;
-        }
-        self.list
-            .push_drop_shadow(filter.dx, filter.dy, filter.std_dev, state.shadow_color);
-        self.paint_shape(paint, geometry, shape);
-        for _ in 0..=layers {
-            self.list.pop_layer();
-        }
-    }
-
-    fn paint_shape(&mut self, paint: &Paint, geometry: Affine, shape: &Outline<'_>) {
-        let list = &mut self.list;
-        if let Some(bounds) = &paint.bounds {
-            list.push_backdrop_clip(Fill::NonZero, Affine::IDENTITY, bounds);
-        }
-        let brush = &paint.brush;
-        let brush_transform = paint.brush_transform(geometry);
-        match shape {
-            Outline::Fill(path, rule) => {
-                list.fill_with(*rule, geometry, brush, brush_transform, *path);
-            }
-            Outline::Stroke(path, stroke) => {
-                list.stroke_with(stroke, geometry, brush, brush_transform, *path);
-            }
-            Outline::Rect(rect) => {
-                list.fill_with(Fill::NonZero, geometry, brush, brush_transform, rect);
-            }
-            Outline::Glyphs { line, stroke } => {
-                draw_glyphs(list, line, *stroke, geometry, brush, brush_transform);
-            }
-        }
-        if paint.bounds.is_some() {
-            list.pop_layer();
-        }
-    }
-}
-
-/// A drop shadow as the filter draws it, in canvas px.
-#[derive(Clone, Copy, Debug)]
-struct ShadowFilter {
-    dx: f64,
-    dy: f64,
-    std_dev: f64,
-}
-
-/// Px a shadow's filter layer leaves of the device's texture side
-/// ([`MAX_SURFACE_SIDE`]): 6 of atlas padding on each side (`vello_gpu`'s
-/// `FILTER_ATLAS_PADDING`, half its 13-tap kernel), 16 for rounding four
-/// lengths up to the 4 px tile, and 1 for the `f32` rounding of the
-/// filter's parameters.
-const SHADOW_LAYER_SLACK: f64 = 2.0 * 6.0 + 16.0 + 1.0;
-
-/// The shadow `state` casts on a canvas of `size`, its standard deviation
-/// (half `shadowBlur`) limited to what `vello_gpu` can filter; `None` when
-/// not even an unblurred shadow at its offsets can be.
-///
-/// `vello_gpu` renders a drop-shadow layer into an intermediate texture no
-/// longer than the device's texture side, and a render with a layer past
-/// it fails whole. Along each axis that layer (`vello_common`
-/// `FilterLayerPlacement::new`) is at most the canvas side, plus the
-/// source padding on both sides (`Filter::source_expansion`) and the
-/// filter padding on one (`Filter::filter_expansion`), each rounded up to
-/// the 4 px tile. For a reach R = 3σ and an offset of length a along the
-/// axis that is under side + 2(a + R) + max(0, R − a) + 16 px, whatever the
-/// shape, so σ is kept to the largest value for which that fits beside
-/// the atlas padding. Browsers bound the blur too (Skia limits its σ).
-fn shadow_filter(state: &State, size: Rect) -> Option<ShadowFilter> {
-    let reach = |side: f64, offset: f64| {
-        let budget = f64::from(MAX_SURFACE_SIDE) - SHADOW_LAYER_SLACK - side;
-        let a = offset.abs();
-        if 2.0 * a > budget {
-            None
-        } else if 4.0 * a <= budget {
-            Some((budget - a) / 3.0)
-        } else {
-            Some(budget / 2.0 - a)
-        }
-    };
-    let rx = reach(size.width(), state.shadow_offset_x)?;
-    let ry = reach(size.height(), state.shadow_offset_y)?;
-    Some(ShadowFilter {
-        dx: state.shadow_offset_x,
-        dy: state.shadow_offset_y,
-        std_dev: (state.shadow_blur / 2.0).min(rx.min(ry) / 3.0),
-    })
-}
-
-/// Records every glyph run of `line` under `geometry`, its alphabetic
-/// baseline at y = 0, with the run's synthetic bold and oblique.
-fn draw_glyphs(
-    list: &mut DisplayList,
-    line: &ShapedLine,
-    stroke: Option<&Stroke>,
-    geometry: Affine,
-    brush: &ListPaint,
-    brush_transform: Option<Affine>,
-) {
-    for run in &line.runs {
-        let (embolden, glyph_transform) =
-            synthesized_outlines(run.synthesis.embolden, run.synthesis.skew, run.size);
-        let builder = list
-            .draw_glyphs(&run.font)
-            .font_size(run.size)
-            .transform(geometry)
-            .glyph_transform(glyph_transform)
-            .font_embolden(embolden)
-            .normalized_coords(&run.normalized_coords)
-            .hint(false)
-            .paint(brush)
-            .brush_transform(brush_transform);
-        let glyphs = run.glyphs.iter().map(|glyph| Glyph {
-            id: glyph.id,
-            x: glyph.x,
-            y: glyph.y,
-        });
-        match stroke {
-            Some(stroke) => builder.draw(stroke, glyphs),
-            None => builder.draw(Fill::NonZero, glyphs),
-        }
-    }
-}
-
-impl Canvas {
-    /// A `width` × `height` canvas, transparent black, its context in the
-    /// default state.
-    #[must_use]
-    pub fn new(width: u32, height: u32) -> Self {
+impl<'a> Context2d<'a> {
+    /// The context `data` keeps, drawing on the `width` × `height` bitmap
+    /// `raster` of the canvas whose change flag is `changed`.
+    pub(in crate::html::canvas) fn new(
+        data: &'a mut Context2dData,
+        width: u32,
+        height: u32,
+        raster: &'a mut Option<Raster>,
+        changed: &'a mut bool,
+    ) -> Self {
+        let Context2dData {
+            state,
+            stack,
+            path,
+            scratch,
+        } = data;
         Self {
             width,
             height,
-            state: State::default(),
-            stack: Vec::new(),
-            path: Path::new(),
-            raster: Raster::new(width, height),
-            scratch: BezPath::new(),
-            changed: false,
+            raster,
+            changed,
+            state,
+            stack,
+            path,
+            scratch,
         }
     }
+}
 
-    #[must_use]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Setting `width` or `height`: the bitmap takes the new size and, like
-    /// `reset`, becomes transparent black with the context in its default
-    /// state, even when the size is unchanged.
-    pub fn set_size(&mut self, width: u32, height: u32) {
-        if (width, height) == (self.width, self.height) {
-            self.reset();
-            return;
-        }
-        self.width = width;
-        self.height = height;
-        self.raster = Raster::new(width, height);
-        self.reset_state();
-        self.changed = true;
-    }
-
+impl Context2d<'_> {
     /// `reset()`: transparent black bitmap, empty path, empty state stack,
     /// default state.
     pub fn reset(&mut self) {
-        if let Some(raster) = &mut self.raster {
+        if let Some(raster) = &mut *self.raster {
             raster.clear();
         }
         self.reset_state();
-        self.changed = true;
+        *self.changed = true;
     }
 
-    fn reset_state(&mut self) {
-        self.state = State::default();
+    pub(in crate::html::canvas) fn reset_state(&mut self) {
+        *self.state = State::default();
         self.stack.clear();
         self.path.clear();
     }
@@ -605,7 +248,7 @@ impl Canvas {
     /// `restore()`; nothing with an empty stack.
     pub fn restore(&mut self) {
         if let Some(state) = self.stack.pop() {
-            self.state = state;
+            *self.state = state;
         }
     }
 
@@ -895,37 +538,37 @@ impl Canvas {
     }
 
     fn default_path(&mut self) -> &mut Path {
-        &mut self.path
+        self.path
     }
 
     // Drawing.
 
     /// `fill(fillRule)` of the current default path.
     pub fn fill(&mut self, rule: FillRule) {
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let paint = self.state.paint(&self.state.fill_style, raster.size);
         let shape = Outline::Fill(&self.path.elements, rule.into());
-        raster.draw(&self.state, paint.as_ref(), Affine::IDENTITY, &shape);
-        self.changed = true;
+        raster.draw(self.state, paint.as_ref(), Affine::IDENTITY, &shape);
+        *self.changed = true;
     }
 
     /// `fill(path, fillRule)`.
     pub fn fill_path(&mut self, path: &Path, rule: FillRule) {
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let paint = self.state.paint(&self.state.fill_style, raster.size);
         let shape = Outline::Fill(&path.elements, rule.into());
-        raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
-        self.changed = true;
+        raster.draw(self.state, paint.as_ref(), self.state.transform, &shape);
+        *self.changed = true;
     }
 
     /// `stroke()` of the current default path, with the line styles taken
     /// through the current transform.
     pub fn stroke(&mut self) {
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let ctm = self.state.transform;
@@ -936,22 +579,22 @@ impl Canvas {
                 .extend(self.path.elements.iter().map(|element| inverse * element));
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke(|| path::length(&self.scratch));
-        let shape = Outline::Stroke(&self.scratch, &stroke);
-        raster.draw(&self.state, paint.as_ref(), ctm, &shape);
-        self.changed = true;
+        let stroke = self.state.stroke(|| path::length(&*self.scratch));
+        let shape = Outline::Stroke(self.scratch, &stroke);
+        raster.draw(self.state, paint.as_ref(), ctm, &shape);
+        *self.changed = true;
     }
 
     /// `stroke(path)`.
     pub fn stroke_path(&mut self, path: &Path) {
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
         let stroke = self.state.stroke(|| path::length(&path.elements));
         let shape = Outline::Stroke(&path.elements, &stroke);
-        raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
-        self.changed = true;
+        raster.draw(self.state, paint.as_ref(), self.state.transform, &shape);
+        *self.changed = true;
     }
 
     /// `clip(fillRule)`: the clip region intersected with the current
@@ -1037,10 +680,10 @@ impl Canvas {
         if ![x, y, w, h].iter().all(|v| v.is_finite()) || w == 0.0 || h == 0.0 {
             return;
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
-        self.changed = true;
+        *self.changed = true;
         let ctm = self.state.transform;
         let rect = Rect::new(x, y, x + w, y + h).abs();
         let [_, b, c, _, _, _] = ctm.as_coeffs();
@@ -1076,13 +719,13 @@ impl Canvas {
         if ![x, y, w, h].iter().all(|v| v.is_finite()) || w == 0.0 || h == 0.0 {
             return;
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let paint = self.state.paint(&self.state.fill_style, raster.size);
         let shape = Outline::Rect(Rect::new(x, y, x + w, y + h).abs());
-        raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
-        self.changed = true;
+        raster.draw(self.state, paint.as_ref(), self.state.transform, &shape);
+        *self.changed = true;
     }
 
     /// `strokeRect(x, y, w, h)`: nothing when both sides are zero, a line
@@ -1091,7 +734,7 @@ impl Canvas {
         if ![x, y, w, h].iter().all(|v| v.is_finite()) || (w == 0.0 && h == 0.0) {
             return;
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         self.scratch.truncate(0);
@@ -1105,10 +748,10 @@ impl Canvas {
             self.scratch.close_path();
         }
         let paint = self.state.paint(&self.state.stroke_style, raster.size);
-        let stroke = self.state.stroke(|| path::length(&self.scratch));
-        let shape = Outline::Stroke(&self.scratch, &stroke);
-        raster.draw(&self.state, paint.as_ref(), self.state.transform, &shape);
-        self.changed = true;
+        let stroke = self.state.stroke(|| path::length(&*self.scratch));
+        let shape = Outline::Stroke(self.scratch, &stroke);
+        raster.draw(self.state, paint.as_ref(), self.state.transform, &shape);
+        *self.changed = true;
     }
 
     // Text.
@@ -1157,7 +800,7 @@ impl Canvas {
         {
             return;
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return;
         };
         let state = &self.state;
@@ -1188,7 +831,7 @@ impl Canvas {
             stroke: line_stroke.as_ref(),
         };
         raster.draw(state, paint.as_ref(), geometry, &shape);
-        self.changed = true;
+        *self.changed = true;
     }
 
     /// `measureText(text)`, shaped in `context`.
@@ -1255,7 +898,7 @@ impl Canvas {
         {
             return Ok(());
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return Ok(());
         };
         // Negative sizes name the same rectangles; they do not flip.
@@ -1301,7 +944,7 @@ impl Canvas {
         };
         let shape = Outline::Rect(dst);
         raster.draw(state, Some(&paint), state.transform, &shape);
-        self.changed = true;
+        *self.changed = true;
         Ok(())
     }
 
@@ -1352,7 +995,7 @@ impl Canvas {
         let len = usize::try_from(area * 4).map_err(|_| CanvasError::Range)?;
         let out = vec![0; len];
         let blank = ImageDataRead { out, read: None };
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return Ok(blank);
         };
         let (bw, bh) = (i64::from(self.width), i64::from(self.height));
@@ -1422,11 +1065,11 @@ impl Canvas {
         if w <= 0 || h <= 0 {
             return Ok(());
         }
-        let Some(raster) = &mut self.raster else {
+        let Some(raster) = &mut *self.raster else {
             return Ok(());
         };
         raster.flush();
-        self.changed = true;
+        *self.changed = true;
         let (bw, bh) = (i64::from(self.width), i64::from(self.height));
         let (dx, dy) = (i64::from(dx), i64::from(dy));
         // The dirty rectangle on the bitmap, clipped to it.
@@ -1448,160 +1091,11 @@ impl Canvas {
         );
         Ok(())
     }
-
-    // The bitmap.
-
-    /// The bitmap as an image, for `drawImage(canvas)`, `createPattern` and
-    /// `createImageBitmap`: the canvas's texture as it is when a draw of it
-    /// is replayed. A draw of it replays at once, a pattern
-    /// ([`super::Pattern::new`]) and a bitmap ([`Image::crop`]) copy it, so
-    /// each sees the pixels as of this call. Replays what is recorded first.
-    pub fn image(&mut self) -> Image {
-        match &mut self.raster {
-            Some(raster) => {
-                raster.flush();
-                Image(Source::Live(raster.surface.texture()))
-            }
-            None => Image::empty(),
-        }
-    }
-
-    /// HTML's update of an `OffscreenCanvas`'s placeholder: the bitmap, with
-    /// every draw recorded so far, becomes what the placeholder `<canvas>` of
-    /// `frames` shows, and the canvas is marked unchanged. Answers what the
-    /// commit owes; nothing for a canvas with no bitmap or a freed element.
-    #[must_use = "a wake or a resize the commit owes is lost"]
-    pub fn commit(&mut self, frames: &CanvasFrames) -> Committed {
-        self.changed = false;
-        let Some(raster) = &mut self.raster else {
-            return Committed::default();
-        };
-        raster.flush();
-        raster.surface.commit(frames)
-    }
-
-    /// Replays the draws recorded since the last replay onto the bitmap, so
-    /// the recording does not grow for a canvas nothing reads.
-    pub fn flush(&mut self) {
-        if let Some(raster) = &mut self.raster {
-            raster.flush();
-        }
-    }
-
-    /// Whether draws are recorded and not yet replayed.
-    #[must_use]
-    pub fn has_pending_draws(&self) -> bool {
-        self.raster.as_ref().is_some_and(Raster::pending)
-    }
-
-    /// Whether anything may have changed the bitmap since the last
-    /// [`Canvas::commit`] (or since creation).
-    #[must_use]
-    pub fn has_changes(&self) -> bool {
-        self.changed
-    }
-
-    /// `transferToImageBitmap()`: hands the bitmap's texture out and leaves
-    /// the canvas transparent black, its context state untouched.
-    pub fn take_image(&mut self) -> Image {
-        self.changed = true;
-        match &mut self.raster {
-            Some(raster) => {
-                raster.flush();
-                Image(Source::Texture(raster.surface.take()))
-            }
-            None => Image::empty(),
-        }
-    }
-}
-
-/// A `getImageData` whose readback is issued ([`Canvas::read_image_data`]):
-/// the answer's pixels once the GPU has sent them. Owns everything it needs,
-/// so the canvas is free while it is waited on.
-#[derive(Debug)]
-#[must_use = "the pixels are only had by waiting"]
-pub struct ImageDataRead {
-    /// The answer, transparent black where the bitmap is not.
-    out: Vec<u8>,
-    /// The part inside the bitmap, `None` when there is none.
-    read: Option<RegionRead>,
-}
-
-#[derive(Debug)]
-struct RegionRead {
-    pending: PendingRead,
-    place: Placement,
-}
-
-/// Where the rows read go in the answer.
-#[derive(Clone, Copy, Debug)]
-struct Placement {
-    /// The first pixel read, in the answer.
-    x0: i64,
-    y0: i64,
-    /// Pixels per row read, and per row of the answer.
-    span: i64,
-    stride: i64,
-}
-
-impl ImageDataRead {
-    /// Blocks the calling thread until the pixels are read.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidState` when the GPU did not answer the readback: no device,
-    /// a device lost, or, on wasm32, the Render Worker dropped it.
-    pub fn wait(self) -> Result<Vec<u8>, CanvasError> {
-        match self.read {
-            None => Ok(self.out),
-            Some(read) => {
-                let pixels = read.pending.wait();
-                read.place.write(self.out, pixels)
-            }
-        }
-    }
-
-    /// [`Self::wait`] for a caller that waits asynchronously.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::wait`].
-    pub async fn wait_async(self) -> Result<Vec<u8>, CanvasError> {
-        match self.read {
-            None => Ok(self.out),
-            Some(read) => {
-                let pixels = read.pending.wait_async().await;
-                read.place.write(self.out, pixels)
-            }
-        }
-    }
-}
-
-impl Placement {
-    /// Unpremultiplies the rows `read` answered into `out`.
-    fn write(
-        self,
-        mut out: Vec<u8>,
-        read: Result<Vec<u8>, SurfaceError>,
-    ) -> Result<Vec<u8>, CanvasError> {
-        let read = read.map_err(|_| CanvasError::InvalidState)?;
-        let bytes = index(0, self.span, 0);
-        for (row, from) in (self.y0..).zip(read.chunks_exact(bytes)) {
-            let dst = index(row, self.x0, self.stride);
-            for (to, from) in out[dst..dst + bytes]
-                .chunks_exact_mut(4)
-                .zip(from.chunks_exact(4))
-            {
-                to.copy_from_slice(&unpremultiply(from));
-            }
-        }
-        Ok(out)
-    }
 }
 
 builder_methods!(
-    Canvas,
-    |canvas: &Canvas| canvas.state.transform,
+    Context2d<'_>,
+    |context: &Context2d<'_>| context.state.transform,
     default_path
 );
 
@@ -1628,53 +1122,4 @@ fn on_path(path: &BezPath, point: Point) -> bool {
             && segment.nearest(point, ON_PATH_TOLERANCE).distance_sq
                 <= ON_PATH_TOLERANCE * ON_PATH_TOLERANCE
     })
-}
-
-/// A rectangle's start and extent with a negative extent turned around.
-fn normalize(start: i32, extent: i32) -> (i64, i64) {
-    let (start, extent) = (i64::from(start), i64::from(extent));
-    if extent < 0 {
-        (start + extent, -extent)
-    } else {
-        (start, extent)
-    }
-}
-
-/// A coordinate already clipped to the bitmap.
-fn to_u32(value: i64) -> u32 {
-    u32::try_from(value).expect("a coordinate inside the bitmap")
-}
-
-/// The byte offset of pixel `(x, y)` in rows `stride` pixels wide.
-fn index(y: i64, x: i64, stride: i64) -> usize {
-    usize::try_from((y * stride + x) * 4).expect("pixel inside the buffer")
-}
-
-fn unpremultiply(pixel: &[u8]) -> [u8; 4] {
-    let a = u32::from(pixel[3]);
-    match a {
-        0 => [0; 4],
-        255 => [pixel[0], pixel[1], pixel[2], 255],
-        _ => {
-            let channel =
-                |c: u8| u8::try_from(((u32::from(c) * 255 + a / 2) / a).min(255)).unwrap_or(255);
-            [
-                channel(pixel[0]),
-                channel(pixel[1]),
-                channel(pixel[2]),
-                pixel[3],
-            ]
-        }
-    }
-}
-
-fn premultiply(pixel: &[u8]) -> [u8; 4] {
-    let a = u32::from(pixel[3]);
-    let channel = |c: u8| u8::try_from((u32::from(c) * a + 127) / 255).unwrap_or(255);
-    [
-        channel(pixel[0]),
-        channel(pixel[1]),
-        channel(pixel[2]),
-        pixel[3],
-    ]
 }
