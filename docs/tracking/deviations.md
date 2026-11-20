@@ -3911,6 +3911,18 @@ consequential choice about whether to follow the spec or the quirk.
   - *A shadow under a composite operation other than `source-over` with two
     or more clip paths* is cast by the shape cut to every clip path but the
     innermost.
+  - *A dash list that would cut a path into more than 1,000,000 dashes is
+    not applied*: `stroke()`, `strokeRect()`, `strokeText()` and
+    `isPointInStroke()` treat the path as undashed. The standard sets no
+    limit; this is Skia's (`SkDashPath`, `kMaxDashCount`), which Chromium
+    follows.
+  - *A shadow's blur is limited to what the GPU can filter*: the standard
+    deviation (half `shadowBlur`) is kept so the drop-shadow layer fits
+    the 8,192 px texture side beside the canvas and the offsets (about 905
+    px on a 16 px canvas with no offset), and a shadow that does not fit
+    even unblurred (a large offset, or a canvas side over 8,163 px) is not
+    drawn. The shape is always drawn, and `shadowBlur` and the offsets
+    read back as set. Browsers bound the blur too (Skia limits its σ).
   - *A second `transferControlToOffscreen` answers code 7*
     (`__InvokeUIMethod`, `MainThread.Element.invoke`): the code this
     engine's `InvalidStateError` answers for a dialog's methods. web-core
