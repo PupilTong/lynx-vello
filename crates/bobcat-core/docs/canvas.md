@@ -167,7 +167,8 @@ answers transparent black (up to 2^28 px, `RangeError` above), and as an
 image source (`drawImage`, `createPattern`, `createImageBitmap`) it is
 `InvalidStateError`, as a canvas with a zero side is. `ImageData` has no
 limit of its own; `createImageBitmap` of one with a side over 8,192 px is
-`InvalidStateError`.
+`InvalidStateError`, and so is a `createImageBitmap` crop (`sw`, `sh`) with a
+side over 8,192 px, from any source.
 
 ## Deviations
 
