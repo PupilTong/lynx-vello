@@ -283,7 +283,8 @@ pub mod html {
     /// [`Pattern`](crate::link::html::canvas::Pattern) and
     /// [`Image`](crate::link::html::canvas::Image) are what those calls take,
     /// a [`ResolvedFont`](crate::link::html::canvas::ResolvedFont) (`seldon`'s,
-    /// with its family and style types) is the `font` its text calls shape
+    /// with its family and style types; `GenericFamily` is parley's enum,
+    /// which `seldon` re-exports) is the `font` its text calls shape
     /// with in a [`TextContext`](crate::link::TextContext),
     /// and [`CanvasError`](crate::link::html::canvas::CanvasError) names the
     /// exception one throws. None of them needs a `Document` or runs
