@@ -132,7 +132,7 @@ mod text;
 
 pub(crate) use encode::encode;
 pub(crate) use parse::parse;
-pub(crate) use shapes::path_data;
+pub(crate) use shapes::{arc_tolerance, path_data};
 pub(crate) use text::TextItem;
 
 use crate::kurbo::{Affine, BezPath, Rect, Stroke};
