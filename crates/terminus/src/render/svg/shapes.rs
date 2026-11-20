@@ -17,8 +17,11 @@ pub(super) const ARC_TOLERANCE: f64 = 0.01;
 /// there first (`BezPath` has no implicit current point after a close);
 /// and `S`/`T` reflect the previous control point only after a segment of
 /// their own kind, as the specification says.
+///
+/// Also what `new Path2D(d)` parses `d` with (HTML defers to SVG's
+/// path data grammar and error handling).
 #[expect(clippy::too_many_lines, reason = "one arm per SVG path command")]
-pub(super) fn path_data(data: &str) -> BezPath {
+pub(crate) fn path_data(data: &str) -> BezPath {
     let mut path = BezPath::new();
     let mut current = Point::ZERO;
     let mut start = Point::ZERO;

@@ -9,6 +9,7 @@ use std::f64::consts::TAU;
 
 use super::CanvasError;
 use crate::kurbo::{self, Affine, BezPath, PathEl, Point, Vec2};
+use crate::render::svg::path_data;
 
 /// A `Path2D`: subpaths of lines and curves in its own coordinates.
 #[derive(Clone, Debug, Default)]
@@ -33,15 +34,14 @@ impl Path {
         Self::default()
     }
 
-    /// `new Path2D(d)`: the SVG path data `d`. Data with a syntax error
-    /// gives an empty path.
+    /// `new Path2D(d)`: the SVG path data `d`. Data with an error keeps
+    /// the segments before the first one in error, as SVG's path data
+    /// error handling asks; data that does not start with a move is an
+    /// empty path.
     #[must_use]
     pub fn from_svg(data: &str) -> Self {
-        let Ok(elements) = BezPath::from_svg(data) else {
-            return Self::new();
-        };
         let mut path = Self::new();
-        for element in elements {
+        for element in path_data(data) {
             match element {
                 PathEl::MoveTo(p) => path.move_to_point(p),
                 PathEl::LineTo(p) => path.line_to_point(p),

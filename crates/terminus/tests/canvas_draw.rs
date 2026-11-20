@@ -1001,6 +1001,29 @@ fn path2d_from_svg_and_add_path() {
     assert_eq!(pixel(&mut canvas, 15, 5), CLEAR);
 }
 
+/// SVG path data error handling, which `new Path2D(d)` follows: the path up
+/// to the last correct segment is kept.
+#[test]
+fn path2d_from_svg_keeps_the_segments_before_an_error() {
+    let mut canvas = Canvas::new(40, 20);
+    canvas.set_fill_style(solid(RED));
+    canvas.fill_path(
+        &Path::from_svg("M0 0 L10 0 L10 10 L0 10 Z X"),
+        FillRule::NonZero,
+    );
+    canvas.fill_path(
+        &Path::from_svg("M20 0 h10 v10 h-10 z M30 0 L 40"),
+        FillRule::NonZero,
+    );
+    assert_eq!(pixel(&mut canvas, 5, 5), RED);
+    assert_eq!(pixel(&mut canvas, 25, 5), RED);
+    assert_eq!(pixel(&mut canvas, 35, 15), CLEAR);
+    // Data that does not start with a move is in error from its first
+    // segment.
+    canvas.fill_path(&Path::from_svg("L0 0 L40 0 L40 20"), FillRule::NonZero);
+    assert_eq!(pixel(&mut canvas, 35, 5), CLEAR);
+}
+
 #[test]
 fn resize_resets_bitmap_and_state() {
     let mut canvas = Canvas::new(10, 10);

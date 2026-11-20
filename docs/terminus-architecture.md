@@ -913,7 +913,8 @@ the element's.
   (skrifa outlines of the shaped runs). Each run's synthetic bold and oblique are drawn as the
   text painter draws them (`paint::display_list::synthesized_outlines`).
 - `Path` (`path.rs`) is `Path2D` and shares its builder with the context's default path
-  (`path::builder_methods!`).
+  (`path::builder_methods!`). `Path::from_svg` parses with SVG's own path data parser
+  (`render::svg::path_data`), which keeps the segments before the first one in error.
 - `Gradient` and `Pattern` (`style.rs`) are shared by reference (`Arc<Mutex<_>>`): a stop or
   pattern transform set later shows in draws recorded after it.
 - `Image` (`image.rs`) is what `drawImage` and patterns sample: pixels not uploaded yet
@@ -983,7 +984,6 @@ Decisions the standard leaves open, or where this differs from it:
   other.
 - A shadow under a composite operation other than `source-over` and two or more clip paths is
   cast by the shape cut to every clip path but the innermost.
-- `Path::from_svg` with a syntax error is an empty path (the standard keeps the valid prefix).
 - Glyphs draw as outlines: bitmap color glyphs (`sbix`/`CBDT` emoji) draw nothing.
 
 The tests are `tests/canvas_draw.rs` and `tests/canvas_text.rs`, against the
