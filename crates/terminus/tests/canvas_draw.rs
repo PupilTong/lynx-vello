@@ -826,6 +826,54 @@ fn hit_tests() {
     assert!(!canvas.is_point_in_stroke(15.0, 15.0));
 }
 
+/// HTML "is point in path": points on the path itself are inside it, under
+/// either fill rule and for either form; points just off it are not.
+#[test]
+fn points_on_the_path_are_inside_it() {
+    let mut canvas = Canvas::new(40, 40);
+    canvas.rect(0.0, 0.0, 10.0, 10.0);
+    let mut path = Path::new();
+    path.rect(0.0, 0.0, 10.0, 10.0);
+    let on = [
+        (0.0, 0.0),
+        (5.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 5.0),
+        (10.0, 10.0),
+        (5.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 5.0),
+    ];
+    let off = [(5.0, -0.01), (10.01, 5.0), (5.0, 10.01), (-0.01, 5.0)];
+    for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+        for (x, y) in on {
+            assert!(canvas.is_point_in_path(x, y, rule), "({x}, {y}) {rule:?}");
+            assert!(
+                canvas.is_point_in_path2d(&path, x, y, rule),
+                "({x}, {y}) {rule:?}"
+            );
+        }
+        for (x, y) in off {
+            assert!(!canvas.is_point_in_path(x, y, rule), "({x}, {y}) {rule:?}");
+            assert!(
+                !canvas.is_point_in_path2d(&path, x, y, rule),
+                "({x}, {y}) {rule:?}"
+            );
+        }
+    }
+    // HTML "is point in stroke": points on the traced outline are inside
+    // too. A 2 px butt stroke of a horizontal line is the rectangle from
+    // y = 4 to y = 6.
+    let mut line = Path::new();
+    line.move_to(0.0, 5.0);
+    line.line_to(10.0, 5.0);
+    canvas.set_line_width(2.0);
+    for (x, y) in [(5.0, 4.0), (5.0, 6.0), (0.0, 5.0), (10.0, 5.0)] {
+        assert!(canvas.is_point_in_stroke_path(&line, x, y), "({x}, {y})");
+    }
+    assert!(!canvas.is_point_in_stroke_path(&line, 5.0, 6.01));
+}
+
 #[test]
 fn arcs_and_ellipses() {
     let mut canvas = Canvas::new(40, 40);

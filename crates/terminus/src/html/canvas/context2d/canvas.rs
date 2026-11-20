@@ -15,7 +15,8 @@ use super::{
 };
 use crate::html::canvas::{CanvasFrames, Committed};
 use crate::kurbo::{
-    self, Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke, StrokeOpts,
+    self, Affine, BezPath, Cap, Join, ParamCurveNearest, PathEl, Point, Rect, Shape, Stroke,
+    StrokeOpts,
 };
 use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
 use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
@@ -25,6 +26,9 @@ use crate::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceIma
 const MAX_AREA: u64 = 1 << 28;
 /// Flattening tolerance for hit-testing a stroke outline, in user units.
 const HIT_TOLERANCE: f64 = 0.01;
+/// How far from a path's segment a hit-tested point still lies on it, in
+/// canvas units.
+const ON_PATH_TOLERANCE: f64 = 1e-9;
 /// How many bytes of draws are recorded before they are replayed with no
 /// read asking: Chromium's bound on a canvas's recorded ops, 2 MiB.
 const MAX_RECORDED_BYTES: usize = 2 << 20;
@@ -963,7 +967,7 @@ impl Canvas {
             &StrokeOpts::default(),
             HIT_TOLERANCE,
         );
-        outline.winding(point) != 0
+        contains(&outline, point, FillRule::NonZero)
     }
 
     // Rectangles.
@@ -1539,13 +1543,29 @@ builder_methods!(
     default_path
 );
 
-/// Whether `point` is inside `path` under `rule`.
+/// Whether `point` is inside `path` under `rule`, a point on the path
+/// itself included (HTML "is point in path" and "is point in stroke").
 fn contains(path: &BezPath, point: Point, rule: FillRule) -> bool {
     let winding = path.winding(point);
-    match rule {
+    let inside = match rule {
         FillRule::NonZero => winding != 0,
         FillRule::EvenOdd => winding % 2 != 0,
-    }
+    };
+    inside || on_path(path, point)
+}
+
+/// Whether `point` lies on one of `path`'s segments, within
+/// [`ON_PATH_TOLERANCE`]. `BezPath::winding` counts a point on a segment
+/// as inside on one side of the shape only.
+fn on_path(path: &BezPath, point: Point) -> bool {
+    path.segments().any(|segment| {
+        segment
+            .bounding_box()
+            .inflate(ON_PATH_TOLERANCE, ON_PATH_TOLERANCE)
+            .contains(point)
+            && segment.nearest(point, ON_PATH_TOLERANCE).distance_sq
+                <= ON_PATH_TOLERANCE * ON_PATH_TOLERANCE
+    })
 }
 
 /// A rectangle's start and extent with a negative extent turned around.
