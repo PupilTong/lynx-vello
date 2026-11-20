@@ -43,7 +43,7 @@ export default defineConfig(({ env }) => {
           'react-frame', 'react-frame-inner', 'react-frame-data', 'react-frame-auto-height',
           'react-frame-data-update', 'react-frame-global-props-update', 'react-frame-tap',
           'react-frame-tap-inner', 'react-set-shared-data', 'react-get-shared-data',
-          'react-animated-image', 'react-video']
+          'react-animated-image', 'react-video', 'react-canvas']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },

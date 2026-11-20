@@ -29,6 +29,7 @@ mod tests;
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Weak;
+use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue, Revival, TransferredClone};
 use rustc_hash::FxHashMap;
@@ -43,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use self::members::install;
 use crate::jobs::JsThreadHandle;
 use crate::paint::canvas_pictures::{CanvasPresenter, Transferred};
+use crate::view::WorkerFonts;
 
 /// One object a realm's JavaScript names by id.
 pub(crate) enum Entry {
@@ -199,10 +201,10 @@ impl CanvasEntry {
 /// What a realm's canvases have of a document.
 #[derive(Clone)]
 pub(crate) enum CanvasHost {
-    /// None: a worker realm's. Text shapes with the platform's fonts, in a
-    /// context the realm makes at its first text call, as a worker on the
-    /// web does not see the document's fonts.
-    Worker,
+    /// None: a worker realm's. Text shapes with the view's host fonts and
+    /// the platform's, in a context the realm makes at its first text call,
+    /// as a worker on the web does not see the document's fonts.
+    Worker(Arc<WorkerFonts>),
     /// The view's document: the MTS realm's and its `ShadowRealm`
     /// children's. Text shapes with the document's text context,
     /// `@font-face` faces included, and a `<canvas>` element's control is
@@ -287,7 +289,7 @@ impl ReadWait {
 }
 
 enum Fonts {
-    System(RefCell<Option<Box<TextContext>>>),
+    Worker(Arc<WorkerFonts>, RefCell<Option<Box<TextContext>>>),
     Document(Weak<dyn CanvasDocument>),
 }
 
@@ -316,7 +318,7 @@ impl CanvasTable {
             drawn: RefCell::default(),
             arrived: RefCell::default(),
             fonts: match host {
-                CanvasHost::Worker => Fonts::System(RefCell::new(None)),
+                CanvasHost::Worker(fonts) => Fonts::Worker(Arc::clone(fonts), RefCell::new(None)),
                 CanvasHost::Document(document) => Fonts::Document(Weak::clone(document)),
             },
             reads,
@@ -424,9 +426,9 @@ impl CanvasTable {
     /// own.
     fn with_fonts<R>(&self, shape: impl FnOnce(&mut TextContext) -> R) -> Option<R> {
         match &self.fonts {
-            Fonts::System(context) => {
+            Fonts::Worker(fonts, context) => {
                 let mut context = context.borrow_mut();
-                let context = context.get_or_insert_with(|| Box::new(TextContext::new()));
+                let context = context.get_or_insert_with(|| Box::new(fonts.text_context()));
                 Some(shape(context))
             }
             Fonts::Document(document) => {

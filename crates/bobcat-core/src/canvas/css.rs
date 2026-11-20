@@ -33,8 +33,8 @@ use terminus::link::peniko::Color;
 use terminus::link::stylo;
 
 /// The base a relative font size resolves against: the default canvas
-/// font's 10px, which the standard takes from the canvas element's computed
-/// font size (`crates/bobcat-core/docs/canvas.md`).
+/// font's 10px, HTML's base for an `OffscreenCanvas`, whose font style
+/// source object is not an element (`crates/bobcat-core/docs/canvas.md`).
 const BASE_FONT_SIZE: f32 = 10.0;
 /// `medium`, the size the absolute-size keywords are scaled from.
 const MEDIUM_FONT_SIZE: f32 = 16.0;

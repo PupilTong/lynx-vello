@@ -568,7 +568,7 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
                 timers: Rc::new(TimerState::new()),
                 futures: Rc::new(FutureTable::new()),
                 canvases: Rc::new(CanvasTable::new(
-                    &CanvasHost::Worker,
+                    &CanvasHost::Worker(std::sync::Arc::default()),
                     ReadWait::new(hook.host.token(), &hook.thread),
                 )),
             };

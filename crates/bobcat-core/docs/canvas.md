@@ -163,8 +163,9 @@ host when a wake is owed, and sends `ToMain::CanvasResized` through its weak
 command sender when the size changed, from that thread. A draw in a timer, a
 message listener or a `requestAnimationFrame` callback (`lynx`'s in the BTS,
 `bobcat:animation-frame`'s in a plain worker) is an entry like any other and
-commits at its end. Text in a worker realm shapes with the system fonts
-("Colors and fonts"), not the document's `@font-face` faces.
+commits at its end. Text in a worker realm shapes with the view's host
+fonts and the system's ("Colors and fonts"), not the document's
+`@font-face` faces.
 
 ## The per-entry step
 
@@ -194,7 +195,8 @@ the biased first arm, `ImageDataRead::wait_async` the other): the thread's
 tasks go on running and no other job does. The wait answers the pixels, or
 `InvalidStateError` when the GPU did not answer (no adapter, a lost device,
 the Render Worker dropping the read for want of a device) or the realm
-ended first. The wasm32 wait is compiled and not run by any test.
+ended first. No automated test runs the wasm32 wait; the local browser
+rendering check does (`docs/browser-wasm.md`, "Rendering check").
 
 ## Colors and fonts
 
@@ -216,12 +218,15 @@ ended first. The wasm32 wait is compiled and not run by any test.
   variant).
 - Text is shaped with the realm's fonts: the MTS realm and its children use
   the document's `TextContext` (`Document::text_context_mut`, through the
-  `DocumentFonts` impl on the document slot), so `@font-face` faces draw; a
-  worker realm makes a `TextContext` from the process's system-font template
-  at its first text call. The canvas text calls take that `TextContext`
-  and shape through `seldon::text::shape_line`, which fills the fallback
-  lists a missing character needs first and hands parley the context's
-  locale.
+  `CanvasDocument` impl on the document slot), so `@font-face` faces draw; a
+  worker realm makes a `TextContext` at its first text call from the view's
+  `WorkerFonts` (`view/lib.rs`, carried by the worker's `HostOutbox`): the
+  system fonts and the view's `ViewSources::fonts`, `fallback_fonts`,
+  `default_font_family` and `locale`, staged as the document's context is.
+  On wasm32, which has no system fonts, those host fonts are the only ones a
+  worker realm has. The canvas text calls take that `TextContext` and shape
+  through `seldon::text::shape_line`, which fills the fallback lists a
+  missing character needs first and hands parley the context's locale.
 
 ## Size limits
 
@@ -239,10 +244,16 @@ side over 8,192 px, from any source.
 - `getContext('2d', options)` reads none of `options`: `willReadFrequently`
   changes nothing (every read is a GPU readback), and `alpha: false` leaves
   the bitmap's alpha as drawn.
-- `currentcolor` is opaque black: there is no element to take a color from.
 - `ImageBitmap` is transferable and not serializable: posted without being
   listed it throws `DataCloneError`, where HTML copies its pixels.
-- A relative font size (`em`, `%`, `rem`, `larger`, …) resolves against
-  10px, where the standard uses the canvas element's computed font size;
-  `ex`/`ch` take half of it and `lh` 1.2 times it. Viewport and container
+- A relative font size resolves against 10px, which is HTML's rule for an
+  `OffscreenCanvas` (its font style source object is not an element, so
+  "the relative keywords must be interpreted relative to the normal-weight
+  10px sans-serif default"), but `ex`/`ch` take half of it and `lh` 1.2
+  times it rather than the default font's metrics. Viewport and container
   units, `rpx` and a `calc()` of a relative length are refused.
+
+`currentcolor` is opaque black: an `OffscreenCanvas` context's style
+setters pass HTML's color parsing no element ("Let context be this's canvas
+attribute's value, if that is an element; otherwise null"), and without
+one `currentcolor` is the initial `color`, opaque black.

@@ -694,6 +694,121 @@ async fn compiled_video_opens_paused_and_plays_on_tap() {
     );
 }
 
+/// The compiled `react-canvas` card (the fixture's `index.jsx` has the
+/// layout): a JSX `<canvas>` whose main-thread ref's
+/// `invoke('transferControlToOffscreen')` resolves with an
+/// `OffscreenCanvas`, posted to the background thread through
+/// `lynx.getJSContext()` and drawn there.
+///
+/// - The first draw: red, green from `multiply`, magenta with a cleared hole, and text; its
+///   `getImageData` reads the same pixels back.
+/// - Three taps: the red column turns blue from a timer, yellow from `lynx.requestAnimationFrame`,
+///   then the canvas is resized to 80 by 100 and the placeholder's box follows.
+#[tokio::test]
+async fn compiled_canvas_draws_from_the_background_thread() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, Painter};
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+    const CYAN: [u8; 4] = [0, 255, 255, 255];
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+
+    let page = PageSource::from_bytes(
+        &Url::parse("app:///canvas.web.bundle").unwrap(),
+        fixtures::fixture("react-canvas").page,
+    )
+    .unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let view = group
+        .create_lynx_view(
+            240.0,
+            240.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN, "en-US"),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+    let mut card = LoggedCard {
+        view,
+        painter,
+        prefix: "canvas ",
+        booted: false,
+        logged: Vec::new(),
+    };
+    let pixels = |card: &mut LoggedCard, expected: &[((usize, usize), [u8; 4])]| {
+        expected
+            .iter()
+            .all(|&(at, colour)| card.pixel(at) == Some(colour))
+    };
+
+    card.until("the first draw", |card| {
+        pixels(
+            card,
+            &[
+                ((20, 30), RED),
+                ((60, 30), GREEN),
+                ((85, 5), MAGENTA),
+                ((100, 20), WHITE),
+            ],
+        )
+    })
+    .await;
+    let read = card.of("read");
+    let [read] = read.as_slice() else {
+        panic!("one read: {read:?}");
+    };
+    let (read, text) = read.split_once(r#","text":"#).unwrap();
+    assert_eq!(
+        read,
+        r#"{"canvas":true,"size":[160,60],"a":[255,0,0,255],"b":[0,255,0,255],"c":[255,0,255,255],"hole":[0,0,0,0]"#
+    );
+    let text: u32 = text.trim_end_matches('}').parse().unwrap();
+    assert!(text > 50, "the text drew {text} pixels");
+    let shot = card.painter.capture().unwrap();
+    let inked = (0..60)
+        .flat_map(|y| (120..160).map(move |x| (y * 240 + x) * 4))
+        .filter(|&at| shot.pixels[at..at + 4] != WHITE)
+        .count();
+    assert!(inked > 50, "the text shows {inked} pixels");
+
+    for (step, expected) in [
+        (1, &[((20, 30), BLUE), ((60, 30), GREEN)][..]),
+        (2, &[((20, 30), YELLOW), ((60, 30), GREEN)][..]),
+        (
+            3,
+            &[((40, 80), CYAN), ((70, 30), CYAN), ((100, 30), WHITE)][..],
+        ),
+    ] {
+        for phase in [PointerPhase::Down, PointerPhase::Up] {
+            card.painter.dispatch_input(InputEvent::pointer(
+                Point2D::new(200.0, 200.0),
+                1,
+                PointerKind::Touch,
+                phase,
+            ));
+        }
+        // The display's vsyncs, which deliver the second step's frame
+        // request.
+        card.until(&format!("step {step}"), |card| {
+            card.painter.vsync();
+            card.of("step").contains(&step.to_string()) && pixels(card, expected)
+        })
+        .await;
+    }
+}
+
 /// Whether `texel` is `expected` within H.264's rounding of a flat colour.
 fn near(texel: [u8; 4], expected: [u8; 4]) -> bool {
     texel
