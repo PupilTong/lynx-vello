@@ -2,29 +2,28 @@
 //! is a full em square from the ascent (0.8 em) to the descent (0.2 em), so
 //! no assertion depends on a system font.
 
-use std::borrow::Cow;
-use std::sync::Arc;
-
-use terminus::link::html::canvas::{Canvas, Direction, Font, Style, TextAlign, TextBaseline};
-use terminus::link::parley::fontique::Blob;
-use terminus::link::parley::{FontContext, FontFamilyName};
+use terminus::link::html::canvas::{
+    Canvas, Direction, ResolvedFamily, ResolvedFont, ResolvedFontStyle, Style, TextAlign,
+    TextBaseline,
+};
 use terminus::link::peniko::Color;
+use terminus::link::{FontBlob, TextContext};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-fn fonts() -> FontContext {
-    let mut fonts = FontContext::new();
-    fonts
-        .collection
-        .register_fonts(Blob::new(Arc::new(AHEM.to_vec())), None);
+fn fonts() -> TextContext {
+    let mut fonts = TextContext::new();
+    assert_eq!(fonts.register_fonts(FontBlob::from_static(AHEM)), 1);
     fonts
 }
 
-fn ahem(size: f32) -> Font {
-    Font {
-        families: Arc::new([FontFamilyName::Named(Cow::Borrowed("Ahem"))]),
+fn ahem(size: f32) -> ResolvedFont {
+    ResolvedFont {
+        families: vec![ResolvedFamily::Named("Ahem".to_owned())],
         size,
-        ..Font::default()
+        weight: 400.0,
+        style: ResolvedFontStyle::Normal,
+        stretch: 1.0,
     }
 }
 

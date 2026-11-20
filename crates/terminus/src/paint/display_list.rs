@@ -472,6 +472,27 @@ pub(crate) enum GlyphStyle {
     Stroke(Arc<Stroke>),
 }
 
+/// The outline widening and glyph transform that draw a run's synthetic
+/// bold and oblique: `embolden` widens by 1/48 of the font size, and a
+/// `skew` of that many degrees leans the glyph's top to the right, which in
+/// the run's y-down space moves a point above the baseline (negative y) to
+/// positive x. Every glyph draw that carries a run's synthesis (the text
+/// painter, SVG `<text>`, the Canvas 2D context) draws it through here.
+pub(crate) fn synthesized_outlines(
+    embolden: bool,
+    skew: Option<f32>,
+    font_size: f32,
+) -> (Embolden, Option<Affine>) {
+    let embolden = if embolden {
+        Embolden::uniform(f64::from(font_size) / 48.0)
+    } else {
+        Embolden::default()
+    };
+    let glyph_transform =
+        skew.map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
+    (embolden, glyph_transform)
+}
+
 /// Synthetic bold: how far a run's outlines are widened, with the controls
 /// of the widening.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -14,7 +14,6 @@
 //! `docs/terminus-link-api.md` records why each item is on the link.
 
 pub use euclid::default::{Point2D, Rect, Size2D, Vector2D};
-pub use parley;
 pub use seldon::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
@@ -283,16 +282,19 @@ pub mod html {
     /// [`Gradient`](crate::link::html::canvas::Gradient),
     /// [`Pattern`](crate::link::html::canvas::Pattern) and
     /// [`Image`](crate::link::html::canvas::Image) are what those calls take,
+    /// a [`ResolvedFont`](crate::link::html::canvas::ResolvedFont) (`seldon`'s,
+    /// with its family and style types) is the `font` its text calls shape
+    /// with in a [`TextContext`](crate::link::TextContext),
     /// and [`CanvasError`](crate::link::html::canvas::CanvasError) names the
     /// exception one throws. None of them needs a `Document` or runs
     /// JavaScript.
     pub mod canvas {
         pub use crate::html::canvas::{
             CANVAS_TAG, Canvas, CanvasError, CanvasFrames, Committed, CompositeOp, ContextMode,
-            Direction, FillRule, Font, Gradient, Image, ImageDataRead, InvalidState, LineCap,
-            LineJoin, Path, Pattern, Placeholder, Repetition, SmoothingQuality, Style, TextAlign,
-            TextBaseline, TextMetrics, context_mode, transfer_control_to_offscreen,
-            update_placeholders,
+            Direction, FillRule, GenericFamily, Gradient, Image, ImageDataRead, InvalidState,
+            LineCap, LineJoin, Path, Pattern, Placeholder, Repetition, ResolvedFamily,
+            ResolvedFont, ResolvedFontStyle, SmoothingQuality, Style, TextAlign, TextBaseline,
+            TextMetrics, context_mode, transfer_control_to_offscreen, update_placeholders,
         };
     }
 }

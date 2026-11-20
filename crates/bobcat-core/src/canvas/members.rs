@@ -471,21 +471,21 @@ fn install_context_members(
         }
         fn canvasFillText(target: id, content: text, x: number, y: number,
             max_width: optional_number) |this| {
-            this.text(target, content, |canvas, fonts| {
+            this.text(target, |canvas, fonts| {
                 canvas.fill_text(fonts, content, x, y, max_width);
             })?;
             Ok(HostValue::Undefined)
         }
         fn canvasStrokeText(target: id, content: text, x: number, y: number,
             max_width: optional_number) |this| {
-            this.text(target, content, |canvas, fonts| {
+            this.text(target, |canvas, fonts| {
                 canvas.stroke_text(fonts, content, x, y, max_width);
             })?;
             Ok(HostValue::Undefined)
         }
         fn canvasMeasureText(target: id, content: text) |this| {
             let metrics = this
-                .text(target, content, |canvas, fonts| canvas.measure_text(fonts, content))?
+                .text(target, |canvas, fonts| canvas.measure_text(fonts, content))?
                 .unwrap_or_default();
             Ok(float_bytes(&[
                 metrics.width,
@@ -706,16 +706,12 @@ impl CanvasTable {
     fn text<R>(
         &self,
         id: u64,
-        content: &str,
         call: impl FnOnce(
             &mut terminus::link::html::canvas::Canvas,
-            &mut terminus::link::parley::FontContext,
+            &mut terminus::link::TextContext,
         ) -> R,
     ) -> Result<Option<R>, String> {
-        self.draw(id, |canvas| {
-            let font = canvas.font().clone();
-            self.with_fonts(content, &font, |fonts| call(canvas, fonts))
-        })
+        self.draw(id, |canvas| self.with_fonts(|fonts| call(canvas, fonts)))
     }
 }
 

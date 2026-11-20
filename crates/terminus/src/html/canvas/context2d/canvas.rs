@@ -3,21 +3,21 @@
 
 use std::sync::Arc;
 
-use parley::FontContext;
+use seldon::text::{ResolvedFont, ShapedLine, TextContext};
 
 use super::image::Source;
 use super::path::builder_methods;
 use super::style::{Paint, canvas_rect, image_quality};
-use super::text::{self, Shaper};
+use super::text::{self, Line};
 use super::{
-    CanvasError, CompositeOp, Direction, FillRule, Font, Image, LineCap, LineJoin, Path,
+    CanvasError, CompositeOp, Direction, FillRule, Image, LineCap, LineJoin, Path,
     SmoothingQuality, Style, TextAlign, TextBaseline, TextMetrics,
 };
 use crate::html::canvas::{CanvasFrames, Committed};
 use crate::kurbo::{
     self, Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke, StrokeOpts,
 };
-use crate::paint::display_list::{DisplayList, Embolden, Glyph, ListPaint};
+use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
 use crate::peniko::{BlendMode, Color, Compose, Extend, Fill, ImageQuality, ImageSampler, Mix};
 use crate::render::canvas::{Init, PendingRead, Surface, SurfaceError, SurfaceImage};
 
@@ -44,7 +44,6 @@ pub struct Canvas {
     /// The current default path, in canvas space.
     path: Path,
     raster: Option<Raster>,
-    shaper: Shaper,
     /// Reused for a path taken to user space.
     scratch: BezPath,
     /// The bitmap may have changed since the last commit.
@@ -72,7 +71,8 @@ struct State {
     shadow_blur: f64,
     shadow_offset_x: f64,
     shadow_offset_y: f64,
-    font: Font,
+    /// Shared by the states `save` pushes, so a save copies no font.
+    font: Arc<ResolvedFont>,
     text_align: TextAlign,
     text_baseline: TextBaseline,
     direction: Direction,
@@ -99,7 +99,7 @@ impl Default for State {
             shadow_blur: 0.0,
             shadow_offset_x: 0.0,
             shadow_offset_y: 0.0,
-            font: Font::default(),
+            font: Arc::new(text::default_font()),
             text_align: TextAlign::Start,
             text_baseline: TextBaseline::Alphabetic,
             direction: Direction::Inherit,
@@ -168,8 +168,7 @@ enum Outline<'a> {
     Stroke(&'a BezPath, &'a Stroke),
     Rect(Rect),
     Glyphs {
-        layout: &'a parley::Layout<()>,
-        baseline: f32,
+        line: &'a ShapedLine,
         stroke: Option<&'a Stroke>,
     },
 }
@@ -430,19 +429,9 @@ impl Raster {
             Outline::Rect(rect) => {
                 list.fill_with(Fill::NonZero, geometry, brush, brush_transform, rect);
             }
-            Outline::Glyphs {
-                layout,
-                baseline,
-                stroke,
-            } => draw_glyphs(
-                list,
-                layout,
-                *baseline,
-                *stroke,
-                geometry,
-                brush,
-                brush_transform,
-            ),
+            Outline::Glyphs { line, stroke } => {
+                draw_glyphs(list, line, *stroke, geometry, brush, brush_transform);
+            }
         }
         if paint.bounds.is_some() {
             list.pop_layer();
@@ -450,57 +439,37 @@ impl Raster {
     }
 }
 
-/// Records every glyph run of `layout` under `geometry`, its alphabetic
-/// baseline at y = 0.
+/// Records every glyph run of `line` under `geometry`, its alphabetic
+/// baseline at y = 0, with the run's synthetic bold and oblique.
 fn draw_glyphs(
     list: &mut DisplayList,
-    layout: &parley::Layout<()>,
-    baseline: f32,
+    line: &ShapedLine,
     stroke: Option<&Stroke>,
     geometry: Affine,
     brush: &ListPaint,
     brush_transform: Option<Affine>,
 ) {
-    for line in layout.lines() {
-        for item in line.items() {
-            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                continue;
-            };
-            let run = glyph_run.run();
-            let coords: Vec<i16> = run
-                .normalized_coords()
-                .iter()
-                .map(|coord| coord.to_bits())
-                .collect();
-            let synthesis = run.synthesis();
-            let embolden = if synthesis.embolden() {
-                // The amount terminus's text paint uses.
-                Embolden::uniform(f64::from(run.font_size()) / 48.0)
-            } else {
-                Embolden::default()
-            };
-            let glyph_transform = synthesis
-                .skew()
-                .map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
-            let builder = list
-                .draw_glyphs(run.font())
-                .font_size(run.font_size())
-                .transform(geometry)
-                .glyph_transform(glyph_transform)
-                .font_embolden(embolden)
-                .normalized_coords(&coords)
-                .hint(false)
-                .paint(brush)
-                .brush_transform(brush_transform);
-            let glyphs = glyph_run.positioned_glyphs().map(|glyph| Glyph {
-                id: glyph.id,
-                x: glyph.x,
-                y: glyph.y - baseline,
-            });
-            match stroke {
-                Some(stroke) => builder.draw(stroke, glyphs),
-                None => builder.draw(Fill::NonZero, glyphs),
-            }
+    for run in &line.runs {
+        let (embolden, glyph_transform) =
+            synthesized_outlines(run.synthesis.embolden, run.synthesis.skew, run.size);
+        let builder = list
+            .draw_glyphs(&run.font)
+            .font_size(run.size)
+            .transform(geometry)
+            .glyph_transform(glyph_transform)
+            .font_embolden(embolden)
+            .normalized_coords(&run.normalized_coords)
+            .hint(false)
+            .paint(brush)
+            .brush_transform(brush_transform);
+        let glyphs = run.glyphs.iter().map(|glyph| Glyph {
+            id: glyph.id,
+            x: glyph.x,
+            y: glyph.y,
+        });
+        match stroke {
+            Some(stroke) => builder.draw(stroke, glyphs),
+            None => builder.draw(Fill::NonZero, glyphs),
         }
     }
 }
@@ -517,7 +486,6 @@ impl Canvas {
             stack: Vec::new(),
             path: Path::new(),
             raster: Raster::new(width, height),
-            shaper: Shaper::new(),
             scratch: BezPath::new(),
             changed: false,
         }
@@ -816,12 +784,12 @@ impl Canvas {
     // Text styles.
 
     #[must_use]
-    pub fn font(&self) -> &Font {
+    pub fn font(&self) -> &ResolvedFont {
         &self.state.font
     }
 
-    pub fn set_font(&mut self, font: Font) {
-        self.state.font = font;
+    pub fn set_font(&mut self, font: ResolvedFont) {
+        self.state.font = Arc::new(font);
     }
 
     #[must_use]
@@ -1082,33 +1050,33 @@ impl Canvas {
 
     // Text.
 
-    /// `fillText(text, x, y, maxWidth)`, shaped with `fonts`.
+    /// `fillText(text, x, y, maxWidth)`, shaped in `context`.
     pub fn fill_text(
         &mut self,
-        fonts: &mut FontContext,
+        context: &mut TextContext,
         text: &str,
         x: f64,
         y: f64,
         max_width: Option<f64>,
     ) {
-        self.draw_text(fonts, text, x, y, max_width, false);
+        self.draw_text(context, text, x, y, max_width, false);
     }
 
-    /// `strokeText(text, x, y, maxWidth)`, shaped with `fonts`.
+    /// `strokeText(text, x, y, maxWidth)`, shaped in `context`.
     pub fn stroke_text(
         &mut self,
-        fonts: &mut FontContext,
+        context: &mut TextContext,
         text: &str,
         x: f64,
         y: f64,
         max_width: Option<f64>,
     ) {
-        self.draw_text(fonts, text, x, y, max_width, true);
+        self.draw_text(context, text, x, y, max_width, true);
     }
 
     fn draw_text(
         &mut self,
-        fonts: &mut FontContext,
+        context: &mut TextContext,
         text: &str,
         x: f64,
         y: f64,
@@ -1130,7 +1098,7 @@ impl Canvas {
             return;
         };
         let state = &self.state;
-        let line = self.shaper.shape(fonts, text, &state.font, state.direction);
+        let line = Line::shape(context, text, &state.font, state.direction);
         // Wider than the max width: squeeze horizontally to fit.
         let squeeze = max_width
             .filter(|max| line.width > *max)
@@ -1149,19 +1117,18 @@ impl Canvas {
         };
         let paint = state.paint(style, raster.size);
         let shape = Outline::Glyphs {
-            layout: &self.shaper.layout,
-            baseline: line.baseline,
+            line: &line.shaped,
             stroke: line_stroke.as_ref(),
         };
         raster.draw(state, paint.as_ref(), geometry, &shape);
         self.changed = true;
     }
 
-    /// `measureText(text)`, shaped with `fonts`.
-    pub fn measure_text(&mut self, fonts: &mut FontContext, text: &str) -> TextMetrics {
+    /// `measureText(text)`, shaped in `context`.
+    pub fn measure_text(&mut self, context: &mut TextContext, text: &str) -> TextMetrics {
         let state = &self.state;
-        let line = self.shaper.shape(fonts, text, &state.font, state.direction);
-        let ink = self.shaper.ink_bounds(&line);
+        let line = Line::shape(context, text, &state.font, state.direction);
+        let ink = line.ink_bounds();
         text::metrics(
             &line,
             ink,

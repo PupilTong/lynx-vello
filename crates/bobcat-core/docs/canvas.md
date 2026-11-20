@@ -202,14 +202,20 @@ ended first. The wasm32 wait is compiled and not run by any test.
 - `font` parses with stylo's shorthand parser
   (`properties::shorthands::font::parse_value`); the getter is the
   shorthand's own serialization (`LonghandsToSerialize`) with the size in px
-  and no line height. `small-caps` parses and is not drawn (`Font` has no
+  and no line height. The parsed value is `terminus`'s
+  `html::canvas::ResolvedFont` (`seldon`'s): family names and generic
+  families as stylo parsed them, the size in px, the weight number, the
+  style with an `oblique` angle (`oblique 0deg` is `normal`) and the stretch
+  ratio. `small-caps` parses and is not drawn (`ResolvedFont` has no
   variant).
 - Text is shaped with the realm's fonts: the MTS realm and its children use
   the document's `TextContext` (`Document::text_context_mut`, through the
   `DocumentFonts` impl on the document slot), so `@font-face` faces draw; a
   worker realm makes a `TextContext` from the process's system-font template
-  at its first text call. `TextContext::fonts_for` fills the fallback lists
-  a missing character needs first.
+  at its first text call. The canvas text calls take that `TextContext`
+  and shape through `seldon::text::shape_line`, which fills the fallback
+  lists a missing character needs first and hands parley the context's
+  locale.
 
 ## Size limits
 

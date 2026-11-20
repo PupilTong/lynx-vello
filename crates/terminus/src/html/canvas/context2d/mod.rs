@@ -7,8 +7,10 @@
 //! [`Gradient`], [`Pattern`], [`Image`]); errors name the exception the
 //! standard throws ([`CanvasError`]). There is no JavaScript, document or CSS
 //! parsing here: colors arrive as [`peniko::Color`](crate::peniko::Color),
-//! fonts as a typed [`Font`], and the caller owns the
-//! [`parley::FontContext`] text is shaped with. A canvas needs no
+//! fonts as a [`ResolvedFont`], and the caller owns the
+//! [`TextContext`](seldon::text::TextContext) text is shaped in, through
+//! the one-line shaper [`shape_line`](seldon::text::shape_line) that SVG
+//! `<text>` shapes with too. A canvas needs no
 //! [`Document`](crate::tree::document::Document): a Worker's
 //! `OffscreenCanvas` has none.
 //!
@@ -32,11 +34,12 @@ mod text;
 pub use canvas::{Canvas, ImageDataRead};
 pub use image::Image;
 pub use path::Path;
+pub use seldon::text::{GenericFamily, ResolvedFamily, ResolvedFont, ResolvedFontStyle};
 pub use style::{
     CompositeOp, Direction, FillRule, Gradient, LineCap, LineJoin, Pattern, Repetition,
     SmoothingQuality, Style, TextAlign, TextBaseline,
 };
-pub use text::{Font, TextMetrics};
+pub use text::TextMetrics;
 
 /// The exception a call throws, named as the standard names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
