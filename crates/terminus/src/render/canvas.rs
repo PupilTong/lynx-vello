@@ -99,10 +99,10 @@ enum Op {
         extent: (u32, u32),
         reply: flume::Sender<Result<Vec<u8>, String>>,
     },
-    /// `source`'s pixels at `from` copied to `to` in a new texture `copy`.
+    /// `source`'s pixels at `from` copied to `to` in a new texture `copy`;
+    /// with no texture under `source`, `copy` stays transparent black.
     Copy {
         source: u64,
-        source_size: (u32, u32),
         from: (u32, u32),
         to: (u32, u32),
         extent: (u32, u32),
@@ -538,7 +538,6 @@ fn copy(
         backend,
         Op::Copy {
             source,
-            source_size,
             from: (fx, fy),
             to: (tx, ty),
             extent: (w, h),
@@ -715,16 +714,26 @@ fn apply(gpu: &SharedGpu, backend: Option<&mut SparseBackend>, op: Op) {
         }
         Op::Copy {
             source,
-            source_size,
             from,
             to,
             extent,
             copy,
             copy_size,
         } => {
-            let source = texture(gpu, source, source_size);
+            // Looked up, not made: a surface that never issued an op of its
+            // own has no texture and removes none when dropped, and its
+            // pixels are transparent black, which the new texture already
+            // is.
+            let source = gpu
+                .raster
+                .canvases()
+                .get(&source)
+                .map(|entry| entry.texture.clone());
             let copied = texture(gpu, copy, copy_size);
-            if extent.0 > 0 && extent.1 > 0 {
+            if let Some(source) = source
+                && extent.0 > 0
+                && extent.1 > 0
+            {
                 let mut encoder = gpu
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -958,10 +967,11 @@ mod queue {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{Init, Surface};
+    use super::{Init, Surface, SurfaceImage};
     use crate::kurbo::{Affine, Rect};
     use crate::paint::display_list::{DisplayList, ListPaint};
     use crate::peniko::{Color, Extend, Fill, ImageQuality, ImageSampler};
+    use crate::render::gpu::SharedGpu;
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const CLEAR: [u8; 4] = [0; 4];
@@ -1023,5 +1033,23 @@ mod tests {
         fill(&mut list, Rect::new(0.0, 0.0, 1.0, 1.0), &red);
         surface.draw(&mut list, Init::Clear, &mut Vec::new());
         assert_eq!(pixel(&mut surface, 0, 0), RED);
+    }
+
+    /// A copy of a surface that never issued an op of its own is
+    /// transparent black, and leaves no texture under the surface's id once
+    /// both are dropped.
+    #[test]
+    fn a_copy_of_a_surface_that_never_drew_leaves_no_texture() {
+        let gpu = SharedGpu::offscreen().expect("a GPU adapter");
+        let fresh = Surface::new(8, 4).expect("a side the device takes");
+        let (id, size) = (fresh.texture().id(), fresh.size());
+        let copy = SurfaceImage::copy(fresh.texture(), 0, 0, size.0, size.1);
+        let copy_id = copy.texture().id();
+        assert_eq!(copy.read().expect("the read"), vec![0; 8 * 4 * 4]);
+        drop(copy);
+        drop(fresh);
+        let canvases = gpu.raster.canvases();
+        assert!(!canvases.contains_key(&id), "the source's texture");
+        assert!(!canvases.contains_key(&copy_id), "the copy's texture");
     }
 }
