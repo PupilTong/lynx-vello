@@ -20,8 +20,8 @@ use std::borrow::Cow;
 use parley::fontique::Attributes;
 use parley::{
     BaseDirection, FontFamily, FontFamilyName, FontStyle as ParleyFontStyle,
-    FontWeight as ParleyFontWeight, FontWidth, GenericFamily as ParleyGenericFamily,
-    PositionedLayoutItem, StyleProperty, WhiteSpaceCollapse,
+    FontWeight as ParleyFontWeight, FontWidth, GenericFamily, PositionedLayoutItem, StyleProperty,
+    WhiteSpaceCollapse,
 };
 
 use super::TextContext;
@@ -62,67 +62,9 @@ impl ResolvedFamily {
     #[must_use]
     pub fn parse(css: &str) -> Self {
         match FontFamilyName::parse(css) {
-            Some(FontFamilyName::Generic(generic)) => {
-                Self::Generic(GenericFamily::from_parley(generic))
-            }
+            Some(FontFamilyName::Generic(generic)) => Self::Generic(generic),
             Some(FontFamilyName::Named(name)) => Self::Named(name.into_owned()),
             None => Self::Named(css.to_owned()),
-        }
-    }
-}
-
-/// The CSS generic font families (css-fonts-4 §4.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GenericFamily {
-    Serif,
-    SansSerif,
-    Monospace,
-    Cursive,
-    Fantasy,
-    SystemUi,
-    UiSerif,
-    UiSansSerif,
-    UiMonospace,
-    UiRounded,
-    Emoji,
-    Math,
-    FangSong,
-}
-
-impl GenericFamily {
-    fn from_parley(generic: ParleyGenericFamily) -> Self {
-        match generic {
-            ParleyGenericFamily::Serif => Self::Serif,
-            ParleyGenericFamily::SansSerif => Self::SansSerif,
-            ParleyGenericFamily::Monospace => Self::Monospace,
-            ParleyGenericFamily::Cursive => Self::Cursive,
-            ParleyGenericFamily::Fantasy => Self::Fantasy,
-            ParleyGenericFamily::SystemUi => Self::SystemUi,
-            ParleyGenericFamily::UiSerif => Self::UiSerif,
-            ParleyGenericFamily::UiSansSerif => Self::UiSansSerif,
-            ParleyGenericFamily::UiMonospace => Self::UiMonospace,
-            ParleyGenericFamily::UiRounded => Self::UiRounded,
-            ParleyGenericFamily::Emoji => Self::Emoji,
-            ParleyGenericFamily::Math => Self::Math,
-            ParleyGenericFamily::FangSong => Self::FangSong,
-        }
-    }
-
-    fn to_parley(self) -> ParleyGenericFamily {
-        match self {
-            Self::Serif => ParleyGenericFamily::Serif,
-            Self::SansSerif => ParleyGenericFamily::SansSerif,
-            Self::Monospace => ParleyGenericFamily::Monospace,
-            Self::Cursive => ParleyGenericFamily::Cursive,
-            Self::Fantasy => ParleyGenericFamily::Fantasy,
-            Self::SystemUi => ParleyGenericFamily::SystemUi,
-            Self::UiSerif => ParleyGenericFamily::UiSerif,
-            Self::UiSansSerif => ParleyGenericFamily::UiSansSerif,
-            Self::UiMonospace => ParleyGenericFamily::UiMonospace,
-            Self::UiRounded => ParleyGenericFamily::UiRounded,
-            Self::Emoji => ParleyGenericFamily::Emoji,
-            Self::Math => ParleyGenericFamily::Math,
-            Self::FangSong => ParleyGenericFamily::FangSong,
         }
     }
 }
@@ -366,11 +308,11 @@ fn family_list(families: &[ResolvedFamily]) -> FontFamily<'_> {
         .iter()
         .map(|family| match family {
             ResolvedFamily::Named(name) => FontFamilyName::Named(Cow::Borrowed(name.as_str())),
-            ResolvedFamily::Generic(generic) => FontFamilyName::Generic(generic.to_parley()),
+            ResolvedFamily::Generic(generic) => FontFamilyName::Generic(*generic),
         })
         .collect();
     match names.len() {
-        0 => FontFamily::Single(FontFamilyName::Generic(ParleyGenericFamily::SansSerif)),
+        0 => FontFamily::Single(FontFamilyName::Generic(GenericFamily::SansSerif)),
         1 => FontFamily::Single(names.remove(0)),
         _ => FontFamily::List(Cow::Owned(names)),
     }
@@ -587,7 +529,7 @@ mod tests {
         );
         assert!(matches!(
             family_list(&[]),
-            FontFamily::Single(FontFamilyName::Generic(ParleyGenericFamily::SansSerif))
+            FontFamily::Single(FontFamilyName::Generic(GenericFamily::SansSerif))
         ));
         let families = [
             ResolvedFamily::Named("serif".to_owned()),
@@ -599,7 +541,7 @@ mod tests {
         assert!(matches!(&names[0], FontFamilyName::Named(name) if name == "serif"));
         assert!(matches!(
             names[1],
-            FontFamilyName::Generic(ParleyGenericFamily::Serif)
+            FontFamilyName::Generic(GenericFamily::Serif)
         ));
     }
 }
