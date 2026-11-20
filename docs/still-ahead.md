@@ -99,12 +99,12 @@ would host it:
     `crates/bobcat-core/src/canvas/members.rs`.
   - `toDataURL`/`toBlob` on the element and `convertToBlob` on an
     `OffscreenCanvas`: nothing encodes an image. They would read the
-    bitmap back as `getImageData` does (`Canvas::read_image_data`) and need
+    bitmap back as `getImageData` does (`Context2d::read_image_data`) and need
     an encoder; `vant::Platform` has a decoder and no encoder.
   - A main-thread `getContext` on the `<canvas>` element itself: the element
     has context modes `none` and `placeholder` only
     (`crates/terminus/src/html/canvas/mod.rs`); a `2d` mode would bind a
-    `terminus::link::html::canvas::Canvas` to the element's picture there and expose it
+    `terminus::link::html::canvas::OffscreenCanvas` to the element's picture there and expose it
     through the Element PAPI (`packages/bobcat-element/src/element-papi.ts`).
   - `ArrayBuffer` in a `postMessage` transfer list (`DataCloneError` today)
     and `ImageBitmap` structured clone (transfer-only today): both are
@@ -119,7 +119,7 @@ would host it:
     which is private to `terminus`, as the 2D context's is).
   - The context's `filter`, `letterSpacing`, `wordSpacing`, `fontKerning`,
     `fontStretch`, `fontVariantCaps`, `textRendering` and `lang` attributes;
-    `small-caps` parses and is not drawn. They are `terminus::link::html::canvas::Canvas`
+    `small-caps` parses and is not drawn. They are `terminus::link::html::canvas::Context2d`
     state (`crates/terminus/src/html/canvas/context2d/`) with their accessors in
     `canvas.ts`.
   - Bitmap color glyphs (`sbix`/`CBDT` emoji), which draw nothing

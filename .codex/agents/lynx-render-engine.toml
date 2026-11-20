@@ -22,8 +22,10 @@ optional shader paints terminus draws are named as Cargo features.
 texture its draws replay into (natively on the drawing thread, on wasm32 on
 the Render Worker from a shared op queue), copied into a placeholder
 `<canvas>`'s picture texture at each commit (`docs/terminus-architecture.md`,
-"Canvas surfaces"). `crates/terminus/src/html/canvas/context2d/`, the Canvas
-2D drawing model recorded into the display list, is yours too.
+"Canvas surfaces"). `crates/terminus/src/html/canvas/offscreen.rs`
+(`OffscreenCanvas`) and `context2d/` (the `Context2d` that
+`OffscreenCanvas::context_2d` borrows), the Canvas 2D drawing model recorded
+into the display list, are yours too.
 
 ## Read first
 
