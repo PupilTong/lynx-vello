@@ -30,6 +30,13 @@
 //! of its [`SharedGpu`] ([`SharedRaster`]); each target's
 //! [`SparseBackend`] keeps its own scene, replay state and bound textures,
 //! so the replay runs on the target's thread without the renderer's lock.
+//!
+//! A canvas surface ([`super::canvas`]) splits a render in two instead: the
+//! replay runs with no device ([`encode`]) on the thread that draws the
+//! canvas, drawing each bitmap under a texture id reserved for the scene,
+//! and the GPU half ([`Submitter::submit`]) resolves those bitmaps through
+//! the bitmap table and renders, on the thread that holds the device —
+//! the same thread natively, the Render Worker on wasm32.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -215,7 +222,7 @@ pub(crate) struct Pictures<'a> {
     /// nothing.
     pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Result<Image, Missing>,
     /// Whether a texture id is bound for the render.
-    pub(crate) bound: &'a dyn Fn(u64) -> bool,
+    pub(crate) bound: &'a mut dyn FnMut(u64) -> bool,
 }
 
 /// The image a texture paint draws: the texture under its own id, the
@@ -485,7 +492,7 @@ impl StripScene {
                         sampler: paint.sampler,
                     })
                 },
-                bound: &|_| true,
+                bound: &mut |_| true,
             },
         );
         self.replay.maintain();
@@ -729,10 +736,13 @@ const PINNED_RENDERS: u64 = 4;
 /// of its own. The CPU half of a render — the list replayed into that
 /// scene, every path flattened and turned into strips — holds no lock but a
 /// short [`Self::bitmaps`] hold per bitmap draw, which converts no pixels
-/// and uploads nothing. The GPU half holds [`Self::renderer`] throughout:
-/// `Renderer::render` (its layer schedule and the command encoding) and the
-/// submit. Two targets therefore strip their scenes in parallel and take
-/// turns only for the GPU half. The two locks are never held together.
+/// and uploads nothing; a canvas's ([`encode`]) holds none and needs no
+/// device, and its bitmaps are looked up at the start of its GPU half
+/// ([`Submitter::submit`]) instead. The GPU half holds [`Self::renderer`]
+/// throughout: `Renderer::render` (its layer schedule and the command
+/// encoding) and the submit. Two targets therefore strip their scenes in
+/// parallel and take turns only for the GPU half. The two locks are never
+/// held together.
 pub(crate) struct SharedRaster {
     renderer: Mutex<Paired>,
     bitmaps: Mutex<Bitmaps>,
@@ -836,12 +846,7 @@ impl Bitmaps {
 
     /// The upload under `key`, marked drawn by `drawing`'s render — whose
     /// first bitmap draw this makes it one of its target's generations.
-    fn hit(
-        &mut self,
-        key: &BitmapKey,
-        sampler: ImageSampler,
-        drawing: &mut Drawing<'_>,
-    ) -> Option<Image> {
+    fn hit(&mut self, key: &BitmapKey, drawing: &mut Drawing<'_>) -> Option<&Bitmap> {
         if drawing.tick.is_none() {
             *drawing.generation += 1;
             self.stamp += 1;
@@ -850,25 +855,15 @@ impl Bitmaps {
         }
         let bitmap = self.entries.get_mut(key)?;
         bitmap.mark(drawing, &self.targets);
-        Some(bitmap.image(sampler))
+        Some(bitmap)
     }
 
     /// Adds the upload `bitmap` under `key`, drawn by `drawing`'s render,
     /// which [`Self::hit`] has ticked.
-    fn insert(
-        &mut self,
-        key: BitmapKey,
-        mut bitmap: Bitmap,
-        sampler: ImageSampler,
-        drawing: &mut Drawing<'_>,
-    ) -> Image {
+    fn insert(&mut self, key: BitmapKey, mut bitmap: Bitmap, drawing: &mut Drawing<'_>) -> &Bitmap {
         bitmap.mark(drawing, &self.targets);
         self.bytes += bitmap.bytes;
-        self.entries
-            .entry(key)
-            .insert_entry(bitmap)
-            .get()
-            .image(sampler)
+        self.entries.entry(key).insert_entry(bitmap).into_mut()
     }
 
     /// Releases the unpinned, unleased uploads, least recently drawn first,
@@ -1385,9 +1380,23 @@ impl SharedRaster {
         sampler: ImageSampler,
         drawing: &mut Drawing<'_>,
     ) -> Result<Image, Missing> {
+        self.resolve(device, queue, image, drawing, |bitmap| {
+            bitmap.image(sampler)
+        })
+    }
+
+    /// [`Self::bitmap`], answering what `answer` makes of the upload drawn.
+    fn resolve<R>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageRef,
+        drawing: &mut Drawing<'_>,
+        answer: impl FnOnce(&Bitmap) -> R,
+    ) -> Result<R, Missing> {
         let key = BitmapKey::drawn(image);
-        if let Some(image) = self.bitmaps().hit(&key, sampler, drawing) {
-            return Ok(image);
+        if let Some(bitmap) = self.bitmaps().hit(&key, drawing) {
+            return Ok(answer(bitmap));
         }
         let longest = device.limits().max_texture_dimension_2d;
         let descriptor = &image.descriptor;
@@ -1408,8 +1417,8 @@ impl SharedRaster {
         drop(texels);
         drop(pixels);
         let mut bitmaps = self.bitmaps();
-        if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
-            return Ok(image);
+        if let Some(bitmap) = bitmaps.hit(&key, drawing) {
+            return Ok(answer(bitmap));
         }
         let bitmap = Bitmap {
             id,
@@ -1421,9 +1430,9 @@ impl SharedRaster {
             pins: SmallVec::new(),
             leases: 0,
         };
-        let image = bitmaps.insert(key, bitmap, sampler, drawing);
+        let answered = answer(bitmaps.insert(key, bitmap, drawing));
         self.uploads.fetch_add(1, Ordering::Release);
-        Ok(image)
+        Ok(answered)
     }
 
     /// Writes `frame`, frame `generation` of `picture`, which `descriptor`
@@ -1649,16 +1658,23 @@ impl SharedRaster {
     }
 }
 
+/// Whether `image` has pixels to convert: no zero side, and a blob holding
+/// at least the bytes the image needs.
+fn readable(image: &ImageData) -> bool {
+    let (width, height) = (image.width as usize, image.height as usize);
+    width != 0 && height != 0 && image.data.data().len() >= width * 4 * height
+}
+
 /// `image`'s pixels as premultiplied RGBA8, and whether every pixel is
 /// opaque; `None` when the blob holds fewer bytes than the image needs.
 /// Pixels that already are premultiplied RGBA8 are borrowed, not copied.
 fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
+    if !readable(image) {
+        return None;
+    }
     let bytes = image.data.data();
     let (width, height) = (image.width as usize, image.height as usize);
     let row = width * 4;
-    if width == 0 || height == 0 || bytes.len() < row * height {
-        return None;
-    }
     let bytes = &bytes[..row * height];
     if image.format == ImageFormat::Rgba8 && image.alpha_type == ImageAlphaType::AlphaPremultiplied
     {
@@ -1790,28 +1806,7 @@ impl SparseBackend {
         } = &**gpu;
 
         let started = ClockInstant::now();
-        scene.reset_and_resize(w, h);
-        // A layer blending over the root blends against what is under the
-        // whole list, which on the target is the base colour. `vello_gpu`
-        // renders a root that is a blend target into a transparent
-        // intermediate and blits that over the cleared target, so the clear
-        // colour is under the blend rather than in it: the base colour is
-        // drawn as the scene's first fill instead, which over a transparent
-        // clear composes to the same pixels the clear would have.
-        let base_color = clear.unwrap_or(Color::TRANSPARENT);
-        let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
-        if underlay {
-            scene.set_transform(Affine::IDENTITY);
-            scene.set_fill_rule(Fill::NonZero);
-            scene.set_paint(base_color);
-            scene.reset_paint_transform();
-            scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
-        }
-        let init = match clear {
-            None => TargetInit::SrcOver,
-            Some(_) if underlay => clear_init(Color::TRANSPARENT),
-            Some(color) => clear_init(color),
-        };
+        let init = target_init(begin(scene, list, (w, h), clear));
         textures.clear();
         let mut drawing = Drawing {
             target: *target,
@@ -1827,7 +1822,7 @@ impl SparseBackend {
                 bitmap: &mut |paint| {
                     shared.bitmap(device, queue, &paint.image, paint.sampler, &mut drawing)
                 },
-                bound: &|id| bound.contains_key(&id) || sources.contains_key(&id),
+                bound: &mut |id| bound.contains_key(&id) || sources.contains_key(&id),
             },
         );
         kept.maintain();
@@ -1845,18 +1840,285 @@ impl SparseBackend {
         *last = stats;
         result
     }
+}
 
-    /// The stack this rasterizer renders on.
-    pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
-        &self.gpu
+/// Resets `scene` to a `w` × `h` target that `list` is replayed onto,
+/// cleared to `clear` first or, with `None`, kept and drawn over; answers
+/// the clear the target gets before the render ([`target_init`]).
+///
+/// A layer blending over the root blends against what is under the whole
+/// list, which on the target is the clear colour. `vello_gpu` renders a
+/// root that is a blend target into a transparent intermediate and blits
+/// that over the cleared target, so the clear colour is under the blend
+/// rather than in it: a visible clear colour is drawn as the scene's first
+/// fill instead, over a transparent clear, which composes to the same
+/// pixels the clear would have.
+fn begin(
+    scene: &mut Scene,
+    list: &DisplayList,
+    (w, h): (u16, u16),
+    clear: Option<Color>,
+) -> Option<Color> {
+    scene.reset_and_resize(w, h);
+    let base_color = clear.unwrap_or(Color::TRANSPARENT);
+    let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
+    if underlay {
+        scene.set_transform(Affine::IDENTITY);
+        scene.set_fill_rule(Fill::NonZero);
+        scene.set_paint(base_color);
+        scene.reset_paint_transform();
+        scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+        return Some(Color::TRANSPARENT);
+    }
+    clear
+}
+
+/// The target init of a render whose target is cleared to `clear` first,
+/// or with `None` kept and drawn over.
+fn target_init(clear: Option<Color>) -> TargetInit<'static> {
+    match clear {
+        None => TargetInit::SrcOver,
+        Some(color) => TargetInit::Clear(ClearSettings::Viewport {
+            color: color.convert(),
+        }),
     }
 }
 
-/// A target cleared to `color` before the render.
-fn clear_init(color: Color) -> TargetInit<'static> {
-    TargetInit::Clear(ClearSettings::Viewport {
-        color: color.convert(),
-    })
+/// A list replayed into a scene by [`encode`], on a thread that may hold no
+/// device: the CPU half of a render, which [`Submitter::submit`] finishes
+/// on the device's thread.
+///
+/// A bitmap the list draws is drawn in the scene as an external texture
+/// under an id reserved for this scene, one per upload the bitmap table
+/// keys, and resolved through the bitmap table only at the submit, which
+/// binds the upload's texture under that id. A texture paint is drawn under
+/// its own id, which the submit's caller binds.
+pub(crate) struct Encoded {
+    scene: Scene,
+    /// The clear the target gets before the render ([`target_init`]).
+    clear: Option<Color>,
+    /// Each bitmap the scene draws: the id it is drawn under, and the bitmap.
+    bitmaps: Vec<(TextureId, ImageRef)>,
+    /// The texture ids the scene draws, each once.
+    textures: Vec<u64>,
+}
+
+impl std::fmt::Debug for Encoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Encoded")
+            .field("width", &self.scene.width())
+            .field("height", &self.scene.height())
+            .field("textures", &self.textures)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Encoded {
+    /// The texture ids the scene draws, each once: every one needs a
+    /// binding at the submit.
+    pub(crate) fn textures(&self) -> &[u64] {
+        &self.textures
+    }
+
+    /// The scene, for the next [`encode`] to reuse its buffers.
+    pub(crate) fn into_scene(self) -> Scene {
+        self.scene
+    }
+}
+
+/// The CPU half of a render, with no device: `list` replayed into `scene`,
+/// reset to a `width` × `height` target that is cleared to `clear` first or,
+/// with `None`, kept and drawn over, as [`SparseBackend::render_onto`]
+/// replays it. A texture paint whose id `drawable` refuses draws nothing,
+/// as one with no texture bound does there.
+///
+/// What a render decides about a bitmap without a device is decided here:
+/// one with a side longer than any texture, or whose pixels are fewer bytes
+/// than it needs, draws nothing, as it does there. Whether an upload is
+/// resident, and whether lent pixels are still alive, is decided at the
+/// submit.
+pub(crate) fn encode(
+    mut scene: Scene,
+    kept: &mut Replay,
+    list: &DisplayList,
+    (width, height): (u32, u32),
+    clear: Option<Color>,
+    drawable: &dyn Fn(u64) -> bool,
+) -> Encoded {
+    let clear = begin(&mut scene, list, (width as u16, height as u16), clear);
+    let longest = SharedGpu::LIMITS.max_texture_dimension_2d;
+    let mut bitmaps: Vec<(TextureId, ImageRef)> = Vec::new();
+    let mut reserved: FxHashMap<BitmapKey, TextureId> = FxHashMap::default();
+    let mut textures: Vec<u64> = Vec::new();
+    replay(
+        &mut scene,
+        list,
+        kept,
+        &mut Pictures {
+            bitmap: &mut |paint| {
+                let image = &paint.image;
+                if image.picture.is_none() {
+                    // No upload keyed on these pixels can exist: none is
+                    // made of a bitmap that cannot be converted.
+                    let descriptor = &image.descriptor;
+                    if descriptor.width > longest || descriptor.height > longest {
+                        return Err(Missing::Unreadable);
+                    }
+                    if image.pixels().is_some_and(|pixels| !readable(&pixels)) {
+                        return Err(Missing::Unreadable);
+                    }
+                }
+                let id = *reserved.entry(BitmapKey::drawn(image)).or_insert_with(|| {
+                    let id = TextureId(next_texture_id());
+                    bitmaps.push((id, image.clone()));
+                    id
+                });
+                // Whether the upload is opaque is not known here; the flag
+                // only lets `vello_gpu` route opaque strips to its depth
+                // pass, which no render here enables (`depth_view: None`).
+                Ok(Image {
+                    image: ImageSource::external_texture(id, TextureRegion::Full, true),
+                    sampler: paint.sampler,
+                })
+            },
+            bound: &mut |id| {
+                let drawn = drawable(id);
+                if drawn && !textures.contains(&id) {
+                    textures.push(id);
+                }
+                drawn
+            },
+        },
+    );
+    kept.maintain();
+    Encoded {
+        scene,
+        clear,
+        bitmaps,
+        textures,
+    }
+}
+
+/// A 1 × 1 transparent black texture: what a submit binds under an id whose
+/// texture it cannot find.
+///
+/// In `vello_gpu` a draw composites by source-over into the layer it is in
+/// (a blend mode is a layer's, never a draw's), so a draw sampling only
+/// transparent black leaves that layer's pixels as they are, as no draw
+/// does. What it still changes is the bounding box the scene recorded for
+/// each layer around it, which was fixed at the encode either way: a
+/// non-destructive blend layer then blends a transparent source over its
+/// backdrop, which leaves the backdrop, and a destructive one composites
+/// over its whole clip region whatever it holds
+/// (`schedule_child_layer`, `vello_gpu` `schedule/mod.rs`).
+pub(crate) fn transparent_view(device: &wgpu::Device) -> wgpu::TextureView {
+    // wgpu zero-fills a texture before its first use.
+    bitmap_texture(device, 1, 1, BITMAP_USAGE).create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The device side of a target whose scenes are encoded elsewhere
+/// ([`encode`]): its name in the bitmaps' pins and its count of renders, as
+/// a [`SparseBackend`] keeps them.
+pub(crate) struct Submitter {
+    gpu: Arc<SharedGpu>,
+    target: u64,
+    generation: u64,
+    /// The textures [`Bitmaps::hit`] lists for a render, unused here: an
+    /// encoded scene draws a bitmap under the id reserved for it.
+    scratch: Vec<(TextureId, wgpu::TextureView)>,
+}
+
+impl std::fmt::Debug for Submitter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Submitter")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Submitter {
+    /// A target on `gpu` that has rendered nothing yet.
+    pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
+        Self {
+            gpu: Arc::clone(gpu),
+            target: next_target(),
+            generation: 0,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// The stack this target renders on.
+    pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
+        &self.gpu
+    }
+
+    /// The GPU half of the render `encoded` began: each bitmap it draws
+    /// resolved through the bitmap table — a hit, or the pixels converted
+    /// and uploaded — and bound under the id the scene draws it by, with
+    /// `sources` bound under theirs, then the scene rendered into `view`
+    /// under the renderer lock and submitted ([`SharedRaster`]).
+    ///
+    /// `sources` binds every id of [`Encoded::textures`]. A bitmap with no
+    /// upload whose pixels are gone or unreadable is bound as transparent
+    /// black ([`transparent_view`]), which draws as nothing does.
+    pub(crate) fn submit(
+        &mut self,
+        encoded: &Encoded,
+        view: &wgpu::TextureView,
+        sources: &FxHashMap<u64, wgpu::TextureView>,
+    ) -> Result<(), String> {
+        let Self {
+            gpu,
+            target,
+            generation,
+            scratch,
+        } = self;
+        let SharedGpu {
+            device,
+            queue,
+            raster: shared,
+            ..
+        } = &**gpu;
+        let mut bindings = TextureBindings::new();
+        for (&id, view) in sources {
+            bindings.insert(TextureId(id), view.clone());
+        }
+        let mut drawing = Drawing {
+            target: *target,
+            generation,
+            tick: None,
+            textures: scratch,
+        };
+        let mut transparent = None;
+        for (id, image) in &encoded.bitmaps {
+            let view = shared
+                .resolve(device, queue, image, &mut drawing, |bitmap| {
+                    bitmap.view.clone()
+                })
+                .unwrap_or_else(|_| {
+                    transparent
+                        .get_or_insert_with(|| transparent_view(device))
+                        .clone()
+                });
+            bindings.insert(*id, view);
+        }
+        drawing.textures.clear();
+        shared.render(
+            gpu,
+            &encoded.scene,
+            view,
+            &bindings,
+            target_init(encoded.clear),
+            &mut Stats::default(),
+        )
+    }
+}
+
+impl Drop for Submitter {
+    /// Gives up this target's pins, as [`SparseBackend`]'s drop does.
+    fn drop(&mut self) {
+        self.gpu.raster.bitmaps().targets.remove(&self.target);
+    }
 }
 
 impl Drop for SparseBackend {

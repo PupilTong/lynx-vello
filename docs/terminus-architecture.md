@@ -935,9 +935,10 @@ the element's.
 
 Draws are recorded into the canvas's `DisplayList` on the calling thread:
 no GPU work and no lock per call. `Raster::flush` (`raster.rs`) hands the
-list to the canvas's `Surface` ("Canvas surfaces"), which replays it onto the canvas's
-texture. A flush happens at every read (`get_image_data`, `image`,
-`take_image`, `commit`), before `put_image_data`, at `flush()` (which the
+list to the canvas's `Surface` ("Canvas surfaces"), which replays it into a
+scene on the calling thread and renders that onto the canvas's texture. A
+flush happens at every read (`get_image_data`, `image`, `take_image`,
+`commit`), before `put_image_data`, at `flush()` (which the
 embedder calls for each canvas drawn during a JavaScript entry), right after
 a draw that samples a canvas's current texture, and once the recording
 passes 2 MiB (`MAX_RECORDED_BYTES`, Chromium's bound on a canvas's recorded
@@ -1026,10 +1027,24 @@ one `Op` applied by `apply`:
   closed: `Init::Load` over the texture (`TargetInit::SrcOver`), `Init::Clear` over a transparent
   clear, `Init::Backdrop` into the surface's second texture over a clear with the first bound
   under the surface's id, after which the two change places unless the render failed, which leaves
-  the content as it was. The list is emptied; `keep` holds the
-  `SurfaceImage`s it draws until the replay. Every `Paint::Texture` the list draws is looked up in
-  the canvas table and bound for the render (`SparseBackend::render_onto`'s `sources`); pixel images
-  are uploaded through the bitmap table like any `ImageRef`.
+  the content as it was. A draw is two halves. The encode (`render::sparse::encode`) runs on the
+  thread that calls `draw`, with no device: the list is replayed into the surface's
+  `vello_gpu::Scene` with its glyph outline cache, a `Paint::Texture` drawn under its own id (the
+  surface's own id only under `Init::Backdrop`; otherwise that draw is left out), and each pixel
+  image under a texture id reserved for that scene, one per upload the bitmap table would key. A
+  bitmap with a side over `MAX_SURFACE_SIDE`, or fewer bytes than its size needs, is left out
+  there. The op then carries the encoded scene, the bitmaps it names and the texture ids it draws.
+  The GPU half (`Submitter::submit`) resolves each bitmap through the bitmap table, uploading it on
+  a miss and pinning it as any render does, binds its texture under the reserved id, binds every
+  canvas texture the scene names from the canvas table, and renders. The list is emptied and keeps
+  its capacity; `keep` holds the `SurfaceImage`s it draws until the render.
+- A canvas texture id with no texture in the table (a surface that never issued an op) and a
+  bitmap with no upload whose lent pixels are gone are known only to the GPU half, after the
+  scene drew them. Each is bound as a 1 × 1 transparent black texture: a draw composites by
+  source-over into its layer, so it leaves the layer's pixels as they were, a non-destructive
+  blend of a transparent layer leaves its backdrop, and `vello_gpu` composites a destructive blend
+  layer over its whole clip region whatever it holds, so every composite operation gives the
+  pixels the draw left out does (`render::canvas`'s tests compare both lists under all 26).
 - `write` (`Queue::write_texture` of a rectangle), `read` (a rectangle copied to a staging buffer
   and mapped; a `PendingRead` whose `wait` blocks), `SurfaceImage::copy`/`crop` and the test-only `snapshot` (a
   `copy_texture_to_texture` into a new texture), `take` (the texture moved to a new
@@ -1044,17 +1059,24 @@ blend never reads the target; and it refuses to sample the texture it
 renders into (`RenderError::TextureFeedbackLoop`). A surface therefore holds
 one texture, and a second from its first backdrop batch on.
 
-Natively the thread that owns a surface applies each op as it is issued:
-the surface makes a `SparseBackend` on `SharedGpu::offscreen()` at its first
-op, replays with no lock but the bitmap table's per bitmap draw, and takes
-the renderer lock for the GPU half. A `SurfaceImage` holds the stack too.
-On wasm32 the device is the Render Worker's: every op is pushed onto one
-queue in shared memory, which wakes the Render Worker through the waker
-`set_waker` registered when the queue was empty, and `drain`, called at the
-start of each of that Worker's turns, applies the queue in order with one
-`SparseBackend` for every canvas. A read is answered from the map's
-completion on the Render Worker; with no live device there the ops are
-dropped, which fails the reads among them.
+Natively the thread that owns a surface applies each op as it is issued,
+so a draw's two halves run back to back there: the surface makes a
+`Submitter` (its name in the bitmaps' pins) on `SharedGpu::offscreen()` at
+its first op, encodes with no lock, and takes the bitmap table's lock per
+bitmap and then the renderer lock for the GPU half. A `SurfaceImage` holds
+the stack too. On wasm32 the device is the Render Worker's: every op is
+pushed onto one queue in shared memory, which wakes the Render Worker
+through the waker `set_waker` registered when the queue was empty, and
+`drain`, called at the start of each of that Worker's turns, applies the
+queue in order with one `Submitter` for every canvas. The encode runs on
+the BTS or Worker thread that flushes the canvas, so the Render Worker runs
+only the GPU half of a canvas draw. The scene goes back to its surface on a
+channel the op carries, and the surface's next draw reuses its buffers; a
+draw issued while its scene is still queued makes a new one, and a second
+scene back is dropped. A surface therefore holds a scene and a glyph outline
+cache on every target. A read is answered from the map's completion on the
+Render Worker; with no live device there the ops are dropped, which fails
+the reads among them.
 
 `DisplayList` carries two items for canvases, both `pub(crate)` with the
 other canvas-only list API. `push_backdrop_clip` opens a
