@@ -274,8 +274,12 @@ Subsystems:
   display lists replayed onto it (with load, with a clear, or into its
   second texture over its own content, `Init::Backdrop`, for a batch that
   blends at the root or samples the canvas itself), pixel writes, readbacks,
-  copies, and commits to a placeholder. A list is replayed into a scene on
-  the owning thread with no device (`render::sparse::encode`); natively that
+  copies, and commits to a placeholder. Its textures are a table per device
+  (`render::canvas::Textures`, the `SharedGpu::canvases` field). A list is
+  replayed into a scene on the owning thread with no device
+  (`render::sparse::canvas::encode`: the rasterizer's pieces only a canvas
+  uses, a child module of `render::sparse` for the bitmap table they read
+  and write); natively that
   thread also applies each GPU step; on wasm32 the steps, a draw carrying
   its encoded scene, queue for the Render Worker, which applies them at the
   start of each turn (`drain`, from `bobcat-core`'s `Painter::pump`) once

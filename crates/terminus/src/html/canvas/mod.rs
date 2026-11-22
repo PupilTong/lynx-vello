@@ -280,7 +280,7 @@ pub fn transfer_control_to_offscreen<T>(
         return Err(InvalidState);
     }
     let link = Arc::new(Link {
-        owner: crate::render::sparse::next_target(),
+        owner: crate::render::canvas::next_owner(),
         shown: Mutex::default(),
         committed: AtomicU64::new(pack(width, height)),
         resize_owed: AtomicBool::new(false),

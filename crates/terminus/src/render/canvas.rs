@@ -5,12 +5,12 @@
 //! The owner records draws into a list on its own thread and hands the list
 //! over at each flush ([`Surface::draw`]); nothing is drawn while it
 //! records. The flush replays the list into a `vello_gpu` scene on the
-//! owner's thread, with no device ([`super::sparse::encode`], the CPU half
-//! of a render: every path flattened and turned into strips). A bitmap the
-//! list draws is drawn in the scene under a texture id reserved for it, and
-//! a texture by its own id. Every GPU step is one [`Op`] applied by
-//! [`apply`] to the textures of [`SharedRaster`]'s canvas table, keyed by a
-//! texture id that is also the id a draw names the texture by
+//! owner's thread, with no device ([`encode`], the CPU half of a render:
+//! every path flattened and turned into strips). A bitmap the list draws is
+//! drawn in the scene under a texture id reserved for it, and a texture by
+//! its own id. Every GPU step is one [`Op`] applied by [`apply`] to the
+//! device's canvas texture table ([`Textures`], held by the [`SharedGpu`]),
+//! keyed by a texture id that is also the id a draw names the texture by
 //! ([`Texture`]); a draw's op carries the encoded scene, and its GPU half
 //! ([`Submitter::submit`]) resolves each bitmap through the bitmap table,
 //! uploading it on a miss, binds it and the canvas textures the scene
@@ -57,13 +57,15 @@
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustc_hash::FxHashMap;
 use vello_gpu::Scene;
 
 use super::gpu::SharedGpu;
-use super::sparse::{CanvasTexture, Encoded, Replay, Submitter, encode, transparent_view};
+use super::sparse::Replay;
+pub(crate) use super::sparse::canvas::next_owner;
+use super::sparse::canvas::{Encoded, Submitter, encode, transparent_view};
 use crate::html::canvas::{CanvasFrames, Committed};
 use crate::paint::display_list::{DisplayList, Texture, next_texture_id};
 use crate::render::image::ImageDescriptor;
@@ -73,6 +75,26 @@ use crate::render::picture::PictureId;
 /// `max_texture_dimension_2d` under the limits every device is created
 /// with ([`SharedGpu::LIMITS`]).
 pub(crate) const MAX_SURFACE_SIDE: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
+
+/// The canvas textures of one device, by the id a draw names each by:
+/// every surface's and every canvas image's ([`SharedGpu::canvases`]).
+#[derive(Default)]
+pub(crate) struct Textures(Mutex<FxHashMap<u64, CanvasTexture>>);
+
+impl Textures {
+    /// Locks the table. A poisoned lock is taken anyway: every change to
+    /// the table is one insert or remove, which leaves it whole.
+    fn lock(&self) -> MutexGuard<'_, FxHashMap<u64, CanvasTexture>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A canvas's texture, and the one a draw that reads the canvas's own
+/// pixels renders into before the two change places.
+struct CanvasTexture {
+    texture: wgpu::Texture,
+    spare: Option<wgpu::Texture>,
+}
 
 /// How a draw treats what the surface holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -608,7 +630,7 @@ impl Drop for Surface {
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(port) = &self.port {
-            port.gpu().raster.canvases().remove(&self.id);
+            port.gpu().canvases.lock().remove(&self.id);
         }
         #[cfg(target_arch = "wasm32")]
         issue(None, None, Op::Drop(self.id));
@@ -709,8 +731,8 @@ fn issue(gpu: Gpu<'_>, port: Option<&mut Submitter>, op: Op) {
 
 /// The texture under `id`, made `size` and zero-filled if there is none.
 fn texture(gpu: &SharedGpu, id: u64, size: (u32, u32)) -> wgpu::Texture {
-    gpu.raster
-        .canvases()
+    gpu.canvases
+        .lock()
         .entry(id)
         .or_insert_with(|| CanvasTexture {
             texture: canvas_texture(gpu, size),
@@ -755,7 +777,7 @@ fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
 fn sources(gpu: &SharedGpu, encoded: &Encoded, target: u64) -> FxHashMap<u64, wgpu::TextureView> {
     let mut sources = FxHashMap::default();
     let mut transparent = None;
-    let canvases = gpu.raster.canvases();
+    let canvases = gpu.canvases.lock();
     for &id in encoded.textures() {
         if id == target {
             continue;
@@ -788,8 +810,8 @@ fn render(gpu: &SharedGpu, port: &mut Submitter, draw: &Draw) {
     let mut sources = sources(gpu, encoded, target);
     let result = if *init == Init::Backdrop {
         let spare = gpu
-            .raster
-            .canvases()
+            .canvases
+            .lock()
             .get_mut(&target)
             .and_then(|entry| entry.spare.take())
             .unwrap_or_else(|| canvas_texture(gpu, size));
@@ -797,7 +819,7 @@ fn render(gpu: &SharedGpu, port: &mut Submitter, draw: &Draw) {
         let result = port.submit(encoded, &view(&spare), &sources);
         // The rendered texture becomes the content; after a failed render
         // the content stays and the spare is kept for the next batch.
-        if let Some(entry) = gpu.raster.canvases().get_mut(&target) {
+        if let Some(entry) = gpu.canvases.lock().get_mut(&target) {
             if result.is_ok() {
                 entry.texture = spare;
                 entry.spare = Some(current);
@@ -867,8 +889,8 @@ fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
             // pixels are transparent black, which the new texture already
             // is.
             let source = gpu
-                .raster
-                .canvases()
+                .canvases
+                .lock()
                 .get(&source)
                 .map(|entry| entry.texture.clone());
             let copied = texture(gpu, copy, copy_size);
@@ -888,7 +910,7 @@ fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
             }
         }
         Op::Move { from, to, size } => {
-            let mut canvases = gpu.raster.canvases();
+            let mut canvases = gpu.canvases.lock();
             let moved = canvases
                 .remove(&from)
                 .map_or_else(|| canvas_texture(gpu, size), |entry| entry.texture);
@@ -913,7 +935,7 @@ fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
                 .copy_to_picture(gpu, owner, picture, generation, descriptor, &source);
         }
         Op::Drop(id) => {
-            gpu.raster.canvases().remove(&id);
+            gpu.canvases.lock().remove(&id);
         }
         Op::EndLease(owner) => gpu.raster.end_leases(owner),
     }
@@ -1202,7 +1224,7 @@ mod tests {
         assert_eq!(copy.read().expect("the read"), vec![0; 8 * 4 * 4]);
         drop(copy);
         drop(fresh);
-        let canvases = gpu.raster.canvases();
+        let canvases = gpu.canvases.lock();
         assert!(!canvases.contains_key(&id), "the source's texture");
         assert!(!canvases.contains_key(&copy_id), "the copy's texture");
     }

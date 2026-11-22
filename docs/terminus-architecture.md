@@ -875,7 +875,7 @@ element is freed; after that a commit does nothing and owes nothing.
 Delivering a wake or a resize, and answering the painter for the picture,
 is the embedder's.
 
-The `Link` holds a lease owner id (`render::sparse::next_target`). A commit
+The `Link` holds a lease owner id (`render::canvas::next_owner`). A commit
 copies the canvas's texture into the picture's own texture in the shared
 bitmap table (`SharedRaster::copy_to_picture`, under
 `BitmapKey::Picture`), which is the texture a draw of the picture samples,
@@ -1018,16 +1018,20 @@ both need a GPU adapter, as every screenshot test does, and run in CI's
 but wasm32's `set_waker` and `drain`, which are on `link::render::canvas`
 for the embedder that runs the Render Worker). A `Surface` is a `width` × `height` RGBA8 texture
 (premultiplied), keyed by a process-unique id (`next_texture_id`) in
-`SharedRaster`'s canvas table; `Surface::new` refuses a zero side or one
+the device's canvas texture table (`render::canvas::Textures`, which
+`SharedGpu` holds as its `canvases` field); `Surface::new` refuses a zero side or one
 over `MAX_SURFACE_SIDE`, the 8,192 of `SharedGpu::LIMITS`. The texture is
-made, zero-filled, by the first operation that needs it. Every GPU step is
-one `Op` applied by `apply`:
+made, zero-filled, by the first operation that needs it. The rasterizer's
+pieces only a canvas uses (the encode, `Submitter`,
+`SharedRaster::copy_to_picture`) are `render/sparse/canvas.rs`, a child
+module of `render::sparse` that reads the bitmap table's private state.
+Every GPU step is one `Op` applied by `apply`:
 
 - `Surface::draw(list, init, keep)` replays a `DisplayList` whose clips and layers are all
   closed: `Init::Load` over the texture (`TargetInit::SrcOver`), `Init::Clear` over a transparent
   clear, `Init::Backdrop` into the surface's second texture over a clear with the first bound
   under the surface's id, after which the two change places unless the render failed, which leaves
-  the content as it was. A draw is two halves. The encode (`render::sparse::encode`) runs on the
+  the content as it was. A draw is two halves. The encode (`render::sparse::canvas::encode`) runs on the
   thread that calls `draw`, with no device: the list is replayed into the surface's
   `vello_gpu::Scene` with that thread's glyph outline cache (below), a `Paint::Texture` drawn
   under its own id (the surface's own id only under `Init::Backdrop`; otherwise that draw is left

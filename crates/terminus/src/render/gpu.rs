@@ -81,6 +81,7 @@ pub(crate) struct SharedGpu {
     /// [`Self::submit`].
     pub(crate) queue: wgpu::Queue,
     pub(crate) raster: SharedRaster,
+    pub(super) canvases: super::canvas::Textures,
     /// Held across every submit and every surface configuration; see
     /// [`Self::configure`].
     submits: Mutex<()>,
@@ -273,6 +274,7 @@ impl SharedGpu {
             device,
             queue,
             raster,
+            canvases: super::canvas::Textures::default(),
             submits: Mutex::new(()),
         })
     }
