@@ -1141,7 +1141,7 @@ mod tests {
         CompositeOp, OffscreenCanvas, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
     };
     use crate::kurbo::{Affine, Rect};
-    use crate::paint::display_list::{DisplayList, ImageRef, ListPaint};
+    use crate::paint::display_list::{DisplayList, ImagePaint, ImageRef, Paint};
     use crate::peniko::{
         Blob, Brush, Color, Extend, Fill, Gradient, ImageAlphaType, ImageData, ImageFormat,
         ImageQuality, ImageSampler,
@@ -1157,8 +1157,13 @@ mod tests {
         [read[0], read[1], read[2], read[3]]
     }
 
-    fn fill(list: &mut DisplayList, rect: Rect, paint: &ListPaint) {
-        list.fill_with(Fill::NonZero, Affine::IDENTITY, paint, None, &rect);
+    fn fill(list: &mut DisplayList, rect: Rect, paint: &Paint) {
+        list.fill_paint(Fill::NonZero, Affine::IDENTITY, paint.clone(), None, &rect);
+    }
+
+    /// `image` sampled through `sampler`.
+    fn image_paint(image: ImageRef, sampler: ImageSampler) -> Paint {
+        Paint::Image(Arc::new(ImagePaint { image, sampler }))
     }
 
     /// A draw lands on what the surface holds; a backdrop draw samples the
@@ -1168,7 +1173,7 @@ mod tests {
         let mut surface = Surface::new(8, 4).expect("a side the device takes");
         assert_eq!(pixel(&mut surface, 0, 0), CLEAR, "zero-filled");
         let mut list = DisplayList::new();
-        let red = ListPaint::from(Color::from_rgba8(255, 0, 0, 255));
+        let red = Paint::Solid(Color::from_rgba8(255, 0, 0, 255));
         fill(&mut list, Rect::new(0.0, 0.0, 4.0, 4.0), &red);
         surface.draw(&mut list, Init::Load, &mut Vec::new());
         assert!(list.is_empty(), "the flush empties the list");
@@ -1176,17 +1181,17 @@ mod tests {
         assert_eq!(pixel(&mut surface, 5, 1), CLEAR);
 
         // The left half drawn again into the right half, from the surface.
-        let own = ListPaint::texture(
+        let own = Paint::texture(
             surface.texture(),
             ImageSampler::new()
                 .with_extend(Extend::Pad)
                 .with_quality(ImageQuality::Low),
         );
         fill(&mut list, Rect::new(0.0, 0.0, 8.0, 4.0), &own);
-        list.fill_with(
+        list.fill_paint(
             Fill::NonZero,
             Affine::IDENTITY,
-            &own,
+            own.clone(),
             Some(Affine::translate((4.0, 0.0))),
             &Rect::new(4.0, 0.0, 8.0, 4.0),
         );
@@ -1237,10 +1242,10 @@ mod tests {
     fn a_failed_backdrop_render_keeps_the_content() {
         let mut surface = Surface::new(8, 4).expect("a side the device takes");
         let mut list = DisplayList::new();
-        let red = ListPaint::from(Color::from_rgba8(255, 0, 0, 255));
+        let red = Paint::Solid(Color::from_rgba8(255, 0, 0, 255));
         fill(&mut list, Rect::new(0.0, 0.0, 8.0, 4.0), &red);
         surface.draw(&mut list, Init::Load, &mut Vec::new());
-        let own = ListPaint::texture(
+        let own = Paint::texture(
             surface.texture(),
             ImageSampler::new()
                 .with_extend(Extend::Pad)
@@ -1289,10 +1294,10 @@ mod tests {
             rect.width() / f64::from(size.0),
             rect.height() / f64::from(size.1),
         );
-        list.fill_with(
+        list.fill_paint(
             Fill::NonZero,
             Affine::IDENTITY,
-            &ListPaint::image(image, nearest()),
+            image_paint(image, nearest()),
             Some(Affine::translate(rect.origin().to_vec2()) * scale),
             &rect,
         );
@@ -1309,8 +1314,8 @@ mod tests {
             Color::from_rgba8(20, 200, 60, 200),
             Color::from_rgba8(200, 20, 160, 10),
         ]);
-        fill(list, canvas, &ListPaint::from(&Brush::Gradient(across)));
-        fill(list, canvas, &ListPaint::from(&Brush::Gradient(down)));
+        fill(list, canvas, &Paint::from(&Brush::Gradient(across)));
+        fill(list, canvas, &Paint::from(&Brush::Gradient(down)));
     }
 
     /// A list encoded on one thread and rendered from another gives the
@@ -1324,7 +1329,7 @@ mod tests {
         fill(
             &mut list,
             Rect::new(0.0, 0.0, 4.0, 2.0),
-            &ListPaint::from(Color::from_rgba8(0, 128, 0, 255)),
+            &Paint::Solid(Color::from_rgba8(0, 128, 0, 255)),
         );
         source.draw(&mut list, Init::Load, &mut Vec::new());
         let image = bitmap(2, &[RED, [0, 0, 255, 128], [0, 255, 0, 255], [9, 9, 9, 9]]);
@@ -1339,7 +1344,7 @@ mod tests {
             fill(
                 list,
                 Rect::new(10.0, 2.0, 14.0, 6.0),
-                &ListPaint::texture(source.texture(), nearest()),
+                &Paint::texture(source.texture(), nearest()),
             );
         };
 
@@ -1490,18 +1495,18 @@ mod tests {
             width: 4,
             height: 4,
         };
-        let missing: [(&str, ListPaint); 3] = [
+        let missing: [(&str, Paint); 3] = [
             (
                 "a canvas with no texture",
-                ListPaint::texture(never_drew.texture(), nearest()),
+                Paint::texture(never_drew.texture(), nearest()),
             ),
             ("lent pixels that are gone", {
                 let gone = bitmap(1, &[RED]);
-                ListPaint::image(ImageRef::lent(&gone), nearest())
+                image_paint(ImageRef::lent(&gone), nearest())
             }),
             (
                 "too few bytes",
-                ListPaint::image(ImageRef::held(&short), nearest()),
+                image_paint(ImageRef::held(&short), nearest()),
             ),
         ];
         let ops = [
@@ -1539,14 +1544,14 @@ mod tests {
             let blend = CompositeOp::from_name(name).expect("an operation").blend();
             for shadow in [false, true] {
                 // `draw` is `None` for the list without the draw.
-                let mut render = |draw: Option<&ListPaint>| {
+                let mut render = |draw: Option<&Paint>| {
                     let mut surface = Surface::new(W, H).expect("a side the device takes");
                     backdrop(&mut list);
                     surface.draw(&mut list, Init::Clear, &mut Vec::new());
                     fill(
                         &mut list,
                         canvas,
-                        &ListPaint::texture(surface.texture(), nearest()),
+                        &Paint::texture(surface.texture(), nearest()),
                     );
                     list.push_layer(Fill::NonZero, blend, 1.0, Affine::IDENTITY, &canvas);
                     if shadow {

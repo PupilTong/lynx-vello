@@ -90,8 +90,8 @@ Subsystems:
   a canvas texture, or past 2 MiB of recording (`MAX_RECORDED_BYTES`);
   `OffscreenCanvas::commit(&CanvasFrames)` is HTML's update of the placeholder.
   The canvas-only display-list items (`push_backdrop_clip`,
-  `push_drop_shadow`, `ListPaint`, `fill_with`, `stroke_with`,
-  `DrawGlyphs::paint`, `recorded_bytes`) and `render::canvas`'s `Surface`
+  `push_drop_shadow`, `stroke_paint`, `DrawGlyphs::paint`,
+  `recorded_bytes`) and `render::canvas`'s `Surface`
   are `pub(crate)`: the 2D context is their one caller. The glyph outline
   cache a canvas replay uses is the encoding thread's, shared by its
   canvases and never by the page painter, and kept while a `ReplayUser` is

@@ -1098,9 +1098,9 @@ clip that is never isolated (`PushClip`'s `isolable`), so a blend layer
 inside it reads what is under the clip, cut to it, which is what a canvas's
 clip region needs. `push_drop_shadow` opens a `DropShadowOnly` filter layer
 (`Item::PushShadow`) with its offsets in the list's space; a chunk holding
-one is never culled. `ListPaint` is a paint a list records with
-(`fill_with`, `stroke_with`, `DrawGlyphs::paint`): a brush, a bitmap
-(`ListPaint::image`) or a texture by id (`ListPaint::texture`).
+one is never culled. The context draws with the list's own `Paint` (a
+brush, a bitmap or a texture by id): `fill_paint`, `stroke_paint` and
+`DrawGlyphs::paint` take one.
 
 ## Intersection observations
 

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::CanvasError;
-use crate::paint::display_list::{ImageRef, ListPaint, Texture};
+use crate::paint::display_list::{ImagePaint, ImageRef, Paint, Texture};
 use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::canvas::{MAX_SURFACE_SIDE, SurfaceImage};
 
@@ -184,20 +184,23 @@ impl Image {
     pub(crate) fn paint(
         &self,
         sampler: ImageSampler,
-    ) -> (ListPaint, Option<SurfaceImage>, Option<Texture>) {
+    ) -> (Paint, Option<SurfaceImage>, Option<Texture>) {
         match &self.0 {
-            Source::Pixels(data) => (ListPaint::image(ImageRef::held(data), sampler), None, None),
+            Source::Pixels(data) => {
+                let image = ImageRef::held(data);
+                (
+                    Paint::Image(Arc::new(ImagePaint { image, sampler })),
+                    None,
+                    None,
+                )
+            }
             Source::Texture(image) => (
-                ListPaint::texture(image.texture(), sampler),
+                Paint::texture(image.texture(), sampler),
                 Some(image.clone()),
                 None,
             ),
-            Source::Live(texture) => (ListPaint::texture(*texture, sampler), None, Some(*texture)),
-            Source::Empty => (
-                ListPaint::from(crate::peniko::Color::TRANSPARENT),
-                None,
-                None,
-            ),
+            Source::Live(texture) => (Paint::texture(*texture, sampler), None, Some(*texture)),
+            Source::Empty => (Paint::Solid(crate::peniko::Color::TRANSPARENT), None, None),
         }
     }
 }

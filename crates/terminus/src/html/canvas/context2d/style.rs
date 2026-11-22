@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{CanvasError, Image};
 use crate::kurbo::{Affine, BezPath, Point, Rect, Shape};
-use crate::paint::display_list::{ListPaint, Texture};
+use crate::paint::display_list::{self, Texture};
 use crate::peniko::color::DynamicColor;
 use crate::peniko::{
     BlendMode, BrushRef, Color, ColorStop, Compose, Extend, Fill, ImageQuality, ImageSampler,
@@ -324,13 +324,13 @@ impl Gradient {
 
     /// The paint as of now, its alpha scaled by `alpha`; `None` when it
     /// paints transparent black everywhere.
-    fn paint(&self, alpha: f32) -> Option<ListPaint> {
+    fn paint(&self, alpha: f32) -> Option<display_list::Paint> {
         let data = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if data.paints_nothing || data.gradient.stops.is_empty() {
             return None;
         }
         let gradient = data.gradient.clone().multiply_alpha(alpha);
-        Some(ListPaint::from(BrushRef::Gradient(&gradient)))
+        Some(display_list::Paint::from(BrushRef::Gradient(&gradient)))
     }
 }
 
@@ -389,7 +389,7 @@ impl Pattern {
 /// canvas texture it reads as it is at replay.
 #[derive(Debug)]
 pub(crate) struct Paint {
-    pub(crate) brush: ListPaint,
+    pub(crate) brush: display_list::Paint,
     pub(crate) transform: Affine,
     pub(crate) bounds: Option<BezPath>,
     pub(crate) keep: Option<SurfaceImage>,
@@ -398,7 +398,7 @@ pub(crate) struct Paint {
 
 impl Paint {
     /// A paint of `brush` in canvas space.
-    fn plain(brush: ListPaint, transform: Affine) -> Self {
+    fn plain(brush: display_list::Paint, transform: Affine) -> Self {
         Self {
             brush,
             transform,
@@ -440,7 +440,7 @@ impl Style {
             Self::Color(color) => {
                 let color = color.multiply_alpha(alpha);
                 (color.components[3] > 0.0)
-                    .then(|| Paint::plain(ListPaint::from(color), Affine::IDENTITY))
+                    .then(|| Paint::plain(display_list::Paint::Solid(color), Affine::IDENTITY))
             }
             Self::Gradient(gradient) => gradient.paint(alpha).map(|brush| Paint::plain(brush, ctm)),
             Self::Pattern(pattern) => {

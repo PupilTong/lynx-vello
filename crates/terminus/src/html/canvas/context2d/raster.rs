@@ -9,7 +9,7 @@ use super::CompositeOp;
 use super::context::State;
 use super::style::{Paint, canvas_rect};
 use crate::kurbo::{Affine, BezPath, Rect, Stroke};
-use crate::paint::display_list::{DisplayList, Glyph, ListPaint, synthesized_outlines};
+use crate::paint::display_list::{self, DisplayList, Glyph, synthesized_outlines};
 use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
 use crate::render::canvas::{Init, MAX_SURFACE_SIDE, Surface, SurfaceImage};
 
@@ -119,14 +119,14 @@ impl Raster {
         }
         self.flush();
         self.init = Init::Backdrop;
-        let own = ListPaint::texture(
+        let own = display_list::Paint::texture(
             self.surface.texture(),
             ImageSampler::new()
                 .with_extend(Extend::Pad)
                 .with_quality(ImageQuality::Low),
         );
         self.list
-            .fill_with(Fill::NonZero, Affine::IDENTITY, &own, None, &self.size);
+            .fill_paint(Fill::NonZero, Affine::IDENTITY, own, None, &self.size);
     }
 
     /// Makes the clips open in the recording the chain ending at `clip`.
@@ -283,13 +283,19 @@ impl Raster {
         let brush_transform = paint.brush_transform(geometry);
         match shape {
             Outline::Fill(path, rule) => {
-                list.fill_with(*rule, geometry, brush, brush_transform, *path);
+                list.fill_paint(*rule, geometry, brush.clone(), brush_transform, *path);
             }
             Outline::Stroke(path, stroke) => {
-                list.stroke_with(stroke, geometry, brush, brush_transform, *path);
+                list.stroke_paint(stroke, geometry, brush.clone(), brush_transform, *path);
             }
             Outline::Rect(rect) => {
-                list.fill_with(Fill::NonZero, geometry, brush, brush_transform, rect);
+                list.fill_paint(
+                    Fill::NonZero,
+                    geometry,
+                    brush.clone(),
+                    brush_transform,
+                    rect,
+                );
             }
             Outline::Glyphs { line, stroke } => {
                 draw_glyphs(list, line, *stroke, geometry, brush, brush_transform);
@@ -358,7 +364,7 @@ fn draw_glyphs(
     line: &ShapedLine,
     stroke: Option<&Stroke>,
     geometry: Affine,
-    brush: &ListPaint,
+    brush: &display_list::Paint,
     brush_transform: Option<Affine>,
 ) {
     for run in &line.runs {
@@ -372,7 +378,7 @@ fn draw_glyphs(
             .font_embolden(embolden)
             .normalized_coords(&run.normalized_coords)
             .hint(false)
-            .paint(brush)
+            .paint(brush.clone())
             .brush_transform(brush_transform);
         let glyphs = run.glyphs.iter().map(|glyph| Glyph {
             id: glyph.id,

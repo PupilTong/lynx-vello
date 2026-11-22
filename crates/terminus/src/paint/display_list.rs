@@ -428,43 +428,6 @@ pub(crate) struct DropShadow {
     pub(crate) color: Color,
 }
 
-/// A paint a list records a draw with: a brush, or a texture the
-/// rasterizer binds by id ([`ListPaint::texture`]).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ListPaint(pub(crate) Paint);
-
-impl ListPaint {
-    /// `texture` sampled through `sampler`.
-    #[must_use]
-    pub(crate) fn texture(texture: Texture, sampler: ImageSampler) -> Self {
-        Self(Paint::texture(texture, sampler))
-    }
-
-    /// `image` sampled through `sampler`.
-    #[must_use]
-    pub(crate) fn image(image: ImageRef, sampler: ImageSampler) -> Self {
-        Self(Paint::Image(Arc::new(ImagePaint { image, sampler })))
-    }
-}
-
-impl From<BrushRef<'_>> for ListPaint {
-    fn from(brush: BrushRef<'_>) -> Self {
-        Self(brush.into())
-    }
-}
-
-impl From<&Brush> for ListPaint {
-    fn from(brush: &Brush) -> Self {
-        Self(brush.into())
-    }
-}
-
-impl From<Color> for ListPaint {
-    fn from(color: Color) -> Self {
-        Self(Paint::Solid(color))
-    }
-}
-
 /// How a glyph run's outlines are drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GlyphStyle {
@@ -983,24 +946,12 @@ impl DisplayList {
         self.record(Item::Stroke(draw, Arc::new(style.clone())));
     }
 
-    /// [`Self::fill`] with a [`ListPaint`].
-    pub(crate) fn fill_with(
-        &mut self,
-        style: Fill,
-        transform: Affine,
-        paint: &ListPaint,
-        brush_transform: Option<Affine>,
-        shape: &impl crate::kurbo::Shape,
-    ) {
-        self.fill_paint(style, transform, paint.0.clone(), brush_transform, shape);
-    }
-
-    /// [`Self::stroke`] with a [`ListPaint`].
-    pub(crate) fn stroke_with(
+    /// [`Self::stroke`] with a paint: what strokes a texture.
+    pub(crate) fn stroke_paint(
         &mut self,
         style: &Stroke,
         transform: Affine,
-        paint: &ListPaint,
+        paint: Paint,
         brush_transform: Option<Affine>,
         shape: &impl crate::kurbo::Shape,
     ) {
@@ -1015,7 +966,7 @@ impl DisplayList {
             transform: self.transform_index(transform),
             paint_transform: self.paint_transform_index(brush_transform),
             shape,
-            paint: paint.0.clone(),
+            paint,
         };
         self.record(Item::Stroke(draw, Arc::new(style.clone())));
     }
@@ -1748,8 +1699,8 @@ impl DrawGlyphs<'_> {
     }
 
     /// The run's paint, a texture's included.
-    pub(crate) fn paint(mut self, paint: &ListPaint) -> Self {
-        self.run.paint = paint.0.clone();
+    pub(crate) fn paint(mut self, paint: Paint) -> Self {
+        self.run.paint = paint;
         self
     }
 
