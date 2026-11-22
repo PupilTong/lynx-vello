@@ -81,6 +81,7 @@ pub(crate) struct SharedGpu {
     /// [`Self::submit`].
     pub(crate) queue: wgpu::Queue,
     pub(crate) raster: SharedRaster,
+    pub(super) canvases: super::canvas::Textures,
     /// Held across every submit and every surface configuration; see
     /// [`Self::configure`].
     submits: Mutex<()>,
@@ -117,6 +118,11 @@ fn with_shared_slot<R>(f: impl FnOnce(&mut Weak<SharedGpu>) -> R) -> R {
     {
         SHARED_GPU.with(|slot| f(&mut slot.borrow_mut()))
     }
+}
+
+/// The live stack of this process (natively) or thread (wasm32), if any.
+pub(crate) fn live() -> Option<Arc<SharedGpu>> {
+    with_shared_slot(|slot| slot.upgrade())
 }
 
 /// The stack `slot` holds if it is live, else one `make` builds, which
@@ -268,6 +274,7 @@ impl SharedGpu {
             device,
             queue,
             raster,
+            canvases: super::canvas::Textures::default(),
             submits: Mutex::new(()),
         })
     }

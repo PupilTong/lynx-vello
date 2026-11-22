@@ -9,6 +9,20 @@ use crate::kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Ve
 /// routinely drawn at ten times its size.
 pub(super) const ARC_TOLERANCE: f64 = 0.01;
 
+/// The smallest tolerance an arc is turned into cubics at, as a fraction
+/// of its larger radius. `kurbo::Arc::append_iter` makes
+/// (1.1163 · radius / tolerance)^(1/6) cubics per turn, so this bounds a
+/// turn to 33 cubics whatever the radius or the scale it is drawn at; an
+/// arc whose radius is under 1e9 times the tolerance asked for keeps that
+/// tolerance.
+const MIN_ARC_TOLERANCE_PER_RADIUS: f64 = 1e-9;
+
+/// `tolerance`, or the tolerance that bounds `arc`'s cubics when it is
+/// larger.
+pub(crate) fn arc_tolerance(arc: &Arc, tolerance: f64) -> f64 {
+    tolerance.max(arc.radii.x.max(arc.radii.y) * MIN_ARC_TOLERANCE_PER_RADIUS)
+}
+
 /// Path data as a kurbo path. A malformed segment ends the path there,
 /// keeping everything before it, as the SVG specification asks.
 ///
@@ -17,8 +31,11 @@ pub(super) const ARC_TOLERANCE: f64 = 0.01;
 /// there first (`BezPath` has no implicit current point after a close);
 /// and `S`/`T` reflect the previous control point only after a segment of
 /// their own kind, as the specification says.
+///
+/// Also what `new Path2D(d)` parses `d` with (HTML defers to SVG's
+/// path data grammar and error handling).
 #[expect(clippy::too_many_lines, reason = "one arm per SVG path command")]
-pub(super) fn path_data(data: &str) -> BezPath {
+pub(crate) fn path_data(data: &str) -> BezPath {
     let mut path = BezPath::new();
     let mut current = Point::ZERO;
     let mut start = Point::ZERO;
@@ -145,7 +162,7 @@ fn append_arc(path: &mut BezPath, arc: SvgArc) {
     }
     match Arc::from_svg_arc(&arc) {
         Some(arc) => {
-            for element in arc.append_iter(ARC_TOLERANCE) {
+            for element in arc.append_iter(arc_tolerance(&arc, ARC_TOLERANCE)) {
                 path.push(element);
             }
         }

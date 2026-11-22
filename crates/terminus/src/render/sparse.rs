@@ -38,6 +38,9 @@
     reason = "target sizes and texture sides are small exact integers in u16 and u32 alike"
 )]
 
+pub(super) mod canvas;
+
+use std::borrow::Cow;
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -46,6 +49,7 @@ use std::time::Duration;
 use glifo::{AtlasCacher, GlyphPrepCache, GlyphRenderError, GlyphRunBackend};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use vello_gpu::filter_effects::{EdgeMode, Filter, FilterPrimitive};
 use vello_gpu::{
     ClearSettings, Image, ImageSource, LayersConfig, MemorySettings, PaintType, RectU16,
     RenderOptions, RenderSettings, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene,
@@ -56,8 +60,8 @@ use super::gpu::SharedGpu;
 use crate::clock::ClockInstant;
 use crate::kurbo::{Affine, BezPath, Diagonal2, Point, Rect, Shape as _};
 use crate::paint::display_list::{
-    DisplayList, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint, ImageRef, Item, Paint,
-    STROKE_TOLERANCE, Shape, Texture, next_texture_id,
+    BlurredRoundedRect, DisplayList, DropShadow, FILL_TOLERANCE, GlyphRun, GlyphStyle, ImagePaint,
+    ImageRef, Item, Paint, STROKE_TOLERANCE, Shape, Texture, next_texture_id,
 };
 use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::image::ImageDescriptor;
@@ -299,7 +303,9 @@ pub(crate) fn replay(
                 scene.set_stroke((**stroke).clone());
                 scene.stroke_path(shape_path(path, list, draw.shape, STROKE_TOLERANCE));
             }
-            Item::PushClip { region, isolated } => {
+            Item::PushClip {
+                region, isolated, ..
+            } => {
                 stats.layers += 1;
                 scene.set_transform(list.transform(region.transform));
                 scene.set_fill_rule(region.rule);
@@ -335,6 +341,11 @@ pub(crate) fn replay(
                 );
                 open.push(false);
             }
+            Item::PushShadow(shadow) => {
+                stats.layers += 1;
+                push_shadow(scene, shadow);
+                open.push(false);
+            }
             Item::Pop => match open.pop() {
                 Some(true) => scene.pop_clip(),
                 Some(false) => scene.pop_layer(),
@@ -349,23 +360,40 @@ pub(crate) fn replay(
             }
             Item::BlurredRoundedRect(blur) => {
                 stats.draws += 1;
-                scene.set_paint(blur.color);
-                scene.reset_paint_transform();
-                // Centred on its rect, the blur covers the 2.5σ-inflated
-                // area around it.
-                scene.set_transform(
-                    list.transform(blur.transform)
-                        .pre_translate(blur.rect.center().to_vec2()),
-                );
-                scene.fill_blurred_rounded_rect(
-                    &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
-                    blur.radius,
-                    blur.std_dev,
-                );
+                blurred_rounded_rect(scene, list, blur);
             }
         }
     }
     stats
+}
+
+/// Fills `blur`, centred on its rect, over the 2.5σ-inflated area around
+/// it.
+fn blurred_rounded_rect(scene: &mut Scene, list: &DisplayList, blur: &BlurredRoundedRect) {
+    scene.set_paint(blur.color);
+    scene.reset_paint_transform();
+    scene.set_transform(
+        list.transform(blur.transform)
+            .pre_translate(blur.rect.center().to_vec2()),
+    );
+    scene.fill_blurred_rounded_rect(
+        &Rect::from_center_size(Point::ORIGIN, blur.rect.size()),
+        blur.radius,
+        blur.std_dev,
+    );
+}
+
+/// Opens `shadow`'s filter layer on `scene`. The filter's offsets are taken
+/// through the transform set when it is pushed: the list's own space.
+fn push_shadow(scene: &mut Scene, shadow: &DropShadow) {
+    scene.set_transform(Affine::IDENTITY);
+    scene.push_filter_layer(Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+        dx: shadow.dx,
+        dy: shadow.dy,
+        std_deviation: shadow.std_dev,
+        color: shadow.color,
+        edge_mode: EdgeMode::None,
+    }));
 }
 
 /// Draws `run` of `list` with the paint already set on `scene`, outlining
@@ -1092,7 +1120,7 @@ fn own_texture(
 /// What a write puts into a picture's texture: CPU pixels converted to
 /// premultiplied texels, or a platform frame its own writer copies.
 enum Content<'a, W> {
-    Texels { texels: Vec<u8>, opaque: bool },
+    Texels { texels: Cow<'a, [u8]>, opaque: bool },
     Frame(&'a W),
 }
 
@@ -1258,7 +1286,6 @@ impl SharedRaster {
         }
         let pixels = image.pixels().ok_or(Missing::Lost)?;
         let (texels, opaque) = premultiplied(&pixels).ok_or(Missing::Unreadable)?;
-        drop(pixels);
         let (id, view) = own_texture(
             device,
             queue,
@@ -1267,6 +1294,9 @@ impl SharedRaster {
             descriptor.height,
             None,
         );
+        let bytes = texels.len() as u64;
+        drop(texels);
+        drop(pixels);
         let mut bitmaps = self.bitmaps();
         if let Some(image) = bitmaps.hit(&key, sampler, drawing) {
             return Ok(image);
@@ -1275,7 +1305,7 @@ impl SharedRaster {
             id,
             view,
             opaque,
-            bytes: texels.len() as u64,
+            bytes,
             written: None,
             last_drawn: 0,
             pins: SmallVec::new(),
@@ -1358,6 +1388,33 @@ impl SharedRaster {
         };
         let bytes = content.bytes(width, height);
         let opaque = content.opaque();
+        self.store_picture(
+            owner, picture, generation, descriptor, held, replaced, bytes, opaque,
+        );
+        true
+    }
+
+    /// What a write of frame `generation` of `picture`, which `descriptor`
+    /// names, ends with once its texture is written: the texture made the
+    /// picture's — `replaced`, a new texture under its id, or else the one
+    /// `held` names, written in place — holding `bytes` and `opaque` or
+    /// not, and leased to `owner`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the lease owner, the frame with its two names, its two textures and its content"
+    )]
+    fn store_picture(
+        &self,
+        owner: u64,
+        picture: PictureId,
+        generation: u64,
+        descriptor: ImageDescriptor,
+        held: Option<(TextureId, bool, wgpu::Texture)>,
+        replaced: Option<(TextureId, wgpu::TextureView)>,
+        bytes: u64,
+        opaque: bool,
+    ) {
+        let key = BitmapKey::Picture(picture);
         let mut bitmaps = self.bitmaps();
         let Bitmaps {
             entries,
@@ -1410,7 +1467,6 @@ impl SharedRaster {
         }
         drop(bitmaps);
         self.uploads.fetch_add(1, Ordering::Release);
-        true
     }
 
     /// Uploads `frame`, the platform frame `descriptor` names, into a
@@ -1462,9 +1518,9 @@ impl SharedRaster {
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
-    /// which a target has filled, drawn into `view` over `clear` with
-    /// `bindings` bound, under the renderer lock — the render and the submit
-    /// — and then the releases.
+    /// which a target has filled, drawn into `view` over `clear`, or over
+    /// what it holds with `None`, with `bindings` bound, under the renderer
+    /// lock — the render and the submit — and then the releases.
     /// Notes the wait for the lock and the time it was held in `stats`.
     fn render(
         &self,
@@ -1472,7 +1528,7 @@ impl SharedRaster {
         scene: &Scene,
         view: &wgpu::TextureView,
         bindings: &TextureBindings,
-        clear: Color,
+        clear: Option<Color>,
         stats: &mut Stats,
     ) -> Result<(), String> {
         let mut encoder = gpu
@@ -1489,9 +1545,13 @@ impl SharedRaster {
             resources,
         } = &mut *paired;
         let mut options = RenderOptions::default();
-        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-            color: clear.convert(),
-        });
+        if let Some(clear) = clear {
+            options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                color: clear.convert(),
+            });
+        } else {
+            options.target_init = TargetInit::SrcOver;
+        }
         let result = renderer.render(
             scene,
             resources,
@@ -1511,18 +1571,32 @@ impl SharedRaster {
     }
 }
 
+/// Whether `image` has pixels to convert: no zero side, and a blob holding
+/// at least the bytes the image needs.
+fn readable(image: &ImageData) -> bool {
+    let (width, height) = (image.width as usize, image.height as usize);
+    width != 0 && height != 0 && image.data.data().len() >= width * 4 * height
+}
+
 /// `image`'s pixels as premultiplied RGBA8, and whether every pixel is
 /// opaque; `None` when the blob holds fewer bytes than the image needs.
-fn premultiplied(image: &ImageData) -> Option<(Vec<u8>, bool)> {
+/// Pixels that already are premultiplied RGBA8 are borrowed, not copied.
+fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
+    if !readable(image) {
+        return None;
+    }
     let bytes = image.data.data();
     let (width, height) = (image.width as usize, image.height as usize);
     let row = width * 4;
-    if width == 0 || height == 0 || bytes.len() < row * height {
-        return None;
+    let bytes = &bytes[..row * height];
+    if image.format == ImageFormat::Rgba8 && image.alpha_type == ImageAlphaType::AlphaPremultiplied
+    {
+        let opaque = bytes.chunks_exact(4).all(|px| px[3] == 255);
+        return Some((Cow::Borrowed(bytes), opaque));
     }
     let mut data = Vec::with_capacity(row * height);
     let mut opaque = true;
-    for px in bytes[..row * height].chunks_exact(4) {
+    for px in bytes.chunks_exact(4) {
         let [mut r, g, mut b, a] = [px[0], px[1], px[2], px[3]];
         if image.format == ImageFormat::Bgra8 {
             std::mem::swap(&mut r, &mut b);
@@ -1537,7 +1611,7 @@ fn premultiplied(image: &ImageData) -> Option<(Vec<u8>, bool)> {
         }
         data.extend_from_slice(&texel);
     }
-    Some((data, opaque))
+    Some((Cow::Owned(data), opaque))
 }
 
 /// The next target's name in the bitmaps' pins.
@@ -1673,7 +1747,7 @@ impl SparseBackend {
         }
         stats.encode = started.elapsed();
 
-        let result = shared.render(gpu, scene, view, &bindings, clear, &mut stats);
+        let result = shared.render(gpu, scene, view, &bindings, Some(clear), &mut stats);
         *lost += u64::from(stats.images_lost);
         *last = stats;
         result

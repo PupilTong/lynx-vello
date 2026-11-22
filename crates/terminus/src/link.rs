@@ -166,6 +166,18 @@ pub mod render {
         pub use crate::render::blur::MAX_FILTER_AREA;
     }
 
+    /// The wasm32 queue of canvas GPU work. A canvas's bitmap is a GPU
+    /// texture its owner records draws for
+    /// ([`OffscreenCanvas`](crate::link::html::canvas::OffscreenCanvas)); natively the owner's
+    /// thread applies each step, and on wasm32 the steps are queued for the
+    /// Render Worker, which applies them at the start of each turn
+    /// ([`drain`](crate::link::render::canvas::drain)) once woken
+    /// ([`set_waker`](crate::link::render::canvas::set_waker)).
+    #[cfg(target_arch = "wasm32")]
+    pub mod canvas {
+        pub use crate::render::canvas::{drain, set_waker};
+    }
+
     /// The CPU half of a render — a display list replayed into sparse
     /// strips — for this crate's benchmarks.
     #[doc(hidden)]
@@ -193,7 +205,8 @@ pub mod scroll {
 }
 
 /// HTML elements this crate implements over its own tree: HTML's `<dialog>`
-/// element and the `popover` attribute's UA rules.
+/// element, the `popover` attribute's UA rules, and HTML's `<canvas>` as the
+/// placeholder of an `OffscreenCanvas` with the 2D rendering context.
 ///
 /// Neither is part of a document by itself. `Document::new` defines no
 /// element, so an embedder that wants them calls
@@ -247,6 +260,50 @@ pub mod html {
     /// The UA rules HTML gives the `popover` attribute.
     pub mod popover {
         pub use crate::html::popover::UA_RULES;
+    }
+
+    /// HTML's `<canvas>` element as the placeholder of an `OffscreenCanvas`,
+    /// and the 2D rendering context an `OffscreenCanvas` draws with.
+    ///
+    /// The element is a replaced element presenting a picture of its own,
+    /// with the natural size of its `width` and `height` attributes in
+    /// context mode none and of its committed bitmap in mode placeholder.
+    /// [`transfer_control_to_offscreen`](crate::link::html::canvas::transfer_control_to_offscreen)
+    /// is HTML's `transferControlToOffscreen()`, and answers the
+    /// [`CanvasFrames`](crate::link::html::canvas::CanvasFrames) a canvas
+    /// on any thread commits through
+    /// ([`OffscreenCanvas::commit`](crate::link::html::canvas::OffscreenCanvas::commit));
+    /// [`update_placeholders`](crate::link::html::canvas::update_placeholders)
+    /// applies a committed bitmap's size on the document's thread.
+    ///
+    /// [`OffscreenCanvas`](crate::link::html::canvas::OffscreenCanvas) is one
+    /// bitmap with its size and commit, and
+    /// [`Context2d`](crate::link::html::canvas::Context2d), borrowed from it
+    /// by `context_2d()`, its `OffscreenCanvasRenderingContext2D`, one call
+    /// per context method or attribute;
+    /// [`Path`](crate::link::html::canvas::Path),
+    /// [`Gradient`](crate::link::html::canvas::Gradient),
+    /// [`Pattern`](crate::link::html::canvas::Pattern) and
+    /// [`Image`](crate::link::html::canvas::Image) are what those calls take,
+    /// a [`ResolvedFont`](crate::link::html::canvas::ResolvedFont) (`seldon`'s,
+    /// with its family and style types; `GenericFamily` is parley's enum,
+    /// which `seldon` re-exports) is the `font` its text calls shape
+    /// with in a [`TextContext`](crate::link::TextContext),
+    /// and [`CanvasError`](crate::link::html::canvas::CanvasError) names the
+    /// exception one throws. None of them needs a `Document` or runs
+    /// JavaScript. A thread's canvases share one glyph outline cache, kept
+    /// while a [`ReplayUser`](crate::link::html::canvas::ReplayUser) is
+    /// alive on that thread.
+    pub mod canvas {
+        pub use crate::html::canvas::{
+            CANVAS_TAG, CanvasError, CanvasFrames, Committed, CompositeOp, Context2d, ContextMode,
+            Direction, FillRule, GenericFamily, Gradient, Image, ImageDataRead, InvalidState,
+            LineCap, LineJoin, OffscreenCanvas, Path, Pattern, Placeholder, Repetition,
+            ResolvedFamily, ResolvedFont, ResolvedFontStyle, SmoothingQuality, Style, TextAlign,
+            TextBaseline, TextMetrics, context_mode, transfer_control_to_offscreen,
+            update_placeholders,
+        };
+        pub use crate::render::canvas::ReplayUser;
     }
 }
 

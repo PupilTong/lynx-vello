@@ -16,6 +16,7 @@
 //! device-pixel geometry and either an opaque op range or an opaque scene.
 
 pub(crate) mod blur;
+pub(crate) mod canvas;
 pub(crate) mod gpu;
 pub(crate) mod image;
 pub(crate) mod picture;

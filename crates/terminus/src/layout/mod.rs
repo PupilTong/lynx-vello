@@ -513,6 +513,15 @@ impl<T> Document<T> {
         self.invalidate_layout_all();
     }
 
+    /// The text context this document lays text out with — its registered
+    /// fonts and `@font-face` faces included — for a caller that shapes
+    /// text of its own with the same fonts (a canvas's `fillText`).
+    pub fn text_context_mut(&mut self) -> &mut TextContext {
+        self.layout_state_mut()
+            .text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()))
+    }
+
     /// Registers an owned font resource without copying its byte payload.
     pub fn register_fonts(&mut self, data: FontBlob) -> usize {
         let context = self

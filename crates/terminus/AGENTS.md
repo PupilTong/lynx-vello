@@ -55,7 +55,51 @@ Subsystems:
   the source order that keeps HTML's precedence. A dialog's `close` and
   `cancel` go, at the moment they are queued, to the document's
   `event::QueuedEventSink` (`Document::set_queued_event_sink`, registered
-  once by the embedder; with none they are dropped).
+  once by the embedder; with none they are dropped). `html::canvas` is HTML's
+  `<canvas>` as an `OffscreenCanvas` placeholder, with no UA rule: each
+  element owns one `PictureId` and a context mode (`none` or `placeholder`;
+  no `getContext`) in `Document::canvases`, shared with its component; in
+  `none` its natural size is `width`/`height` (HTML's non-negative integer
+  rules, 300 × 150 by default); `transfer_control_to_offscreen` (an
+  `InvalidState` unless `none`) answers the size and a `Send`
+  `CanvasFrames`, through which a canvas surface commits
+  (`OffscreenCanvas::commit`, through `render::canvas::Surface::commit`): its
+  texture is copied into the
+  picture's own texture, which the element's link leases until it is freed,
+  before the generation is published; the commit answers whether a host
+  wake and an `update_placeholders` call on the document's thread are owed;
+  a placeholder ignores its attributes and takes its natural size from the
+  committed bitmaps there. `html/canvas/context2d/` is HTML's 2D rendering
+  context, the `OffscreenCanvas`'s side (bucket 1: the standard, no Lynx
+  quirk), with no `Document` and no JavaScript, so a Worker's canvas has one:
+  `OffscreenCanvas` (`html/canvas/offscreen.rs`) is one bitmap with its
+  size, commit and `transferToImageBitmap`, and `Context2d`
+  (`context2d/context.rs`), which `OffscreenCanvas::context_2d` borrows from
+  it, is its `OffscreenCanvasRenderingContext2D`, one call
+  per context method or attribute taking numbers, `&str`, keyword enums
+  (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL
+  strings) or `Path` (`Path2D`), `Gradient`, `Pattern` (shared by
+  reference, so a stop or transform set later shows in later draws), `Image`,
+  `Style`, `seldon`'s `ResolvedFont` (CSS strings are parsed by the
+  caller) and `peniko::Color`; text calls take the caller's
+  `&mut TextContext` and shape through `seldon::text::shape_line`, the
+  shaper SVG `<text>` uses; `CanvasError` names the exception. `OffscreenCanvas`
+  is `Send` and there is no global state. Draws are recorded into the
+  canvas's own `DisplayList` on the calling thread and replayed onto its
+  `render::canvas::Surface` at a read, at `flush`, after a draw that samples
+  a canvas texture, or past 2 MiB of recording (`MAX_RECORDED_BYTES`);
+  `OffscreenCanvas::commit(&CanvasFrames)` is HTML's update of the placeholder.
+  The canvas-only display-list items (`push_backdrop_clip`,
+  `push_drop_shadow`, `stroke_paint`, `DrawGlyphs::paint`,
+  `recorded_bytes`) and `render::canvas`'s `Surface`
+  are `pub(crate)`: the 2D context is their one caller. The glyph outline
+  cache a canvas replay uses is the encoding thread's, shared by its
+  canvases and never by the page painter, and kept while a `ReplayUser` is
+  alive on that thread. The tests are
+  `tests/canvas_draw.rs` and `tests/canvas_text.rs` (Ahem from
+  `crates/seldon/tests/fixtures`), which need a GPU adapter.
+  `docs/terminus-architecture.md` "Canvas 2D context" has the replay rules
+  and the decisions the standard leaves open.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
   sheets and inline styles, and the one process-wide lock every user-agent
@@ -224,7 +268,23 @@ Subsystems:
   table, while still naming no node, style, layout or paint-order type. A
   `backdrop-filter` bake at the document's root renders over the canvas
   colour its caller composites over, which `FilterTextures::prepare` and
-  `Headless::prepare_filters` therefore take.
+  `Headless::prepare_filters` therefore take. `render::canvas` is a canvas
+  bitmap as a GPU texture (`Surface`, `SurfaceImage`, for `html::canvas`'s 2D
+  context):
+  display lists replayed onto it (with load, with a clear, or into its
+  second texture over its own content, `Init::Backdrop`, for a batch that
+  blends at the root or samples the canvas itself), pixel writes, readbacks,
+  copies, and commits to a placeholder. Its textures are a table per device
+  (`render::canvas::Textures`, the `SharedGpu::canvases` field). A list is
+  replayed into a scene on the owning thread with no device
+  (`render::sparse::canvas::encode`: the rasterizer's pieces only a canvas
+  uses, a child module of `render::sparse` for the bitmap table they read
+  and write); natively that
+  thread also applies each GPU step; on wasm32 the steps, a draw carrying
+  its encoded scene, queue for the Render Worker, which applies them at the
+  start of each turn (`drain`, from `bobcat-core`'s `Painter::pump`) once
+  woken (`set_waker`, from `LynxViewGroup::new`).
+  `docs/terminus-architecture.md` "Canvas surfaces" has the detail.
 - `painter/` — the presenting painter (`link::painter::Painter`), built on the
   thread that draws and `!Send`: the input router and gesture synthesis on an
   owner's `GesturePolicy` (`gesture.rs`), the scroll kinematics (`motion.rs`)

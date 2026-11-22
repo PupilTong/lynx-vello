@@ -5069,6 +5069,7 @@ dependencies = [
  "seldon",
  "selectors",
  "siphasher",
+ "skrifa",
  "slab",
  "smallvec",
  "stylo",
