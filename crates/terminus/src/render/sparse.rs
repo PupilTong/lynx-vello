@@ -145,6 +145,21 @@ impl Replay {
     pub(crate) fn maintain(&mut self) {
         self.glyphs.maintain();
     }
+
+    /// How many glyph outlines glifo's cache holds, for a test: read from
+    /// its `Debug` output, the one place glifo shows the count.
+    #[cfg(test)]
+    pub(crate) fn cached_outlines(&self) -> usize {
+        let debug = format!("{:?}", self.glyphs);
+        let (_, count) = debug
+            .split_once("cached_count: ")
+            .expect("glifo's outline cache lists its count");
+        count
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .expect("a count")
+    }
 }
 
 /// `shape` as a path in `list`'s arena, rebuilt into `path`.

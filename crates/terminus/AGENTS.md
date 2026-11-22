@@ -92,7 +92,10 @@ Subsystems:
   The canvas-only display-list items (`push_backdrop_clip`,
   `push_drop_shadow`, `ListPaint`, `fill_with`, `stroke_with`,
   `DrawGlyphs::paint`, `recorded_bytes`) and `render::canvas`'s `Surface`
-  are `pub(crate)`: the 2D context is their one caller. The tests are
+  are `pub(crate)`: the 2D context is their one caller. The glyph outline
+  cache a canvas replay uses is the encoding thread's, shared by its
+  canvases and never by the page painter, and kept while a `ReplayUser` is
+  alive on that thread. The tests are
   `tests/canvas_draw.rs` and `tests/canvas_text.rs` (Ahem from
   `crates/seldon/tests/fixtures`), which need a GPU adapter.
   `docs/terminus-architecture.md` "Canvas 2D context" has the replay rules

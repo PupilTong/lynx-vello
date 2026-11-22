@@ -18,6 +18,17 @@
 //! channel, and the surface's next draw reuses its buffers; a draw issued
 //! while it is away makes another.
 //!
+//! The replay's state — glifo's glyph outline cache and the replay's
+//! scratch buffers — is the encoding thread's, not a surface's: every
+//! surface that encodes on a thread uses that thread's one [`Replay`], so
+//! two canvases drawing the same text keep its outlines once. It is
+//! maintained once per encode, so a glyph is dropped after 64 encodes on
+//! the thread that did not draw it, whichever surfaces they were for. The
+//! state is kept while a [`ReplayUser`] is alive on the thread and dropped
+//! with the last one; an encode while none is alive keeps nothing. It is
+//! never the page painter's: each [`super::sparse::SparseBackend`] keeps
+//! its own.
+//!
 //! - **Natively** the owner's thread applies each op as it is issued, with the surface's own
 //!   [`Submitter`], so a draw's two halves run back to back there: the shared renderer is locked
 //!   for the render and submit, and a read blocks on the readback.
@@ -44,6 +55,8 @@
 //! sampled under the surface's id, and the two change places once the
 //! render has succeeded.
 
+use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -153,10 +166,63 @@ const _: () = {
     send::<Op>();
 };
 
-/// What a surface encodes its draws with, on the thread that issues them.
+/// The calling thread's canvas replay state: how many [`ReplayUser`]s are
+/// alive on it, and the [`Replay`] every surface encodes with here, kept
+/// only while one is.
+struct ThreadReplay {
+    users: usize,
+    replay: Option<Replay>,
+}
+
+thread_local! {
+    static REPLAY: RefCell<ThreadReplay> = const {
+        RefCell::new(ThreadReplay {
+            users: 0,
+            replay: None,
+        })
+    };
+}
+
+/// One user of the calling thread's canvas replay state (see the [module
+/// documentation](self)): while one is alive on a thread, the glyph
+/// outlines its canvases encoded stay cached there; the last one dropped
+/// drops them. An owner of canvases holds one on its thread while it holds
+/// a canvas.
+///
+/// Not `Send`: it is dropped on the thread it counts on.
+#[derive(Debug)]
+pub struct ReplayUser(PhantomData<*const ()>);
+
+impl ReplayUser {
+    #[must_use]
+    pub fn new() -> Self {
+        REPLAY.with_borrow_mut(|thread| thread.users += 1);
+        Self(PhantomData)
+    }
+}
+
+impl Default for ReplayUser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ReplayUser {
+    fn drop(&mut self) {
+        // After the thread's own destruction there is nothing left to drop.
+        let _ = REPLAY.try_with(|thread| {
+            let mut thread = thread.borrow_mut();
+            thread.users -= 1;
+            if thread.users == 0 {
+                thread.replay = None;
+            }
+        });
+    }
+}
+
+/// What a surface encodes its draws with, on the thread that issues them,
+/// beside the thread's [`Replay`].
 struct Encoder {
-    /// glifo's outline cache and the replay's scratch state.
-    replay: Replay,
     /// The scenes back from their renders ([`Draw::back`]).
     back: flume::Sender<Scene>,
     returned: flume::Receiver<Scene>,
@@ -165,11 +231,7 @@ struct Encoder {
 impl Encoder {
     fn new() -> Self {
         let (back, returned) = flume::unbounded();
-        Self {
-            replay: Replay::default(),
-            back,
-            returned,
-        }
+        Self { back, returned }
     }
 
     /// A scene back from its render, or a new one while every scene is
@@ -430,17 +492,26 @@ impl Surface {
         self.issue(Op::Draw(Box::new(draw)));
     }
 
-    /// The CPU half of [`Self::draw`]: `list` replayed into a scene, which
-    /// draws a texture under its own id and a bitmap under an id reserved
-    /// for it, with no device ([`encode`]). A draw of the surface's own
-    /// texture draws nothing unless `init` is [`Init::Backdrop`], which
-    /// binds it.
+    /// The CPU half of [`Self::draw`]: `list` replayed into a scene with the
+    /// thread's [`Replay`], which draws a texture under its own id and a
+    /// bitmap under an id reserved for it, with no device ([`encode`]). A
+    /// draw of the surface's own texture draws nothing unless `init` is
+    /// [`Init::Backdrop`], which binds it.
     fn encode(&mut self, list: &mut DisplayList, init: Init, keep: &mut Vec<SurfaceImage>) -> Draw {
         let (target, size) = (self.id, self.size());
         let state = self.encoder.get_or_insert_with(Encoder::new);
         let clear = (init != Init::Load).then_some(Color::TRANSPARENT);
-        let encoded = encode(state.scene(), &mut state.replay, list, size, clear, &|id| {
-            id != target || init == Init::Backdrop
+        // Nothing called inside `encode` reaches this thread-local: it runs
+        // no caller code but the `drawable` test below.
+        let encoded = REPLAY.with_borrow_mut(|thread| {
+            let replay = thread.replay.get_or_insert_with(Replay::default);
+            let encoded = encode(state.scene(), replay, list, size, clear, &|id| {
+                id != target || init == Init::Backdrop
+            });
+            if thread.users == 0 {
+                thread.replay = None;
+            }
+            encoded
         });
         list.reset();
         Draw {
@@ -1042,8 +1113,14 @@ mod queue {
 mod tests {
     use std::sync::Arc;
 
-    use super::{Init, Op, Surface, SurfaceImage, canvas_texture, read_region, view};
-    use crate::html::canvas::CompositeOp;
+    use seldon::text::{FontBlob, TextContext};
+
+    use super::{
+        Init, Op, Replay, ReplayUser, Surface, SurfaceImage, canvas_texture, read_region, view,
+    };
+    use crate::html::canvas::{
+        CompositeOp, OffscreenCanvas, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
+    };
     use crate::kurbo::{Affine, Rect};
     use crate::paint::display_list::{DisplayList, ImageRef, ListPaint};
     use crate::peniko::{
@@ -1277,6 +1354,76 @@ mod tests {
         .expect("the encoding thread");
         surface.issue(Op::Draw(Box::new(draw)));
         assert_eq!(pixels(&mut surface), expected);
+    }
+
+    /// How many glyph outlines the calling thread's canvas replay state
+    /// holds; `None` when it holds no state.
+    fn thread_outlines() -> Option<usize> {
+        super::REPLAY.with_borrow(|thread| thread.replay.as_ref().map(Replay::cached_outlines))
+    }
+
+    /// An `OffscreenCanvas` that has drawn `text` in Ahem and replayed it.
+    fn draw_text(fonts: &mut TextContext, text: &str) -> OffscreenCanvas {
+        let mut canvas = OffscreenCanvas::new(W, H);
+        let mut context = canvas.context_2d();
+        context.set_font(ResolvedFont {
+            families: vec![ResolvedFamily::Named("Ahem".to_owned())],
+            size: 8.0,
+            weight: 400.0,
+            style: ResolvedFontStyle::Normal,
+            stretch: 1.0,
+        });
+        context.fill_text(fonts, text, 0.0, 6.0, None);
+        canvas.flush();
+        canvas
+    }
+
+    fn ahem() -> TextContext {
+        const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
+        let mut fonts = TextContext::new();
+        assert_eq!(fonts.register_fonts(FontBlob::from_static(AHEM)), 1);
+        fonts
+    }
+
+    /// Two canvases on one thread encode with the thread's one glyph
+    /// outline cache: the second canvas's draw of the same text adds no
+    /// outline, and its draw of a new glyph adds one to the same cache.
+    #[test]
+    fn two_canvases_on_one_thread_share_the_glyph_outlines() {
+        let mut fonts = ahem();
+        let _user = ReplayUser::new();
+        let _first = draw_text(&mut fonts, "X");
+        let one = thread_outlines().expect("the thread's replay state");
+        assert!(one > 0, "the text drew an outline");
+        let _second = draw_text(&mut fonts, "X");
+        assert_eq!(thread_outlines(), Some(one), "the outline is found again");
+        let _third = draw_text(&mut fonts, "Xp");
+        assert!(
+            thread_outlines().is_some_and(|outlines| outlines > one),
+            "a new glyph's outline joins the same cache"
+        );
+    }
+
+    /// The thread's replay state lives while a user is alive on it and
+    /// goes with the last one; an encode while none is alive keeps
+    /// nothing.
+    #[test]
+    fn the_last_replay_user_drops_the_thread_replay_state() {
+        let mut fonts = ahem();
+        let _canvas = draw_text(&mut fonts, "X");
+        assert_eq!(thread_outlines(), None, "no user: nothing kept");
+
+        let first = ReplayUser::new();
+        let second = ReplayUser::new();
+        let _canvas = draw_text(&mut fonts, "X");
+        assert!(thread_outlines().is_some_and(|outlines| outlines > 0));
+        drop(first);
+        assert!(
+            thread_outlines().is_some_and(|outlines| outlines > 0),
+            "a user is left"
+        );
+        drop(second);
+        assert_eq!(thread_outlines(), None, "the last user is gone");
     }
 
     /// A pixel image is drawn under the id its scene reserved for it, from

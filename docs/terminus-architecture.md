@@ -1029,9 +1029,10 @@ one `Op` applied by `apply`:
   under the surface's id, after which the two change places unless the render failed, which leaves
   the content as it was. A draw is two halves. The encode (`render::sparse::encode`) runs on the
   thread that calls `draw`, with no device: the list is replayed into the surface's
-  `vello_gpu::Scene` with its glyph outline cache, a `Paint::Texture` drawn under its own id (the
-  surface's own id only under `Init::Backdrop`; otherwise that draw is left out), and each pixel
-  image under a texture id reserved for that scene, one per upload the bitmap table would key. A
+  `vello_gpu::Scene` with that thread's glyph outline cache (below), a `Paint::Texture` drawn
+  under its own id (the surface's own id only under `Init::Backdrop`; otherwise that draw is left
+  out), and each pixel image under a texture id reserved for that scene, one per upload the
+  bitmap table would key. A
   bitmap with a side over `MAX_SURFACE_SIDE`, or fewer bytes than its size needs, is left out
   there. The op then carries the encoded scene, the bitmaps it names and the texture ids it draws.
   The GPU half (`Submitter::submit`) resolves each bitmap through the bitmap table, uploading it on
@@ -1073,8 +1074,17 @@ the BTS or Worker thread that flushes the canvas, so the Render Worker runs
 only the GPU half of a canvas draw. The scene goes back to its surface on a
 channel the op carries, and the surface's next draw reuses its buffers; a
 draw issued while its scene is still queued makes a new one, and a second
-scene back is dropped. A surface therefore holds a scene and a glyph outline
-cache on every target. A read is answered from the map's completion on the
+scene back is dropped. A surface therefore holds a scene on every target.
+The replay's state, glifo's glyph outline cache with the replay's scratch
+buffers, is the encoding thread's (`render::canvas`'s thread-local `Replay`,
+the same code natively and on wasm32), so two canvases on one thread that
+draw the same text keep its outlines once; it is not the page painter's,
+whose `SparseBackend` keeps its own, so no lock is shared with it. The cache
+is maintained at every encode, so a glyph is dropped after 64 canvas encodes
+on that thread that did not draw it, whichever canvas they belong to. The
+state is kept while a `ReplayUser` (`link::html::canvas`) is alive on the
+thread and dropped with the last one; an encode while none is alive keeps
+nothing. An owner of canvases holds one while it holds a canvas. A read is answered from the map's completion on the
 Render Worker; with no live device there the ops are dropped, which fails
 the reads among them.
 

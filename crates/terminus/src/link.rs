@@ -291,7 +291,9 @@ pub mod html {
     /// with in a [`TextContext`](crate::link::TextContext),
     /// and [`CanvasError`](crate::link::html::canvas::CanvasError) names the
     /// exception one throws. None of them needs a `Document` or runs
-    /// JavaScript.
+    /// JavaScript. A thread's canvases share one glyph outline cache, kept
+    /// while a [`ReplayUser`](crate::link::html::canvas::ReplayUser) is
+    /// alive on that thread.
     pub mod canvas {
         pub use crate::html::canvas::{
             CANVAS_TAG, CanvasError, CanvasFrames, Committed, CompositeOp, Context2d, ContextMode,
@@ -301,6 +303,7 @@ pub mod html {
             TextBaseline, TextMetrics, context_mode, transfer_control_to_offscreen,
             update_placeholders,
         };
+        pub use crate::render::canvas::ReplayUser;
     }
 }
 
