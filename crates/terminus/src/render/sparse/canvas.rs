@@ -80,39 +80,51 @@ impl SharedRaster {
         let (width, height) = (descriptor.width, descriptor.height);
         let key = BitmapKey::Picture(picture);
         let held = self.bitmaps().entries.get(&key).map(|bitmap| {
-            let texture = bitmap.view.texture().clone();
-            (bitmap.id, texture)
+            let texture = bitmap.view.texture();
+            (
+                bitmap.id,
+                (texture.width(), texture.height()) == (width, height),
+                texture.clone(),
+            )
         });
-        let (id, texture, replaced) = match held {
-            Some((id, texture)) if (texture.width(), texture.height()) == (width, height) => {
-                (id, texture, false)
-            }
-            held => (
-                held.map_or_else(|| TextureId(next_texture_id()), |(id, _)| id),
-                bitmap_texture(&gpu.device, width, height, BITMAP_USAGE),
-                true,
-            ),
+        let copy_into = |texture: &wgpu::Texture| {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("terminus canvas commit"),
+                });
+            encoder.copy_texture_to_texture(
+                source.as_image_copy(),
+                texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.submit([encoder.finish()]);
         };
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("terminus canvas commit"),
-            });
-        encoder.copy_texture_to_texture(
-            source.as_image_copy(),
-            texture.as_image_copy(),
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        gpu.submit([encoder.finish()]);
+        let replaced = if let Some((_, true, texture)) = &held {
+            copy_into(texture);
+            None
+        } else {
+            let texture = bitmap_texture(&gpu.device, width, height, BITMAP_USAGE);
+            copy_into(&texture);
+            let id = held
+                .as_ref()
+                .map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| *id);
+            Some((
+                id,
+                texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            ))
+        };
         self.store_picture(
             owner,
             picture,
-            (generation, descriptor),
-            (id, &texture, replaced),
+            generation,
+            descriptor,
+            held,
+            replaced,
             u64::from(width) * u64::from(height) * 4,
             false,
         );

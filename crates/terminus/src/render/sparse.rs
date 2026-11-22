@@ -1368,49 +1368,53 @@ impl SharedRaster {
                 texture.clone(),
             )
         });
-        let (id, texture, replaced) = match held {
-            Some((id, true, texture)) => {
-                if !content.write(device, queue, &texture, width, height) {
-                    return false;
-                }
-                (id, texture, false)
+        let replaced = if let Some((_, true, texture)) = &held {
+            if !content.write(device, queue, texture, width, height) {
+                return false;
             }
-            held => {
-                let texture = bitmap_texture(device, width, height, usage);
-                if !content.write(device, queue, &texture, width, height) {
-                    return false;
-                }
-                let id = held.map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| id);
-                (id, texture, true)
+            None
+        } else {
+            let texture = bitmap_texture(device, width, height, usage);
+            if !content.write(device, queue, &texture, width, height) {
+                return false;
             }
+            let id = held
+                .as_ref()
+                .map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| *id);
+            Some((
+                id,
+                texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            ))
         };
+        let bytes = content.bytes(width, height);
+        let opaque = content.opaque();
         self.store_picture(
-            owner,
-            picture,
-            (generation, descriptor),
-            (id, &texture, replaced),
-            content.bytes(width, height),
-            content.opaque(),
+            owner, picture, generation, descriptor, held, replaced, bytes, opaque,
         );
         true
     }
 
-    /// Makes `texture`, which frame `written` of `picture` (its generation
-    /// and descriptor) was just written into, the picture's texture under
-    /// `id`, holding `bytes` and `opaque` or not, and leases it to `owner`.
-    /// `replaced` says whether it is a new texture, which replaces the one
-    /// the picture held, or that one written in place.
+    /// What a write of frame `generation` of `picture`, which `descriptor`
+    /// names, ends with once its texture is written: the texture made the
+    /// picture's — `replaced`, a new texture under its id, or else the one
+    /// `held` names, written in place — holding `bytes` and `opaque` or
+    /// not, and leased to `owner`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the lease owner, the frame with its two names, its two textures and its content"
+    )]
     fn store_picture(
         &self,
         owner: u64,
         picture: PictureId,
-        written: (u64, ImageDescriptor),
-        (id, texture, replaced): (TextureId, &wgpu::Texture, bool),
+        generation: u64,
+        descriptor: ImageDescriptor,
+        held: Option<(TextureId, bool, wgpu::Texture)>,
+        replaced: Option<(TextureId, wgpu::TextureView)>,
         bytes: u64,
         opaque: bool,
     ) {
         let key = BitmapKey::Picture(picture);
-        let view = || texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut bitmaps = self.bitmaps();
         let Bitmaps {
             entries,
@@ -1418,10 +1422,10 @@ impl SharedRaster {
             leases,
             ..
         } = &mut *bitmaps;
-        let written = Some(written);
+        let written = Some((generation, descriptor));
         if let Some(bitmap) = entries.get_mut(&key) {
-            if replaced {
-                bitmap.view = view();
+            if let Some((_, view)) = replaced {
+                bitmap.view = view;
             }
             *total = *total - bitmap.bytes + bytes;
             bitmap.bytes = bytes;
@@ -1431,12 +1435,19 @@ impl SharedRaster {
             // Released between the two locks: the texture the write went
             // into is gone with it, so the new one, or the one written in
             // place, is the picture's now.
+            let (id, view) = replaced.unwrap_or_else(|| {
+                let (id, _, texture) = held.expect("a write in place had a texture");
+                (
+                    id,
+                    texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                )
+            });
             *total += bytes;
             entries.insert(
                 key,
                 Bitmap {
                     id,
-                    view: view(),
+                    view,
                     opaque,
                     bytes,
                     written,
