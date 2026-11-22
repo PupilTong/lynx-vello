@@ -66,7 +66,6 @@ use super::gpu::SharedGpu;
 use super::sparse::{CanvasTexture, Encoded, Replay, Submitter, encode, transparent_view};
 use crate::html::canvas::{CanvasFrames, Committed};
 use crate::paint::display_list::{DisplayList, Texture, next_texture_id};
-use crate::peniko::Color;
 use crate::render::image::ImageDescriptor;
 use crate::render::picture::PictureId;
 
@@ -500,7 +499,7 @@ impl Surface {
     fn encode(&mut self, list: &mut DisplayList, init: Init, keep: &mut Vec<SurfaceImage>) -> Draw {
         let (target, size) = (self.id, self.size());
         let state = self.encoder.get_or_insert_with(Encoder::new);
-        let clear = (init != Init::Load).then_some(Color::TRANSPARENT);
+        let clear = init != Init::Load;
         // Nothing called inside `encode` reaches this thread-local: it runs
         // no caller code but the `drawable` test below.
         let encoded = REPLAY.with_borrow_mut(|thread| {
@@ -1115,9 +1114,7 @@ mod tests {
 
     use seldon::text::{FontBlob, TextContext};
 
-    use super::{
-        Init, Op, Replay, ReplayUser, Surface, SurfaceImage, canvas_texture, read_region, view,
-    };
+    use super::{Init, Op, Replay, ReplayUser, Surface, SurfaceImage};
     use crate::html::canvas::{
         CompositeOp, OffscreenCanvas, ResolvedFamily, ResolvedFont, ResolvedFontStyle,
     };
@@ -1128,7 +1125,7 @@ mod tests {
         ImageQuality, ImageSampler,
     };
     use crate::render::gpu::SharedGpu;
-    use crate::render::sparse::{BitmapLeases, SharedRaster, SparseBackend};
+    use crate::render::sparse::{BitmapLeases, SharedRaster};
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const CLEAR: [u8; 4] = [0; 4];
@@ -1295,10 +1292,9 @@ mod tests {
     }
 
     /// A list encoded on one thread and rendered from another gives the
-    /// pixels a page target's render of it does
-    /// (`SparseBackend::render_onto`, which resolves its bitmaps as it
-    /// encodes): the encoded draw, a bitmap and a canvas texture included,
-    /// crosses threads.
+    /// pixels the same list encoded on the rendering thread does: the
+    /// encoded draw, a bitmap and a canvas texture included, crosses
+    /// threads.
     #[test]
     fn a_draw_encoded_on_one_thread_renders_from_another() {
         let mut source = Surface::new(4, 4).expect("a side the device takes");
@@ -1310,40 +1306,28 @@ mod tests {
         );
         source.draw(&mut list, Init::Load, &mut Vec::new());
         let image = bitmap(2, &[RED, [0, 0, 255, 128], [0, 255, 0, 255], [9, 9, 9, 9]]);
-        backdrop(&mut list);
-        fill_image(
-            &mut list,
-            Rect::new(1.0, 1.0, 9.0, 7.0),
-            ImageRef::held(&image),
-            (2, 2),
-        );
-        fill(
-            &mut list,
-            Rect::new(10.0, 2.0, 14.0, 6.0),
-            &ListPaint::texture(source.texture(), nearest()),
-        );
+        let record = |list: &mut DisplayList| {
+            backdrop(list);
+            fill_image(
+                list,
+                Rect::new(1.0, 1.0, 9.0, 7.0),
+                ImageRef::held(&image),
+                (2, 2),
+            );
+            fill(
+                list,
+                Rect::new(10.0, 2.0, 14.0, 6.0),
+                &ListPaint::texture(source.texture(), nearest()),
+            );
+        };
 
-        let gpu = SharedGpu::offscreen().expect("a GPU adapter");
-        let target = canvas_texture(&gpu, (W, H));
-        let sources = std::iter::once((
-            source.texture().id(),
-            view(&gpu.raster.canvases()[&source.texture().id()].texture),
-        ))
-        .collect();
-        SparseBackend::new(&gpu)
-            .render_onto(
-                &list,
-                &view(&target),
-                (W, H),
-                Some(Color::TRANSPARENT),
-                &sources,
-            )
-            .expect("the page target's render");
-        let (reply, answer) = flume::bounded(1);
-        read_region(&gpu, &target, (0, 0), (W, H), reply);
-        let expected = answer.recv().expect("the readback").expect("the readback");
+        let mut here = Surface::new(W, H).expect("a side the device takes");
+        record(&mut list);
+        here.draw(&mut list, Init::Clear, &mut Vec::new());
+        let expected = pixels(&mut here);
         assert_ne!(expected, vec![0; expected.len()], "the list draws");
 
+        record(&mut list);
         let surface = Surface::new(W, H).expect("a side the device takes");
         let (mut surface, draw) = std::thread::spawn(move || {
             let mut surface = surface;

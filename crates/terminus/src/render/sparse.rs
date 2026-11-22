@@ -46,6 +46,7 @@
 )]
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -237,7 +238,7 @@ pub(crate) struct Pictures<'a> {
     /// nothing.
     pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Result<Image, Missing>,
     /// Whether a texture id is bound for the render.
-    pub(crate) bound: &'a mut dyn FnMut(u64) -> bool,
+    pub(crate) bound: &'a dyn Fn(u64) -> bool,
 }
 
 /// The image a texture paint draws: the texture under its own id, the
@@ -507,7 +508,7 @@ impl StripScene {
                         sampler: paint.sampler,
                     })
                 },
-                bound: &mut |_| true,
+                bound: &|_| true,
             },
         );
         self.replay.maintain();
@@ -1626,9 +1627,9 @@ impl SharedRaster {
     }
 
     /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
-    /// which a target has filled, drawn into `view` as `init` says with
-    /// `bindings` bound, under the renderer lock — the render and the submit
-    /// — and then the releases.
+    /// which a target has filled, drawn into `view` over `clear`, or over
+    /// what it holds with `None`, with `bindings` bound, under the renderer
+    /// lock — the render and the submit — and then the releases.
     /// Notes the wait for the lock and the time it was held in `stats`.
     fn render(
         &self,
@@ -1636,7 +1637,7 @@ impl SharedRaster {
         scene: &Scene,
         view: &wgpu::TextureView,
         bindings: &TextureBindings,
-        init: TargetInit<'_>,
+        clear: Option<Color>,
         stats: &mut Stats,
     ) -> Result<(), String> {
         let mut encoder = gpu
@@ -1653,7 +1654,13 @@ impl SharedRaster {
             resources,
         } = &mut *paired;
         let mut options = RenderOptions::default();
-        options.target_init = init;
+        if let Some(clear) = clear {
+            options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                color: clear.convert(),
+            });
+        } else {
+            options.target_init = TargetInit::SrcOver;
+        }
         let result = renderer.render(
             scene,
             resources,
@@ -1776,26 +1783,6 @@ impl SparseBackend {
         height: u32,
         base_color: Color,
     ) -> Result<(), String> {
-        self.render_onto(
-            list,
-            view,
-            (width, height),
-            Some(base_color),
-            &FxHashMap::default(),
-        )
-    }
-
-    /// [`Self::render`], with the target cleared to `clear` first, or with
-    /// `None` kept and drawn over (`TargetInit::SrcOver`), and with
-    /// `sources` bound beside [`Self::bind`]'s textures for this render.
-    pub(crate) fn render_onto(
-        &mut self,
-        list: &DisplayList,
-        view: &wgpu::TextureView,
-        (width, height): (u32, u32),
-        clear: Option<Color>,
-        sources: &FxHashMap<u64, wgpu::TextureView>,
-    ) -> Result<(), String> {
         debug_assert_eq!(
             (view.texture().width(), view.texture().height()),
             (width, height),
@@ -1821,7 +1808,27 @@ impl SparseBackend {
         } = &**gpu;
 
         let started = ClockInstant::now();
-        let init = target_init(begin(scene, list, (w, h), clear));
+        scene.reset_and_resize(w, h);
+        // A layer blending over the root blends against what is under the
+        // whole list, which on the target is the base colour. `vello_gpu`
+        // renders a root that is a blend target into a transparent
+        // intermediate and blits that over the cleared target, so the clear
+        // colour is under the blend rather than in it: the base colour is
+        // drawn as the scene's first fill instead, which over a transparent
+        // clear composes to the same pixels the clear would have.
+        let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
+        if underlay {
+            scene.set_transform(Affine::IDENTITY);
+            scene.set_fill_rule(Fill::NonZero);
+            scene.set_paint(base_color);
+            scene.reset_paint_transform();
+            scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+        }
+        let clear = if underlay {
+            Color::TRANSPARENT
+        } else {
+            base_color
+        };
         textures.clear();
         let mut drawing = Drawing {
             target: *target,
@@ -1837,12 +1844,12 @@ impl SparseBackend {
                 bitmap: &mut |paint| {
                     shared.bitmap(device, queue, &paint.image, paint.sampler, &mut drawing)
                 },
-                bound: &mut |id| bound.contains_key(&id) || sources.contains_key(&id),
+                bound: &|id| bound.contains_key(&id),
             },
         );
         kept.maintain();
         let mut bindings = TextureBindings::new();
-        for (&id, view) in bound.iter().chain(sources) {
+        for (&id, view) in bound.iter() {
             bindings.insert(TextureId(id), view.clone());
         }
         for (id, view) in drawing.textures.drain(..) {
@@ -1850,52 +1857,10 @@ impl SparseBackend {
         }
         stats.encode = started.elapsed();
 
-        let result = shared.render(gpu, scene, view, &bindings, init, &mut stats);
+        let result = shared.render(gpu, scene, view, &bindings, Some(clear), &mut stats);
         *lost += u64::from(stats.images_lost);
         *last = stats;
         result
-    }
-}
-
-/// Resets `scene` to a `w` × `h` target that `list` is replayed onto,
-/// cleared to `clear` first or, with `None`, kept and drawn over; answers
-/// the clear the target gets before the render ([`target_init`]).
-///
-/// A layer blending over the root blends against what is under the whole
-/// list, which on the target is the clear colour. `vello_gpu` renders a
-/// root that is a blend target into a transparent intermediate and blits
-/// that over the cleared target, so the clear colour is under the blend
-/// rather than in it: a visible clear colour is drawn as the scene's first
-/// fill instead, over a transparent clear, which composes to the same
-/// pixels the clear would have.
-fn begin(
-    scene: &mut Scene,
-    list: &DisplayList,
-    (w, h): (u16, u16),
-    clear: Option<Color>,
-) -> Option<Color> {
-    scene.reset_and_resize(w, h);
-    let base_color = clear.unwrap_or(Color::TRANSPARENT);
-    let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
-    if underlay {
-        scene.set_transform(Affine::IDENTITY);
-        scene.set_fill_rule(Fill::NonZero);
-        scene.set_paint(base_color);
-        scene.reset_paint_transform();
-        scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
-        return Some(Color::TRANSPARENT);
-    }
-    clear
-}
-
-/// The target init of a render whose target is cleared to `clear` first,
-/// or with `None` kept and drawn over.
-fn target_init(clear: Option<Color>) -> TargetInit<'static> {
-    match clear {
-        None => TargetInit::SrcOver,
-        Some(color) => TargetInit::Clear(ClearSettings::Viewport {
-            color: color.convert(),
-        }),
     }
 }
 
@@ -1910,8 +1875,9 @@ fn target_init(clear: Option<Color>) -> TargetInit<'static> {
 /// its own id, which the submit's caller binds.
 pub(crate) struct Encoded {
     scene: Scene,
-    /// The clear the target gets before the render ([`target_init`]).
-    clear: Option<Color>,
+    /// Whether the target is cleared to transparent black before the
+    /// render, rather than kept and drawn over.
+    clear: bool,
     /// Each bitmap the scene draws: the id it is drawn under, and the bitmap.
     bitmaps: Vec<(TextureId, ImageRef)>,
     /// The texture ids the scene draws, each once.
@@ -1942,10 +1908,12 @@ impl Encoded {
 }
 
 /// The CPU half of a render, with no device: `list` replayed into `scene`,
-/// reset to a `width` × `height` target that is cleared to `clear` first or,
-/// with `None`, kept and drawn over, as [`SparseBackend::render_onto`]
-/// replays it. A texture paint whose id `drawable` refuses draws nothing,
-/// as one with no texture bound does there.
+/// reset to a `width` × `height` target that is cleared to transparent
+/// black first when `clear` is set, or kept and drawn over, as
+/// [`SparseBackend::render`] replays it. A texture paint whose id
+/// `drawable` refuses draws nothing, as one with no texture bound does
+/// there. Neither needs the base colour fill a page target's render draws
+/// under a blend at the root, which only a visible clear colour needs.
 ///
 /// What a render decides about a bitmap without a device is decided here:
 /// one with a side longer than any texture, or whose pixels are fewer bytes
@@ -1957,14 +1925,14 @@ pub(crate) fn encode(
     kept: &mut Replay,
     list: &DisplayList,
     (width, height): (u32, u32),
-    clear: Option<Color>,
+    clear: bool,
     drawable: &dyn Fn(u64) -> bool,
 ) -> Encoded {
-    let clear = begin(&mut scene, list, (width as u16, height as u16), clear);
+    scene.reset_and_resize(width as u16, height as u16);
     let longest = SharedGpu::LIMITS.max_texture_dimension_2d;
     let mut bitmaps: Vec<(TextureId, ImageRef)> = Vec::new();
     let mut reserved: FxHashMap<BitmapKey, TextureId> = FxHashMap::default();
-    let mut textures: Vec<u64> = Vec::new();
+    let textures: RefCell<Vec<u64>> = RefCell::new(Vec::new());
     replay(
         &mut scene,
         list,
@@ -1996,8 +1964,9 @@ pub(crate) fn encode(
                     sampler: paint.sampler,
                 })
             },
-            bound: &mut |id| {
+            bound: &|id| {
                 let drawn = drawable(id);
+                let mut textures = textures.borrow_mut();
                 if drawn && !textures.contains(&id) {
                     textures.push(id);
                 }
@@ -2010,7 +1979,7 @@ pub(crate) fn encode(
         scene,
         clear,
         bitmaps,
-        textures,
+        textures: textures.into_inner(),
     }
 }
 
@@ -2123,7 +2092,7 @@ impl Submitter {
             &encoded.scene,
             view,
             &bindings,
-            target_init(encoded.clear),
+            encoded.clear.then_some(Color::TRANSPARENT),
             &mut Stats::default(),
         )
     }
