@@ -18,15 +18,13 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 use vello_gpu::{Image, ImageSource, Scene, TextureBindings, TextureId, TextureRegion};
 
 use super::{
-    BITMAP_USAGE, Bitmap, BitmapKey, Bitmaps, Drawing, Missing, Pictures, Replay, SharedRaster,
-    Stats, bitmap_texture, next_target, readable, replay,
+    BITMAP_USAGE, BitmapKey, Drawing, Missing, Pictures, Replay, SharedRaster, Stats,
+    bitmap_texture, next_target, readable, replay,
 };
 use crate::paint::display_list::{DisplayList, ImageRef, next_texture_id};
 use crate::peniko::{Color, ImageSampler};
@@ -110,49 +108,14 @@ impl SharedRaster {
             },
         );
         gpu.submit([encoder.finish()]);
-        let bytes = u64::from(width) * u64::from(height) * 4;
-        let mut bitmaps = self.bitmaps();
-        let Bitmaps {
-            entries,
-            bytes: total,
-            leases,
-            ..
-        } = &mut *bitmaps;
-        let written = Some((generation, descriptor));
-        if let Some(bitmap) = entries.get_mut(&key) {
-            if replaced {
-                bitmap.view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            }
-            *total = *total - bitmap.bytes + bytes;
-            bitmap.bytes = bytes;
-            bitmap.opaque = false;
-            bitmap.written = written;
-        } else {
-            *total += bytes;
-            entries.insert(
-                key,
-                Bitmap {
-                    id,
-                    view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                    opaque: false,
-                    bytes,
-                    written,
-                    last_drawn: 0,
-                    pins: SmallVec::new(),
-                    leases: 0,
-                },
-            );
-        }
-        let held = leases.entry(owner).or_default();
-        if !held.contains(&key) {
-            held.push(key);
-            entries
-                .get_mut(&key)
-                .expect("the picture's texture was just written")
-                .leases += 1;
-        }
-        drop(bitmaps);
-        self.uploads.fetch_add(1, Ordering::Release);
+        self.store_picture(
+            owner,
+            picture,
+            (generation, descriptor),
+            (id, &texture, replaced),
+            u64::from(width) * u64::from(height) * 4,
+            false,
+        );
     }
 }
 
@@ -299,7 +262,7 @@ pub(crate) struct Submitter {
     gpu: Arc<SharedGpu>,
     target: u64,
     generation: u64,
-    /// The textures [`Bitmaps::hit`] lists for a render: where a submit
+    /// The textures [`super::Bitmaps::hit`] lists for a render: where a submit
     /// finds each upload's texture, which it binds under the id the
     /// encoded scene reserved for the bitmap.
     scratch: Vec<(TextureId, wgpu::TextureView)>,

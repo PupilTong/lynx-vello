@@ -1368,26 +1368,49 @@ impl SharedRaster {
                 texture.clone(),
             )
         });
-        let replaced = if let Some((_, true, texture)) = &held {
-            if !content.write(device, queue, texture, width, height) {
-                return false;
+        let (id, texture, replaced) = match held {
+            Some((id, true, texture)) => {
+                if !content.write(device, queue, &texture, width, height) {
+                    return false;
+                }
+                (id, texture, false)
             }
-            None
-        } else {
-            let texture = bitmap_texture(device, width, height, usage);
-            if !content.write(device, queue, &texture, width, height) {
-                return false;
+            held => {
+                let texture = bitmap_texture(device, width, height, usage);
+                if !content.write(device, queue, &texture, width, height) {
+                    return false;
+                }
+                let id = held.map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| id);
+                (id, texture, true)
             }
-            let id = held
-                .as_ref()
-                .map_or_else(|| TextureId(next_texture_id()), |(id, _, _)| *id);
-            Some((
-                id,
-                texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            ))
         };
-        let bytes = content.bytes(width, height);
-        let opaque = content.opaque();
+        self.store_picture(
+            owner,
+            picture,
+            (generation, descriptor),
+            (id, &texture, replaced),
+            content.bytes(width, height),
+            content.opaque(),
+        );
+        true
+    }
+
+    /// Makes `texture`, which frame `written` of `picture` (its generation
+    /// and descriptor) was just written into, the picture's texture under
+    /// `id`, holding `bytes` and `opaque` or not, and leases it to `owner`.
+    /// `replaced` says whether it is a new texture, which replaces the one
+    /// the picture held, or that one written in place.
+    fn store_picture(
+        &self,
+        owner: u64,
+        picture: PictureId,
+        written: (u64, ImageDescriptor),
+        (id, texture, replaced): (TextureId, &wgpu::Texture, bool),
+        bytes: u64,
+        opaque: bool,
+    ) {
+        let key = BitmapKey::Picture(picture);
+        let view = || texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut bitmaps = self.bitmaps();
         let Bitmaps {
             entries,
@@ -1395,10 +1418,10 @@ impl SharedRaster {
             leases,
             ..
         } = &mut *bitmaps;
-        let written = Some((generation, descriptor));
+        let written = Some(written);
         if let Some(bitmap) = entries.get_mut(&key) {
-            if let Some((_, view)) = replaced {
-                bitmap.view = view;
+            if replaced {
+                bitmap.view = view();
             }
             *total = *total - bitmap.bytes + bytes;
             bitmap.bytes = bytes;
@@ -1408,19 +1431,12 @@ impl SharedRaster {
             // Released between the two locks: the texture the write went
             // into is gone with it, so the new one, or the one written in
             // place, is the picture's now.
-            let (id, view) = replaced.unwrap_or_else(|| {
-                let (id, _, texture) = held.expect("a write in place had a texture");
-                (
-                    id,
-                    texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                )
-            });
             *total += bytes;
             entries.insert(
                 key,
                 Bitmap {
                     id,
-                    view,
+                    view: view(),
                     opaque,
                     bytes,
                     written,
@@ -1440,7 +1456,6 @@ impl SharedRaster {
         }
         drop(bitmaps);
         self.uploads.fetch_add(1, Ordering::Release);
-        true
     }
 
     /// Uploads `frame`, the platform frame `descriptor` names, into a
