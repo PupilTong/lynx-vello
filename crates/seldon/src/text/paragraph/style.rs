@@ -28,6 +28,7 @@ use stylo::values::computed::{
 };
 
 use crate::style::TextBrush;
+use crate::text::line::generic_family;
 
 /// The fully resolved effective style of one text run.
 ///
@@ -467,21 +468,8 @@ pub(in crate::text) fn translate_font_family_name(
             ParleyFontFamilyName::Named(Cow::Borrowed(name.name.as_ref()))
         }
         SingleFontFamily::Generic(generic) => {
-            ParleyFontFamilyName::Generic(translate_generic_family(*generic))
+            ParleyFontFamilyName::Generic(generic_family(*generic))
         }
-    }
-}
-
-pub(in crate::text) const fn translate_generic_family(
-    value: GenericFontFamily,
-) -> ParleyGenericFamily {
-    match value {
-        GenericFontFamily::None | GenericFontFamily::SansSerif => ParleyGenericFamily::SansSerif,
-        GenericFontFamily::Serif => ParleyGenericFamily::Serif,
-        GenericFontFamily::Monospace => ParleyGenericFamily::Monospace,
-        GenericFontFamily::Cursive => ParleyGenericFamily::Cursive,
-        GenericFontFamily::Fantasy => ParleyGenericFamily::Fantasy,
-        GenericFontFamily::SystemUi => ParleyGenericFamily::SystemUi,
     }
 }
 

@@ -3,6 +3,7 @@
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use super::css::parse_color;
 use super::{CanvasError, Image};
 use crate::kurbo::{Affine, BezPath, Point, Rect, Shape};
 use crate::paint::display_list::{self, Texture};
@@ -297,10 +298,7 @@ impl Gradient {
     /// `addColorStop`. `Type` for a non-finite offset, `IndexSize` for one
     /// outside 0..=1. Stops at one offset keep the order they were added in.
     pub fn add_color_stop(&self, offset: f64, color: Color) -> Result<(), CanvasError> {
-        finite(&[offset])?;
-        if !(0.0..=1.0).contains(&offset) {
-            return Err(CanvasError::IndexSize);
-        }
+        stop_offset(offset)?;
         #[expect(clippy::cast_possible_truncation, reason = "peniko offsets are f32")]
         let offset = offset as f32;
         let mut data = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -314,6 +312,16 @@ impl Gradient {
             },
         );
         Ok(())
+    }
+
+    /// `addColorStop` given a string, as HTML defines it: `Type` for a
+    /// non-finite offset and `IndexSize` for one outside 0..=1, both
+    /// checked before the color, then `Syntax` when `css` is not a CSS
+    /// `<color>`.
+    pub fn add_color_stop_css(&self, offset: f64, css: &str) -> Result<(), CanvasError> {
+        stop_offset(offset)?;
+        let color = parse_color(css).ok_or(CanvasError::Syntax)?;
+        self.add_color_stop(offset, color)
     }
 
     /// Whether `other` is a clone of this gradient.
@@ -509,6 +517,17 @@ fn pattern_bounds(
     let mut path = band.to_path(0.1);
     path.apply_affine(transform);
     Some(path)
+}
+
+/// `addColorStop`'s offset check: `Type` for a non-finite offset,
+/// `IndexSize` for one outside 0..=1.
+fn stop_offset(offset: f64) -> Result<(), CanvasError> {
+    finite(&[offset])?;
+    if (0.0..=1.0).contains(&offset) {
+        Ok(())
+    } else {
+        Err(CanvasError::IndexSize)
+    }
 }
 
 pub(crate) fn finite(values: &[f64]) -> Result<(), CanvasError> {

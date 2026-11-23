@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use seldon::text::{ResolvedFont, TextContext};
 
+use super::css::{parse_color, parse_font, serialize_color};
 use super::path::{self, builder_methods};
 use super::pixels::{ImageDataRead, Placement, RegionRead, index, normalize, premultiply, to_u32};
 use super::raster::{ClipNode, Outline, Raster};
@@ -355,6 +356,15 @@ impl Context2d<'_> {
         self.state.fill_style = style;
     }
 
+    /// The `fillStyle` setter given a string: a CSS `<color>` sets the
+    /// style and answers the serialization the getter then gives; anything
+    /// else is ignored, and `None` answered.
+    pub fn set_fill_style_css(&mut self, css: &str) -> Option<String> {
+        let color = parse_color(css)?;
+        self.set_fill_style(Style::Color(color));
+        Some(serialize_color(color))
+    }
+
     #[must_use]
     pub fn stroke_style(&self) -> &Style {
         &self.state.stroke_style
@@ -362,6 +372,14 @@ impl Context2d<'_> {
 
     pub fn set_stroke_style(&mut self, style: Style) {
         self.state.stroke_style = style;
+    }
+
+    /// The `strokeStyle` setter given a string, as
+    /// [`set_fill_style_css`](Self::set_fill_style_css).
+    pub fn set_stroke_style_css(&mut self, css: &str) -> Option<String> {
+        let color = parse_color(css)?;
+        self.set_stroke_style(Style::Color(color));
+        Some(serialize_color(color))
     }
 
     // Shadows.
@@ -373,6 +391,15 @@ impl Context2d<'_> {
 
     pub fn set_shadow_color(&mut self, color: Color) {
         self.state.shadow_color = color;
+    }
+
+    /// The `shadowColor` setter: a CSS `<color>` sets the color and answers
+    /// the serialization the getter then gives; anything else is ignored,
+    /// and `None` answered.
+    pub fn set_shadow_color_css(&mut self, css: &str) -> Option<String> {
+        let color = parse_color(css)?;
+        self.set_shadow_color(color);
+        Some(serialize_color(color))
     }
 
     #[must_use]
@@ -496,6 +523,17 @@ impl Context2d<'_> {
 
     pub fn set_font(&mut self, font: ResolvedFont) {
         self.state.font = Arc::new(font);
+    }
+
+    /// The `font` setter: a value of the CSS `font` shorthand this context
+    /// can resolve sets the font and answers the serialization the getter
+    /// then gives — the shorthand with the size in px and no line height;
+    /// anything else (a CSS-wide keyword, a size that needs a viewport or a
+    /// container, a system font) is ignored, and `None` answered.
+    pub fn set_font_css(&mut self, css: &str) -> Option<String> {
+        let parsed = parse_font(css)?;
+        self.set_font(parsed.font);
+        Some(parsed.css)
     }
 
     #[must_use]

@@ -22,6 +22,7 @@ use parley::{
     BaseDirection, FontFamily, FontFamilyName, FontStyle as ParleyFontStyle,
     FontWeight as ParleyFontWeight, FontWidth, GenericFamily, PositionedLayoutItem, StyleProperty,
 };
+use stylo::values::computed::font::{GenericFontFamily, SingleFontFamily};
 
 use super::TextContext;
 use super::paragraph::Direction;
@@ -65,6 +66,29 @@ impl ResolvedFamily {
             Some(FontFamilyName::Named(name)) => Self::Named(name.into_owned()),
             None => Self::Named(css.to_owned()),
         }
+    }
+}
+
+impl From<&SingleFontFamily> for ResolvedFamily {
+    /// One entry of a `font-family` list as stylo parsed it.
+    fn from(single: &SingleFontFamily) -> Self {
+        match single {
+            SingleFontFamily::FamilyName(name) => Self::Named(name.name.to_string()),
+            SingleFontFamily::Generic(generic) => Self::Generic(generic_family(*generic)),
+        }
+    }
+}
+
+/// A stylo generic family as parley names it; `none`, the absence of a
+/// generic, is `sans-serif`.
+pub(in crate::text) const fn generic_family(value: GenericFontFamily) -> GenericFamily {
+    match value {
+        GenericFontFamily::None | GenericFontFamily::SansSerif => GenericFamily::SansSerif,
+        GenericFontFamily::Serif => GenericFamily::Serif,
+        GenericFontFamily::Monospace => GenericFamily::Monospace,
+        GenericFontFamily::Cursive => GenericFamily::Cursive,
+        GenericFontFamily::Fantasy => GenericFamily::Fantasy,
+        GenericFontFamily::SystemUi => GenericFamily::SystemUi,
     }
 }
 
