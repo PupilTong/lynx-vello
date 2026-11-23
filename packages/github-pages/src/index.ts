@@ -1,6 +1,6 @@
 // The GitHub Pages Lynx Explorer: the page shell, the canvas it hands to a
-// `BobcatCanvas`, the Explorer homepage's `NativeModules`, and the Lynx XML
-// editor, all on the page's main thread.
+// `BobcatCanvas`, what the Explorer homepage's `NativeModules.ExplorerModule`
+// asks of the page, and the Lynx XML editor, all on the page's main thread.
 //
 // The Lynx performance section, below the source in the same scrolling
 // column, reads the same entries a native LynxView hands its host's
@@ -19,13 +19,13 @@ import './styles.css';
 
 import type {
   BobcatCanvas,
+  ExplorerRequest,
   FcpBreakdown,
   LynxPaintEntry,
   LynxPerformanceEntry,
   LynxPerformanceMetric,
   LynxPipelineEntry,
   LynxThread,
-  NativeModules,
   PageConfig,
   PerformanceLoad,
   PerformanceTimeline,
@@ -45,8 +45,9 @@ const LOCAL_SCHEMA_PREFIX = 'file://lynx?local://';
 // What a native Explorer opens, and what Bobcat opens instead.
 const LYNX_BUNDLE_SUFFIX = '.lynx.bundle';
 const WEB_BUNDLE_SUFFIX = '.web.bundle';
-// One namespace for everything the demo's ExplorerModule stores, so the page
-// shares no key with anything else served from this origin.
+// One namespace for every preference the ExplorerModule asks the page to
+// store, so the page shares no key with anything else served from this
+// origin.
 const STORAGE_PREFIX = 'bobcat-explorer:';
 // Whether the Lynx performance panel is open, under that same namespace.
 const PERFORMANCE_PANEL_KEY = `${STORAGE_PREFIX}performance-panel`;
@@ -755,9 +756,9 @@ function nextAnimationFrame(): Promise<void> {
 }
 
 /**
- * How `ExplorerModule.openSchema` reaches the page's template loader. It is a
- * holder rather than the function because the module is built before the
- * canvas exists and the loader before anything can be rendered.
+ * How an `openSchema` request reaches the page's template loader. It is a
+ * holder rather than the function because the request handler is built before
+ * the canvas exists and the loader before anything can be rendered.
  */
 interface TemplateLoader {
   load?: (label: string, template?: boolean) => Promise<void>;
@@ -794,102 +795,82 @@ function explorerTemplateUrls(raw: string): string[] {
   return [web.href, url.href];
 }
 
-function storeExplorerValue(key: string, value: unknown): void {
+function storeExplorerValue(key: string, value: string): void {
   try {
-    localStorage.setItem(`${STORAGE_PREFIX}${key}`, String(value));
+    localStorage.setItem(`${STORAGE_PREFIX}${key}`, value);
   } catch (error) {
     console.warn(`Could not store the Explorer preference ${key}`, error);
   }
 }
 
 /**
- * The host capabilities the Lynx Explorer homepage reaches through
- * `NativeModules.ExplorerModule`, as far as a browser demo can answer them.
+ * What the page does for each request of the Lynx Explorer homepage's
+ * `NativeModules.ExplorerModule`. The module is bobcat-wasm's own, built with
+ * its `explorer-module` feature, and runs on the Render Worker; it hands the
+ * page only what needs the page: a template to open, a preference to store in
+ * `localStorage`, and a status to show.
  *
- * Every handler runs on this thread, after the page's call has already
- * returned `undefined` to it, so nothing here can answer synchronously:
- * `readFromLocalStorage` and `getSettingInfo` exist only so the homepage's
- * `typeof` checks pass, and read back as nothing. `saveThemePreferences` and
- * `saveToLocalStorage` really do write, but nothing reads them back yet: this
- * demo passes its pages no `globalProps` at all, so the homepage sees no
- * `preferredTheme` and lays itself out in its portrait default.
+ * Nothing here answers the homepage: its `readFromLocalStorage` and
+ * `getSettingInfo` return nothing, so the stored preferences are not read
+ * back, and this demo passes its pages no `globalProps` at all, so the
+ * homepage sees no `preferredTheme` and lays itself out in its portrait
+ * default.
  */
-function createExplorerModule(
+function createExplorerRequestHandler(
   shell: Shell,
   loader: TemplateLoader,
-): NativeModules {
-  return {
-    ExplorerModule: {
-      openSchema(...args: unknown[]): void {
-        const requested = args[0];
-        if (typeof requested !== 'string' || requested.trim() === '') {
-          shell.uploadStatus.textContent = 'The page asked to open an empty URL';
-          return;
-        }
-        let urls: string[];
+): (request: ExplorerRequest) => void {
+  const openSchema = (requested: string): void => {
+    let urls: string[];
+    try {
+      urls = explorerTemplateUrls(requested);
+    } catch (error) {
+      shell.uploadStatus.textContent = `Could not open ${requested}: ${errorMessage(error)}`;
+      return;
+    }
+    const load = loader.load;
+    if (load === undefined) {
+      console.warn('Bobcat is not ready to open', requested);
+      return;
+    }
+    shell.zipInput.value = '';
+    shell.zipStatus.textContent = 'No ZIP selected';
+    void (async (): Promise<void> => {
+      for (const [index, url] of urls.entries()) {
+        // The same load the "Load template" button runs, from the same
+        // fields, so its status, busy state and error text are the ones the
+        // page already has.
+        shell.entryInput.value = url;
         try {
-          urls = explorerTemplateUrls(requested);
+          await load(url, true);
+          return;
         } catch (error) {
-          shell.uploadStatus.textContent = `Could not open ${requested}: ${errorMessage(error)}`;
-          return;
-        }
-        const load = loader.load;
-        if (load === undefined) {
-          console.warn('Bobcat is not ready to open', requested);
-          return;
-        }
-        shell.zipInput.value = '';
-        shell.zipStatus.textContent = 'No ZIP selected';
-        void (async (): Promise<void> => {
-          for (const [index, url] of urls.entries()) {
-            // The same load the "Load template" button runs, from the same
-            // fields, so its status, busy state and error text are the ones
-            // the page already has.
-            shell.entryInput.value = url;
-            try {
-              await load(url, true);
-              return;
-            } catch (error) {
-              // The last candidate's failure is the one the page keeps.
-              if (index === urls.length - 1) {
-                throw error;
-              }
-              console.info(`Retrying ${requested} as ${urls[index + 1]!}`);
-            }
+          // The last candidate's failure is the one the page keeps.
+          if (index === urls.length - 1) {
+            throw error;
           }
-        })().catch((error: unknown) => {
-          console.error(error);
-        });
-      },
-      openScan(): void {
+          console.info(`Retrying ${requested} as ${urls[index + 1]!}`);
+        }
+      }
+    })().catch((error: unknown) => {
+      console.error(error);
+    });
+  };
+  return (request) => {
+    switch (request.kind) {
+      case 'openSchema':
+        openSchema(request.schema);
+        break;
+      case 'store':
+        storeExplorerValue(request.key, request.value);
+        break;
+      case 'notice':
         shell.uploadStatus.textContent =
-          'QR scanning is unavailable in this browser demo; paste a template URL instead';
-        console.warn(
-          'ExplorerModule.openScan: this demo has no camera scanner',
-        );
-      },
-      setThreadMode(): void {
-        console.info(
-          'ExplorerModule.setThreadMode: Bobcat has one thread strategy',
-        );
-      },
-      openDevtoolSwitchPage(): void {
-        console.info(
-          'ExplorerModule.openDevtoolSwitchPage: this demo ships no DevTool switches',
-        );
-      },
-      saveThemePreferences(...args: unknown[]): void {
-        storeExplorerValue(String(args[0]), args[1]);
-      },
-      saveToLocalStorage(...args: unknown[]): void {
-        storeExplorerValue(String(args[0]), args[1]);
-      },
-      // Present for the page's feature detection, and nothing more: a module
-      // method runs off the page's JavaScript thread, so it has no return
-      // value to give. The homepage treats both as absent.
-      readFromLocalStorage(): void {},
-      getSettingInfo(): void {},
-    },
+          request.notice === 'emptySchema'
+            ? 'The page asked to open an empty URL'
+            : 'QR scanning is unavailable in this browser demo; paste a template URL instead';
+        break;
+    }
   };
 }
 
@@ -1346,7 +1327,7 @@ class PreviewRenderer {
   readonly #factory: BobcatCanvasFactory;
   readonly #fallbackFonts: readonly Uint8Array[];
   readonly #fontBytes: Uint8Array;
-  readonly #nativeModules: NativeModules;
+  readonly #onExplorerRequest: (request: ExplorerRequest) => void;
   readonly #onPerformanceEntry: (entry: LynxPerformanceEntry) => void;
   readonly #reportFatal: (error: Error) => void;
   readonly #resizeObserver: ResizeObserver;
@@ -1364,7 +1345,7 @@ class PreviewRenderer {
     config: PageConfig,
     fontBytes: Uint8Array,
     fallbackFonts: readonly Uint8Array[],
-    nativeModules: NativeModules,
+    onExplorerRequest: (request: ExplorerRequest) => void,
     onPerformanceEntry: (entry: LynxPerformanceEntry) => void,
     reportFatal: (error: Error) => void,
   ) {
@@ -1374,7 +1355,7 @@ class PreviewRenderer {
     this.#config = config;
     this.#fontBytes = fontBytes;
     this.#fallbackFonts = fallbackFonts;
-    this.#nativeModules = nativeModules;
+    this.#onExplorerRequest = onExplorerRequest;
     this.#reportFatal = reportFatal;
     this.#resizeObserver = new ResizeObserver(() => this.scheduleResize());
     this.#resizeObserver.observe(shell.canvasHost);
@@ -1424,7 +1405,8 @@ class PreviewRenderer {
     await this.#load((view) => view.loadZip(bytes, entryUrl, { openTime }));
   }
 
-  // This demo hands its pages no `globalProps`; see `createExplorerModule`.
+  // This demo hands its pages no `globalProps`; see
+  // `createExplorerRequestHandler`.
   async #load(load: (view: BobcatCanvas) => Promise<void>): Promise<void> {
     const generation = ++this.#generation;
     let view = this.#view;
@@ -1445,9 +1427,9 @@ class PreviewRenderer {
           initial.height,
           initial.dpr,
           this.#config,
-          // Retained for every page this canvas loads, like the fonts.
           {
-            nativeModules: this.#nativeModules,
+            // Every page this canvas loads may call the ExplorerModule.
+            onExplorerRequest: this.#onExplorerRequest,
             onFrameRate: (fps) => {
               if (this.#canvas === canvas) {
                 this.#shell.frameRate.textContent = fps === null ? 'Unavailable' : fps.toFixed(1);
@@ -1774,9 +1756,9 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
       ? 'No system fonts: text Roboto does not cover is not rendered.'
       : 'System fonts loaded.';
 
-  // The Explorer homepage opens templates through its own native module; the
-  // loader it uses is the page's, and exists only once `installSources` has
-  // built it below.
+  // The Explorer homepage opens templates through its ExplorerModule, which
+  // asks the page; the loader the page opens them with exists only once
+  // `installSources` has built it below.
   const loader: TemplateLoader = {};
   const performancePanel = new PerformancePanel(shell.performance, kit);
   const renderer = new PreviewRenderer(
@@ -1785,7 +1767,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     LYNX_XML_PAGE_CONFIG,
     fontBytes,
     fallbackFonts,
-    createExplorerModule(shell, loader),
+    createExplorerRequestHandler(shell, loader),
     (entry) => performancePanel.add(entry),
     (error) => {
       setIndicator(shell.renderer, 'Failed', 'error');

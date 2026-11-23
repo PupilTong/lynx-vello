@@ -8,6 +8,10 @@
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
+// `NativeModules.ExplorerModule` for the GitHub Pages demo, which the native
+// test build checks too.
+#[cfg(any(all(target_arch = "wasm32", feature = "explorer-module"), test))]
+mod explorer;
 #[cfg(target_arch = "wasm32")]
 pub mod platform;
 // The browser decoder's pure half, which the native test build checks too.

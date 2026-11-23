@@ -4,12 +4,11 @@ import { TextInputProxy, keyFields } from './text-input.ts'
 import type {
   EditCommand,
   EditMessage,
+  ExplorerMessage,
   InitMessage,
   KeyFields,
   KeyMessage,
   LoadTimingFields,
-  NativeModuleCallMessage,
-  NativeModuleCallbackMessage,
   Operation,
   PointerDevice,
   PointerFields,
@@ -50,24 +49,32 @@ export interface PageConfig {
 }
 
 /**
- * The host capabilities a page reaches as `NativeModules.<name>.<method>()`
- * from its background thread.
+ * What a page's `NativeModules.ExplorerModule` asks the embedding page to do.
+ * The module exists only in a bobcat-wasm build with the `explorer-module`
+ * cargo feature; it runs on the Render Worker, which has no `document` and no
+ * `localStorage`, and sends the page these.
  *
- * Every handler runs here, on the page's main thread, because that is where
- * `localStorage`, navigation and the rest of the DOM are — and it runs after
- * the calling script has moved on, so there is nothing to return. A handler
- * that has an answer takes a function argument and calls it: the page passes
- * a function, the engine hands this side a single-shot wrapper in that
- * argument's place, and calling it delivers the answer to the realm.
+ * - `openSchema`: open the template `schema` names — the string the page's
+ *   script passed to `openSchema`, as it passed it, never only white space.
+ * - `store`: store the preference `value` under `key`, from
+ *   `saveThemePreferences` or `saveToLocalStorage`. Each is ECMAScript's
+ *   `String()` of the argument.
+ * - `notice`: show a status for a call there is nothing else to do for.
+ *   `emptySchema` is an `openSchema` without a URL, `noScanner` an
+ *   `openScan`.
  */
-export type NativeModules = Record<
-  string,
-  Record<string, (...args: unknown[]) => void>
->
+export type ExplorerRequest =
+  | { kind: 'openSchema'; schema: string }
+  | { kind: 'store'; key: string; value: string }
+  | { kind: 'notice'; notice: 'emptySchema' | 'noScanner' }
 
 /** What a canvas keeps for every page it loads, beyond its metrics. */
 export interface BobcatCanvasOptions {
-  nativeModules?: NativeModules
+  /**
+   * Opt-in Explorer requests (`ExplorerRequest`), each delivered as its
+   * message arrives. Without it they are dropped.
+   */
+  onExplorerRequest?: (request: ExplorerRequest) => void
   /** Opt-in Painter-thread rAF cadence, reported twice a second. This is
    * not a count of GPU presents; null means Worker rAF is unavailable. */
   onFrameRate?: (fps: number | null) => void
@@ -177,40 +184,6 @@ function validateMetrics(
 }
 
 /**
- * Reads the host's modules into the name/method table the Worker declares to
- * the realm, rejecting anything that is not a function: the table says what
- * exists on the page's `NativeModules` object, so a member that could not be
- * called must not appear in it.
- */
-function nativeModuleTable(
-  modules: NativeModules | undefined,
-): Record<string, string[]> {
-  if (modules === undefined) {
-    return {}
-  }
-  if (modules === null || typeof modules !== 'object') {
-    throw new TypeError('BobcatCanvas.create nativeModules must be an object')
-  }
-  const table: Record<string, string[]> = {}
-  for (const [name, module] of Object.entries(modules)) {
-    if (module === null || typeof module !== 'object') {
-      throw new TypeError(`Bobcat nativeModules.${name} must be an object`)
-    }
-    const methods: string[] = []
-    for (const [method, handler] of Object.entries(module)) {
-      if (typeof handler !== 'function') {
-        throw new TypeError(
-          `Bobcat nativeModules.${name}.${method} must be a function`,
-        )
-      }
-      methods.push(method)
-    }
-    table[name] = methods
-  }
-  return table
-}
-
-/**
  * Serializes one load's `globalProps` into the text the engine carries.
  * `undefined` means the page gets none; anything JSON refuses is the caller's
  * mistake, reported before the load crosses the Worker boundary.
@@ -253,57 +226,23 @@ function globalPropsFields(options: LoadOptions): { globalProps?: string } {
 }
 
 /**
- * Runs one `bobcat-native-module` call against the host's handlers.
- *
- * The arguments arrive as JSON array text with each function argument `null`;
- * every index the Worker named gets a wrapper that posts the page's answer
- * back, the first time it is called and only then. The handler's own return
- * value is nothing — the realm's method already answered `undefined` — so a
- * handler that throws is reported here rather than propagated: the call is the
- * page's, not the Worker's, and nothing upstream is waiting on it.
+ * The `ExplorerRequest` one Explorer message carries, or `undefined` for a
+ * message whose fields are not the protocol's.
  */
-export function deliverNativeModuleCall(
-  modules: NativeModules,
-  message: NativeModuleCallMessage,
-  post: (answer: NativeModuleCallbackMessage) => void,
-): void {
-  const handler = modules[message.module]?.[message.method]
-  if (typeof handler !== 'function') {
-    return
-  }
-  let args: unknown[]
-  try {
-    const parsed: unknown = JSON.parse(message.args)
-    args = Array.isArray(parsed) ? parsed : []
-  } catch (error) {
-    console.error(
-      `Bobcat could not read the arguments of NativeModules.${message.module}.${message.method}`,
-      error,
-    )
-    return
-  }
-  for (const index of message.callbacks) {
-    let answered = false
-    args[index] = (...answer: unknown[]): void => {
-      if (answered) {
-        return
-      }
-      answered = true
-      post({
-        args: JSON.stringify(answer),
-        call: message.call,
-        index,
-        type: 'bobcat-native-module-callback',
-      })
-    }
-  }
-  try {
-    handler(...args)
-  } catch (error) {
-    console.error(
-      `NativeModules.${message.module}.${message.method} threw`,
-      error,
-    )
+function explorerRequest(message: ExplorerMessage): ExplorerRequest | undefined {
+  switch (message.type) {
+    case 'bobcat-explorer-open-schema':
+      return typeof message.schema === 'string'
+        ? { kind: 'openSchema', schema: message.schema }
+        : undefined
+    case 'bobcat-explorer-store':
+      return typeof message.key === 'string' && typeof message.value === 'string'
+        ? { kind: 'store', key: message.key, value: message.value }
+        : undefined
+    case 'bobcat-explorer-notice':
+      return message.notice === 'emptySchema' || message.notice === 'noScanner'
+        ? { kind: 'notice', notice: message.notice }
+        : undefined
   }
 }
 
@@ -696,7 +635,6 @@ interface PendingRequest {
 class RenderWorkerClient {
   #fatalError: Error | undefined
   #fatalListeners = new Set<(error: Error) => void>()
-  #modules: NativeModules
   #nextRequest = 1
   #pending = new Map<number, PendingRequest>()
   #ready: Promise<void>
@@ -706,6 +644,7 @@ class RenderWorkerClient {
   #worker: Worker
   /** The `<video>` elements of the videos the Render Worker opened. */
   #media: MediaElements
+  #onExplorerRequest: BobcatCanvasOptions['onExplorerRequest']
   #onFrameRate: BobcatCanvasOptions['onFrameRate']
   #onPerformanceEntry: BobcatCanvasOptions['onPerformanceEntry']
   /** The canvas's text proxy, once the canvas exists. */
@@ -713,12 +652,14 @@ class RenderWorkerClient {
 
   constructor(
     worker: Worker,
-    modules: NativeModules,
-    options: Pick<BobcatCanvasOptions, 'onFrameRate' | 'onPerformanceEntry'>,
+    options: Pick<
+      BobcatCanvasOptions,
+      'onExplorerRequest' | 'onFrameRate' | 'onPerformanceEntry'
+    >,
   ) {
+    this.#onExplorerRequest = options.onExplorerRequest
     this.#onFrameRate = options.onFrameRate
     this.#onPerformanceEntry = options.onPerformanceEntry
-    this.#modules = modules
     this.#worker = worker
     this.#media = new MediaElements((message, transfer = []) => {
       if (this.#fatalError === undefined) {
@@ -813,19 +754,21 @@ class RenderWorkerClient {
       this.#fail(new Error(message.message))
       return
     }
-    if (message?.type === 'bobcat-native-module') {
-      // The handlers are the page's; a failure of theirs is theirs to hear
-      // about, so nothing here touches the fatal path.
-      deliverNativeModuleCall(this.#modules, message, (answer) => {
-        if (this.#fatalError !== undefined) {
-          return
-        }
-        try {
-          this.#worker.postMessage(answer)
-        } catch (error) {
-          console.error('Bobcat could not deliver a native module answer', error)
-        }
-      })
+    if (
+      message?.type === 'bobcat-explorer-open-schema' ||
+      message?.type === 'bobcat-explorer-store' ||
+      message?.type === 'bobcat-explorer-notice'
+    ) {
+      const request = explorerRequest(message)
+      if (request === undefined) {
+        console.warn('Bobcat received an unreadable Explorer message', message)
+        return
+      }
+      try {
+        this.#onExplorerRequest?.(request)
+      } catch (error) {
+        console.error('Bobcat Explorer request callback threw', error)
+      }
       return
     }
     if (message?.type !== 'bobcat-response') {
@@ -1076,10 +1019,6 @@ export class BobcatCanvas {
     if (options === null || typeof options !== 'object') {
       throw new TypeError('BobcatCanvas.create options must be an object')
     }
-    // Checked before the Worker exists: a module table the page cannot
-    // answer is the caller's mistake, not a runtime failure of the canvas.
-    const modules = options.nativeModules ?? {}
-    const nativeModules = nativeModuleTable(options.nativeModules)
     validateMetrics(width, height, devicePixelRatio)
     const config = {
       defaultDisplayLinear: pageConfig.defaultDisplayLinear,
@@ -1102,7 +1041,7 @@ export class BobcatCanvas {
         name: 'bobcat-render',
         type: 'module',
       })
-      client = new RenderWorkerClient(worker, modules, options)
+      client = new RenderWorkerClient(worker, options)
       worker.postMessage(
         {
           type: 'bobcat-init',
@@ -1111,7 +1050,6 @@ export class BobcatCanvas {
           devicePixelRatio,
           height,
           hardwareConcurrency: hardwareConcurrency(),
-          nativeModules,
           measureFrameRate: options.onFrameRate !== undefined,
           observePerformance: options.onPerformanceEntry !== undefined,
           screenPixelHeight: screen.height,

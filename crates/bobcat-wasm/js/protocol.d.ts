@@ -59,14 +59,6 @@ export interface InitMessage {
   devicePixelRatio: number
   height: number
   hardwareConcurrency: number
-  /**
-   * The host's `NativeModules` surface, by module name: the methods it
-   * declared, in declaration order. Only the names cross — the handlers
-   * themselves stay on the page's main thread, where `localStorage` and
-   * navigation are — and they are retained for every page the canvas loads,
-   * like the fonts.
-   */
-  nativeModules: Record<string, string[]>
   measureFrameRate: boolean
   /**
    * Whether the page passed `onPerformanceEntry`. Only then is each view told
@@ -84,22 +76,6 @@ export interface InitMessage {
   screenPixelHeight: number
   workerUrl: string
   width: number
-}
-
-/**
- * The facade's answer to one function argument of one native-module call.
- *
- * Single-shot: the wrapper the facade put in that argument slot posts this
- * the first time the page's handler calls it, and does nothing afterwards.
- */
-export interface NativeModuleCallbackMessage {
-  type: 'bobcat-native-module-callback'
-  /** The call number the Worker sent. */
-  call: number
-  /** Which argument of that call the answered function was. */
-  index: number
-  /** The answer's arguments as JSON array text, which the realm spreads. */
-  args: string
 }
 
 /**
@@ -293,7 +269,6 @@ export type MediaEventMessage = { type: 'bobcat-media-event'; player: number } &
 
 export type FacadeMessage =
   | InitMessage
-  | NativeModuleCallbackMessage
   | EditMessage
   | KeyMessage
   | MediaEventMessage
@@ -318,28 +293,46 @@ export interface ErrorMessage {
   message: string
 }
 
+// The Explorer messages. A build with the `explorer-module` cargo feature
+// gives every view `NativeModules.ExplorerModule` (`src/explorer.rs`), which
+// runs on the Render Worker and sends these for what only the page can do.
+// A build without the feature sends none.
+
 /**
- * One `NativeModules.<module>.<method>(...)` the page's BTS realm made,
- * on its way to the handler the host gave `BobcatCanvas.create`.
- *
- * Nothing is awaited: the method answered `undefined` in the realm already.
- * `args` is the whole argument list as JSON array text, with each function
- * argument `null` and its index named in `callbacks`; the facade puts a
- * single-shot wrapper back in each of those slots before calling the handler.
+ * `ExplorerModule.openSchema(schema)`: open the template `schema` names.
+ * `schema` is the string the page's script passed, as it passed it, and is
+ * never only white space.
  */
-export interface NativeModuleCallMessage {
-  type: 'bobcat-native-module'
-  /** This call's number, which a callback answer quotes back. */
-  call: number
-  /** The `NativeModules` key. */
-  module: string
-  /** The method name, always one the host declared. */
-  method: string
-  /** The arguments as JSON array text. */
-  args: string
-  /** The argument indices that were functions. */
-  callbacks: number[]
+export interface ExplorerOpenSchemaMessage {
+  type: 'bobcat-explorer-open-schema'
+  schema: string
 }
+
+/**
+ * `ExplorerModule.saveThemePreferences(key, value)` or
+ * `saveToLocalStorage(key, value)`: store a preference. Each field is
+ * ECMAScript's `String()` of the argument, `'undefined'` for a missing one.
+ */
+export interface ExplorerStoreMessage {
+  type: 'bobcat-explorer-store'
+  key: string
+  value: string
+}
+
+/**
+ * A status the page shows for a call it has nothing else to do for:
+ * `emptySchema` is an `openSchema` whose first argument was not a string or
+ * only white space, `noScanner` an `openScan`.
+ */
+export interface ExplorerNoticeMessage {
+  type: 'bobcat-explorer-notice'
+  notice: 'emptySchema' | 'noScanner'
+}
+
+export type ExplorerMessage =
+  | ExplorerOpenSchemaMessage
+  | ExplorerStoreMessage
+  | ExplorerNoticeMessage
 
 /**
  * The view's `TextInputState`: everything the facade's `<textarea>` proxy
@@ -457,8 +450,8 @@ export type ResponseMessage =
 export type RenderWorkerMessage =
   | { type: 'bobcat-frame-rate'; fps: number | null }
   | ErrorMessage
+  | ExplorerMessage
   | MediaRequestMessage
-  | NativeModuleCallMessage
   | PerformanceMessage
   | ReadyMessage
   | ResponseMessage

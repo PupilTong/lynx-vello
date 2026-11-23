@@ -250,6 +250,14 @@ jobs:
           -p quickjs-rust-bridge
           -- -D warnings
 
+      - name: Clippy (wasm32, bobcat-wasm with explorer-module)
+        # The step above builds bobcat-wasm without its features; the package
+        # build below turns `explorer-module` on, and this lints that build.
+        run: >-
+          cargo clippy --target wasm32-unknown-unknown --lib
+          -p bobcat-wasm --features explorer-module
+          -- -D warnings
+
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:

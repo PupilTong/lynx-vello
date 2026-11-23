@@ -14,11 +14,8 @@
 //! `setExtraTiming`) come back the other way through
 //! [`BobcatRenderer::set_extra_timing`] as Unix milliseconds.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -29,9 +26,9 @@ use bobcat_core::editing::{Rect, TextInputSource, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::performance::{EntryTypes, ExtraTiming, PerformanceEntry, TimeOrigin};
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, ModuleCall,
-    ModuleCallback, NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources,
-    WindowTarget, configure_wasm_workers,
+    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView,
+    NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources, WindowTarget,
+    configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
@@ -42,6 +39,8 @@ use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 use web_time::SystemTime;
 
+#[cfg(feature = "explorer-module")]
+use crate::explorer::{ExplorerModule, ExplorerNotice, ExplorerPage, LogLevel};
 use crate::platform::{BrowserFrame, BrowserMedia, BrowserPlatform, CodeCacheConfig};
 use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
@@ -53,6 +52,9 @@ extern "C" {
     fn console_warn(value: &JsValue);
     #[wasm_bindgen(js_namespace = console, js_name = log)]
     fn console_log(value: &JsValue);
+    #[cfg(feature = "explorer-module")]
+    #[wasm_bindgen(js_namespace = console, js_name = info)]
+    fn console_info(value: &JsValue);
 }
 
 /// The language a page's text is in until the host names another
@@ -140,105 +142,6 @@ impl Future for EventWait {
     }
 }
 
-/// The Render Worker's half of a host native module: the one JavaScript
-/// function every module's every call goes out through, and the callbacks the
-/// page has yet to answer.
-///
-/// The handlers themselves are not here and never can be: `localStorage` and
-/// navigation belong to the page's main thread, and this Worker is not it. So
-/// a call becomes a message — `on_call` posts it — and the answer comes back
-/// as an ordinary facade operation, [`BobcatRenderer::answer_native_module_callback`].
-///
-/// `Rc`/`Cell`/`RefCell` rather than their threaded spellings because a
-/// [`NativeModule`] is invoked only inside [`LynxView::pump`], on the thread
-/// that built the view, which is the thread that built this.
-struct HostModuleBridge {
-    /// `(call, module, method, arguments, callbackIndices)`, the Render
-    /// Worker's `onNativeModuleCall`.
-    on_call: js_sys::Function,
-    /// The next call number. Numbers are this renderer's, not a view's: the
-    /// map below is cleared when a view is replaced, so nothing outlives the
-    /// realm that minted its callbacks.
-    next: Cell<u64>,
-    /// The callbacks of every call the page has not finished answering, by
-    /// call number. A module that never answers keeps its entry until the next
-    /// load clears it, which releases the JavaScript functions — the same
-    /// thing native's release does, deferred to the only moment this side can
-    /// know nobody will answer.
-    calls: RefCell<HashMap<u64, Vec<ModuleCallback>>>,
-}
-
-impl fmt::Debug for HostModuleBridge {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HostModuleBridge")
-            .field("outstanding_calls", &self.calls.borrow().len())
-            .finish_non_exhaustive()
-    }
-}
-
-/// One `NativeModules.<name>` the host declared at `BobcatCanvas.create`,
-/// answering every method by posting it to the page.
-///
-/// The name and method list are the table the facade validated; nothing here
-/// knows what the page's handler does, and there is no reply to wait for.
-#[derive(Debug)]
-struct HostModule {
-    name: String,
-    methods: Vec<String>,
-    bridge: Rc<HostModuleBridge>,
-}
-
-impl NativeModule for HostModule {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn methods(&self) -> Vec<String> {
-        self.methods.clone()
-    }
-
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "a call number reaches JavaScript as the Number it will be compared as"
-    )]
-    fn invoke(&self, call: ModuleCall) {
-        let id = self.bridge.next.get();
-        self.bridge.next.set(id.wrapping_add(1));
-        // The indices, not the callbacks: what crosses is which arguments were
-        // functions, so the page can put a wrapper back in each slot.
-        let indices = call
-            .callbacks
-            .iter()
-            .map(|callback| callback.argument_index().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let has_callbacks = !call.callbacks.is_empty();
-        if has_callbacks {
-            self.bridge.calls.borrow_mut().insert(id, call.callbacks);
-        }
-        let posted = self.bridge.on_call.apply(
-            &JsValue::NULL,
-            &Array::of5(
-                &JsValue::from_f64(id as f64),
-                &JsValue::from_str(&self.name),
-                &JsValue::from_str(&call.method),
-                &JsValue::from_str(&call.arguments),
-                &JsValue::from_str(&indices),
-            ),
-        );
-        if let Err(error) = posted {
-            // The call is the page's, not this Worker's: a bridge that threw
-            // is reported and the callbacks released, rather than failing the
-            // view that made an ordinary call.
-            console_error(&error);
-            if has_callbacks {
-                drop(self.bridge.calls.borrow_mut().remove(&id));
-            }
-        }
-    }
-}
-
 /// A complete browser embedder, permanently owned by the explicit Render
 /// Worker that constructs it. Its canvas, Wasm instance and image decoder
 /// outlive every page it shows; each document, element tree,
@@ -300,14 +203,11 @@ pub struct BobcatRenderer {
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
     style_threads: StyleThreads,
-    /// The host's `NativeModules` table — each module's name and the method
-    /// names the facade checked were functions. Wrapper state like the fonts:
-    /// the page declared it once at `BobcatCanvas.create`, and every view this
-    /// renderer builds gets a fresh set of modules made from it.
-    native_modules: Vec<(String, Vec<String>)>,
-    /// The one bridge those modules share, kept across loads because the
-    /// Render Worker's `onNativeModuleCall` is.
-    module_bridge: Rc<HostModuleBridge>,
+    /// The Render Worker's `postExplorerMessage`, which posts each of
+    /// `js/protocol.d.ts`'s Explorer messages to the facade. Every view this
+    /// renderer builds gets an [`ExplorerModule`] that posts through it.
+    #[cfg(feature = "explorer-module")]
+    on_explorer: js_sys::Function,
     /// The Render Worker's `postTextInputState`: each
     /// [`TextInputState`] the view publishes, as the `bobcat-text-input`
     /// fields, on its way to the facade's `<textarea>` proxy.
@@ -373,9 +273,10 @@ impl BobcatRenderer {
         default_display_linear: bool,
         default_overflow_visible: bool,
         enable_css_selector: bool,
-        native_module_names: Vec<String>,
-        native_module_methods: Vec<String>,
-        on_native_module_call: js_sys::Function,
+        // Called with each Explorer message of `js/protocol.d.ts`, which the
+        // `ExplorerModule` of a build with the `explorer-module` feature
+        // sends; a build without it has no such module and never calls this.
+        on_explorer: js_sys::Function,
         // Called with each published `TextInputState` as one plain object of
         // `js/protocol.d.ts`'s `TextInputFields`.
         on_text_input: js_sys::Function,
@@ -389,26 +290,6 @@ impl BobcatRenderer {
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
-        if native_module_names.len() != native_module_methods.len() {
-            return Err(js_error(
-                "each Bobcat native module needs one comma-joined method list",
-            ));
-        }
-        // Two flat `string[]`s rather than a JavaScript object, because this
-        // is the internal Worker seam and the facade already has the table in
-        // the only order it matters in.
-        let native_modules: Vec<_> = native_module_names
-            .into_iter()
-            .zip(native_module_methods)
-            .map(|(name, methods)| {
-                let methods = if methods.is_empty() {
-                    Vec::new()
-                } else {
-                    methods.split(',').map(str::to_owned).collect()
-                };
-                (name, methods)
-            })
-            .collect();
         // `available_parallelism` cannot answer on Wasm, so the machine's
         // parallelism arrives from `navigator.hardwareConcurrency` — and then
         // takes exactly the path a native view's does, through the same
@@ -426,6 +307,9 @@ impl BobcatRenderer {
                 "one Bobcat Wasm instance supports exactly one renderer; load another page into the existing renderer to replace its native view",
             ));
         }
+
+        #[cfg(not(feature = "explorer-module"))]
+        drop(on_explorer);
 
         let result = async move {
             configure_wasm_workers(worker_url).map_err(js_error)?;
@@ -495,12 +379,8 @@ impl BobcatRenderer {
                 fallback_fonts: Vec::new(),
                 locale: DEFAULT_LOCALE.to_owned(),
                 style_threads,
-                native_modules,
-                module_bridge: Rc::new(HostModuleBridge {
-                    on_call: on_native_module_call,
-                    next: Cell::new(1),
-                    calls: RefCell::new(HashMap::new()),
-                }),
+                #[cfg(feature = "explorer-module")]
+                on_explorer,
                 on_text_input,
                 text_input_focused: false,
                 on_performance,
@@ -1032,53 +912,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Answer one function argument of one host native-module call.
-    ///
-    /// The page's handler is the only thing that can say this, and it says it
-    /// once: the callback with that argument index is taken out of the call
-    /// and consumed, so a second answer finds nothing and is ignored — as is
-    /// an answer to a call whose view has already been replaced. `arguments`
-    /// is JSON array text the BTS realm parses and spreads; `undefined`
-    /// releases the JavaScript function without calling it.
-    #[wasm_bindgen(js_name = answerNativeModuleCallback)]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the call number is the Number this renderer minted for it"
-    )]
-    pub fn answer_native_module_callback(
-        &mut self,
-        call: f64,
-        index: u32,
-        arguments: Option<String>,
-    ) {
-        if !call.is_finite() || call < 0.0 {
-            return;
-        }
-        let id = call as u64;
-        let index = index as usize;
-        let mut calls = self.module_bridge.calls.borrow_mut();
-        let Some(callbacks) = calls.get_mut(&id) else {
-            return;
-        };
-        let Some(position) = callbacks
-            .iter()
-            .position(|callback| callback.argument_index() == index)
-        else {
-            return;
-        };
-        let callback = callbacks.remove(position);
-        if callbacks.is_empty() {
-            calls.remove(&id);
-        }
-        // The invocation is a message the callback sends as it drops, so the
-        // borrow is released first rather than held across it.
-        drop(calls);
-        if let Some(arguments) = arguments {
-            callback.invoke(arguments);
-        }
-    }
-
     /// Report the host's marks around the current view, Lynx's
     /// `setExtraTiming`: when the user opened the page, when the container
     /// (this canvas) was initialized, and when the template was prepared,
@@ -1153,7 +986,6 @@ impl BobcatRenderer {
         drop(self.painter.take());
         self.page_resources = None;
         self.boot_urls.clear();
-        self.module_bridge.calls.borrow_mut().clear();
     }
 }
 
@@ -1192,10 +1024,6 @@ impl BobcatRenderer {
         if self.text_input_focused {
             self.post_text_input(&TextInputState::default());
         }
-        // The outgoing page's unanswered native-module calls belonged to its
-        // realm, which is gone: dropping them releases the JavaScript
-        // functions, and the next page's calls start from an empty map.
-        self.module_bridge.calls.borrow_mut().clear();
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -1243,20 +1071,7 @@ impl BobcatRenderer {
         let boot_urls: Vec<_> = std::iter::once(sources.entry.clone())
             .chain(sources.style_sheets.iter().cloned())
             .collect();
-        // One set of modules per view, made from the table the facade
-        // declared: a module is the view's, and the bridge behind them all is
-        // this renderer's.
-        let native_modules: Vec<Box<dyn NativeModule>> = self
-            .native_modules
-            .iter()
-            .map(|(name, methods)| {
-                Box::new(HostModule {
-                    name: name.clone(),
-                    methods: methods.clone(),
-                    bridge: Rc::clone(&self.module_bridge),
-                }) as Box<dyn NativeModule>
-            })
-            .collect();
+        let native_modules = self.native_modules();
         let built = group.create_lynx_view(
             self.width,
             self.height,
@@ -1333,6 +1148,79 @@ impl BobcatRenderer {
             Err(js_error("the Bobcat renderer is disposed"))
         } else {
             Ok(())
+        }
+    }
+
+    /// The native modules of one view this renderer builds: a fresh
+    /// [`ExplorerModule`] in a build with the `explorer-module` feature, and
+    /// none in a build without it.
+    #[cfg_attr(
+        not(feature = "explorer-module"),
+        expect(
+            clippy::unused_self,
+            reason = "the build without the feature reads nothing of the renderer"
+        )
+    )]
+    fn native_modules(&self) -> Vec<Box<dyn NativeModule>> {
+        #[cfg(feature = "explorer-module")]
+        {
+            vec![Box::new(ExplorerModule::new(BrowserExplorerPage {
+                post: self.on_explorer.clone(),
+            }))]
+        }
+        #[cfg(not(feature = "explorer-module"))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+/// The page an [`ExplorerModule`] asks for what only the page can do: each
+/// request is one of `js/protocol.d.ts`'s Explorer messages, handed to the
+/// Render Worker's `postExplorerMessage`. A post that threw is reported and
+/// the view goes on: the request is the page's, not the view's.
+#[cfg(feature = "explorer-module")]
+#[derive(Debug)]
+struct BrowserExplorerPage {
+    post: js_sys::Function,
+}
+
+#[cfg(feature = "explorer-module")]
+impl BrowserExplorerPage {
+    fn post(&self, kind: &str, fields: &[(&str, &str)]) {
+        let message = Object::new();
+        let set = |key: &str, value: &str| {
+            let _ = Reflect::set(&message, &JsValue::from_str(key), &JsValue::from_str(value));
+        };
+        set("type", kind);
+        for (key, value) in fields {
+            set(key, value);
+        }
+        if let Err(error) = self.post.call1(&JsValue::NULL, &message) {
+            console_error(&error);
+        }
+    }
+}
+
+#[cfg(feature = "explorer-module")]
+impl ExplorerPage for BrowserExplorerPage {
+    fn open_schema(&self, schema: String) {
+        self.post("bobcat-explorer-open-schema", &[("schema", &schema)]);
+    }
+
+    fn store_preference(&self, key: String, value: String) {
+        self.post("bobcat-explorer-store", &[("key", &key), ("value", &value)]);
+    }
+
+    fn notice(&self, notice: ExplorerNotice) {
+        self.post("bobcat-explorer-notice", &[("notice", notice.name())]);
+    }
+
+    fn log(&self, level: LogLevel, message: &str) {
+        let message = JsValue::from_str(message);
+        match level {
+            LogLevel::Info => console_info(&message),
+            LogLevel::Warn => console_warn(&message),
         }
     }
 }
