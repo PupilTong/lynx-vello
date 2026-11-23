@@ -2879,10 +2879,11 @@ cargo check -p bobcat-source
 cargo check -p bobcat-cli --no-default-features --features cli
 cargo check -p bobcat-cli --no-default-features --features server
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
+cargo check -p bobcat-wasm --target wasm32-unknown-unknown --features explorer-module
 cargo check --workspace --all-targets
 ```
 
-The two wasm32 lines take no `--all-targets`, and CI's `browser` job lints
+The three wasm32 lines take no `--all-targets`, and CI's `browser` job lints
 that target with `--lib` for the same reason: `bobcat-core`'s library builds
 there — its tokio features are target-gated, with `time` enabled only off
 wasm32 — while its *dev* dependency asks for `rt-multi-thread`, which does not

@@ -251,45 +251,51 @@ moves and selects all; the facade prevents the textarea's own handling of
 those keys and sends a key the input method is composing with as
 `'Process'`.
 
-**Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
-`BobcatCanvas.create` takes an optional
-`nativeModules: Record<string, Record<string, (...args) => void>>`, checked
-member by member before a Worker exists and retained for every page the canvas
-loads, like its fonts; only the name/method table crosses, as
-`InitMessage.nativeModules` and then two flat `string[]`s to
-`BobcatRenderer::create`, from which each load builds a fresh
-`Vec<Box<dyn NativeModule>>`. The handlers themselves run on the page's main
-thread — that is the point, since `localStorage` and navigation are there — so
-a `HostModule::invoke` posts `bobcat-native-module` (call number, module,
-method, arguments as JSON array text, the function arguments' indices) and the
-facade restores a single-shot wrapper in each named slot before calling the
-handler. The answer returns as `bobcat-native-module-callback` and reaches
-`BobcatRenderer::answerNativeModuleCallback` through the *same* ordered queue
-as pointer input, so it cannot re-enter the Wasm wrapper while an async load
-owns its mutable borrow. A handler that throws is `console.error`ed rather than
-propagated, an unknown module or a call whose view has been replaced is
-dropped, and callbacks nobody answered are released by the next load.
-`load`/`loadLynxXml`/`loadTemplate`/`loadZip` each take an optional
-`{ globalProps }`, JSON-stringified on the facade and written into
-`ViewSources::global_props` unread. `packages/github-pages` is the one embedder
-of both: its `ExplorerModule` gives the `@explorer/homepage` bundle it loads
-first an `openSchema` that resolves an absolute URL, a relative path, or
-`file://lynx?local://<path>[?query]` against the document base and runs the
-page's own template load. Those local paths have targets because the Pages
-build also publishes `@explorer/showcase`'s menus as
-`showcase/menu/<name>.web.bundle` and each `@lynx-example/<category>` it
-depends on as the package's whole `dist/` under `showcase/<category>/`, both
-bundle flavours and the `static/` assets a demo names relative to itself; the
-category list comes from the showcase's dependencies and the packages are
-found through a `createRequire` rooted at its manifest, pnpm's layout keeping
-them under its own `node_modules`. A `.lynx.bundle` local path is loaded as
-the `.web.bundle` beside it, retrying the named file once if that rejects —
-which is how the demos shipping only a source-based `.lynx.bundle` open, while
-a bytecode one fails both. It also has
-`localStorage`-backed preference writes, and
-documented no-ops where a browser demo has no answer — no camera scanner, one
-thread strategy, and no synchronous return value for
-`readFromLocalStorage`/`getSettingInfo`. It passes **no `globalProps`**
+**Native modules are Rust; `globalProps` is the page's.** A view's
+`NativeModules` are `impl bobcat_core::NativeModule`, which
+`BobcatRenderer` hands every view it builds (`native_modules` in
+`src/browser.rs`) and which run inside `LynxView::pump` on the Render Worker;
+the facade takes no JavaScript handlers. The one module is `ExplorerModule`
+(`src/explorer.rs`), compiled with the `explorer-module` cargo feature, off
+by default and turned on by `scripts/build.ts` for the one package
+`pnpm --filter bobcat-wasm build` makes, so the GitHub Pages demo and
+`scripts/render-check.ts` both have it; a build without the feature gives a
+view no module. It declares the Lynx Explorer homepage's methods
+(`openSchema`, `openScan`, `setThreadMode`, `openDevtoolSwitchPage`,
+`saveThemePreferences`, `saveToLocalStorage`, `readFromLocalStorage`,
+`getSettingInfo`), reads each call's JSON arguments itself, logs
+`setThreadMode`/`openDevtoolSwitchPage` on the Render Worker's console,
+answers nothing, and sends the page three typed messages through
+`postExplorerMessage` (a `BobcatRenderer.create` argument) for what needs the
+page: `bobcat-explorer-open-schema` (`schema`, the card's string, never only
+white space), `bobcat-explorer-store` (`key`, `value`, each ECMAScript's
+`String()` of the argument) and `bobcat-explorer-notice` (`emptySchema` for an
+`openSchema` without a URL, `noScanner` for `openScan`). Its logic is written
+over an `ExplorerPage` trait so the native test build checks it; the
+`BrowserExplorerPage` that posts the messages is browser-only. The facade
+turns each message into an `ExplorerRequest` (`kind` `openSchema`, `store` or
+`notice`) for `BobcatCanvas.create`'s `onExplorerRequest` callback, the shape
+`onPerformanceEntry` has: a message whose fields are not the protocol's is
+dropped with a warning, a callback that throws is `console.error`ed, and a
+canvas without the callback drops them. `load`/`loadLynxXml`/`loadTemplate`/
+`loadZip` each take an optional `{ globalProps }`, JSON-stringified on the
+facade and written into `ViewSources::global_props` unread.
+`packages/github-pages` passes `onExplorerRequest` for the
+`@explorer/homepage` bundle it loads first: an `openSchema` request resolves
+an absolute URL, a relative path, or `file://lynx?local://<path>[?query]`
+against the document base and runs the page's own template load. Those local
+paths have targets because the Pages build also publishes
+`@explorer/showcase`'s menus as `showcase/menu/<name>.web.bundle` and each
+`@lynx-example/<category>` it depends on as the package's whole `dist/` under
+`showcase/<category>/`, both bundle flavours and the `static/` assets a demo
+names relative to itself; the category list comes from the showcase's
+dependencies and the packages are found through a `createRequire` rooted at
+its manifest, pnpm's layout keeping them under its own `node_modules`. A
+`.lynx.bundle` local path is loaded as the `.web.bundle` beside it, retrying
+the named file once if that rejects — which is how the demos shipping only a
+source-based `.lynx.bundle` open, while a bytecode one fails both. A `store`
+request writes `localStorage` under a `bobcat-explorer:` prefix, and the two
+notices set the upload status. The page passes **no `globalProps`**
 deliberately: web-core's Explorer hands its view a `theme`, but the homepage
 also reads `screenWidth`/`screenHeight` and flips to a two-column landscape
 layout when the width exceeds the height, which is the wrong shape for this

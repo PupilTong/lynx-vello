@@ -131,6 +131,11 @@ Treat that as a hypothesis to test, not the default explanation for a failure.
     -p seldon -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
+  The package build turns on `bobcat-wasm`'s `explorer-module` feature, which
+  that command leaves off; CI lints it with a second run,
+  `cargo clippy --target wasm32-unknown-unknown --lib -p bobcat-wasm
+  --features explorer-module -- -D warnings`.
+
   `--lib`, not `--all-targets`. `bobcat-core`'s own tokio dependency builds for
   wasm32 because its feature set is target-gated: `rt`, `sync` and `macros`
   everywhere, and `time` only under `cfg(not(target_arch = "wasm32"))`, since

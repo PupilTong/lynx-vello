@@ -6,6 +6,7 @@ import initWasm, {
 import { monitorFrameRate } from './frame-rate.ts'
 import type {
   EditCommand,
+  ExplorerMessage,
   FacadeMessage,
   InitMessage,
   LoadTimingFields,
@@ -114,26 +115,10 @@ async function nextEngineWakeup(): Promise<boolean> {
   return false
 }
 
-// A host native module runs on the page's main thread, not here: the engine
-// hands this Worker the call and the indices of its function arguments, and
-// this posts it on. Nothing is awaited — the realm's method already answered
-// `undefined` — so this returns as soon as the message is queued.
-function postNativeModuleCall(
-  call: number,
-  module: string,
-  method: string,
-  args: string,
-  callbackIndices: string,
-): void {
-  self.postMessage({
-    args,
-    call,
-    callbacks:
-      callbackIndices === '' ? [] : callbackIndices.split(',').map(Number),
-    method,
-    module,
-    type: 'bobcat-native-module',
-  } satisfies RenderWorkerMessage)
+// One Explorer message, built by the engine's `ExplorerModule` on this
+// Worker, on its way to the page (`js/protocol.d.ts`).
+function postExplorerMessage(message: ExplorerMessage): void {
+  self.postMessage(message satisfies RenderWorkerMessage)
 }
 
 // The view's newest `TextInputState`, built by the engine as the protocol's
@@ -196,12 +181,6 @@ async function initialize(message: InitMessage): Promise<void> {
   }
   initialized = true
   await initWasm()
-  // Two parallel `string[]`s: the engine reads the table once, and a flat
-  // pair crosses the wasm-bindgen seam without a JavaScript object model.
-  const nativeModuleNames = Object.keys(message.nativeModules)
-  const nativeModuleMethods = nativeModuleNames.map((name) =>
-    (message.nativeModules[name] ?? []).join(','),
-  )
   renderer = await BobcatRenderer.create(
     message.canvas,
     message.width,
@@ -214,9 +193,7 @@ async function initialize(message: InitMessage): Promise<void> {
     message.config.defaultDisplayLinear,
     message.config.defaultOverflowVisible,
     message.config.enableCSSSelector,
-    nativeModuleNames,
-    nativeModuleMethods,
-    postNativeModuleCall,
+    postExplorerMessage,
     postTextInputState,
     message.observePerformance ? postPerformanceEntry : undefined,
     postMediaRequest,
@@ -654,26 +631,6 @@ self.addEventListener('message', (event) => {
     } else {
       deliverMediaEvent(message.player, message.event, 0, 0, 0, '', '')
     }
-  } else if (message?.type === 'bobcat-native-module-callback') {
-    const answer = (): void => {
-      if (!running || renderer === undefined) {
-        return
-      }
-      try {
-        renderer.answerNativeModuleCallback(
-          message.call,
-          message.index,
-          message.args,
-        )
-      } catch (error) {
-        reportFatal(error)
-      }
-    }
-    // Same queue as pointer input and for the same reason: an answer that
-    // arrives during an async load must not re-enter the Wasm wrapper while
-    // that load owns its mutable borrow. A call whose view has been replaced
-    // is unknown to the renderer by then and is ignored there.
-    requestQueue = requestQueue.then(answer)
   } else if (message?.type === 'bobcat-request') {
     const dispatch = async () => {
       try {

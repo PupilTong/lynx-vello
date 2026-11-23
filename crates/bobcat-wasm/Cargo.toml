@@ -15,6 +15,12 @@ publish = false
 bench = false
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# `NativeModules.ExplorerModule` (`src/explorer.rs`) in every view
+# `BobcatRenderer` builds: the host module the Lynx Explorer homepage calls.
+# `pnpm --filter bobcat-wasm build` turns it on for the one package it builds.
+explorer-module = []
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bobcat-core = { workspace = true }
 bobcat-resources = { workspace = true }
@@ -62,6 +68,8 @@ web-time = { workspace = true }
 # the one native build of this crate that links the engine.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 bobcat-core = { workspace = true }
+# `src/explorer.rs` reads a call's JSON arguments.
+serde_json = { workspace = true }
 # `src/image_frames.rs`, the browser decoder's pure half.
 vant = { workspace = true }
 

@@ -201,6 +201,11 @@ execFileSync(
     '--',
     '-Z',
     'build-std=std,panic_abort',
+    // The one package every consumer uses — the GitHub Pages demo, whose
+    // Explorer homepage calls `NativeModules.ExplorerModule`, and
+    // `scripts/render-check.ts` — gives every view that module.
+    '--features',
+    'explorer-module',
   ],
   {
     cwd: packageDirectory,

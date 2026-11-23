@@ -46,12 +46,10 @@ out at the canvas's.
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
-limited to canvas creation with `PageConfig` and the host's `NativeModules`,
+limited to canvas creation with `PageConfig` and its observation callbacks,
 URL-based page loads with their `globalProps`, font and
 default-family registration, resize, error observation, disposal, and
-automatic pointer and wheel forwarding from the attached HTML canvas. Running
-the host's native-module handlers is its one piece of engine-facing work, and
-it is exactly the work that has to happen there.
+automatic pointer and wheel forwarding from the attached HTML canvas.
 
 The Render Worker calls `configure_wasm_workers` once, then sizes its
 `OffscreenCanvas` to `FrameSize::for_viewport` before building its `Painter`
@@ -317,52 +315,62 @@ builds reports them. They describe the screen rather than the canvas, so
 resizing the canvas does not change them, and a host that can read neither
 leaves each view deriving the three numbers from its own metrics.
 
-## Host native modules and page data
+## Native modules and page data
 
-`BobcatCanvas.create` takes an optional
-`{ nativeModules }`, a `Record<string, Record<string, (...args) => void>>`: the
-host capabilities a page reaches as `NativeModules.<name>.<method>(...)` from
-its background thread. Every member must be a function, checked before the
-Render Worker is created, and the table is retained for every page the canvas
-loads, exactly like its fonts and default family. Only the names cross the
-Worker boundary — `InitMessage.nativeModules`, then two flat `string[]`s to
-`BobcatRenderer::create` — and each load builds a fresh `Vec<Box<dyn
-NativeModule>>` from them for the view it constructs.
+A view's native modules are Rust: `impl bobcat_core::NativeModule`, which
+`BobcatRenderer` hands `LynxGroup::create_lynx_view` for every view it builds,
+and which runs inside `LynxView::pump` on the Render Worker. The facade takes
+no JavaScript handlers. A build without the `explorer-module` feature gives a
+view none.
 
-**The handlers run on the page's main thread**, not on the Render Worker and
-not in the realm that called them. That is the whole reason for the option:
-`localStorage`, navigation and the rest of the DOM are there. So a call is a
-message, `bobcat-native-module`, carrying the call number, the module and
-method names, the arguments as JSON array text with each function argument
-`null`, and the indices of those function arguments. The facade parses the
-text, puts a wrapper back in each named slot and calls the handler. The answer
-is the other message, `bobcat-native-module-callback`, quoting the call number
-and the argument index; the Render Worker queues
-`BobcatRenderer::answerNativeModuleCallback` on the same ordered queue as
-pointer input and the facade operations, so an answer arriving mid-load cannot
-re-enter the Wasm wrapper while that load owns its mutable borrow.
+The one module the crate carries is `ExplorerModule` (`src/explorer.rs`),
+compiled with the `explorer-module` cargo feature, which
+`pnpm --filter bobcat-wasm build` turns on for the one package it builds; every
+consumer of that package, the GitHub Pages demo and `scripts/render-check.ts`
+included, has it. It declares the methods the Lynx Explorer homepage calls:
+`openSchema`, `openScan`, `setThreadMode`, `openDevtoolSwitchPage`,
+`saveThemePreferences`, `saveToLocalStorage`, `readFromLocalStorage` and
+`getSettingInfo`. The Render Worker has no `document`, no `localStorage` and
+no template loader of the page's, so the module reads and checks each call's
+JSON arguments itself and sends the page three typed messages
+(`js/protocol.d.ts`) for what only the page can do:
 
-Nothing returns. The realm's method answered `undefined` before this side ever
-saw the call — native Lynx's shape, not a promise's — so a handler's return
-value is discarded and a handler that throws is reported to `console.error`
-rather than failing anything: the call is the page's. Each wrapper is
-single-shot, like the `ModuleCallback` it answers: the first call posts the
-answer and later ones do nothing. A callback nobody answers keeps its
-JavaScript function alive until the next load, which clears the renderer's
-outstanding calls and releases them all. A call naming a module the host did
-not declare, or an answer to a call whose view has been replaced, is dropped.
+- `bobcat-explorer-open-schema` with `schema`, the string the card passed to
+  `openSchema`, as it passed it, when it is a string that is not only white
+  space;
+- `bobcat-explorer-store` with `key` and `value`, ECMAScript's `String()` of
+  the two arguments of `saveThemePreferences` or `saveToLocalStorage`
+  (`'undefined'` for a missing one);
+- `bobcat-explorer-notice` with `notice`: `emptySchema` for an `openSchema`
+  whose first argument is not such a string, `noScanner` for `openScan`.
+
+`setThreadMode` and `openDevtoolSwitchPage` write a `console.info` line on the
+Render Worker, `openScan` a `console.warn` beside its notice, and
+`readFromLocalStorage` and `getSettingInfo` do nothing: they exist so the
+homepage's feature checks find them, and a module method has no synchronous
+answer to give, so the homepage reads them as no stored value and no settings.
+No method answers a callback; none of the Explorer's calls passes a function.
+
+The facade turns each message into an `ExplorerRequest` —
+`{ kind: 'openSchema', schema }`, `{ kind: 'store', key, value }` or
+`{ kind: 'notice', notice }` — and hands it to the `onExplorerRequest` callback
+of `BobcatCanvas.create`'s options, the shape `onPerformanceEntry` and
+`onFrameRate` have. A message whose fields are not the protocol's is dropped
+with a `console.warn`, a callback that throws is reported to `console.error`,
+and a canvas created without the callback drops every request. The module is
+the same for every page the canvas loads.
 
 `load`, `loadLynxXml`, `loadTemplate` and `loadZip` each take an optional
 `{ globalProps }`: any JSON-serializable value, which the facade stringifies
 (a `TypeError` if JSON refuses it) and the engine hands the page as
 `lynx.__globalProps` without reading. `undefined` means the page gets none.
 
-`packages/github-pages` uses both for the Lynx Explorer homepage it loads
-first. Its `ExplorerModule` answers `openSchema` by resolving what the page
-asked for — an absolute URL, a relative path, or the
+`packages/github-pages` passes `onExplorerRequest` for the Lynx Explorer
+homepage it loads first. An `openSchema` request resolves what the page asked
+for — an absolute URL, a relative path, or the
 `file://lynx?local://<path>[?query]` scheme the Explorer's `navigateTo` builds,
 whose path resolves against the document base — into the page's own entry field
-and running the same load the **Load template** button runs, so a bundle this
+and runs the same load the **Load template** button runs, so a bundle this
 demo does not publish fails in the upload status like any other bad URL.
 
 The targets of those local paths are published beside the page. The build
@@ -375,18 +383,16 @@ read from the showcase's own dependencies, and the packages are located with a
 `createRequire` rooted at its manifest, because pnpm's strict layout keeps them
 under its `node_modules`. A local path names `.lynx.bundle`, which is what a
 native Explorer loads; Bobcat consumes the `.web.bundle` beside it, so
-`openSchema` tries the web sibling first and retries the named file once if
+the page tries the web sibling first and retries the named file once if
 that load rejects — which is what serves the demos shipping only a
 source-based `.lynx.bundle` (`fetch`, `lazy-bundle`, `animation/animate`,
 `layout/relative`). A bundle carrying real bytecode fails both attempts and
 the upload status reports it. The query is kept on either URL.
 
-`openScan` says the browser demo has no camera scanner; `setThreadMode` and
-`openDevtoolSwitchPage` are `console.info` no-ops, Bobcat having one thread
-strategy and no DevTool switches; `saveThemePreferences` and
-`saveToLocalStorage` write under a `bobcat-explorer:` prefix. `getSettingInfo`
-and `readFromLocalStorage` exist only so the page's `typeof` checks pass and
-read back as nothing — a module method has no synchronous answer to give.
+A `store` request writes `localStorage` under a `bobcat-explorer:` prefix, and
+nothing reads it back. The `emptySchema` notice shows "The page asked to open
+an empty URL" in the upload status, and the `noScanner` notice says there that
+the browser demo has no camera scanner.
 
 It passes **no `globalProps` yet**, deliberately. web-core's Explorer hands its
 view a `theme`, but the homepage also reads `screenWidth`/`screenHeight` and

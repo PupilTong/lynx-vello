@@ -733,7 +733,7 @@ Public surface:
   `inputType`, `inputMode`, `enterKeyHint`, `value`, `selectionStart`/`End`,
   `composition` `{start, end}` or `null`, `caret`, `editableBounds`,
   `compositionBounds`, CSS px and UTF-16 units). `BobcatRenderer.create`
-  takes a `postTextInputState` function after `onNativeModuleCall`, and
+  takes a `postTextInputState` function after `postExplorerMessage`, and
   `BobcatRenderer.edit(kind, text, first, second)` is the flat seam the
   Render Worker turns an `EditCommand` into.
 
