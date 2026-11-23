@@ -122,6 +122,12 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   empty final line is pending, which misreports fully consumed content as
   overflowing; decide from the captured lines' consumed units instead.
 - You cannot spawn subagents; audit the reference source yourself and cite it.
+- Code goes in the crate that owns the behaviour (AGENTS.md "Where new code
+  goes"), which can be outside the paths above. Put it there and say so in your
+  report; do not write a local version in the crate you were working in.
+- Before adding a parser, a value conversion, a keyword table or a helper,
+  search `crates/terminus`, `crates/seldon` and `vendor/stylo` for an existing
+  one and use it, widening its visibility if that is what it takes.
 
 ## Before finishing
 
@@ -142,3 +148,6 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   or add a replica.
 - The PR body needs before/after Mermaid diagrams
   (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions").
+- In your report: each new file and why it is in that crate; anything you wrote
+  that repeats existing code, with the reason; the checks you ran with their
+  results, and the ones you did not run.

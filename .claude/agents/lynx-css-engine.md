@@ -101,6 +101,12 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   `docs/tracking/deviations.md`.
 - You cannot spawn subagents. Do the read-only source audit yourself; the main
   session can run `lynx-behavior-researcher` first if it wants one.
+- Code goes in the crate that owns the behaviour (AGENTS.md "Where new code
+  goes"), which can be outside the paths above. Put it there and say so in your
+  report; do not write a local version in the crate you were working in.
+- Before adding a parser, a value conversion, a keyword table or a helper,
+  search `crates/terminus`, `crates/seldon` and `vendor/stylo` for an existing
+  one and use it, widening its visibility if that is what it takes.
 
 ## Before finishing
 
@@ -121,3 +127,6 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   check `git -C vendor/stylo status` for drift you did not intend.
 - The PR body needs before/after Mermaid diagrams
   (`.github/pull_request_template.md`, AGENTS.md "Pull-request descriptions").
+- In your report: each new file and why it is in that crate; anything you wrote
+  that repeats existing code, with the reason; the checks you ran with their
+  results, and the ones you did not run.

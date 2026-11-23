@@ -109,7 +109,7 @@ Subsystems:
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
   per-element facts a `StyleView` answers with that no computed value carries:
   `content-visibility: auto` relevance (`relevance.rs`) and the css-sizing-4
-  last remembered size (`remembered.rs`). Two kinds of box lay their content
+  last remembered size (`committed_box.rs`). Two kinds of box lay their content
   out as one paragraph: a Lynx text element (`Node::is_lynx_text`, from its
   custom element definition, under any `display` but `none` and `contents`;
   the fork's `display: -lynx-text` value that did this until 2026-10-17 is
@@ -428,7 +428,7 @@ Rulings and limits to know before touching it:
   `docs/style-assumptions.md` §19.
 - The css-sizing-4 **last remembered size** is `terminus`'s in the same way, in a
   second slot-keyed side table on `TreeArenas`
-  (`crates/terminus/src/layout/remembered.rs`): the layout host records a box's
+  (`crates/terminus/src/layout/committed_box.rs`): the layout host records a box's
   content box after every committing run in which it had no size containment,
   and `StyleView` substitutes it into `CoreStyle::contain_intrinsic_{width,
   height}` once the box is skipping. That commit's layout run is the spec's

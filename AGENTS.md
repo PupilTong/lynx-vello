@@ -1,12 +1,13 @@
 # lynx-vello — Agent Guide
 
 This is the canonical project doc for coding agents working in this repo.
-Claude Code and Codex both start here: `CLAUDE.md` is a short pointer to this
-file plus Claude-specific notes, `.codex/agents/` mirrors `.claude/agents/`,
+Claude Code and Codex both start here: `CLAUDE.md` imports this file and adds
+Claude-specific notes, `.codex/agents/` mirrors `.claude/agents/`,
 and `.agents/skills/` mirrors `.claude/skills/`.
 
 **How to read the guide.** This file is the part every session needs: Mission,
-Standards policy and Dependency policy set what to build; the Workspace map
+Standards policy and Dependency policy set what to build; Where new code goes
+names the crate that owns a behaviour; the Workspace map
 names each crate and pnpm package and links the file that describes it;
 Reference repos, Reference knowledge, Toolchain and Testing say where to look
 things up and how to run them. What exists inside a crate is not in this file.
@@ -14,13 +15,6 @@ Before reading or changing code under a path in the Workspace map, read the
 file its Guide column links, and only that one: a task in `crates/seldon` does
 not need `crates/bobcat-core`'s. `crates/bobcat-core` is split once more, by
 topic; its `AGENTS.md` is the index, and a task reads the topics it touches.
-
-Format Rust with `cargo fmt -p <crate>` for the crates you touched — never `cargo fmt --all`,
-which reaches into `vendor/stylo` — then run `./.github/scripts/fmt-check.sh`,
-which is CI's check and only verifies formatting. Run
-`pnpm install --frozen-lockfile` and
-`pnpm --filter reactlynx-test-fixtures build` before any Rust test, clippy or
-bench run.
 
 ## Pull-request descriptions
 
@@ -92,24 +86,11 @@ not by what its name resembles:
    - `z-index`/stacking context — Lynx reparents same-`z-index` elements once
      to the nearest "stacking context node" and sorts by raw integer value.
      Implement the real recursive, per-stacking-context CSS algorithm instead.
-   - `position: fixed` — in every mode Lynx supports (legacy,
-     `enable-fixed-new`, `enable-unify-fixed-behavior`) the containing block
-     is always the viewport-sized page root (`ElementManager::root()`),
-     reached by reparenting under it (`FiberElement::InsertFixedElement`,
-     `fiber_element.cc:5037-5096`) or by a root pointer plus a root-only
-     measurement pass (`LayoutObject::GetRoot()`,
-     `LayoutAlgorithm::InitializeFixedNode`, `layout_algorithm.cc:102-130`);
-     ancestor scroll offset is excluded structurally, since the fixed
-     element's view is never mounted inside a scrollable ancestor's hierarchy
-     (`ElementContainer::InsertElementContainerAccordingToElement`,
-     `element_container.cc:321-327`). There is **no exception anywhere for
-     ancestors with `transform`/`filter`/`perspective`/`will-change`/`contain`**
-     (confirmed absent: no `transform` reference in
-     `core/renderer/starlight/layout/`, and Lynx has no `contain` property),
-     and no component-boundary-scoped containing block whatever the
-     `<component>` nesting depth. **Implement the real W3C algorithm**:
-     viewport-equivalent containing block by default, re-anchored to the
-     nearest qualifying ancestor where one exists.
+   - `position: fixed` — Lynx's containing block is always the page root, with
+     no exception for an ancestor with `transform`, `filter`, `perspective`,
+     `will-change` or `contain`. Implement the real W3C algorithm: the
+     viewport by default, re-anchored to the nearest qualifying ancestor. The
+     Lynx source citations are in `docs/tracking/deviations.md`.
 2. **Lynx supports a Lynx-only extension with no W3C equivalent** (e.g.
    `display: linear`, `relative-*` positioning, the `rpx`/`ppx` units).
    Implement **Lynx's actual behavior**, faithfully. **Do not extend these
@@ -151,6 +132,32 @@ structs/maps to build JSON for a JS call. When exposing facts Rust itself owns,
 pass primitive binding arguments and construct the JS object in JavaScript.
 Rust parses structured input only when Rust behavior actually needs its fields
 (for example, page configuration or styles), not merely to forward it to JS.
+
+## Where new code goes
+
+Code belongs to the crate that owns the behaviour, whichever crate first needs
+it:
+
+- A behaviour a W3C, WHATWG or CSS specification defines — parsing a CSS value,
+  the algorithm of an HTML element or API, a serialization — is
+  `crates/terminus`'s (box layout and text shaping: `crates/seldon`), also when
+  the caller is the JavaScript runtime or an embedder. `crates/bobcat-core`
+  then only forwards to it.
+- Lynx policy over those — the UA sheet, Lynx-only elements, the Element PAPI,
+  the page lifecycle — is `crates/bobcat-core`'s and `packages/bobcat-element`'s.
+- Input, device facts, OS services, the draw target and IO are an embedder's
+  (`crates/bobcat-cli`, `crates/bobcat-wasm`), behind the traits
+  `crates/bobcat-core` and `crates/vant` define.
+
+Before writing a parser, a value conversion, a keyword table or a helper,
+search `crates/terminus`, `crates/seldon` and `vendor/stylo` for one that
+exists. When it exists but is private to its crate, the new code goes into
+that crate or the item's visibility widens; the calling crate does not get a
+second copy. Use stylo's own computed-value functions before computing a value
+by hand.
+
+A task that needs code outside the paths its brief or persona names puts that
+code in the owning crate and says so in its report.
 
 ## Where a new fact goes
 
@@ -288,84 +295,21 @@ section is the only place the absolute paths are spelled out.
 
 ### macOS worktree build caches
 
-Install the shared Git hook once with
-`python3 .github/scripts/worktree-cow.py install`. On `git worktree add`, it
-clones the primary checkout's `target` using APFS copy-on-write. Worktrees keep
-independent writable files; subsequent normal checkouts keep their own cache.
-The hook uses the script in the primary checkout so it also works for older
-branches. It does not install dependencies or compile; follow the normal pnpm
-and Cargo prerequisites after checkout.
-
-For existing worktrees, stop builds and rust-analyzer's automatic checks first,
-then run `python3 .github/scripts/worktree-cow.py seed --replace <worktree>` or
-`python3 .github/scripts/worktree-cow.py seed --all --replace`. This replaces
-only existing `target` directories; it leaves sources and Git state intact and
-skips targets already seeded. Cloning must succeed before the old cache is
-removed. Local/path-package fingerprints and local build-script output are
-invalidated; old incremental directories and unrecognized/local dependency
-artifacts are omitted. Incremental compilation settings remain unchanged for
-subsequent builds. External build scripts rerun, so a subsequent build cannot
-mistake the primary checkout's local code for this branch's code. The normal
-build rebuilds these packages while reusable external artifacts remain shared.
-
-The primary checkout must have its submodules/dependencies available for
-`cargo metadata --offline --locked`, and a regular `target` directory on the
-same APFS volume. Custom Cargo target/build directories are not supported.
-Missing or busy seeds cause an explanatory hook message without failing Git;
-retry with `seed <worktree>` later. `BOBCAT_WORKTREE_COW=0` disables automatic
-seeding for one invocation. `--no-checkout` does not run the Git hook; use the
-explicit seed command after checkout. Existing custom hooks are never replaced
-by the installer. See [worktree cache details](docs/worktree-cow.md).
+`python3 .github/scripts/worktree-cow.py install`, run once in the primary
+checkout, makes `git worktree add` clone the primary checkout's `target` by
+APFS copy-on-write. It does not install dependencies or compile.
+`BOBCAT_WORKTREE_COW=0` skips it for one invocation. Seeding an existing
+worktree, the failure cases and the limits are in `docs/worktree-cow.md`.
 
 ### Dev profile debug info and target size
 
-The `dev` profile (and `test`, which inherits it) builds workspace crates with
-`debug = "line-tables-only"` and every dependency, `vendor/stylo` included,
-with `debug = false`. Panic messages and backtraces still name file and line
-in workspace code; a debugger shows no local variables anywhere and no source
-lines inside dependencies. The reason is disk: on macOS debug info stays in the
-object files Cargo keeps beside each artifact, and a clean
-`cargo build --workspace --all-targets` measured 26.2 GB with full debug info
-against 14.0 GB with these settings.
-
-**When a problem is hard to debug, raise the level for that build rather than
-working around the missing information** — stepping through code in `lldb`,
-reading locals in a crash, or a backtrace that stops at a dependency frame are
-all reasons to. Use a command-line override, so the committed profile stays as
-it is:
-
-```sh
-# Full debug info for workspace crates
-CARGO_PROFILE_DEV_DEBUG=true cargo test -p <crate> <filter>
-
-# ...and for dependencies too (stylo, vello_gpu, parley, ...)
-cargo test -p <crate> <filter> \
-  --config 'profile.dev.debug=true' \
-  --config 'profile.dev.package."*".debug=true'
-
-# One dependency only
-cargo test -p <crate> <filter> --config 'profile.dev.package.stylo.debug=true'
-```
-
-Changing the level recompiles the affected crates and writes a second set of
-artifacts next to the first, so go back to the plain command once the problem
-is understood. Do not commit a raised level in `Cargo.toml`.
-
-Cargo never deletes superseded artifacts, and each edit, branch switch or
-feature combination adds a new hashed set: a long-lived worktree's `target`
-grows without bound, mostly in `debug/deps` and `debug/incremental`. With no
-build running in that checkout, remove what has not been used recently with
-[`cargo-sweep`](https://github.com/holmgr/cargo-sweep)
-(`cargo install cargo-sweep`):
-
-```sh
-cargo sweep --time 3          # this checkout: artifacts unused for 3 days
-cargo sweep --time 3 -r ..    # every Cargo project below a directory
-```
-
-It only deletes build output; the next build recompiles whatever it needed
-after all. For a worktree, `worktree-cow.py seed --replace` (above) is the
-complete reset.
+The `dev` and `test` profiles build workspace crates with
+`debug = "line-tables-only"` and every dependency with `debug = false`: panics
+and backtraces name file and line in workspace code, and a debugger shows no
+locals. When a problem needs more, raise the level for that build on the
+command line (`CARGO_PROFILE_DEV_DEBUG=true cargo test -p <crate> <filter>`)
+and never in `Cargo.toml`. The other overrides, and removing old build output
+with `cargo sweep`, are in `docs/dev-profile.md`.
 
 ## Testing
 
@@ -381,7 +325,8 @@ The rest is in `docs/testing.md`; read the part that matches the work:
 
 - **Screenshot tests** — before running, adding or accepting a golden
   (`PRIME_RADIANT_UPDATE_SNAPSHOTS`, the CSS paint atlas workflow).
-- **The Element PAPI and TypeScript suites** — when TypeScript changed.
+- **The Element PAPI and TypeScript suites** — when TypeScript changed
+  (`pnpm test:type`, `pnpm --filter bobcat-element test`).
 - **Input robustness at the external-byte boundaries** — before touching
   `bobcat-source`'s parsers.
 - **The unsafe floor** — before writing `unsafe`.
