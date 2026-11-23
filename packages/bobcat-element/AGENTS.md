@@ -60,7 +60,18 @@ between two runtimes; which of them a realm can link is decided by the host
 modules it declares, not by the table. `src/native.d.ts` declares the three
 host modules' contracts and is the authoritative list of what
 `bobcat-internal:host`, `bobcat-internal:worker` and
-`bobcat-internal:native-modules` export.
+`bobcat-internal:native-modules` export, except the canvas members of
+`bobcat-internal:host`, which `src/canvas-host.d.ts` declares on its own.
+
+`src/canvas-host.d.ts` is the contract an embedder's native-module ES module
+(`lynx:<name>`) is written against, beside the built-in modules: the
+`BobcatCanvasNative` interface, `CanvasErrorName` and the canvas exports of
+`bobcat-internal:host`, with the member contract in its header. A change to a
+canvas member's name, parameters or answer changes what embedder modules are
+written against: update `canvas-host.d.ts` and the member list in
+`crates/bobcat-core/docs/canvas.md` in the same change. A test in
+`crates/bobcat-core/src/canvas/tests.rs` holds the file's exported names equal
+to the ones the engine registers.
 
 What core embeds, with `include_bytes!`, is QuickJS bytecode: TypeScript 7
 compiles `src/*.ts` to JavaScript during the Cargo build, at `target: es2025`

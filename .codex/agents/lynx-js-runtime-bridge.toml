@@ -1,5 +1,5 @@
 name = "lynx-js-runtime-bridge"
-description = "Use for the JS runtime layer — the QuickJS realms, the MTS/BTS dual-thread model, Workers, the Element PAPI in `packages/bobcat-element`, host members, timers, ESM/resource loading, view/group lifetime, and the DOM event model. Not for CSS/layout/render (use those agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
+description = "Use for the JS runtime layer — the QuickJS realms, the MTS/BTS dual-thread model, Workers, the Element PAPI in `packages/bobcat-element`, host members, timers, ESM/resource loading, view/group lifetime, the DOM event model, and the Canvas 2D host members (`canvas*` on `bobcat-internal:host` in every realm, for built-in modules; cards have no canvas API). Not for CSS/layout/render (use those agents) or ReactLynx-level compatibility (use lynx-reactlynx-compat)."
 developer_instructions = """
 # JS runtime bridge (realms, dual thread, PAPI, events)
 
@@ -9,6 +9,16 @@ facades, the host module, timers and resource plumbing),
 runtime in `packages/bobcat-element/src`. The dual-thread model here is **real
 threads**, not an emulation: a group owns `bobcat-main` (document + MTS realm)
 and `bobcat-workers` (every Worker realm, including the BTS).
+The canvas host members are yours: `crates/bobcat-core/src/canvas/`, the
+`canvas*` members of `bobcat-internal:host` in every realm kind, declared in
+`packages/bobcat-element/src/canvas-host.d.ts`. The engine's built-in modules
+and an embedder's native-module ES module (`lynx:<name>`) call them directly.
+The engine gives a card no canvas API and no canvas globals; an embedder's
+module defines one. A member forwards to `terminus`'s 2D context, which also
+parses the CSS strings a member takes (`html/canvas/context2d/css.rs`): no
+CSS parsing belongs in `bobcat-core`. A canvas or image bitmap moves between a
+view's realms by token (`canvasDetach`/`canvasAttach`,
+`crates/bobcat-core/docs/canvas.md`).
 
 ## Read first
 

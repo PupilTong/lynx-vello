@@ -7,6 +7,46 @@ use std::time::{Duration, Instant};
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, NoWakeup};
 
+/// The contract an embedder's `lynx:` module is written against.
+const CANVAS_HOST_D_TS: &str =
+    include_str!("../../../../packages/bobcat-element/src/canvas-host.d.ts");
+
+/// `canvas-host.d.ts` exports, and its `BobcatCanvasNative` declares, the
+/// members the engine registers: [`super::MEMBERS`] in every realm and
+/// [`super::DOCUMENT_MEMBER`] in a realm with a document. A member renamed,
+/// added or removed on one side alone fails here.
+#[test]
+fn canvas_host_d_ts_names_the_members_the_engine_registers() {
+    let mut registered: Vec<&str> = super::MEMBERS.to_vec();
+    registered.push(super::DOCUMENT_MEMBER);
+    registered.sort_unstable();
+
+    let mut exported: Vec<&str> = CANVAS_HOST_D_TS
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("export const "))
+        .map(|rest| rest.split(':').next().unwrap_or_default())
+        .collect();
+    exported.sort_unstable();
+    assert_eq!(exported, registered, "the `bobcat-internal:host` exports");
+
+    let interface = CANVAS_HOST_D_TS
+        .split_once("interface BobcatCanvasNative {")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("canvas-host.d.ts declares BobcatCanvasNative");
+    let mut declared: Vec<&str> = interface
+        .lines()
+        .filter_map(|line| line.strip_prefix("  canvas"))
+        .map(|rest| &rest[..rest.find('(').expect("a member is a method")])
+        .collect();
+    declared.sort_unstable();
+    let declared: Vec<String> = declared
+        .iter()
+        .map(|name| format!("canvas{name}"))
+        .collect();
+    assert_eq!(declared, registered, "the `BobcatCanvasNative` members");
+}
+
 /// One suite of drawing and error checks over the canvas members, as a
 /// module every realm kind imports: `run(realm, report)` reports
 /// `canvas <realm> <failures>`, the failures it found as JSON text.

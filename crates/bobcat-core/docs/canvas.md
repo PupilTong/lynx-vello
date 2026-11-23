@@ -72,22 +72,47 @@ An embedder's module reaches a `<canvas>` from a worker realm this way:
    JavaScript entry that changed the canvas commits it to the placeholder
    from the worker's thread ("The per-entry step" below).
 
-A card-facing canvas API, in an embedder's module or anywhere else, needs
-on top of these members:
+### What an embedder's module writes itself
 
-- a class layer with Web IDL's argument conversions and overloads, which
-  throws the exceptions whose names the members answer (with a
-  `DOMException`, which no realm has), and which keeps the attribute values
-  the members do not read back (below);
-- a way to drop an entry when its object is collected
-  (`FinalizationRegistry`).
+For canvas, the engine gives such a module the members and the UI method
+above and nothing else. A card-facing API over them writes:
+
+- the class layer: Web IDL's argument conversions and overloads, since a
+  member converts nothing ("The members" below);
+- the exceptions whose names the members answer, thrown as objects: a
+  `DOMException` of its own, since no realm has one;
+- the values the members do not read back: `fillStyle`, `strokeStyle`,
+  `shadowColor` and `font`, and a gradient or pattern set with
+  `canvasSetPaint`;
+- `canvasDrop` of an entry once its object is collected, through a
+  `FinalizationRegistry`: no garbage collection drops an entry.
+
+What the engine does not have for this route:
+
+- An image source other than a canvas, an image bitmap or unpremultiplied
+  RGBA8 pixels (`canvasBitmapFrom`, `canvasBitmapFromPixels`): nothing
+  decodes an image from a URL or from encoded bytes.
+- `lynx:` modules in the MTS realm: `esm.rs`'s `build_main_runtime`
+  reserves the `lynx:` prefix on `bobcat-main`, and a `ShadowRealm` child's
+  `lynx:` import is refused (`realm/owner.rs`), so the route covers the BTS
+  and each `Worker`. Code in the MTS realm calls the members directly.
+- An ES module from the browser embedder: no native module `bobcat-wasm`
+  registers supplies an `esm()`, and `BobcatCanvas.create` has no option that
+  takes one. `bobcat-core`'s `esm` path itself has no wasm32-specific code.
+
+The member contract is declared in
+`packages/bobcat-element/src/canvas-host.d.ts`, which an embedder's module
+is written against. A change to a member's name, parameters or answer
+changes what those modules are written against: update `canvas-host.d.ts`
+and the member list below in the same change. A test in
+`canvas/tests.rs` holds the names `canvas-host.d.ts` exports equal to
+`MEMBERS` and `DOCUMENT_MEMBER`.
 
 ## Where it is
 
 - `crates/bobcat-core/src/canvas/`: `mod.rs` the per-realm `CanvasTable`,
-  `members.rs` the `bobcat-internal:host` members (`native.d.ts`'s
-  `BobcatCanvasNative` declares each, with its answer). A context member
-  runs on the canvas's `Context2d`
+  `members.rs` the `bobcat-internal:host` members (`canvas-host.d.ts`'s
+  `BobcatCanvasNative` declares each, with its answer). A context member runs on the canvas's `Context2d`
   (`CanvasTable::context`, or `CanvasTable::draw` for one that may change
   the bitmap and so lists the canvas as drawn); a canvas member runs on the
   `OffscreenCanvas` itself (`CanvasTable::draw_canvas`, the
@@ -276,11 +301,14 @@ realm ended first. The wasm32 wait is compiled and not run by any test.
 - Text is shaped with the realm's fonts: the MTS realm and its children use
   the document's `TextContext` (`Document::text_context_mut`, through the
   `CanvasDocument` impl on the document slot), so `@font-face` faces draw; a
-  worker realm makes a `TextContext` from the process's system-font template
-  at its first text call. The canvas text calls take that `TextContext`
-  and shape through `seldon::text::shape_line`, which fills the fallback
-  lists a missing character needs first and hands parley the context's
-  locale.
+  worker realm makes a `TextContext` at its first text call from the view's
+  `WorkerFonts` (`view/lib.rs`, carried by the worker's `HostOutbox`): the
+  system fonts and the view's `ViewSources::fonts`, `fallback_fonts`,
+  `default_font_family` and `locale`, staged as the document's context is.
+  On wasm32, which has no system fonts, those host fonts are the only ones a
+  worker realm has. The canvas text calls take that `TextContext` and shape
+  through `seldon::text::shape_line`, which fills the fallback lists a
+  missing character needs first and hands parley the context's locale.
 
 ## Size limits
 
@@ -314,7 +342,9 @@ one `currentcolor` is the initial `color`, opaque black.
 `canvas/tests.rs` runs one suite over the members in the MTS realm, a
 `ShadowRealm` child, the BTS and a `Worker`, each importing
 `bobcat-internal:host` from a test module, and checks that no realm kind
-has a canvas global or a `bobcat:canvas` module. `paint/canvas_tests.rs`
+has a canvas global or a `bobcat:canvas` module; it also holds the names
+`canvas-host.d.ts` exports and declares equal to `MEMBERS` and
+`DOCUMENT_MEMBER`. `paint/canvas_tests.rs`
 drives a placeholder end to end through `canvasTransferControl`, through
 `__InvokeUIMethod` and `canvasAttach` in the MTS realm, through the BTS's
 `SelectorQuery.invoke` and `canvasAttach` there, and through a native

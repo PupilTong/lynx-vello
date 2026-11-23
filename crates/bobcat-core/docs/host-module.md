@@ -8,7 +8,9 @@ backticks are relative to the repository root.
 
 The private `MainThreadRuntime` registers the native QuickJS ESM
 `bobcat-internal:host` as one Rust-backed named function export per member, and
-`packages/bobcat-element/src/native.d.ts` is the authoritative enumeration: a
+`packages/bobcat-element/src/native.d.ts` is the authoritative enumeration,
+with the canvas members of every realm kind in
+`packages/bobcat-element/src/canvas-host.d.ts` (`docs/canvas.md`): a
 `declare module "bobcat-internal:host"` block for the MTS realm;
 `"bobcat-internal:worker"` for a worker's, which carries `postWorkerMessage`,
 `closeWorker` and the one-shot `workerName`, and nothing else, the BTS's

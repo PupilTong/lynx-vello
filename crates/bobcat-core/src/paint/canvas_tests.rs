@@ -803,3 +803,24 @@ fn a_canvas_resized_as_it_is_detached_is_committed_by_the_realm_that_attaches_it
     capture_until_inside_only(&mut engine, (10, 5), (30, 5), RED);
     assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
 }
+
+/// A worker realm's canvas text shapes with the view's host fonts
+/// (`ViewSources::fonts`), which on wasm32 are the only fonts there are:
+/// the BTS measures Ahem's em squares in a family no system has.
+#[test]
+fn bts_canvas_text_shapes_with_the_views_host_fonts() {
+    const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
+    let mut engine = TestViewSpec::new("globalThis.renderPage = () => __CreatePage('card', 0);")
+        .with_default_font("Ahem", AHEM)
+        .with_background_entry(
+            r"
+            import * as H from 'bobcat-internal:host';
+            const canvas = H.canvasCreate(10, 10);
+            H.canvasSetFont(canvas, '20px Ahem');
+            console.log(`width ${new Float64Array(H.canvasMeasureText(canvas, 'Hi'))[0]}`);
+            ",
+        )
+        .create(Arc::new(crate::view::NoWakeup));
+    let mut log = Log::default();
+    log.until(&mut engine, |log| log.has("width 40"));
+}

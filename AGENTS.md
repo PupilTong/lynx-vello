@@ -47,10 +47,13 @@ DOM + CSS engine). We replace that browser-hosted implementation with a native,
 cross-platform engine built on:
 
 - **[stylo](https://github.com/servo/stylo)** — CSS parsing/cascade/computed-style engine (Servo's)
-- **[vello_gpu](https://github.com/linebender/vello)** (0.3) — the rasterizer, from the
+- **[vello_gpu](https://github.com/linebender/vello)** (0.4) — the rasterizer, from the
   linebender Vello project: sparse strips generated on the CPU and composited on wgpu 30.
   The paint walk records terminus's own display list, which each render replays into a
-  `vello_gpu::Scene`.
+  `vello_gpu::Scene`. Canvas 2D draws (`terminus::link::html::canvas`), made through host
+  members by the engine's built-in JavaScript and by an embedder's native-module ES module
+  (the engine itself gives cards no canvas API), are recorded into the same display list and
+  replayed into a GPU texture per canvas, which an HTML `<canvas>` placeholder shows.
 - **[parley](https://github.com/linebender/parley)** (0.13) — text layout & shaping, including
   the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
