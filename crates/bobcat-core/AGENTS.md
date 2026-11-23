@@ -64,7 +64,8 @@ the main-thread flush binding — and
 - [Realm, document and boot](docs/realm-boot.md) — the realm (`open_realm`), the
   document, boot and the code cache (`code_cache.rs`).
 - [Painter, frames, pacing and images](docs/painter.md) — the `Painter`, frames,
-  pacing and images.
+  pacing and images, and the placeholder canvases' presenter
+  (`paint/canvas_pictures.rs`).
 - [Workers, the BTS and cross-thread messages](docs/workers.md) — Workers
   (`main/workers.rs`), the BTS and cross-thread messages.
 - [The host module, realm construction and ShadowRealm](docs/host-module.md) —
@@ -85,3 +86,10 @@ the main-thread flush binding — and
   its mapping (`tree/lynx_svg.rs`, `tree/tag_map.rs`) and the `video`
   element (`tree/video.rs`), which `bobcat-core` owns and `terminus` does
   not.
+- [The Canvas 2D API](docs/canvas.md) — the canvas members of
+  `bobcat-internal:host` in every realm kind, called by the built-in
+  modules and an embedder's native-module ES module (`lynx:<name>`); the
+  engine gives cards no canvas API: the per-realm table (`canvas/`),
+  `canvasTransferControl` in the MTS realm, the per-entry flush and commit,
+  pixel reads, the color and font strings (parsed by `terminus`'s 2D
+  context), and the deviations.

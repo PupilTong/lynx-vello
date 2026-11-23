@@ -2456,6 +2456,11 @@ impl MainThreadRuntime {
             // Every child gets the same document members, and `Worker`
             // members of its own.
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
+            // Canvas text here and in every child shapes with the
+            // document's fonts, `@font-face` faces included.
+            crate::canvas::CanvasHost::Document(
+                Rc::downgrade(&slot) as std::rc::Weak<dyn crate::canvas::CanvasDocument>
+            ),
             |engine| {
                 document
                     .install_members(
@@ -5615,6 +5620,48 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
         return Err(malformed());
     }
     Ok((&body[..end], &body[end..]))
+}
+
+impl crate::canvas::CanvasDocument for RefCell<DocumentSlot> {
+    fn with_text_context(&self, shape: &mut dyn FnMut(&mut terminus::link::TextContext)) -> bool {
+        let Ok(mut slot) = self.try_borrow_mut() else {
+            return false;
+        };
+        let Some(document) = slot.document.as_mut() else {
+            return false;
+        };
+        shape(document.text_context_mut());
+        true
+    }
+
+    fn transfer_control_to_offscreen(
+        &self,
+        node: terminus::link::NodeId,
+    ) -> Result<
+        Result<
+            crate::paint::canvas_pictures::Transferred,
+            terminus::link::html::canvas::InvalidState,
+        >,
+        String,
+    > {
+        const NAME: &str = "bobcat-internal:host.canvasTransferControl";
+        let mut slot = self
+            .try_borrow_mut()
+            .map_err(|_| format!("{NAME} cannot re-enter the element tree"))?;
+        let slot = &mut *slot;
+        let document = slot
+            .document
+            .as_mut()
+            .ok_or_else(|| format!("{NAME} ran before the document exists"))?;
+        validate_live_element(document, NAME, node)?;
+        Ok(
+            crate::paint::canvas_pictures::transfer_control_to_offscreen(
+                &slot.outbox,
+                document,
+                node,
+            ),
+        )
+    }
 }
 
 fn borrow_slot<'a>(

@@ -2622,6 +2622,51 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// `transferControlToOffscreen` is no UI method of a `canvas`: the
+/// background thread's `invoke` of it and the main thread's
+/// `__InvokeUIMethod` both take the generic path and answer 3, and the
+/// canvas's control is still there for `canvasTransferControl` to take.
+#[test]
+fn invokes_of_transfer_control_to_offscreen_answer_3_and_transfer_nothing() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        const canvas = __CreateElement('canvas', 0); __SetID(canvas, 'c');
+        __AppendElement(page, canvas);
+        globalThis.canvas = canvas;
+        globalThis.result = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
+        ",
+        Some(
+            r"
+        import { lynx } from 'bobcat:bts-runtime';
+        lynx.createSelectorQuery().select('#c').invoke({
+            method: 'transferControlToOffscreen',
+            fail: result => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:result}),
+            success: data => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{success:true}}),
+        }).exec();
+        ",
+        ),
+    );
+    // The invoke crosses the Worker, then the application result.
+    for _ in 0..2 {
+        pair.deliver();
+    }
+    pair.check(
+        r"
+        import { __InvokeUIMethod, __GetElementUniqueID } from 'bobcat:element';
+        import { canvasTransferControl } from 'bobcat-internal:host';
+        if (result.code !== 3) throw Error(JSON.stringify(result));
+        let answer;
+        __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, value => { answer = value; });
+        if (answer.code !== 3) throw Error(JSON.stringify(answer));
+        const entry = canvasTransferControl(__GetElementUniqueID(canvas));
+        if (!(entry instanceof ArrayBuffer)) throw Error('already transferred: ' + entry);
+    ",
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
 /// Every realm sends its own console output and `lynx.reportError`s to the
 /// view's host, named by its source: the BTS's reach the embedder without a
 /// message to the main-thread realm, and a level is spelled as the console
