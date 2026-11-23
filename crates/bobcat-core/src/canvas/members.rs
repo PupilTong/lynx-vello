@@ -10,7 +10,7 @@
 //! `InternalError`, its message starting with the member's full name. A call
 //! that fails as the HTML Standard says answers the exception's name as a
 //! string (`"IndexSizeError"`, `"TypeError"`, …) and throws nothing;
-//! `packages/bobcat-element/src/native.d.ts` lists each member's answer.
+//! `packages/bobcat-element/src/canvas-host.d.ts` lists each member's answer.
 
 use std::rc::{Rc, Weak};
 
@@ -565,7 +565,7 @@ fn install_context_members(
     Ok(())
 }
 
-// `canvasGetNumber`/`canvasSetNumber`'s `which`, in `native.d.ts`'s order;
+// `canvasGetNumber`/`canvasSetNumber`'s `which`, in `canvas-host.d.ts`'s order;
 // anything past the last is `lineDashOffset`.
 const GLOBAL_ALPHA: u8 = 0;
 const SHADOW_BLUR: u8 = 1;

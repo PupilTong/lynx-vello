@@ -91,5 +91,10 @@ the main-thread flush binding — and
   modules and an embedder's native-module ES module (`lynx:<name>`); the
   engine gives cards no canvas API: the per-realm table (`canvas/`),
   `canvasTransferControl` in the MTS realm, moving a canvas between realms
-  by token, the per-entry flush and commit, pixel reads, the color and font
-  strings (parsed by `terminus`'s 2D context), and the deviations.
+  by token, the `transferControlToOffscreen` UI method, the per-entry flush
+  and commit, pixel reads, the color and font strings (parsed by
+  `terminus`'s 2D context), and the deviations. A
+  change to a canvas member's name, parameters or answer changes what
+  embedder modules are written against: update
+  `packages/bobcat-element/src/canvas-host.d.ts` and the member list in
+  `docs/canvas.md` in the same change.

@@ -3886,6 +3886,45 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
+- **The Canvas 2D host members depart from HTML in these places**
+  (2026-11-19; `crates/bobcat-core/docs/canvas.md`,
+  `docs/terminus-architecture.md` "Canvas 2D context"). The engine gives
+  cards no canvas API; these hold for the `bobcat-internal:host` canvas
+  members the engine's built-in modules and an embedder's `lynx:<name>`
+  native-module ES module call. Neither native Lynx nor web-core defines a
+  canvas API of its own, so the reference is the HTML Standard alone.
+  - *A bitmap side is at most 8,192 px* (`MAX_SURFACE_SIDE`, the texture
+    limit every GPU device is created with). A larger canvas has no
+    bitmap: draws do nothing, `canvasGetImageData` answers transparent
+    black, and as an image source it is `"InvalidStateError"`; a
+    placeholder keeps its last committed picture and size.
+  - *Colors the stylo fork's `lynx` grammar leaves out are refused*:
+    `color-mix()`, `light-dark()`, `contrast-color()` and the system colors
+    (which need a device) leave the fill, stroke and shadow colors
+    unchanged, as an unparsable color does.
+  - *Relative font sizes are approximated*: `em`, `%` and the keywords
+    resolve against 10px as HTML says for an `OffscreenCanvas`, but `ex`
+    and `ch` take half of it and `lh` 1.2 times it rather than the default
+    font's metrics; viewport and container units, `rpx` and a `calc()` of
+    a relative length are refused.
+  - *A shadow under a composite operation other than `source-over` with two
+    or more clip paths* is cast by the shape cut to every clip path but the
+    innermost.
+  - *A dash list that would cut a path into more than 1,000,000 dashes is
+    not applied*: the stroke members and `canvasIsPointInStroke` treat the
+    path as undashed. The standard sets no limit; this is Skia's
+    (`SkDashPath`, `kMaxDashCount`), which Chromium follows.
+  - *A shadow's blur is limited to what the GPU can filter*: the standard
+    deviation (half the shadow blur) is kept so the drop-shadow layer fits
+    the 8,192 px texture side beside the canvas and the offsets (about 905
+    px on a 16 px canvas with no offset), and a shadow that does not fit
+    even unblurred (a large offset, or a canvas side over 8,163 px) is not
+    drawn. The shape is always drawn, and the blur and the offsets read
+    back as set. Browsers bound the blur too (Skia limits its σ).
+  - *`canvasDetach` moves a canvas with its context state*: HTML's transfer
+    steps refuse an `OffscreenCanvas` whose context mode is not none, and
+    there is no `getContext()` here to give a canvas a mode.
+
 - **Main-thread code that names a browser global throws, as on native**
   (user, 2026-10-20). `MTS_CHUNK_PREAMBLE`
   (`crates/bobcat-core/src/esm.rs`) declares none of `navigator`,

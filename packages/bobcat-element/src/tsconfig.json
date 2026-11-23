@@ -9,7 +9,8 @@
   // the file it registers under it; the three host modules —
   // `bobcat-internal:host`, `bobcat-internal:worker` and
   // `bobcat-internal:native-modules` — have no source and are declared in
-  // `native.d.ts`.
+  // `native.d.ts`, the canvas members of `bobcat-internal:host` in
+  // `canvas-host.d.ts`.
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["es2025"],
