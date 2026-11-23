@@ -210,6 +210,12 @@ consequential choice about whether to follow the spec or the quirk.
   element's native view is simply never mounted inside any scrollable
   ancestor — and that part already matches the *observable* CSS behavior of
   staying put while scrolling, so no decision is needed there.)
+  Source: reparenting under the root in `FiberElement::InsertFixedElement`
+  (`fiber_element.cc:5037-5096`); the root pointer and root-only measurement
+  pass in `LayoutObject::GetRoot()` and `LayoutAlgorithm::InitializeFixedNode`
+  (`layout_algorithm.cc:102-130`); the view never mounted inside a scrollable
+  ancestor in `ElementContainer::InsertElementContainerAccordingToElement`
+  (`element_container.cc:321-327`).
 - **css-anchor-position-1 (user-directed extension, 2026-09-29/30)** —
   neither native Lynx nor web-core has the module (web-core leaves it to the
   browser, so a web bundle gets Chrome's behaviour); this engine implements
