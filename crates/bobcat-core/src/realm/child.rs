@@ -54,7 +54,8 @@ use std::rc::{Rc, Weak};
 
 use quickjs_rust_bridge::HostArgument;
 
-use super::{FrameDemand, RealmNames};
+use super::{CoreTables, FrameDemand, RealmNames};
+use crate::canvas::{CanvasHost, CanvasTable, ReadWait};
 use crate::clock::ClockInstant;
 use crate::esm::Export;
 use crate::future::{FutureTable, HostFuture, Outcome};
@@ -95,6 +96,7 @@ pub(crate) struct ChildRealm {
     key: ChildKey,
     timers: Rc<TimerState>,
     futures: Rc<FutureTable>,
+    canvases: Rc<CanvasTable>,
     /// Set once the child is to be released; the epilogue's last step drops
     /// it. Shared, so that whatever retires a child can say so without
     /// borrowing the list.
@@ -354,6 +356,14 @@ impl ChildRealms {
         }
     }
 
+    /// Each child's [`CanvasTable::settle_drawn`], in construction order.
+    pub(crate) fn settle_drawn_canvases(&self) {
+        // Settling runs no JavaScript, so the list stays borrowed throughout.
+        for child in self.live.borrow().iter() {
+            child.canvases.settle_drawn();
+        }
+    }
+
     /// The earliest timer deadline any child has armed.
     pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
         self.live
@@ -477,6 +487,8 @@ pub(crate) struct ShadowRealmHook {
     /// names no [`ChildHostModules`] — a worker's — is timed as.
     pub(crate) opener: Opener,
     pub(crate) child_hosts: Option<Rc<dyn ChildHostModules>>,
+    /// What every child's canvases have of a document: its owner's.
+    pub(crate) canvas_host: CanvasHost,
 }
 
 /// Installs the `ShadowRealm` constructor on `engine`, every construction
@@ -523,6 +535,7 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         },
         &hook.children,
         hook.child_hosts.clone(),
+        hook.canvas_host.clone(),
     )
     .and_then(|tables| {
         if let (Some(modules), Some(opener)) = (&hook.child_hosts, own_opener) {
@@ -533,19 +546,27 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
     // A child the hook could not furnish is kept all the same, retired:
     // the hook runs inside a JavaScript call, where no realm is freed, and
     // the epilogue's release step frees it.
-    let (timers, futures, refused) = match installed {
-        Ok((timers, futures)) => (timers, futures, None),
+    let (tables, refused) = match installed {
+        Ok(tables) => (tables, None),
         Err(error) => {
             retired.set(true);
-            let unused = (Rc::new(TimerState::new()), Rc::new(FutureTable::new()));
-            (unused.0, unused.1, Some(error.message.to_string()))
+            let unused = CoreTables {
+                timers: Rc::new(TimerState::new()),
+                futures: Rc::new(FutureTable::new()),
+                canvases: Rc::new(CanvasTable::new(
+                    &CanvasHost::Worker,
+                    ReadWait::new(hook.host.token(), &hook.thread),
+                )),
+            };
+            (unused, Some(error.message.to_string()))
         }
     };
     children.keep(ChildRealm {
         engine,
         key,
-        timers,
-        futures,
+        timers: tables.timers,
+        futures: tables.futures,
+        canvases: tables.canvases,
         retired,
         in_flight: Cell::new(0),
         state,

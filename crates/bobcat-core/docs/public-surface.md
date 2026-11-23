@@ -65,7 +65,8 @@ document's animation clock to the painter's, then one synchronous operation
 under the borrows of the shared runtime and the realm, and then that
 operation's epilogue. The epilogue is one function;
 what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
-step. For a page the order is: the timers that came due, the commit — then the
+step. For a page the order is: the timers that came due, the canvases drawn
+during the entry (`docs/canvas.md`), the commit — then the
 `<text>` `layout` reports that commit left (queued as component events), the
 resize observations that commit moved, the intersection observations that
 commit or an adopted scroll moved, and the resize, intersection,

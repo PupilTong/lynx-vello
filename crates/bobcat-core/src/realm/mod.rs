@@ -43,6 +43,7 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use self::child::{ChildHostModules, ChildKey, ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
+use crate::canvas::{CanvasHost, CanvasTable, ReadWait};
 use crate::esm::{Export, HOST_MODULE_SPECIFIER};
 use crate::future::FutureTable;
 use crate::jobs::JsThreadHandle;
@@ -54,7 +55,7 @@ use crate::timers::{TimerState, install_timer_members};
 use crate::view::{EngineEvent, ScriptSource};
 
 /// What every realm holds, whatever else its owner keeps beside it: the realm
-/// itself and the two tables its core members write to.
+/// itself and the tables its core members write to.
 ///
 /// `engine` is declared first, so an owner that holds this as its first field
 /// frees the realm, and with it every host function that holds a clone of
@@ -78,6 +79,8 @@ pub(crate) struct RealmCore {
     /// Every host-backed operation this realm holds a `Future` for, every
     /// `fetchResource` included.
     pub(crate) futures: Rc<FutureTable>,
+    /// The canvas objects this realm's JavaScript names by id.
+    pub(crate) canvases: Rc<CanvasTable>,
 }
 
 /// One JavaScript context of an owner's realm tree on this runtime: the
@@ -117,6 +120,13 @@ impl RealmId {
 }
 
 impl RealmCore {
+    /// What follows every entry for the realm's canvases: the realm's own
+    /// [`CanvasTable::settle_drawn`], then each `ShadowRealm` child's.
+    pub(crate) fn settle_drawn_canvases(&self) {
+        self.canvases.settle_drawn();
+        self.children.settle_drawn_canvases();
+    }
+
     /// Every realm of this core, the owner's own first, then its children in
     /// construction order.
     pub(crate) fn realm_ids(&self) -> impl Iterator<Item = RealmId> + use<> {
@@ -214,7 +224,9 @@ impl RealmCore {
 /// named by when they reach the embedder, and the realm its fetches are
 /// timed as: the page realm's [`crate::performance::OpenerId::PAGE`], or the
 /// worker. `child_hosts` is what every `ShadowRealm` child of this realm, and
-/// of its children, gets beyond the core.
+/// of its children, gets beyond the core. `canvas_host` is what this
+/// realm's and its children's canvases have of a document.
+#[expect(clippy::too_many_arguments, reason = "what a realm is opened with")]
 pub(crate) fn open_realm<T>(
     js: &mut ScriptRuntime,
     host: &HostOutbox,
@@ -222,6 +234,7 @@ pub(crate) fn open_realm<T>(
     frame_target: Option<WorkerKey>,
     names: RealmNames,
     child_hosts: Option<Rc<dyn ChildHostModules>>,
+    canvas_host: CanvasHost,
     host_modules: impl FnOnce(&mut ScriptEngine) -> Result<T, ScriptError>,
 ) -> Result<(RealmCore, T), ScriptError> {
     let mut engine = js
@@ -233,7 +246,11 @@ pub(crate) fn open_realm<T>(
     engine.enable_module_loading();
     let children = Rc::new(ChildRealms::new());
     engine.set_children(Rc::downgrade(&children));
-    let (timers, futures) = install_realm_core(
+    let CoreTables {
+        timers,
+        futures,
+        canvases,
+    } = install_realm_core(
         &mut engine,
         host,
         thread,
@@ -241,6 +258,7 @@ pub(crate) fn open_realm<T>(
         names,
         &Rc::downgrade(&children),
         child_hosts,
+        canvas_host,
     )?;
     let installed = host_modules(&mut engine)?;
     Ok((
@@ -249,6 +267,7 @@ pub(crate) fn open_realm<T>(
             children,
             timers,
             futures,
+            canvases,
         },
         installed,
     ))
@@ -273,15 +292,23 @@ pub(crate) struct RealmNames {
     pub(crate) opener: Opener,
 }
 
+/// The tables the core members of one realm write to.
+pub(crate) struct CoreTables {
+    pub(crate) timers: Rc<TimerState>,
+    pub(crate) futures: Rc<FutureTable>,
+    pub(crate) canvases: Rc<CanvasTable>,
+}
+
 /// Installs the members every realm has, the `ShadowRealm` constructor last,
-/// and answers with the two tables they write to.
+/// and answers with the tables they write to.
 ///
 /// One function for an owner's realm and for each `ShadowRealm` child, which
 /// differ only in `frames` and in `names`' opener. A child is furnished from
 /// inside its parent's JavaScript, which is why nothing here takes the
 /// runtime. `children` is the list every `new ShadowRealm()` of this realm,
-/// and of its children, joins, and `child_hosts` what each of them gets
-/// beyond the core.
+/// and of its children, joins, `child_hosts` what each of them gets beyond
+/// the core, and `canvas_host` what their canvases have of a document.
+#[expect(clippy::too_many_arguments, reason = "what a realm's core is made of")]
 fn install_realm_core(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
@@ -290,7 +317,8 @@ fn install_realm_core(
     names: RealmNames,
     children: &Weak<ChildRealms>,
     child_hosts: Option<Rc<dyn ChildHostModules>>,
-) -> Result<(Rc<TimerState>, Rc<FutureTable>), ScriptError> {
+    canvas_host: CanvasHost,
+) -> Result<CoreTables, ScriptError> {
     let RealmNames { source, opener } = names;
     let notices = host.clone();
     crate::script_frames::install(engine, move |pending| {
@@ -313,6 +341,12 @@ fn install_realm_core(
         .map_err(|error| context_of("installing require", error))?;
     install_diagnostics(engine, host, source.clone())
         .map_err(|error| context_of("installing the diagnostics members", error))?;
+    let canvases = Rc::new(CanvasTable::new(
+        &canvas_host,
+        ReadWait::new(host.token(), &thread),
+    ));
+    crate::canvas::install(engine, &canvases)
+        .map_err(|error| context_of("installing the canvas members", error))?;
     child::install(
         engine,
         ShadowRealmHook {
@@ -322,10 +356,15 @@ fn install_realm_core(
             source,
             opener,
             child_hosts,
+            canvas_host,
         },
     )
     .map_err(|error| context_of("installing ShadowRealm", error))?;
-    Ok((timers, futures))
+    Ok(CoreTables {
+        timers,
+        futures,
+        canvases,
+    })
 }
 
 /// Installs the two members this realm's console and `reportError` are written

@@ -39,8 +39,9 @@ realm, enables module loading and installs the core every realm has under
 resolved against the view's base, as the fetcher resolves what it is handed),
 `resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair
 `reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
-`ConsoleMessage` through the realm's own `HostOutbox`, and then the global
-`ShadowRealm` (below). Registering a host member takes no runtime borrow: it
+`ConsoleMessage` through the realm's own `HostOutbox`, the canvas members
+over a `CanvasTable` of the realm's own (`docs/canvas.md`), and then the
+global `ShadowRealm` (below). Registering a host member takes no runtime borrow: it
 enters no JavaScript, and a child is furnished from inside the parent's entry,
 which holds the runtime. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
@@ -59,7 +60,7 @@ two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
 over its key and its URL, whatever that URL is. What it
-answers with, `RealmCore { engine, children, timers, futures }`, is the first
+answers with, `RealmCore { engine, children, timers, futures, canvases }`, is the first
 field of both `MainThreadRuntime` and the worker thread's `WorkerRealm`; the
 MTS realm holds it as an `Rc<RealmCore>`, the one strong handle, because its
 synthetic dispatch member reaches the same table through a `Weak` from inside

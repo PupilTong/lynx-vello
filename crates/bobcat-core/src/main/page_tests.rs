@@ -5601,3 +5601,63 @@ realm.evaluate(`report => {{
         );
     });
 }
+
+/// The epilogue of each entry that drew replays what the canvas recorded:
+/// entries that draw and never read leave nothing recorded behind each one,
+/// and an entry that drew nothing settles nothing.
+#[test]
+fn the_epilogue_replays_the_canvases_an_entry_drew() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+import * as H from 'bobcat-internal:host';
+globalThis.H = H;
+globalThis.canvas = H.canvasCreate(8, 8);
+H.canvasFillRect(canvas, 0, 0, 4, 4);
+"
+            ))
+            .await;
+        let state = |owned: &OwnedPage| {
+            owner::enter(&owned.page, JobKind::Command, |runtime, _| {
+                let canvases = &runtime.core().canvases;
+                (canvases.has_pending_draws(), canvases.settled.get())
+            })
+        };
+        let (pending, mut settled) = state(&owned).await.expect("the page is live");
+        assert!(!pending, "boot's draw was settled");
+        assert_eq!(settled, 1, "boot drew the one canvas");
+        for tick in 0..3 {
+            owner::enter(&owned.page, JobKind::Command, move |runtime, js| {
+                runtime.evaluate_module(
+                    js,
+                    &format!("H.canvasFillRect(canvas, {tick}, 0, 1, 1);"),
+                    &format!("app:///draw-{tick}.js"),
+                    "drawing",
+                )
+            })
+            .await
+            .expect("the page is live")
+            .expect("the draw runs");
+            let (pending, now) = state(&owned).await.expect("the page is live");
+            assert!(!pending, "entry {tick} left draws recorded");
+            assert_eq!(now, settled + 1, "entry {tick} settled its canvas once");
+            settled = now;
+        }
+        owner::enter(&owned.page, JobKind::Command, |runtime, js| {
+            runtime.evaluate_module(
+                js,
+                "H.canvasGetNumber(canvas, 0); H.canvasGetTransform(canvas);",
+                "app:///read.js",
+                "reading",
+            )
+        })
+        .await
+        .expect("the page is live")
+        .expect("the read runs");
+        let (_, now) = state(&owned).await.expect("the page is live");
+        assert_eq!(now, settled, "an entry that drew nothing settled nothing");
+    });
+}

@@ -1867,7 +1867,7 @@ fn a_worker_realm_declares_these_host_members() {
         group.message(0),
         wire(&format!(
             "{} / {} / {}",
-            host.join(","),
+            crate::canvas::host_members_with_canvas(&host),
             worker.join(","),
             native_modules.join(",")
         ))

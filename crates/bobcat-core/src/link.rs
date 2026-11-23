@@ -50,6 +50,7 @@ use crate::background::{WorkerKey, WorkerMessage};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::{ModuleReply, NativeModuleEsms};
+use crate::paint::CanvasPictures;
 use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
@@ -237,6 +238,12 @@ pub(crate) enum ToMain {
         index: u32,
         arguments: Option<String>,
     },
+    /// A placeholder canvas committed a frame of a new size: main applies
+    /// the committed sizes (`terminus`'s `update_placeholders`). Sent by a
+    /// [`CanvasPresenter`](crate::paint::canvas_pictures::CanvasPresenter) on any thread,
+    /// outside the seat's [`CommandSender`] like [`Self::ModuleCallback`],
+    /// at most once until main has applied it; it carries no pixels.
+    CanvasResized,
     /// A monitor was turned on, or changed, by one of `LynxView`'s
     /// monitor setters: start the view's task that serves it, for as long
     /// as that configuration is the monitor's current one.
@@ -714,6 +721,10 @@ pub(crate) struct ViewSeat<P = std::convert::Infallible> {
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
     pub(crate) images: Rc<dyn FrameImages<PlatformFrame = P>>,
+    /// The view's placeholder canvases, which the painter answers ahead of
+    /// `images`. Main holds a clone of its own, in the view's
+    /// [`ViewOutbox`].
+    pub(crate) canvases: Arc<CanvasPictures>,
     /// Where the painter posts its scroll offsets, its frame requests and its
     /// clock. Main holds a clone of its own: the seat never leaves this
     /// thread.
@@ -760,6 +771,13 @@ pub(crate) struct ViewOutbox {
     /// This view's native module ES modules, read by `create_lynx_view` and
     /// handed to every [`HostOutbox`] the view makes, a worker's included.
     native_esms: Arc<NativeModuleEsms>,
+    /// This view's placeholder canvases, made by `create_lynx_view` and
+    /// shared with its seat.
+    canvases: Arc<CanvasPictures>,
+    /// This view's command channel, held weakly and outside the seat's
+    /// count: what a canvas presenter sends [`ToMain::CanvasResized`] on.
+    /// `None` for an outbox no view built.
+    main: Option<mpsc::WeakUnboundedSender<ToMain>>,
 }
 
 impl ViewOutbox {
@@ -787,6 +805,8 @@ impl ViewOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            canvases: Arc::default(),
+            main: None,
         }
     }
 
@@ -795,6 +815,34 @@ impl ViewOutbox {
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
+    }
+
+    /// This outbox with the view's placeholder canvases, which its seat
+    /// shares, and the weak handle on the view's command channel a canvas
+    /// presenter sends on.
+    pub(crate) fn with_canvases(
+        mut self,
+        canvases: Arc<CanvasPictures>,
+        main: mpsc::WeakUnboundedSender<ToMain>,
+    ) -> Self {
+        self.canvases = canvases;
+        self.main = Some(main);
+        self
+    }
+
+    /// This view's placeholder canvases.
+    pub(crate) const fn canvases(&self) -> &Arc<CanvasPictures> {
+        &self.canvases
+    }
+
+    /// The weak handle on this view's command channel.
+    pub(crate) const fn main(&self) -> Option<&mpsc::WeakUnboundedSender<ToMain>> {
+        self.main.as_ref()
+    }
+
+    /// What wakes the embedder's thread: see [`Self::wake`].
+    pub(crate) const fn requester(&self) -> &Arc<dyn EventRequester> {
+        &self.requester
     }
 
     /// This view's pipeline registry.
