@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::background::{WorkerKey, WorkerMessage};
+use crate::canvas::CanvasHandOver;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::{ModuleReply, NativeModuleEsms};
@@ -84,6 +85,10 @@ pub(crate) struct HostOutbox {
     /// completes an import of `lynx:<name>` from. It rides here because a
     /// worker's outbox is what travels to the worker thread.
     native_esms: Arc<NativeModuleEsms>,
+    /// The view's store of canvases handed from one realm to another
+    /// (`canvasDetach`/`canvasAttach`). It rides here because every realm
+    /// of the view, a worker's included, opens its canvas table over it.
+    canvas_hand_over: Arc<CanvasHandOver>,
 }
 
 impl HostOutbox {
@@ -103,6 +108,7 @@ impl HostOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            canvas_hand_over: Arc::default(),
         }
     }
 
@@ -110,6 +116,17 @@ impl HostOutbox {
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
+    }
+
+    /// This outbox with the view's canvas hand-over store.
+    pub(crate) fn with_canvas_hand_over(mut self, store: Arc<CanvasHandOver>) -> Self {
+        self.canvas_hand_over = store;
+        self
+    }
+
+    /// The view's canvas hand-over store.
+    pub(crate) const fn canvas_hand_over(&self) -> &Arc<CanvasHandOver> {
+        &self.canvas_hand_over
     }
 
     /// The view's native module ES modules.
@@ -778,6 +795,9 @@ pub(crate) struct ViewOutbox {
     /// count: what a canvas presenter sends [`ToMain::CanvasResized`] on.
     /// `None` for an outbox no view built.
     main: Option<mpsc::WeakUnboundedSender<ToMain>>,
+    /// This view's store of canvases handed from one realm to another, made
+    /// with the outbox and handed to every [`HostOutbox`] it makes.
+    canvas_hand_over: Arc<CanvasHandOver>,
 }
 
 impl ViewOutbox {
@@ -807,6 +827,7 @@ impl ViewOutbox {
             native_esms: Arc::default(),
             canvases: Arc::default(),
             main: None,
+            canvas_hand_over: Arc::default(),
         }
     }
 
@@ -876,6 +897,7 @@ impl ViewOutbox {
             Arc::clone(&self.registry),
         )
         .with_native_esms(Arc::clone(&self.native_esms))
+        .with_canvas_hand_over(Arc::clone(&self.canvas_hand_over))
     }
 
     /// Announces one notice, then wakes the thread that paints.

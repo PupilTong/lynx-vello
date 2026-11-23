@@ -738,6 +738,8 @@ declare module "bobcat-internal:host" {
   export const canvasCreate: BobcatCanvasNative["canvasCreate"];
   export const canvasDrop: BobcatCanvasNative["canvasDrop"];
   export const canvasSetSize: BobcatCanvasNative["canvasSetSize"];
+  export const canvasDetach: BobcatCanvasNative["canvasDetach"];
+  export const canvasAttach: BobcatCanvasNative["canvasAttach"];
   export const canvasPath: BobcatCanvasNative["canvasPath"];
   export const canvasPathFromSvg: BobcatCanvasNative["canvasPathFromSvg"];
   export const canvasAddPath: BobcatCanvasNative["canvasAddPath"];
@@ -821,12 +823,12 @@ type CanvasErrorName = string;
  *
  * Each canvas, path, gradient, pattern and image bitmap is an entry of the
  * realm's own table under an id, from 1 and never reused. An entry lives
- * until `canvasDrop(id)` or the realm's end; nothing drops one when the
- * caller stops using its id. Arguments are taken as given, with no
- * conversion: numbers, strings, booleans, and a fixed-length `ArrayBuffer`
- * with the offset and length of the bytes to read in it. A value of another
- * type, or an id naming nothing of the kind, throws an `InternalError` whose
- * message starts with the member's full name.
+ * until `canvasDrop(id)`, `canvasDetach(id)` or the realm's end; nothing
+ * drops one when the caller stops using its id. Arguments are taken as
+ * given, with no conversion: numbers, strings, booleans, and a fixed-length
+ * `ArrayBuffer` with the offset and length of the bytes to read in it. A
+ * value of another type, or an id naming nothing of the kind, throws an
+ * `InternalError` whose message starts with the member's full name.
  *
  * A canvas `target` names a canvas; the path members also take a path's id
  * there. A `which` selects one attribute of a shared getter and setter, in
@@ -841,6 +843,22 @@ interface BobcatCanvasNative {
   canvasDrop(id: number): void;
   /** The canvas's new size, as setting `width`/`height` does: the bitmap and the context state reset. */
   canvasSetSize(target: number, width: number, height: number): void;
+  /**
+   * Takes the canvas or image bitmap `target` out of this realm's table and
+   * puts it in the view's hand-over store, answering its token: a number
+   * any realm of the same view can pass to `canvasAttach`. A canvas goes as
+   * it is — bitmap, context state, draws not yet replayed, its placeholder
+   * binding. `target` names nothing afterwards. An id of a path, gradient or
+   * pattern, or of nothing, throws as any wrong id does.
+   */
+  canvasDetach(target: number): number;
+  /**
+   * Takes the entry the view's hand-over store holds under `token` into
+   * this realm's table, answering `[id, width, height]` in a
+   * `Float64Array`'s bytes; `"InvalidStateError"` for a token that names
+   * nothing in the store (never issued, already attached, another view's).
+   */
+  canvasAttach(token: number): ArrayBuffer | CanvasErrorName;
   /** A new path (HTML's `Path2D`): empty for `source` 0, else a copy of that path. */
   canvasPath(source: number): number;
   /** A new path of SVG path data (empty for data with an error). */

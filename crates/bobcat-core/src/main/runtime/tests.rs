@@ -13506,3 +13506,56 @@ fn a_realm_keeps_the_canvas_replay_state_while_it_holds_a_canvas() {
     assert_eq!(canvases.census(), [0, 0, 0, 0, 1], "the bitmap is left");
     assert!(!canvases.keeps_replay_state());
 }
+
+/// The replay state follows the last canvas out of a table and into it:
+/// `canvasDetach` of the realm's last canvas lets go of it, an image bitmap
+/// detached or attached changes nothing, and `canvasAttach` of a canvas
+/// takes it again. A canvas detached with draws not replayed is listed as
+/// drawn where it is attached.
+#[test]
+fn the_canvas_replay_state_follows_the_last_canvas_out_and_in() {
+    let (mut js, mut runtime, _elements) = runtime();
+    let canvases = Rc::clone(&runtime.core().canvases);
+    let run = |runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime, script: &str| {
+        let script = format!("import * as H from 'bobcat-internal:host';\n{script}");
+        runtime
+            .evaluate_module(js, &script, "app:///hand-over.js", "handing over")
+            .unwrap();
+    };
+    run(
+        &mut runtime,
+        &mut js,
+        "const canvas = H.canvasCreate(4, 4);
+        H.canvasFillRect(canvas, 0, 0, 4, 4);
+        globalThis.bitmap = H.canvasBitmapFromPixels(new Uint8Array(4).buffer, 0, 4, 1, 1);
+        globalThis.canvasToken = H.canvasDetach(canvas);",
+    );
+    assert_eq!(canvases.census(), [0, 0, 0, 0, 1]);
+    assert!(!canvases.keeps_replay_state(), "the last canvas left");
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(
+        canvases.settled.get(),
+        0,
+        "a detached canvas leaves the drawn list"
+    );
+
+    run(
+        &mut runtime,
+        &mut js,
+        "globalThis.bitmapToken = H.canvasDetach(bitmap);",
+    );
+    assert_eq!(canvases.census(), [0, 0, 0, 0, 0]);
+    run(&mut runtime, &mut js, "H.canvasAttach(bitmapToken);");
+    assert!(
+        !canvases.keeps_replay_state(),
+        "a bitmap takes no replay state"
+    );
+
+    run(&mut runtime, &mut js, "H.canvasAttach(canvasToken);");
+    assert_eq!(canvases.census(), [1, 0, 0, 0, 1]);
+    assert!(canvases.keeps_replay_state(), "an attached canvas takes it");
+    assert!(canvases.has_pending_draws());
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(canvases.settled.get(), 1, "its recorded draws are settled");
+    assert!(!canvases.has_pending_draws());
+}

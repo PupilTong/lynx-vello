@@ -14,34 +14,63 @@ replays it on the GPU. This crate exposes it as host members of
 `bobcat-internal:host`, functions over ids. Their callers are the engine's
 built-in JavaScript (the `bobcat:*` modules of `packages/bobcat-element`)
 and an embedder's native-module ES module (`lynx:<name>`,
-`NativeModule::esm` in `src/native_module.rs`). No built-in module calls
-them yet.
+`NativeModule::esm` in `src/native_module.rs`). Of the built-in modules,
+`bobcat:element` calls two, `canvasTransferControl` and `canvasDetach`, for
+the `transferControlToOffscreen` UI method ("Cards" below).
 
 A `<canvas>` element shows what a canvas commits to it once the MTS realm
 has bound it as the canvas's placeholder with `canvasTransferControl` ("The
-placeholder canvas" below); the element has no `getContext()`. A canvas is
-not moved between realms yet. The painter's side of a placeholder is
+placeholder canvas" below); the element has no `getContext()`. A canvas or
+image bitmap moves from one realm of a view to another by token ("Moving a
+canvas between realms" below). The painter's side of a placeholder is
 `painter.md`'s "Placeholder canvases".
 
 ## Cards
 
-Cards have no canvas API. No realm has `OffscreenCanvas`,
+The engine gives cards no canvas API. No realm has `OffscreenCanvas`,
 `OffscreenCanvasRenderingContext2D`, `CanvasGradient`, `CanvasPattern`,
 `TextMetrics`, `ImageData`, `ImageBitmap`, `Path2D`, `DOMException` or
 `createImageBitmap` as a global, no built-in module exports them, and
 `bobcat:canvas` is no module (its import fails in the realm with a
-`ReferenceError`, as any unregistered `bobcat:` name does). A card's
-`__InvokeUIMethod(canvas, 'transferControlToOffscreen', …)`, and the
-background thread's `SelectorQuery.invoke` of it, take the generic
-UI-method path: no element kind and no base method answers that name, so
-the answer is code 3 (`UI_METHOD_NOT_FOUND`) and the element stays in
-context mode none.
+`ReferenceError`, as any unregistered `bobcat:` name does).
 
-The engine gives cards no canvas API. The canvas members are called by the
-engine's built-in modules and by an embedder's `lynx:<name>` module, which
-may define a card-facing API over them. `bobcat-internal:host` is not
-closed to card code: an `import` of it from a card links like any other,
-as it does for every other host member, and nothing checks the caller.
+The canvas members are called by the engine's built-in modules and by an
+embedder's `lynx:<name>` module, which may define a card-facing API over
+them. `bobcat-internal:host` is not closed to card code: an `import` of it
+from a card links like any other, as it does for every other host member,
+and nothing checks the caller.
+
+### `transferControlToOffscreen` as a UI method
+
+`__InvokeUIMethod(canvas, 'transferControlToOffscreen', params, callback)`
+on a `canvas` element does not reach `callElementMethod`:
+`element-papi.ts`'s `invokeUIMethod` calls `canvasTransferControl` on the
+element and, when that answers an entry, `canvasDetach` on it in the same
+call, and answers `{code: 0, data: {token, width, height}}`: the hand-over
+token ("Moving a canvas between realms" below) and the placeholder's
+`width` and `height` at the transfer. The entry is in no realm's table
+until a `canvasAttach(token)` files it. A canvas already transferred
+answers `{code: 7, data: undefined}` (7 is `INVALID_STATE_ERROR`, the code
+a kind's method failing with `InvalidStateError` answers). `params` is not
+read. Any other element kind, and any other method on a `canvas`, takes
+the generic path, where no element kind and no base method answers that
+name, so the answer is code 3 (`METHOD_NOT_FOUND`).
+
+The background thread's `SelectorQuery.invoke` of the method runs the same
+`invokeUIMethod` in the MTS realm, so it answers the same: the data is
+three numbers, which the existing reply carries. A token nobody attaches
+stays in the view's hand-over store until the view ends.
+
+An embedder's module reaches a `<canvas>` from a worker realm this way:
+
+1. `lynx.createSelectorQuery().select(selector).invoke({method:
+   'transferControlToOffscreen', success, fail})` from `bobcat:bts-runtime`;
+2. `success({token, width, height})` calls `canvasAttach(token)`, which
+   answers `[id, width, height]` as a `Float64Array`'s bytes, or
+   `"InvalidStateError"` for a token already attached;
+3. the module draws on `id` with the canvas members; the end of each
+   JavaScript entry that changed the canvas commits it to the placeholder
+   from the worker's thread ("The per-entry step" below).
 
 A card-facing canvas API, in an embedder's module or anywhere else, needs
 on top of these members:
@@ -50,14 +79,8 @@ on top of these members:
   throws the exceptions whose names the members answer (with a
   `DOMException`, which no realm has), and which keeps the attribute values
   the members do not read back (below);
-- those classes as globals of each realm kind that should have them, and a
-  way to drop an entry when its object is collected
-  (`FinalizationRegistry`);
-- a route for `transferControlToOffscreen`: `element-papi.ts`'s
-  `invokeUIMethod` calling `canvasTransferControl` for a `canvas` and
-  answering the object, since `callElementMethod`'s answer is a record and
-  cannot carry one, and an answer for the background thread's `invoke`,
-  whose reply is a structured clone that a realm's canvas does not cross.
+- a way to drop an entry when its object is collected
+  (`FinalizationRegistry`).
 
 ## Where it is
 
@@ -100,6 +123,8 @@ reads and writes, and the objects a context uses:
   fill, stroke, clip and the two hit tests, text (`canvasFillText`,
   `canvasStrokeText`, `canvasMeasureText`), `canvasDrawImage`,
   `canvasGetImageData` and `canvasPutImageData`;
+- `canvasDetach` and `canvasAttach`, which move a canvas or image bitmap
+  between the realms of a view;
 - `canvasTransferControl`, in a realm with a document.
 
 A member converts nothing. Its arguments are numbers, strings, booleans,
@@ -128,8 +153,8 @@ The table maps ids to `Entry` values — a canvas (its size, its
 needs a bitmap, and the `CanvasPresenter` of a placeholder's), a `Path`, a
 `Gradient`, a `Pattern`, an image bitmap's `Image` — all owned `Send`
 values (a compile-time assertion in `mod.rs`). Ids start at 1 and are never
-reused, so a stale id names nothing. An entry lives until `canvasDrop(id)`
-or the realm's end: no JavaScript object stands for it, and a garbage
+reused, so a stale id names nothing. An entry lives until `canvasDrop(id)`,
+`canvasDetach(id)` or the realm's end: no JavaScript object stands for it, and a garbage
 collection drops nothing. The table is freed with the realm.
 
 ## The placeholder canvas
@@ -142,7 +167,8 @@ presenter, its bitmap made at once, and answers `[id, width, height]`, the
 size the placeholder's `width` and `height` at the transfer. An element
 that is not a canvas in context mode none — another kind, or a canvas
 already transferred — answers `"InvalidStateError"`; an id that is not a
-live element throws. No built-in module calls it yet.
+live element throws. `bobcat:element`'s `transferControlToOffscreen` UI
+method calls it ("Cards" above).
 
 `canvasSetSize` on that canvas resizes its bitmap, and the next commit
 sends `ToMain::CanvasResized`, on which `bobcat-main` applies the new
@@ -150,6 +176,48 @@ natural size (`update_placeholders`). A size with no bitmap (a zero side,
 or one over 8,192 px) commits nothing: the placeholder keeps the last
 commit's picture and size. Once the element is removed, draws and commits
 go on and show nowhere; once it is freed, a commit does nothing.
+
+## Moving a canvas between realms
+
+Every realm kind has `canvasDetach(id)` and `canvasAttach(token)`, over one
+`CanvasHandOver` store per view (`canvas/mod.rs`). The view's `ViewOutbox`
+makes the store, and every `HostOutbox` it hands out carries the same
+`Arc`: the MTS realm's and its `ShadowRealm` children's, the BTS's and each
+`Worker`'s. That outbox is the narrowest owner all of a view's realms
+share; nothing narrower reaches both `bobcat-main` and `bobcat-workers`.
+
+- `canvasDetach(id)` takes the canvas or image bitmap entry `id` out of the
+  calling realm's table, stores it under a new token and answers the token,
+  a number. Tokens start at 1 and are never reused. A canvas goes as it
+  is: its bitmap, its context state, the draws it recorded and has not
+  replayed, and its placeholder's presenter if it has one. `id` names
+  nothing afterwards. An id that names a path, gradient or pattern, or
+  nothing, throws as any wrong id does. The canvas leaves the table's drawn
+  list, so the detaching entry's epilogue neither flushes nor commits it,
+  and the table's `ReplayUser` is let go when its last canvas leaves.
+- `canvasAttach(token)` takes the entry out of the store, files it in the
+  calling realm's table under a new id and answers `[id, width, height]` as
+  a `Float64Array`'s bytes, the encoding `canvasTransferControl` answers
+  with. A token that names nothing in the store — never issued, already
+  attached, another view's — answers `"InvalidStateError"` and throws
+  nothing. A canvas that arrives with recorded draws, or with a bitmap
+  changed since its last commit (a size or a draw in the entry that
+  detached it), is listed as drawn, so the receiving entry's epilogue
+  replays it or commits it to its placeholder. The receiving table takes a
+  `ReplayUser` as it files a canvas.
+
+The token is a plain number, so it travels in any message a realm can
+already send — a `Worker`'s `postMessage`, the cross-thread context — and
+no transport carries anything of the canvas itself. A placeholder canvas
+attached on `bobcat-workers` commits from there: its presenter is `Send`,
+and the commit's `ToMain::CanvasResized` reaches `bobcat-main` through the
+presenter's weak handle on the view's command channel. An entry that is
+never attached is dropped with the store, when the last outbox holding it
+goes, which is after the view and its workers have ended.
+
+HTML's transfer steps refuse an `OffscreenCanvas` whose context mode is not
+none. There is no `getContext()` here, so `canvasDetach` makes no such
+check: a canvas moves with its context state.
 
 ## The per-entry step
 
@@ -247,7 +315,13 @@ one `currentcolor` is the initial `color`, opaque black.
 `ShadowRealm` child, the BTS and a `Worker`, each importing
 `bobcat-internal:host` from a test module, and checks that no realm kind
 has a canvas global or a `bobcat:canvas` module. `paint/canvas_tests.rs`
-drives a placeholder end to end through `canvasTransferControl` and checks
-that a card's `__InvokeUIMethod` transfers nothing;
+drives a placeholder end to end through `canvasTransferControl`, through
+`__InvokeUIMethod` and `canvasAttach` in the MTS realm, through the BTS's
+`SelectorQuery.invoke` and `canvasAttach` there, and through a native
+module's `lynx:` ES module that gives the BTS entry a small canvas API over
+the members;
 `main/runtime/tests.rs` and `main/page_tests.rs` hold the table's lifetime,
-the `ReplayUser` hold and the per-entry step.
+the `ReplayUser` hold and the per-entry step. The hand-over is tested
+between the MTS realm and a `Worker` both ways (`canvas/tests.rs`), and for
+a placeholder canvas the MTS realm detaches and the BTS attaches
+(`paint/canvas_tests.rs`).

@@ -84,8 +84,10 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
 `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`, an
 `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`, a
-scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a
-dialog's `show`/`showModal`/`close`/`requestClose`, and
+scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, a
+dialog's `show`/`showModal`/`close`/`requestClose` and a `canvas`'s
+`transferControlToOffscreen`, which `element-papi.ts` answers over the
+canvas host members with a hand-over token (`docs/canvas.md`, "Cards"), and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
 caller; the event

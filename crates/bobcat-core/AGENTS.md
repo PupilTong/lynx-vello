@@ -88,6 +88,6 @@ the main-thread flush binding — and
   `bobcat-internal:host` in every realm kind, called by the built-in
   modules and an embedder's native-module ES module (`lynx:<name>`); the
   engine gives cards no canvas API: the per-realm table (`canvas/`),
-  `canvasTransferControl` in the MTS realm, the per-entry flush and commit,
-  pixel reads, the color and font strings (parsed by `terminus`'s 2D
-  context), and the deviations.
+  `canvasTransferControl` in the MTS realm, moving a canvas between realms
+  by token, the per-entry flush and commit, pixel reads, the color and font
+  strings (parsed by `terminus`'s 2D context), and the deviations.

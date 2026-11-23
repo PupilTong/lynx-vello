@@ -164,6 +164,14 @@ fn install_context_members(
             }
             Ok(HostValue::Undefined)
         }
+        fn canvasDetach(target: id) |this| {
+            Ok(id_value(this.detach(target)?))
+        }
+        fn canvasAttach(token: number) |this| {
+            // A token is a positive integer; anything else names nothing.
+            let attached = token_of(token).and_then(|token| this.attach(token));
+            Ok(attached.map_or_else(|| error_value(CanvasError::InvalidState), |entry| float_bytes(&entry)))
+        }
         fn canvasPath(source: optional_id) |this| {
             let path = match source {
                 None => Path::new(),
@@ -663,6 +671,17 @@ fn view(buffer: &[u8], offset: u32, length: u32) -> Result<&[u8], String> {
 #[expect(clippy::cast_possible_truncation, reason = "the value is a long")]
 fn to_long(value: f64) -> i32 {
     value as i32
+}
+
+/// `value` as a token of the view's store, if it can be one.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "checked to be a positive integer below 2^53"
+)]
+fn token_of(value: f64) -> Option<u64> {
+    (value >= 1.0 && value.fract() == 0.0 && value < 9_007_199_254_740_992.0)
+        .then_some(value as u64)
 }
 
 fn undefined<T>(_: T) -> HostValue {
