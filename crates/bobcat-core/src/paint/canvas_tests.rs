@@ -351,6 +351,10 @@ impl Log {
                     | EngineEvent::TimerFailed(error)
                     | EngineEvent::ListenerFailed(error) => panic!("a script failed: {error}"),
                     EngineEvent::ScriptReported { message, .. } => panic!("reported: {message}"),
+                    EngineEvent::WorkerThrew { error, .. }
+                    | EngineEvent::WorkerEnded { error, .. } => {
+                        panic!("the BTS failed: {error}")
+                    }
                     EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
                     EngineEvent::Panicked(error) => panic!("the engine panicked: {error}"),
                     _ => {}
@@ -368,7 +372,21 @@ impl Log {
 /// is `canvasTransferControl` on the canvas, answering the new canvas's
 /// `[id, width, height]` or the error name.
 fn scripted(style: &str, script: &str) -> (TestEngine, Log) {
-    let mut engine = TestViewSpec::new(&format!(
+    scripted_with(style, script, None)
+}
+
+/// [`scripted`], with a BTS entry when `background` names one.
+fn scripted_with(style: &str, script: &str, background: Option<&str>) -> (TestEngine, Log) {
+    let mut spec = scripted_spec(style, script);
+    if let Some(background) = background {
+        spec = spec.with_background_entry(background);
+    }
+    booted(spec)
+}
+
+/// The view [`scripted`] boots, before it is created.
+fn scripted_spec(style: &str, script: &str) -> TestViewSpec {
+    TestViewSpec::new(&format!(
         r"
         import * as H from 'bobcat-internal:host';
         globalThis.renderPage = function () {{
@@ -385,7 +403,11 @@ fn scripted(style: &str, script: &str) -> (TestEngine, Log) {
         "
     ))
     .offscreen(40.0, 30.0)
-    .create(Arc::new(crate::view::NoWakeup));
+}
+
+/// Creates the view `spec` describes and pumps it until boot has finished.
+fn booted(spec: TestViewSpec) -> (TestEngine, Log) {
+    let mut engine = spec.create(Arc::new(crate::view::NoWakeup));
     let mut log = Log::default();
     log.until(&mut engine, |log| log.booted);
     (engine, log)
@@ -466,30 +488,142 @@ fn an_mts_transfer_draws_into_the_canvas_box() {
 }
 
 /// A card's `__InvokeUIMethod(canvas, 'transferControlToOffscreen', …)`
-/// takes the generic UI-method path: no element kind and no base method
-/// answers that name, so the answer is code 3 with no data, and the canvas
-/// stays in context mode none.
+/// binds the placeholder and answers `{token, width, height}`: the canvas
+/// is already out of the realm's table, and `canvasAttach` of the token in
+/// the same realm files it again. A draw on it reaches the placeholder. A
+/// second invoke answers 7.
 #[test]
-fn a_cards_invoke_of_transfer_control_to_offscreen_transfers_nothing() {
+fn a_main_thread_invoke_of_transfer_control_to_offscreen_answers_a_token() {
     let (mut engine, log) = scripted(
         "width:40px;height:30px;align-self:flex-start",
         r"
+          __SetAttribute(canvas, 'width', '4');
+          __SetAttribute(canvas, 'height', '2');
+          let data;
           __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, (result) => {
-            console.log(`invoke ${result.code} ${result.data}`);
+            data = result.data;
+            console.log(`invoke ${result.code} ${typeof data.token} ${data.width}x${data.height}`);
           });
+          __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, (result) => {
+            console.log(`again ${result.code} ${result.data}`);
+          });
+          const [id, width, height] = new Float64Array(H.canvasAttach(data.token));
+          console.log(`attached ${width}x${height}`);
+          H.canvasSetColor(id, 0, 'red');
+          H.canvasFillRect(id, 0, 0, 4, 2);
           __FlushElementTree();
         ",
     );
-    assert!(
-        log.has("invoke 3 undefined"),
-        "the answer: {:?}",
-        log.messages
-    );
+    for said in ["invoke 0 number 4x2", "again 7 undefined", "attached 4x2"] {
+        assert!(log.has(said), "{said}: {:?}", log.messages);
+    }
     let canvas = canvas_of(&mut engine);
     assert_eq!(
         engine.probe_document(move |document| context_mode(document, canvas)),
-        Some(Some(ContextMode::None))
+        Some(Some(ContextMode::Placeholder))
     );
+    capture_until(&mut engine, 20, 15, RED);
+}
+
+/// The background thread's `SelectorQuery.invoke` of
+/// `transferControlToOffscreen` answers the token in the BTS, which
+/// attaches the canvas and draws on it: the commit from `bobcat-workers`
+/// fills the placeholder.
+#[test]
+fn a_background_invoke_of_transfer_control_to_offscreen_hands_the_canvas_to_the_bts() {
+    let (mut engine, mut log) = scripted_with(
+        "width:40px;height:30px;align-self:flex-start",
+        r"
+          __SetID(canvas, 'c');
+          __SetAttribute(canvas, 'width', '4');
+          __SetAttribute(canvas, 'height', '2');
+          __FlushElementTree();
+        ",
+        Some(
+            r"
+import { lynx } from 'bobcat:bts-runtime';
+import * as H from 'bobcat-internal:host';
+lynx.createSelectorQuery().select('#c').invoke({
+  method: 'transferControlToOffscreen',
+  success: ({ token, width, height }) => {
+    const [id] = new Float64Array(H.canvasAttach(token));
+    console.log(`bts token ${typeof token} ${width}x${height}`);
+    H.canvasSetColor(id, 0, 'red');
+    H.canvasFillRect(id, 0, 0, 4, 2);
+  },
+  fail: (result) => console.log(`bts failed ${result.code}`),
+}).exec();
+",
+        ),
+    );
+    log.until(&mut engine, |log| {
+        log.has("bts token number 4x2") || log.messages.iter().any(|m| m.starts_with("bts failed"))
+    });
+    assert!(log.has("bts token number 4x2"), "{:?}", log.messages);
+    capture_until(&mut engine, 20, 15, RED);
+}
+
+/// The ES module of an embedder's native module, `lynx:Canvas`, imported
+/// before the BTS entry, gives the card a canvas API of its own over the
+/// canvas members of `bobcat-internal:host`: `lynx.queryCanvas(selector)`
+/// invokes `transferControlToOffscreen` through a selector query, attaches
+/// the token and resolves to an object whose `getContext('2d')` has a
+/// `fillStyle` setter and `fillRect`. The BTS entry uses only that API, and
+/// its draw fills the placeholder.
+#[test]
+fn an_embedder_module_gives_the_card_a_canvas_api_over_the_host_members() {
+    const MODULE: &str = r"
+import { lynx } from 'bobcat:bts-runtime';
+import { canvasAttach, canvasFillRect, canvasSetColor } from 'bobcat-internal:host';
+const context = (id) => ({
+  set fillStyle(value) { canvasSetColor(id, 0, String(value)); },
+  fillRect(x, y, width, height) { canvasFillRect(id, x, y, width, height); },
+});
+lynx.queryCanvas = (selector) => new Promise((resolve, reject) => {
+  lynx.createSelectorQuery().select(selector).invoke({
+    method: 'transferControlToOffscreen',
+    success: ({ token, width, height }) => {
+      const answer = canvasAttach(token);
+      if (typeof answer === 'string') {
+        reject(new Error(answer));
+        return;
+      }
+      const [id] = new Float64Array(answer);
+      resolve({ width, height, getContext: (kind) => (kind === '2d' ? context(id) : null) });
+    },
+    fail: ({ code }) => reject(new Error(`invoke answered ${code}`)),
+  }).exec();
+});
+";
+    let spec = scripted_spec(
+        "width:40px;height:30px;align-self:flex-start",
+        r"
+          __SetID(canvas, 'c');
+          __SetAttribute(canvas, 'width', '4');
+          __SetAttribute(canvas, 'height', '2');
+          __FlushElementTree();
+        ",
+    )
+    .with_echo_esm_module("Canvas", MODULE, true)
+    .with_background_entry(
+        r"
+import { lynx } from 'bobcat:bts-runtime';
+lynx.queryCanvas('#c').then((canvas) => {
+  const context = canvas.getContext('2d');
+  context.fillStyle = 'red';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  console.log(`card drew ${canvas.width}x${canvas.height}`);
+}, (error) => console.log(`card failed ${error}`));
+",
+    );
+    let (mut engine, mut log) = booted(spec);
+    log.until(&mut engine, |log| {
+        log.messages
+            .iter()
+            .any(|m| m.starts_with("card drew") || m.starts_with("card failed"))
+    });
+    assert!(log.has("card drew 4x2"), "{:?}", log.messages);
+    capture_until(&mut engine, 20, 15, RED);
 }
 
 /// Setting the canvas's size resizes its bitmap, and the commit carries the
@@ -554,4 +688,118 @@ fn a_transferred_canvas_never_drawn_captures_without_waiting() {
     );
     let shot = capture(&mut engine);
     assert_eq!(pixel(&shot, 20, 15), GREEN);
+}
+
+/// Captures until `inside` is `colour` and `outside` is not: the frame in
+/// which a resized placeholder's box holds the new picture.
+fn capture_until_inside_only(
+    engine: &mut TestEngine,
+    inside: (u32, u32),
+    outside: (u32, u32),
+    colour: [u8; 4],
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let shot = capture(engine);
+        let (at, out) = (
+            pixel(&shot, inside.0, inside.1),
+            pixel(&shot, outside.0, outside.1),
+        );
+        if at == colour && out != colour {
+            return;
+        }
+        assert!(Instant::now() < deadline, "inside {at:?}, outside {out:?}");
+        engine.pump();
+        std::thread::yield_now();
+    }
+}
+
+/// The BTS half of the hand-over tests: it attaches the canvas whose token
+/// the MTS realm posts, and runs what the MTS realm's later messages name.
+const BTS_ATTACH: &str = r"
+import { lynx } from 'bobcat:bts-runtime';
+import * as H from 'bobcat-internal:host';
+let id;
+lynx.getCoreContext().addEventListener('message', ({ data }) => {
+  if (typeof data === 'number') {
+    const [attached, width, height] = new Float64Array(H.canvasAttach(data));
+    id = attached;
+    console.log(`bts attached ${width}x${height}`);
+  } else if (data === 'red') {
+    H.canvasSetColor(id, 0, 'red');
+    H.canvasFillRect(id, 0, 0, 4, 2);
+    console.log('bts red');
+  } else if (data === 'resize') {
+    H.canvasSetSize(id, 20, 10);
+    H.canvasSetColor(id, 0, 'blue');
+    H.canvasFillRect(id, 0, 0, 20, 10);
+    console.log('bts resized');
+  }
+});
+";
+
+/// The MTS realm binds the placeholder, detaches the canvas and posts its
+/// token to the BTS, which attaches it and draws: the commit comes from
+/// `bobcat-workers` and fills the canvas box with no document commit.
+/// Later the BTS sets a new size, and the commit's `CanvasResized` from that
+/// thread makes the placeholder's natural size follow.
+#[test]
+fn the_bts_draws_on_a_placeholder_canvas_the_mts_realm_detached() {
+    let (mut engine, mut log) = scripted_with(
+        "align-self:flex-start",
+        r"
+          __SetAttribute(canvas, 'width', '40');
+          __SetAttribute(canvas, 'height', '30');
+          const [id] = transfer();
+          lynx.getJSContext().postMessage(H.canvasDetach(id));
+          lynx.getJSContext().postMessage('red');
+          __AddEventListener(canvas, 'touchstart', () => {
+            lynx.getJSContext().postMessage('resize');
+          }, {});
+          __FlushElementTree();
+        ",
+        Some(BTS_ATTACH),
+    );
+    log.until(&mut engine, |log| {
+        log.has("bts attached 40x30") && log.has("bts red")
+    });
+    let shot = capture_until(&mut engine, 2, 1, RED);
+    assert_eq!(pixel(&shot, 2, 1), RED, "the BTS's draw");
+    let canvas = canvas_of(&mut engine);
+    assert_eq!(rect(&mut engine, canvas), (40.0, 30.0));
+
+    engine.dispatch_input(terminus::link::input::InputEvent::pointer(
+        terminus::link::Point2D::new(5.0, 5.0),
+        1,
+        terminus::link::input::PointerKind::Touch,
+        terminus::link::input::PointerPhase::Down,
+    ));
+    log.until(&mut engine, |log| log.has("bts resized"));
+    // The frame that shows the resize: the new picture inside the 20 × 10
+    // box and nothing of it outside.
+    capture_until_inside_only(&mut engine, (10, 5), (30, 20), BLUE);
+    assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
+}
+
+/// A canvas resized and drawn on in the entry that detached it is listed
+/// as drawn by the realm that attaches it, whose epilogue commits it: the
+/// BTS only attaches, and the placeholder takes the new size and the draw.
+#[test]
+fn a_canvas_resized_as_it_is_detached_is_committed_by_the_realm_that_attaches_it() {
+    let (mut engine, mut log) = scripted_with(
+        "align-self:flex-start",
+        r"
+          const [id] = transfer();
+          H.canvasSetSize(id, 20, 10);
+          H.canvasSetColor(id, 0, 'red');
+          H.canvasFillRect(id, 0, 0, 20, 10);
+          lynx.getJSContext().postMessage(H.canvasDetach(id));
+          __FlushElementTree();
+        ",
+        Some(BTS_ATTACH),
+    );
+    log.until(&mut engine, |log| log.has("bts attached 20x10"));
+    let canvas = canvas_of(&mut engine);
+    capture_until_inside_only(&mut engine, (10, 5), (30, 5), RED);
+    assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
 }

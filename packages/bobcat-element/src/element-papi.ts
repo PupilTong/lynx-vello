@@ -1,6 +1,8 @@
 import {
   attributeNames,
   callElementMethod,
+  canvasDetach,
+  canvasTransferControl,
   childElementIds,
   childIndex,
   createDocument,
@@ -94,7 +96,7 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // | `__GetPageElement()` | the page handle `__CreatePage` minted |
 // | `__QuerySelector(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
 // | `__QuerySelectorAll(element, selector, params)` | native `queryElementIds` export + this runtime's handle index |
-// | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store |
+// | `__InvokeUIMethod(element, method, params, callback)` | native `callElementMethod` + `getAttribute` exports + this runtime's dataset store; a `canvas`'s `transferControlToOffscreen`, native `canvasTransferControl` + `canvasDetach` |
 // | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
 // | `__FlushElementTree(element?, options?)` | native `flushElementTree` export, with `options.pipelineOptions.pipelineID` and `options.__lynx_timing_flag`; a list cell's flush (`options.listID`) commits nothing |
 //
@@ -2500,6 +2502,9 @@ interface InvokeResult {
  * empty string without serializing anything.
  */
 function invokeUIMethod(handle: Handle, method: string, params: unknown): InvokeResult {
+  if (method === TRANSFER_CONTROL && tagName(nodeIdOf(handle)) === "canvas") {
+    return transferControlToOffscreen(handle);
+  }
   let text = "";
   if (method !== "boundingClientRect") {
     try {
@@ -2517,6 +2522,32 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
     code: Number(fields[0]),
     data: decodeMethodData(handle, method, fields.slice(1)),
   };
+}
+
+/** The UI method a `canvas` answers over the canvas members, not the host's method table. */
+const TRANSFER_CONTROL = "transferControlToOffscreen";
+
+/**
+ * HTML's `transferControlToOffscreen()` on a `canvas`, answered as a
+ * hand-over token rather than an object: `canvasTransferControl` makes a
+ * canvas entry bound to the element as its placeholder, `canvasDetach` takes
+ * it out of this realm's table at once, and `data` is `{token, width,
+ * height}` — the token `canvasAttach` takes in any realm of the view, and the
+ * placeholder's `width` and `height` at the transfer. The data is three
+ * numbers, so the background thread's `invoke` reply carries it as it is.
+ * A token nobody attaches stays in the view's hand-over store until the view
+ * ends.
+ *
+ * A canvas whose control was already transferred answers 7,
+ * `INVALID_STATE_ERROR`, the code the host answers a kind's method failing
+ * with `InvalidStateError` (web-core answers 4 for any method that throws).
+ * An element of another kind takes the generic path, which answers 3.
+ */
+function transferControlToOffscreen(handle: Handle): InvokeResult {
+  const entry = canvasTransferControl(nodeIdOf(handle));
+  if (typeof entry === "string") return { code: 7, data: undefined };
+  const [id, width, height] = new Float64Array(entry) as unknown as [number, number, number];
+  return { code: 0, data: { token: canvasDetach(id), width, height } };
 }
 
 /**

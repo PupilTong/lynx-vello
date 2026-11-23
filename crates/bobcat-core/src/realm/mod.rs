@@ -344,6 +344,7 @@ fn install_realm_core(
     let canvases = Rc::new(CanvasTable::new(
         &canvas_host,
         ReadWait::new(host.token(), &thread),
+        std::sync::Arc::clone(host.canvas_hand_over()),
     ));
     crate::canvas::install(engine, &canvases)
         .map_err(|error| context_of("installing the canvas members", error))?;

@@ -556,6 +556,7 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
                 canvases: Rc::new(CanvasTable::new(
                     &CanvasHost::Worker,
                     ReadWait::new(hook.host.token(), &hook.thread),
+                    std::sync::Arc::clone(hook.host.canvas_hand_over()),
                 )),
             };
             (unused, Some(error.message.to_string()))

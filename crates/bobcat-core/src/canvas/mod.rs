@@ -15,7 +15,8 @@
 //!   another object's entry. `canvasDrop` removes an entry; nothing else does while the realm
 //!   lives, and the table goes with the realm.
 //! - **Entries** are owned `Send` values ([`Entry`]), so an entry can leave this table for another
-//!   realm's.
+//!   realm's: `canvasDetach` puts a canvas or image bitmap in the view's [`CanvasHandOver`] under a
+//!   token, and `canvasAttach` files it in the table of the realm that names the token.
 //! - **The glyph outline cache** a canvas replay uses is its thread's, shared by every canvas
 //!   encoded there (`terminus`'s `render::canvas`). The table holds a [`ReplayUser`] while it holds
 //!   a canvas, so the cache is dropped once no realm on the thread holds one: a group's view realms
@@ -32,6 +33,8 @@ mod tests;
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Weak;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rustc_hash::FxHashMap;
 use terminus::link::html::canvas::{
@@ -76,6 +79,61 @@ const _: () = {
     const fn send<T: Send>() {}
     send::<Entry>();
 };
+
+/// An entry in a [`CanvasHandOver`], behind a trait object whose `Send` is
+/// stated in its type: a type holding the store is then proven `Send`
+/// without the compiler walking an entry's GPU types, which nest deeper than
+/// its default recursion limit lets it go.
+trait Moved: Send {
+    fn into_entry(self: Box<Self>) -> Entry;
+}
+
+impl Moved for Entry {
+    fn into_entry(self: Box<Self>) -> Entry {
+        *self
+    }
+}
+
+/// The canvas and image bitmap entries one view's realms hand to each
+/// other, by token: `canvasDetach` stores an entry taken out of the calling
+/// realm's table, and `canvasAttach` takes it out again into the calling
+/// realm's table.
+///
+/// One per view: the view's `ViewOutbox` makes it, and every `HostOutbox`
+/// the view hands out — the MTS realm's, its `ShadowRealm` children's, the
+/// BTS's and each `Worker`'s — carries the same `Arc`. Tokens start at 1
+/// and are never reused. What is never attached is dropped when the last of
+/// those outboxes goes, which is when the view and its workers have ended.
+#[derive(Default)]
+pub(crate) struct CanvasHandOver {
+    /// The last token handed out.
+    last: AtomicU64,
+    entries: Mutex<FxHashMap<u64, Box<dyn Moved>>>,
+}
+
+impl CanvasHandOver {
+    fn lock(&self) -> std::sync::MutexGuard<'_, FxHashMap<u64, Box<dyn Moved>>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stores `entry` under a new token, and answers the token.
+    fn store(&self, entry: Box<dyn Moved>) -> u64 {
+        let token = self.last.fetch_add(1, Ordering::Relaxed) + 1;
+        self.lock().insert(token, entry);
+        token
+    }
+
+    /// Takes the entry under `token` out of the store.
+    fn take(&self, token: u64) -> Option<Entry> {
+        self.lock().remove(&token).map(Moved::into_entry)
+    }
+
+    /// How many entries wait in the store, for a test.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
 
 impl CanvasEntry {
     fn new(width: u32, height: u32) -> Self {
@@ -222,6 +280,8 @@ pub(crate) struct CanvasTable {
     drawn: RefCell<Vec<u64>>,
     fonts: Fonts,
     reads: ReadWait,
+    /// The view's store that `canvasDetach` and `canvasAttach` go through.
+    hand_over: Arc<CanvasHandOver>,
     /// Held while `entries` holds a canvas: the thread's canvas replay
     /// state is kept for it.
     replay: RefCell<Option<ReplayUser>>,
@@ -232,7 +292,7 @@ pub(crate) struct CanvasTable {
 }
 
 impl CanvasTable {
-    pub(crate) fn new(host: &CanvasHost, reads: ReadWait) -> Self {
+    pub(crate) fn new(host: &CanvasHost, reads: ReadWait, hand_over: Arc<CanvasHandOver>) -> Self {
         Self {
             entries: RefCell::default(),
             next: Cell::new(1),
@@ -242,6 +302,7 @@ impl CanvasTable {
                 CanvasHost::Document(document) => Fonts::Document(Weak::clone(document)),
             },
             reads,
+            hand_over,
             replay: RefCell::new(None),
             #[cfg(test)]
             settled: Cell::new(0),
@@ -296,6 +357,55 @@ impl CanvasTable {
             self.canvas_removed(&entries);
         }
         entry
+    }
+
+    /// `canvasDetach(id)`: takes the canvas or image bitmap under `id` out
+    /// of this table into the view's store, and answers its token. A canvas
+    /// goes as it is — bitmap, context state, draws not yet replayed, its
+    /// placeholder's presenter — and leaves the drawn list; the replay state
+    /// is let go once the last canvas has left.
+    fn detach(&self, id: u64) -> Result<u64, String> {
+        let mut entries = self.entries();
+        if !matches!(entries.get(&id), Some(Entry::Canvas(_) | Entry::Bitmap(_))) {
+            return Err(no_such("canvas or image bitmap", id));
+        }
+        let Some(mut entry) = entries.remove(&id) else {
+            return Err(no_such("canvas or image bitmap", id));
+        };
+        if let Entry::Canvas(canvas) = &mut entry {
+            canvas.drawn = false;
+            self.drawn.borrow_mut().retain(|drawn| *drawn != id);
+            self.canvas_removed(&entries);
+        }
+        drop(entries);
+        Ok(self.hand_over.store(Box::new(entry)))
+    }
+
+    /// `canvasAttach(token)`: files the entry the view's store holds under
+    /// `token` in this table, and answers its new id, width and height;
+    /// `None` when the store holds nothing under `token`. A canvas that
+    /// arrives with draws not yet replayed, or with a bitmap changed since
+    /// its last commit, is listed as drawn, so this realm's epilogue
+    /// replays or commits it.
+    fn attach(&self, token: u64) -> Option<[f64; 3]> {
+        let entry = self.hand_over.take(token)?;
+        let (size, owed) = match &entry {
+            Entry::Canvas(canvas) => (
+                [canvas.width, canvas.height],
+                canvas
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|bitmap| bitmap.has_changes() || bitmap.has_pending_draws()),
+            ),
+            Entry::Bitmap(image) => ([image.width(), image.height()], false),
+            Entry::Path(_) | Entry::Gradient(_) | Entry::Pattern(_) => ([0, 0], false),
+        };
+        let id = self.insert(entry);
+        if owed && let Some(Entry::Canvas(canvas)) = self.entries().get_mut(&id) {
+            self.note_drawn(id, canvas);
+        }
+        #[expect(clippy::cast_precision_loss, reason = "ids stay below 2^53")]
+        Some([id as f64, f64::from(size[0]), f64::from(size[1])])
     }
 
     /// Lets go of the thread's canvas replay state once `entries`, which a
@@ -430,10 +540,12 @@ fn no_such(kind: &str, id: u64) -> String {
 /// The names of the members [`install`] registers, for a test listing what
 /// a realm's `bobcat-internal:host` exports.
 #[cfg(test)]
-pub(crate) const MEMBERS: [&str; 63] = [
+pub(crate) const MEMBERS: [&str; 65] = [
     "canvasCreate",
     "canvasDrop",
     "canvasSetSize",
+    "canvasDetach",
+    "canvasAttach",
     "canvasPath",
     "canvasPathFromSvg",
     "canvasAddPath",

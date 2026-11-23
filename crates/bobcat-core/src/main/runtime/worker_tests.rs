@@ -2622,18 +2622,24 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// `transferControlToOffscreen` is no UI method of a `canvas`: the
-/// background thread's `invoke` of it and the main thread's
-/// `__InvokeUIMethod` both take the generic path and answer 3, and the
-/// canvas's control is still there for `canvasTransferControl` to take.
+/// A `canvas`'s `transferControlToOffscreen` answers through both invoke
+/// paths: the background thread's `invoke` gets `{token, width, height}`,
+/// plain numbers in the reply; the canvas, now a placeholder, answers the
+/// main thread's `__InvokeUIMethod` of it with 7, `INVALID_STATE_ERROR`; a
+/// `view` takes the generic path and answers 3. The token attaches in the
+/// main thread's realm too, at the placeholder's size.
 #[test]
-fn invokes_of_transfer_control_to_offscreen_answer_3_and_transfer_nothing() {
+fn invokes_of_transfer_control_to_offscreen_answer_a_token_then_7() {
     let mut pair = Pair::with_background(
         r"
         const page = __CreatePage();
         const canvas = __CreateElement('canvas', 0); __SetID(canvas, 'c');
+        __SetAttribute(canvas, 'width', '4'); __SetAttribute(canvas, 'height', '2');
+        const view = __CreateView(0);
         __AppendElement(page, canvas);
+        __AppendElement(page, view);
         globalThis.canvas = canvas;
+        globalThis.view = view;
         globalThis.result = null;
         lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
         ",
@@ -2643,7 +2649,7 @@ fn invokes_of_transfer_control_to_offscreen_answer_3_and_transfer_nothing() {
         lynx.createSelectorQuery().select('#c').invoke({
             method: 'transferControlToOffscreen',
             fail: result => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:result}),
-            success: data => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{success:true}}),
+            success: data => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{code:0, data}}),
         }).exec();
         ",
         ),
@@ -2654,14 +2660,21 @@ fn invokes_of_transfer_control_to_offscreen_answer_3_and_transfer_nothing() {
     }
     pair.check(
         r"
-        import { __InvokeUIMethod, __GetElementUniqueID } from 'bobcat:element';
-        import { canvasTransferControl } from 'bobcat-internal:host';
-        if (result.code !== 3) throw Error(JSON.stringify(result));
+        import { __InvokeUIMethod } from 'bobcat:element';
+        import { canvasAttach } from 'bobcat-internal:host';
+        const { code, data } = result;
+        if (code !== 0 || typeof data.token !== 'number' || data.width !== 4 || data.height !== 2) {
+            throw Error(JSON.stringify(result));
+        }
         let answer;
         __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, value => { answer = value; });
+        if (answer.code !== 7 || answer.data !== undefined) throw Error(JSON.stringify(answer));
+        __InvokeUIMethod(view, 'transferControlToOffscreen', {}, value => { answer = value; });
         if (answer.code !== 3) throw Error(JSON.stringify(answer));
-        const entry = canvasTransferControl(__GetElementUniqueID(canvas));
-        if (!(entry instanceof ArrayBuffer)) throw Error('already transferred: ' + entry);
+        const attached = canvasAttach(data.token);
+        if (!(attached instanceof ArrayBuffer)) throw Error('not attached: ' + attached);
+        const [, width, height] = new Float64Array(attached);
+        if (width !== 4 || height !== 2) throw Error(`${width}x${height}`);
     ",
     );
     assert!(worker_failures(pair.notices()).is_empty());

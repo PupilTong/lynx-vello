@@ -354,3 +354,113 @@ canvasGlobals('main', (message) => console.log(message));
         ]
     );
 }
+
+/// The MTS realm's half of the hand-over test: a canvas drawn green and an
+/// image bitmap go to a `Worker` by token; the canvas comes back by another
+/// token, with the worker's draw on it.
+const HAND_OVER_MAIN: &str = r"
+import { Worker } from 'bobcat-internal';
+import * as H from 'bobcat-internal:host';
+__CreatePage();
+const say = (message) => console.log('hand-over ' + message);
+const misuse = (call) => {
+  try { call(); return 'returned'; } catch (error) { return error.name; }
+};
+const pixel = (id, x) => Array.from(new Uint8Array(H.canvasGetImageData(id, x, 0, 1, 1))).join(',');
+
+const canvas = H.canvasCreate(4, 1);
+H.canvasSetColor(canvas, 0, '#00ff00');
+H.canvasFillRect(canvas, 0, 0, 4, 1);
+const canvasToken = H.canvasDetach(canvas);
+say('old id ' + misuse(() => H.canvasFillRect(canvas, 0, 0, 1, 1)));
+const bitmap = H.canvasBitmapFromPixels(new Uint8Array(12).buffer, 0, 12, 3, 1);
+const bitmapToken = H.canvasDetach(bitmap);
+say('path ' + misuse(() => H.canvasDetach(H.canvasPath(0))));
+say('tokens ' + (canvasToken >= 1) + ' ' + (bitmapToken > canvasToken));
+for (const token of [0, -1, 1.5, 999999]) say('token ' + token + ' ' + H.canvasAttach(token));
+
+const worker = new Worker('app:///hand-over-worker.js');
+worker.onmessage = ({ data }) => {
+  if (typeof data === 'string') { say(data); return; }
+  const [id, width, height] = new Float64Array(H.canvasAttach(data));
+  say('back ' + width + 'x' + height + ' ' + pixel(id, 0) + ' ' + pixel(id, 3));
+};
+globalThis.handOverWorker = worker;
+worker.postMessage({ canvasToken, bitmapToken });
+";
+
+/// The `Worker`'s half: it attaches both, the canvas token twice, draws
+/// red on the canvas's left half and hands the canvas back.
+const HAND_OVER_WORKER: &str = r"
+import 'bobcat:worker';
+import * as H from 'bobcat-internal:host';
+onmessage = ({ data: { canvasToken, bitmapToken } }) => {
+  const [id, width, height] = new Float64Array(H.canvasAttach(canvasToken));
+  const pixel = Array.from(new Uint8Array(H.canvasGetImageData(id, 0, 0, 1, 1))).join(',');
+  postMessage('worker canvas ' + width + 'x' + height + ' ' + pixel);
+  postMessage('worker again ' + H.canvasAttach(canvasToken));
+  const [bitmap, bw, bh] = new Float64Array(H.canvasAttach(bitmapToken));
+  postMessage('worker bitmap ' + bw + 'x' + bh + ' ' + H.canvasBitmapWidth(bitmap));
+  H.canvasSetColor(id, 0, 'red');
+  H.canvasFillRect(id, 0, 0, 2, 1);
+  postMessage(H.canvasDetach(id));
+};
+";
+
+/// A canvas and an image bitmap move from the MTS realm to a `Worker` by
+/// token, and the canvas back again, keeping its pixels each way. The old
+/// id names nothing after a detach, a token is attached once, and a token
+/// the store does not hold answers `InvalidStateError` without throwing.
+#[test]
+fn canvases_move_between_the_mts_realm_and_a_worker_by_token() {
+    let mut engine = TestViewSpec::new(HAND_OVER_MAIN)
+        .with_module("app:///hand-over-worker.js", HAND_OVER_WORKER)
+        .create(Arc::new(NoWakeup));
+    assert_eq!(
+        messages(&mut engine, "hand-over ", 11),
+        [
+            "hand-over back 4x1 255,0,0,255 0,255,0,255",
+            "hand-over old id InternalError",
+            "hand-over path InternalError",
+            "hand-over token -1 InvalidStateError",
+            "hand-over token 0 InvalidStateError",
+            "hand-over token 1.5 InvalidStateError",
+            "hand-over token 999999 InvalidStateError",
+            "hand-over tokens true true",
+            "hand-over worker again InvalidStateError",
+            "hand-over worker bitmap 3x1 3",
+            "hand-over worker canvas 4x1 0,255,0,255",
+        ]
+    );
+}
+
+/// An entry stored and never attached is dropped with the store, which
+/// goes with the last outbox of the view holding it.
+#[test]
+fn an_entry_never_attached_is_dropped_with_the_store() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Probe(Arc<AtomicBool>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    impl super::Moved for Probe {
+        fn into_entry(self: Box<Self>) -> super::Entry {
+            unreachable!("the probe is never attached")
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let store = Arc::new(super::CanvasHandOver::default());
+    let holder = Arc::clone(&store);
+    let first = store.store(Box::new(Probe(Arc::clone(&dropped))));
+    let second = store.store(Box::new(Probe(Arc::new(AtomicBool::new(false)))));
+    assert_eq!((first, second), (1, 2), "tokens count from 1");
+    assert_eq!(store.len(), 2);
+    drop(store);
+    assert!(!dropped.load(Ordering::Relaxed), "another holder keeps it");
+    drop(holder);
+    assert!(dropped.load(Ordering::Relaxed));
+}

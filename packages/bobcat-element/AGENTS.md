@@ -111,8 +111,12 @@ and `getScrollInfo`, a `list`'s `scrollToPosition`, `scrollBy`,
 `getScrollContainerInfo` and `getVisibleCells`, an `x-refresh-view`'s
 `finishRefresh`, `finishLoadMore` and `autoStartRefresh`, a scroll
 coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, and a dialog's four methods, and fails every other method with
-code 3, `METHOD_NOT_FOUND`,
-alongside the selection failures it already delivered. No callback or document handle crosses into
+code 3, `METHOD_NOT_FOUND`, alongside the selection failures it already
+delivered. A `canvas`'s `transferControlToOffscreen` is answered here, not
+by the host's method table: `invokeUIMethod` calls `canvasTransferControl`
+and then `canvasDetach`, and answers `{token, width, height}`, or code 7
+for a canvas already transferred (`crates/bobcat-core/docs/canvas.md`,
+"Cards"). No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
 fields, callback semantics and remaining boundaries.
 
