@@ -355,9 +355,10 @@ concretely, so the tables above are read as "the target" and this section as
   `element.animate()` has no producer and is out of scope.
 - **SVG.** CSS animations and transitions run on SVG elements (`fill`,
   `stroke`, `stroke-dashoffset`, `opacity`, `transform` and every other
-  animatable SVG property stylo has), through the same driver: an SVG
-  image whose isolated document still animates ticks on the host's clock
-  while something uses it
+  animatable SVG property stylo has), through the same driver: an inline
+  `svg` root records its subtree again after each tick that re-cascades an
+  element under it, and an SVG image whose isolated document still animates
+  ticks on the host's clock while something uses it
   (`docs/svg-dom-design.md`, "Animation"). SMIL (`animate`,
   `animateTransform`, `animateMotion`, `set`) is not supported.
 

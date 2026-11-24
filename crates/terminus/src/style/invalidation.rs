@@ -443,6 +443,10 @@ impl<T> Document<T> {
             Some(value) => node.set_attr_local_name(ID.clone(), value.to_owned()),
             None => node.remove_attr_local_name(&ID),
         }
+        // An id is what `url(#id)` and `href` resolve (`svg::present`).
+        if self.live(id).in_svg_namespace() {
+            self.note_svg_change(id);
+        }
         self.drain_reactions(base);
     }
 
@@ -615,6 +619,12 @@ impl<T> Document<T> {
             text
         };
         self.live_node_mut(id).set_literal_text(text);
+        // SVG `text` content is the `svg` root's drawing (`svg::present`).
+        if let Some(element) = affected_element
+            && self.live(element).in_svg_namespace()
+        {
+            self.note_svg_change(element);
+        }
         if let Some(element) = affected_element
             && watches_empty
             && was_empty != self.live_element(element).is_empty_element()

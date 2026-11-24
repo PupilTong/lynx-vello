@@ -106,17 +106,25 @@ impl OpenLayers {
             *group = by * *group;
         }
     }
+
+    /// Whether what the layers draw depends on the extent of the content:
+    /// a compositing layer shaped by its bounds, or a clip in
+    /// `objectBoundingBox` units.
+    pub(super) fn binds_content(&self) -> bool {
+        self.bounds_layer.is_some() || !self.object_clips.is_empty()
+    }
 }
 
 /// Opens the layers the group effects of element `node` need around its
 /// content, at the element's transform `transform`: a compositing layer for
-/// `opacity` below one, shaped by `clip` when that is one shape, else by
-/// the content's bounds, patched in by [`close_layers`]; then the clip
-/// chain, outermost first. Every layer is `Normal`.
+/// `opacity` below one, or at any opacity when `fades` (an animated
+/// `opacity`, which a curve may fade), shaped by `clip` when that is one
+/// shape, else by the content's bounds, patched in by [`close_layers`];
+/// then the clip chain, outermost first. Every layer is `Normal`.
 pub(super) fn open_layers(
     items: &mut Vec<Item>,
     node: NodeId,
-    opacity: f32,
+    (opacity, fades): (f32, bool),
     clip: Option<ClipDef>,
     transform: Affine,
 ) -> OpenLayers {
@@ -125,7 +133,7 @@ pub(super) fn open_layers(
         bounds_layer: None,
         object_clips: SmallVec::new(),
     };
-    let composite = opacity < 1.0;
+    let composite = opacity < 1.0 || fades;
     let mut own_clip_pushed = false;
     if composite {
         // A one-shape clip doubles as the layer's shape (the clips

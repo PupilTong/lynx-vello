@@ -171,6 +171,9 @@ impl<T> Document<T> {
         if sizes_root {
             self.update_svg_natural_size(id);
         }
+        // Every attribute is input to the `svg` root's drawing, mapped to a
+        // property or read as geometry (`svg::present`).
+        self.note_svg_change(id);
     }
 }
 

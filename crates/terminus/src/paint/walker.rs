@@ -122,6 +122,7 @@
 use euclid::default::{Size2D, Vector2D};
 
 use crate::kurbo::{Affine, Point, Rect};
+use crate::paint::background::ReplacedContent;
 use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
 use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
@@ -297,7 +298,13 @@ impl WalkSink<'_> {
     /// Pushes one layer of an `svg` element's recording under `transform`:
     /// through [`svg::Layer::push`] in the monolithic walk,
     /// as the program op that replays the same push in the compose walk.
-    fn push_svg_layer(&mut self, space: Option<u32>, layer: &svg::Layer<'_>, transform: Affine) {
+    fn push_svg_layer(
+        &mut self,
+        space: Option<u32>,
+        alpha_animation: Option<u32>,
+        layer: &svg::Layer<'_>,
+        transform: Affine,
+    ) {
         match self {
             Self::Monolithic(scene, _) => layer.push(scene, transform),
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Push {
@@ -311,7 +318,7 @@ impl WalkSink<'_> {
                     svg::LayerShape::Path(path) => CapturedShape::Path(std::sync::Arc::clone(path)),
                 },
                 space,
-                alpha_animation: None,
+                alpha_animation,
             }),
         }
     }
@@ -1424,7 +1431,9 @@ fn open_scope<T>(
 /// Such a scope has no filter, no backdrop and no mask, is no Backdrop Root
 /// and is never floored, so its items push the clip chains a scope around
 /// it would have them push. A singular map pushes an empty clip, which
-/// keeps everything inside from drawing.
+/// keeps everything inside from drawing. A compositing layer whose element
+/// exports an opacity curve takes its alpha from the curve at compose time,
+/// as `open_scope`'s effect layer does.
 fn open_svg_scope<T>(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -1446,8 +1455,16 @@ fn open_svg_scope<T>(
     let pushed = convert::item_affine(&frame.matrix(layer.transform), layer.size)
         .and_then(|local| svg::layer_push(document, recorded, scale * local));
     let transparent = if let Some((pushed, transform)) = &pushed {
-        sink.push_svg_layer(layer.space, pushed, *transform);
-        !pushed.clip_only && pushed.alpha <= 0.0
+        let alpha_animation =
+            space::nearest_animation(frame.spaces(), layer.space).filter(|&slot| {
+                !pushed.clip_only && frame.animations()[slot as usize].node == layer.node
+            });
+        sink.push_svg_layer(layer.space, alpha_animation, pushed, *transform);
+        // As for an element's group: only a still zero is transparent.
+        let fades = document
+            .get(layer.node)
+            .is_some_and(crate::tree::node::Node::animates_opacity);
+        !pushed.clip_only && pushed.alpha <= 0.0 && alpha_animation.is_none() && !fades
     } else {
         sink.push_clip_empty(layer.space);
         false
@@ -1762,7 +1779,9 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
 /// Draws the picture a replaced element presents into its content box,
 /// fitted against the natural size it was given with it: a picture it owns,
 /// or a URL resolved against the registry as a CSS image is, which draws
-/// nothing while pending or after failing.
+/// nothing while pending or after failing. An outermost `svg` element
+/// presents no picture: its recorded subtree is items of their own
+/// (`crate::visual::svg`, [`svg`]).
 fn paint_presented<T>(
     sink: &mut WalkSink<'_>,
     document: &Document<T>,
@@ -1772,13 +1791,16 @@ fn paint_presented<T>(
     fragment: &BoxFragment,
     node: crate::tree::document::NodeId,
 ) {
-    let (picture, vector) = match document.picture(node) {
-        Some(PictureKey::Id(picture)) => (PictureKey::Id(*picture), None),
+    let content = match document.picture(node) {
+        Some(PictureKey::Id(picture)) => ReplacedContent::Picture(PictureKey::Id(*picture)),
         Some(PictureKey::Url(url)) => {
             let Some((image, _, vector)) = images.resolve(url) else {
                 return;
             };
-            (PictureKey::Url(image), vector)
+            vector.map_or(
+                ReplacedContent::Picture(PictureKey::Url(image)),
+                ReplacedContent::Vector,
+            )
         }
         None => return,
     };
@@ -1787,8 +1809,7 @@ fn paint_presented<T>(
         space,
         style,
         fragment,
-        picture,
-        vector,
+        content,
         document.natural_size(node),
     );
 }

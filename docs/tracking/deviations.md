@@ -1972,7 +1972,7 @@ consequential choice about whether to follow the spec or the quirk.
   - *SMIL is not run* (since 2026-11-23, animation is CSS only): `animate`,
     `animateTransform`, `animateMotion` and `set` are unknown elements and
     the static state draws, where web-core's browser runs SMIL. CSS
-    animations and transitions inside an SVG image run; an
+    animations and transitions inside an SVG run, inline and in an image; an
     animated SVG image is recorded again and its texture baked again after
     every tick that changes it, where a browser repaints its own SVG image.
   - *Masks, filters, patterns, markers and a nested `image` draw nothing*,

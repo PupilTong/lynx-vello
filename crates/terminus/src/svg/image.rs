@@ -13,7 +13,7 @@
 //! root has no box to carry its own `opacity`, `clip-path`, mask and
 //! `transform`) and its text shaped with the host document's `TextContext`,
 //! so SVG glyphs come from the page's fonts and `@font-face` registrations.
-//! The recording is then planned into paint
+//! The recording is then drawn as an inline root's is: planned into paint
 //! items and group layers (`Document::plan_svg_image`) and painted by the
 //! paint walk, with nothing culled, into the image's one display list. The
 //! root is not a CSS box: the document is never laid out or rendered. The
@@ -171,7 +171,7 @@ impl IsolatedSvg {
     /// The image the document draws now: its root recorded, its text shaped
     /// with `context`, the host document's text context, and kept in the
     /// document's own side table (`super::present`), then planned by the
-    /// visual plan (`Document::plan_svg_image`) and
+    /// visual plan of an inline root (`Document::plan_svg_image`) and
     /// painted by the paint walk with nothing culled, into one display list.
     pub(crate) fn image(&mut self, context: &mut Option<Box<TextContext>>) -> VectorImage {
         let document = &mut self.document;

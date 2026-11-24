@@ -45,11 +45,13 @@
 //!   snapped absolute positions at any device scale.
 //! - Subtrees the layout host zeroes (display:none, unstyled descendants, `DisplayMode::Leaf`
 //!   children, skipped `content-visibility` contents) are exactly the subtrees this module skips.
-//!   That is a two-way street for `content-visibility: auto`: the skipping is decided *here*, by
-//!   [`relevance`], out of the frame this module built — so the frame a render publishes is always
-//!   the one built under the bits the layout it was built on used. Note that the decision reads the
-//!   build's [`AutoBox`] records, not its items: relevance is geometric, and a `visibility: hidden`
-//!   `auto` element has no item yet still decides whether its contents lay out.
+//!   The descendants of an outermost `svg` element are among them: what they draw reaches the order
+//!   as the element's recording, appended after its box item ([`svg`]). That is a two-way street
+//!   for `content-visibility: auto`: the skipping is decided *here*, by [`relevance`], out of the
+//!   frame this module built — so the frame a render publishes is always the one built under the
+//!   bits the layout it was built on used. Note that the decision reads the build's [`AutoBox`]
+//!   records, not its items: relevance is geometric, and a `visibility: hidden` `auto` element has
+//!   no item yet still decides whether its contents lay out.
 //! - `display: contents` (css-display-3 §2.5) dissolves in lockstep with layout: this module walks
 //!   the engine's own `LayoutTree::flattened_children`, so dissolved grandchildren paint, stack,
 //!   and hit as members of the box parent's context; the boxless element itself paints nothing,
@@ -424,10 +426,7 @@ impl PaintOrder {
     /// The world matrix `transform` names in this frame.
     #[must_use]
     pub(crate) fn matrix(&self, transform: ItemTransform) -> Transform3D<f32> {
-        match transform {
-            ItemTransform::Translate(offset) => Transform3D::translation(offset.x, offset.y, 0.0),
-            ItemTransform::Matrix(index) => self.matrices[index as usize],
-        }
+        transform.resolve(&self.matrices)
     }
 
     #[must_use]
@@ -751,13 +750,13 @@ pub(crate) enum PaintItemKind {
     InlineFragment {
         paragraph: NodeId,
     },
-    /// One path or text item of an SVG image's recording
-    /// (`crate::svg::present`): `root` is the `svg` element it is filed
-    /// under, `index` the item's place in its recording. The item's node is
-    /// the SVG element the item was recorded from; its transform maps the
-    /// item's ink rectangle (`crate::svg::ink_extent`), placed at its
-    /// origin, onto the image, and its size is that rectangle's. Never
-    /// hit-testable.
+    /// One path or text item of an outermost `svg` element's recording
+    /// (`crate::svg::present`): `root` is that element, `index` the item's
+    /// place in its recording. The item's node is the SVG element the item
+    /// was recorded from; its transform maps the item's ink rectangle
+    /// (`crate::svg::ink_extent`), placed at its origin, onto the page, and
+    /// its size is that rectangle's. Never hit-testable: a point over it
+    /// hits the root's own box.
     Svg {
         root: NodeId,
         index: u32,
@@ -776,6 +775,16 @@ pub(crate) enum PaintItemKind {
 pub(crate) enum ItemTransform {
     Translate(Vector2D<f32>),
     Matrix(u32),
+}
+
+impl ItemTransform {
+    /// The world matrix this names among `matrices`, the frame's table.
+    pub(crate) fn resolve(self, matrices: &[Transform3D<f32>]) -> Transform3D<f32> {
+        match self {
+            Self::Translate(offset) => Transform3D::translation(offset.x, offset.y, 0.0),
+            Self::Matrix(index) => matrices[index as usize],
+        }
+    }
 }
 
 /// One node's entry in the paint order.
@@ -834,12 +843,12 @@ pub(crate) enum LayerKind {
     /// `opacity`, `mix-blend-mode`, `filter`, `backdrop-filter`,
     /// `clip-path` and mask.
     Element,
-    /// One layer push of an SVG image's recording
+    /// One layer push of an outermost `svg` element's recording
     /// (`crate::paint::svg::layer`): a compositing layer at its alpha or a
     /// clip, shaped by a rectangle or a path. `root` is the `svg` element,
     /// `index` the push's place in its recording; the layer's node is the
     /// element whose group effects the push records, its transform maps the
-    /// shape's bounding box, placed at its origin, onto the image, and its
+    /// shape's bounding box, placed at its origin, onto the page, and its
     /// size is that box's. Never floored, filtered or a Backdrop Root.
     Svg { root: NodeId, index: u32 },
 }
@@ -936,6 +945,10 @@ impl<T: Sync> Document<T> {
     /// frame it was decided on — while the commit id is claimed once per
     /// render, so every pass builds the *same* commit.
     fn build_frame(&mut self) -> PaintOrder {
+        // Every `svg` root whose subtree changed records it now, after the
+        // layout the caller ran and before the walk draws it
+        // (`svg::present`). One `bool` test without one.
+        self.record_svg_roots();
         // Both takes finish before `build` reborrows the document shared. The
         // retained frame is not among them: it stays where hit testing can
         // read it for the whole build, and a build that panics loses only one

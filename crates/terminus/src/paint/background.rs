@@ -61,6 +61,7 @@ use crate::paint::{BoxFragment, TextClip};
 use crate::peniko;
 use crate::peniko::{BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
 use crate::render::image::{ImageRegistry, VectorImage};
+use crate::visual::CornerRadii;
 
 const EPS: f64 = 1e-6;
 
@@ -300,69 +301,51 @@ fn open_text_clip_ops(
     true
 }
 
-/// Draws the image `image` names into the element's content box: a bitmap
-/// as an image draw, or `vector`, when the source is an SVG document, as a
-/// vector draw.
-///
-/// The picture is the one the element presents (`Document::set_picture`),
-/// and `natural` is the natural size it was presented with.
+/// What a replaced element draws into its content box.
+pub(crate) enum ReplacedContent<'a> {
+    /// The picture the element presents (`Document::set_picture`), drawn
+    /// as an image draw.
+    Picture(crate::render::picture::PictureKey),
+    /// A vector image, drawn as a vector draw: an SVG document the element
+    /// presents by URL. An `svg` element's own subtree is not one: it is
+    /// drawn as paint items of its own (`crate::visual::svg`).
+    Vector(&'a VectorImage),
+}
+
+/// Draws `content` into the element's content box, fitted against
+/// `natural`, the natural size the element has.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    image: crate::render::picture::PictureKey,
-    vector: Option<&VectorImage>,
+    content: ReplacedContent<'_>,
     natural: NaturalSize,
 ) {
-    let content = fragment.content_box;
-    if content.width() <= 0.0 || content.height() <= 0.0 {
+    let Some(destination) = replaced_destination(style, fragment, natural) else {
         return;
-    }
-
-    let position = &style.get_position();
-    let (object_width, object_height) = concrete_object_size(natural, content);
-    let (draw_width, draw_height) =
-        fitted_size(position.object_fit, object_width, object_height, content);
-    if draw_width <= 0.0 || draw_height <= 0.0 {
-        return;
-    }
-    let destination = Rect::from_origin_size(
-        (
-            content.x0
-                + position_offset(
-                    &position.object_position.horizontal,
-                    content.width(),
-                    draw_width,
-                ),
-            content.y0
-                + position_offset(
-                    &position.object_position.vertical,
-                    content.height(),
-                    draw_height,
-                ),
-        ),
-        (draw_width, draw_height),
-    );
-
+    };
     let shape = level_shape(fragment, BoxLevel::Content);
-    if let Some(vector) = vector {
-        if is_drawable(vector)
-            && let Some(area) = image_area(&shape, destination)
-        {
-            sink.vector(
-                space,
-                vector_draw(
-                    vector,
-                    fragment.transform,
-                    destination,
-                    image_quality(style),
-                    area,
-                ),
-            );
+    let image = match content {
+        ReplacedContent::Picture(image) => image,
+        ReplacedContent::Vector(vector) => {
+            if is_drawable(vector)
+                && let Some(area) = image_area(&shape, destination)
+            {
+                sink.vector(
+                    space,
+                    vector_draw(
+                        vector,
+                        fragment.transform,
+                        destination,
+                        image_quality(style),
+                        area,
+                    ),
+                );
+            }
+            return;
         }
-        return;
-    }
+    };
     let Some(area) = image_area(&shape, destination) else {
         return;
     };
@@ -381,6 +364,59 @@ pub(crate) fn paint_replaced_content(
             area,
         },
     );
+}
+
+/// The rectangle, in the fragment's own space, a replaced element's
+/// picture of `natural` size is drawn onto: its concrete object size fitted
+/// into the content box by `object-fit` and placed by `object-position`.
+/// `None` when the content box or the fitted size is empty, which draws
+/// nothing. What the picture is clipped to is the content box's shape
+/// ([`content_radii`]) cut to this rectangle ([`fill_plan`]).
+pub(crate) fn replaced_destination(
+    style: &ComputedValues,
+    fragment: &BoxFragment,
+    natural: NaturalSize,
+) -> Option<Rect> {
+    let content_box = fragment.content_box;
+    if content_box.width() <= 0.0 || content_box.height() <= 0.0 {
+        return None;
+    }
+    let position = &style.get_position();
+    let (object_width, object_height) = concrete_object_size(natural, content_box);
+    let (draw_width, draw_height) = fitted_size(
+        position.object_fit,
+        object_width,
+        object_height,
+        content_box,
+    );
+    if draw_width <= 0.0 || draw_height <= 0.0 {
+        return None;
+    }
+    Some(Rect::from_origin_size(
+        (
+            content_box.x0
+                + position_offset(
+                    &position.object_position.horizontal,
+                    content_box.width(),
+                    draw_width,
+                ),
+            content_box.y0
+                + position_offset(
+                    &position.object_position.vertical,
+                    content_box.height(),
+                    draw_height,
+                ),
+        ),
+        (draw_width, draw_height),
+    ))
+}
+
+/// The corner radii of the fragment's content box: its border radii inset
+/// by the border and then by the padding, the shape
+/// [`BoxLevel::Content`] clips to.
+pub(crate) fn content_radii(fragment: &BoxFragment) -> CornerRadii {
+    let padding = inner_radii(&fragment.radii, &fragment.border_widths);
+    inner_radii(&padding, &fragment.padding_widths)
 }
 
 fn concrete_object_size(natural: NaturalSize, content: Rect) -> (f64, f64) {
@@ -470,13 +506,7 @@ pub(super) fn level_shape(fragment: &BoxFragment, level: BoxLevel) -> BoxShape {
             fragment.padding_box,
             &inner_radii(&fragment.radii, &fragment.border_widths),
         ),
-        BoxLevel::Content => {
-            let padding = inner_radii(&fragment.radii, &fragment.border_widths);
-            BoxShape::new(
-                fragment.content_box,
-                &inner_radii(&padding, &fragment.padding_widths),
-            )
-        }
+        BoxLevel::Content => BoxShape::new(fragment.content_box, &content_radii(fragment)),
     }
 }
 
@@ -744,7 +774,7 @@ impl TileGrid {
 /// fill be described on one thread and encoded on another, with the pixels
 /// supplied only at encode time.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum FillPlan {
+pub(crate) enum FillPlan {
     /// Degenerate: a zero-area draw, or a clip the draw misses entirely.
     /// Nothing is painted.
     None,
@@ -759,7 +789,7 @@ pub(super) enum FillPlan {
 }
 
 /// The shape a fill of `draw` inside `clip` resolves to.
-pub(super) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
+pub(crate) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
     if draw.width() <= 0.0 || draw.height() <= 0.0 {
         return FillPlan::None;
     }

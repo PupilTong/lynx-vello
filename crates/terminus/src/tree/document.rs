@@ -126,7 +126,7 @@ pub struct Document<T> {
     /// The Container Timing roots ([`crate::visual::container_timing`]):
     /// what the paint walk and every insertion test before anything else.
     pub(crate) container_roots: crate::visual::container_timing::ContainerRoots,
-    /// The recording of each SVG image root this isolated document files
+    /// What each outermost SVG `svg` element draws, and which owe a record
     /// ([`crate::svg::present`]). Empty and unallocated without one.
     pub(crate) svg_roots: crate::svg::present::SvgRoots,
     /// The isolated documents of SVG images that still animate
@@ -613,6 +613,12 @@ impl<T> Document<T> {
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.note_child_inserted(parent, child);
+        // An `svg` root's drawing is its subtree (`svg::present`).
+        if self.tree.at(child_slot).in_svg_namespace()
+            || self.tree.at(parent_slot).in_svg_namespace()
+        {
+            self.note_svg_change(child);
+        }
         self.invalidate_layout(child);
         self.invalidate_hoisted_under(child);
         let connected = contains_custom_elements && self.is_connected(child);
@@ -756,6 +762,9 @@ impl<T> Document<T> {
 
         let removed_index = self.tree.remove_child(parent, child);
         self.note_slot_assignment_removed(parent, child);
+        if self.live(parent).in_svg_namespace() {
+            self.note_svg_change(parent);
+        }
 
         debug_assert_ne!(
             parent, DOCUMENT_NODE_ID,
@@ -1082,8 +1091,8 @@ impl<T> Document<T> {
         let mut containing_blocks = Vec::new();
         let mut anchor_restyled = Vec::new();
         while let Some(current) = stack.pop() {
-            let (harvested, refresh) = {
-                let (harvested, refresh, descend, anchor_restyle) = {
+            let (harvested, refresh, svg) = {
+                let (harvested, refresh, descend, anchor_restyle, svg) = {
                     let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
@@ -1112,12 +1121,14 @@ impl<T> Document<T> {
                         damage.unwrap_or_default(),
                         refresh.paragraph_limits_changed,
                     );
+                    let svg = node.in_svg_namespace();
                     let dirty = node.styling.dirty_descendants.get_mut();
                     (
                         harvested,
                         refresh,
                         std::mem::replace(dirty, false) || refresh.changed,
                         anchor_restyle,
+                        svg,
                     )
                 };
                 // An element that declares nothing now may have declared
@@ -1139,7 +1150,7 @@ impl<T> Document<T> {
                             .map(|&slot| arenas.at(slot).id()),
                     );
                 }
-                (harvested, refresh)
+                (harvested, refresh, svg)
             };
             // Before the damage test: a first or a last style carries no
             // damage at all, and it still decides whether the element's text
@@ -1150,12 +1161,22 @@ impl<T> Document<T> {
                 harvested.is_some_and(StyleDamage::needs_relayout),
             );
             let Some(damage) = harvested else {
+                // A first style carries no damage: an outermost `svg` styled
+                // again after a `display: none` ancestor is shown owes a
+                // record of what changed while it had no style.
+                if svg && refresh.first {
+                    self.note_svg_first_style(current);
+                }
                 continue;
             };
+            // An SVG element's new style is its `svg` root's new drawing
+            // (`svg::present`); one bit test for every other element. One
+            // below its root has no box, so it relays nothing out.
+            let boxless = svg && self.note_svg_restyle(current);
             if refresh.containing_block_changed {
                 containing_blocks.push(current);
             }
-            if damage.needs_relayout() {
+            if damage.needs_relayout() && !boxless {
                 // Reconstruction damage needs no second walk from the parent:
                 // this one already cleared the parent's cache (or stopped
                 // because it was empty, or because the parent skips its

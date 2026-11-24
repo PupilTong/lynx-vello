@@ -297,10 +297,10 @@ state.
 ## SVG-namespace elements
 
 `crates/terminus/src/svg/` puts SVG content in the document as real element
-nodes that stylo cascades, records a cascaded subtree into an item list, and
-draws every SVG image as an isolated SVG document of its own, planned and
-painted by the paint walk (`docs/svg-dom-design.md`). An `svg` element in a
-document draws nothing yet.
+nodes that stylo cascades, records a cascaded subtree into an item list, plans and paints an `svg`
+element's recorded subtree into its box, and draws every SVG image as an
+isolated SVG document of its own, planned and painted the same way
+(`docs/svg-dom-design.md`).
 
 **The namespace bit.** An element is in the HTML namespace or the SVG
 namespace (`http://www.w3.org/2000/svg`): bit 13 of `NodeFlags`, set when
@@ -490,7 +490,8 @@ text).
   `width`/`height`. A gradient is resolved for each reference against the referencing element's
   viewport and its own font size; stops take their own computed `stop-color` and `stop-opacity`.
 - `group`: `RootGroup::Recorded` draws the root's own `opacity`, `clip-path`, mask and
-  `transform` into the list, as an image's root.
+  `transform` into the list, as an image's root; `RootGroup::Box` leaves them to the root's CSS
+  box.
 - An element with no computed style (inside a `display: none` subtree) draws nothing; the walk is
   bounded by `MAX_NESTING`, counting element nesting, `tspan` nesting and `use` expansion.
 
@@ -514,7 +515,8 @@ flushed), and asks it for its image (`IsolatedSvg::image`): the root is
 recorded with `RootGroup::Recorded`, its text shaped with the host
 document's `TextContext`, and the recording filed in the isolated
 document's own `svg_roots` (`keep_svg_recording`). `Document::plan_svg_image`
-plans it (`visual/svg.rs`, `plan_recording`) under the identity map and world, with no root box item,
+plans it with the inline root's planning function (`visual/svg.rs`,
+`plan_recording`) under the identity map and world, with no root box item,
 clip, space, scroll slot or animation slot, and claims a commit id for it;
 `paint::walker::walk_uncultured`, the monolithic sink with culling off,
 walks that plan into one display list, so every recorded item is drawn, one
@@ -536,6 +538,123 @@ committed: `FramePainter::paint` passes the walk's vector draws to
 `note_drawn_images`, which also ORs a running image into the frame's
 `animations_active` and `needs_main_ticks`. `has_active_animations` and
 `AnimationTick::needs_next_frame` include it too.
+
+**Presenting** (`svg/present.rs`, `visual/svg.rs`, `paint/svg.rs`). An
+outermost `svg` element, one whose flat-tree parent is not an SVG element,
+draws its own subtree. The document keeps a side table,
+`Document::svg_roots` (`SvgRoots`): per root, its last `Recording`, its text
+shaped, and whether it owes a new one; the map is empty and unallocated
+while the document has no root, and `free_node` takes a freed node out of it
+(one `is_empty` test otherwise). An inline root makes no `VectorImage`, no
+`VectorDraw` and no texture: what it draws is items of the paint order.
+
+- Recording runs at the start of `build_frame`, so after the style flush and layout of the render
+  and before the visual plan, for each dirty root that is connected and has a computed style:
+  `record(document, root, RootGroup::Box)` (the root's own `opacity`, `transform` and clip belong
+  to its CSS box and are not in the list), then `svg::text::shape` with the document's own
+  `TextContext`. A dirty root that is not connected or not styled stays dirty for a later build. A
+  filed element that is no longer outermost leaves the table at the first build that finds it
+  dirty; a root inserted under another `svg` is not marked again (every mark walks up to the new
+  outermost root), so its entry and recording stay until it is freed or is outermost again and
+  marked. A document with nothing to record
+  pays one `bool` test per build.
+- The plan (`visual/svg.rs`, `plan_root`): where the builder pushes the box item of a replaced
+  element on a document that has a root (`Document::has_svg_roots`, one test per box otherwise),
+  it appends the root's recording after that item, in the recording's order. Each path and text
+  item is a `PaintItem` of kind `PaintItemKind::Svg { root, index }`, its node the SVG element it
+  was recorded from, not hit-testable, in the root's space and scroll slot; its world matrix is
+  the root's border-box world, then `RootPlacement::map`, then the item's absolute transform,
+  then the origin of its ink rectangle (`svg::ink_extent`: a path's box grown by its stroke's
+  reach, a text item's shaped chunk boxes), whose size is the item's size. Each layer push and
+  its pop is a `RenderLayer` of kind `LayerKind::Svg { root, index }` around the items between
+  them, nested in the layers open around it. Every item and layer is clipped by one or two
+  `ClipNode`s inside the root's own clip chain: the content box's shape and the destination
+  rectangle. A root in a stacking context of its own is planned where its item is pushed; one
+  painted in its parent's stream is planned when its record is emitted.
+- The placement (`Document::svg_root_placement`) is the one a vector image of the same natural
+  size gets: `paint::replaced_destination` (`object-fit` and `object-position` in the content
+  box), then `paint::compose::aspect_transform` for the root's `preserveAspectRatio`, and
+  `paint::fill_plan` decides which of the two clips are needed.
+- The paint walk (`paint/svg.rs`) draws an `Svg` item into the fragment of its space through
+  `paint::svg::draw`, the function that draws the same item into an SVG image's list, under the
+  item's resolved matrix moved back by its ink rectangle's origin. An `Svg` layer opens a scope of
+  its own (`open_svg_scope`): one `ComposeOp::Push` of the recorded shape (a rectangle, or the
+  recorded path as `CapturedShape::Path`, shared through an `Arc`) at the recorded alpha, or a
+  clip-only push, and nothing else; it has no filter, backdrop or mask, is no Backdrop Root and is
+  never floored, and `reset_layers` and `layer_blur_sigma` read no style for it. The monolithic
+  walk pushes the same layer through `paint::svg::Layer::push`. A recorded path item is culled
+  as an element box is, by its ink rectangle; a recorded text item as a text run is, never by
+  geometry alone. An `Svg` item counts as contentful paint.
+- `paint_presented` draws nothing for an `svg` root, which presents no picture. An untouched root
+  keeps its recording across renders; every frame plans and paints it again from that recording.
+- `Document::scene()` holds an inline root's drawing, since it is ordinary fragment content.
+
+A root is marked dirty (`Document::note_svg_change`, which walks up the flat
+tree from the changed node to the outermost `svg` and notes a visual
+mutation) by:
+
+- `set_attribute`/`remove_attribute` on an SVG element, through `reflect_svg_attribute` (every
+  attribute but `class` and `style`), and `set_id_attribute` on one;
+- `insert_before` when the child or the parent is an SVG element, `unlink_from_parent` when the
+  parent is one, and a text change whose element is one (`set_element_text_content`);
+- a style change of an SVG element, in the style flush's damage harvest
+  (`harvest_style_damage`) and the animation recascade's (`harvest_animation_damage`). Every
+  longhand without a `servo_restyle_damage` of its own reports `rebuild_box`, the
+  `RELAYOUT` set; the `inherited_svg` and `svg` paint longhands (`fill`, `stroke`, the opacities,
+  `stop-color`, …) declare none, so a `fill` change reports `RELAYOUT` and is never empty
+  damage. A first style carries no damage: insertion marks a newly inserted element's root, and
+  the style flush's harvest marks an outermost `svg` on its first style
+  (`Document::note_svg_first_style`, after a `display: none` HTML ancestor is shown again); the
+  animation recascade styles no element for the first time, since `display` does not animate.
+  The harvests read the
+  node's namespace bit with the damage and call nothing more for an element that is not SVG.
+  An SVG element below its root (`Document::note_svg_restyle`) generates no box, so the harvest
+  does not call `invalidate_layout` for it: that would clear the box caches of the root and its
+  ancestors (for a child of the root) or force a layout pass (for a deeper element) on every
+  `fill` change and animation tick. The rest of the harvest (`note_box_restyle`, anchor state,
+  containing-block flips) runs as for any element. The root's own damage takes the normal path,
+  since its `width`, `height` and `display` are box properties.
+
+A CSS animation or transition on an SVG element below its root runs through
+the document's animation driver like any other: each tick that re-cascades
+it reaches the animation recascade's damage harvest, which marks the root
+dirty, and the next build records it again. SMIL elements are unknown
+elements and draw nothing.
+
+A `transform` or `opacity` animation of such an element runs in the painter
+instead, through the box path's machinery:
+
+- The recorder marks the element when its `animates_opacity` or
+  `animates_transform` bit is set: `Recording::animated` holds its node, its
+  subtree's item range, its parent's absolute transform and the reference box
+  its transform was folded against; an animated `opacity` records the
+  element's compositing layer at any value. The reference box, and with it a `transform` curve, is withheld under an
+  enclosing element whose drawing depends on its content's extent (a
+  bounds-shaped layer, an `objectBoundingBox` clip, a `fill-box` or
+  `stroke-box` transform). Only a `RootGroup::Box` recording marks.
+- `visual/svg.rs` asks `allocate_animation_slot` (`visual/build.rs`) for each
+  marked element, the function a stacking-context box asks, with track
+  inputs from `svg::context_matrix` over the reference box, the root's world,
+  the placement map and the parent's transform, and the subtree's ink extent
+  in place of a box's size. With a slot, the subtree's items and layers take
+  an animation space nested in the one around them; `open_svg_scope` gives
+  the element's layer the curve's alpha. `refresh_animation_activity` counts
+  the slot as it counts a box's.
+- With the curve exported, the frame needs no main-thread tick for it and
+  nothing records. A tick that re-cascades the element all the same
+  (something else needs ticks, or an expiring curve hands it back) marks the
+  root dirty as any other restyle does; the next build records it again and
+  plans a new track over the new recording, as a re-planned CSS box gets
+  one.
+
+Limits: a document's text shaped into an `svg` root is not re-shaped when an
+`@font-face` lands later, as for vector images; the viewport of a root
+whose `width` or `height` is not an absolute length is the image rule's
+300 × 150 default, not the box's size as in a browser; a point over a
+recorded shape hits the root, not the shape; and a frame built for a change
+elsewhere on the page plans and paints every root's recording again, item by
+item, without recording it again (`docs/svg-dom-design.md` section 9 has the
+cost).
 
 ## Layout host
 
@@ -929,9 +1048,9 @@ clips, layers and glyph runs as drawing semantics, replayed by
 `render::sparse` into `vello_gpu` per render). Item clip chains diff against
 its layer stack;
 `RenderLayer` scopes composite opacity, filters, clip paths, and masks, or
-one recorded layer push of an SVG image (`LayerKind::Svg`); box
+one recorded layer push of an `svg` root (`LayerKind::Svg`); box
 fragments paint shadows, backgrounds, replaced content, borders, outlines, and
-retained Parley glyphs, and an SVG image's recorded paths and text paint as
+retained Parley glyphs, and an `svg` root's recorded paths and text paint as
 items of their own (`paint/svg.rs`). Internal style access is `Document::paint_style`
 (post-flush, no `Arc` bump), geometry is the rounded layout, and the document
 Device supplies viewport/DPR so paint cannot disagree with layout. The
