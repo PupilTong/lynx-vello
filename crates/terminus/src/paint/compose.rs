@@ -79,7 +79,7 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
-use crate::kurbo::{Affine, Point, Rect, Size};
+use crate::kurbo::{Affine, BezPath, Point, Rect, Shape, Size};
 use crate::paint::display_list::{DisplayList, ImagePaint, ImageRef, Paint, Texture, may_reach};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
@@ -96,6 +96,9 @@ use crate::visual::{AnimationSamples, AnimationSlot};
 pub(crate) enum CapturedShape {
     Rect(Rect),
     Box(BoxShape),
+    /// A path, shared with the SVG recording it came from: the shape of an
+    /// `svg` element's recorded layer or clip (`paint::svg`).
+    Path(Arc<BezPath>),
 }
 
 impl CapturedShape {
@@ -104,6 +107,7 @@ impl CapturedShape {
         match self {
             Self::Rect(rect) => rect.abs(),
             Self::Box(shape) => shape.bounding_box().abs(),
+            Self::Path(path) => path.bounding_box().abs(),
         }
     }
 }
@@ -145,6 +149,10 @@ macro_rules! with_captured {
         match $shape {
             CapturedShape::Rect($s) => $body,
             CapturedShape::Box(shape) => with_shape!(shape, |$s| $body),
+            CapturedShape::Path(path) => {
+                let $s: &BezPath = path;
+                $body
+            }
         }
     };
 }
@@ -397,12 +405,8 @@ impl Picture<'_> {
 pub(crate) fn encode_vector_inline(scene: &mut DisplayList, draw: &VectorDraw, outer: Affine) {
     let transform = outer * draw.transform;
     let layers = match &draw.area {
-        ImageArea::Fill(CapturedShape::Rect(rect)) => {
-            scene.push_clip_layer(Fill::NonZero, transform, rect);
-            1
-        }
-        ImageArea::Fill(CapturedShape::Box(shape)) => {
-            with_shape!(shape, |s| scene.push_clip_layer(
+        ImageArea::Fill(shape) => {
+            with_captured!(shape, |s| scene.push_clip_layer(
                 Fill::NonZero,
                 transform,
                 s
@@ -491,11 +495,8 @@ fn encode_textured(
         );
     let paint = picture.paint(sampler);
     match area {
-        ImageArea::Fill(CapturedShape::Rect(rect)) => {
-            scene.fill_paint(Fill::NonZero, transform, paint, Some(brush_transform), rect);
-        }
-        ImageArea::Fill(CapturedShape::Box(shape)) => {
-            with_shape!(shape, |s| scene.fill_paint(
+        ImageArea::Fill(shape) => {
+            with_captured!(shape, |s| scene.fill_paint(
                 Fill::NonZero,
                 transform,
                 paint,

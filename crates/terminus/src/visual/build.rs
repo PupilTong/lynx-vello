@@ -50,9 +50,9 @@ use super::frame::MAX_MOVING_EXTENT_VIEWPORTS;
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ContextMatrix, ParentPerspective, as_translation, same_bits};
 use super::{
-    AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, ItemTransform, PaintItem,
-    PaintItemKind, PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind,
-    StickySlot, stacking,
+    AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, ItemTransform, LayerKind,
+    PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space,
+    SpaceKind, StickySlot, stacking,
 };
 use crate::layout::inline_flow::is_inline_box;
 use crate::layout::{
@@ -993,6 +993,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             space,
             clip,
             items: start..start,
+            kind: LayerKind::Element,
         });
         let index = self.layers.len() - 1;
         self.current_layer = Some(index);
@@ -1667,7 +1668,10 @@ fn translated(world: &Transform3D<f32>, offset: Point2D<f32>) -> Transform3D<f32
 /// otherwise in the frame's table. A context's own item, clip, layer and
 /// `auto` box are interned back to back with one world, so a matrix equal to
 /// the last one stored shares its entry.
-fn intern(matrices: &mut Vec<Transform3D<f32>>, matrix: Transform3D<f32>) -> ItemTransform {
+pub(super) fn intern(
+    matrices: &mut Vec<Transform3D<f32>>,
+    matrix: Transform3D<f32>,
+) -> ItemTransform {
     if let Some(offset) = as_translation(&matrix) {
         return ItemTransform::Translate(offset);
     }

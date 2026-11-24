@@ -49,13 +49,17 @@
 //!    first `blur()` inside the blur bracket, the ones after it outside it. Composite order on pop
 //!    is therefore pre-blur adjustments → blur → post-blur adjustments → mask → clip-path →
 //!    opacity/blend — clip and mask are both intersective alpha ops, so the swap versus the spec's
-//!    filter → clip → mask is unobservable.
+//!    filter → clip → mask is unobservable. A layer push of an `svg` root's recording
+//!    ([`crate::visual::LayerKind::Svg`]) is a scope of its own: one push of the recorded rectangle
+//!    or path at the recorded alpha, or a clip, and nothing else ([`open_svg_scope`]).
 //! 3. **Fragments** — per element box: outset shadows, background, inset shadows, replaced content
 //!    (above the inset shadows — css-backgrounds-3 §7.4.1 paints inner shadows immediately above
 //!    the background, below content, which is why an inset shadow on an `<img>` is invisible in
 //!    browsers), border, outline (outline painting with its element rather than Appendix E step 10
 //!    is a recorded v1 limit); per text run: the retained Parley layout under the parent element's
-//!    style.
+//!    style; per recorded item of an `svg` root ([`PaintItemKind::Svg`]): the path or glyph run the
+//!    recording holds ([`svg`]). An SVG image's plan, which is such items and layers with no box
+//!    behind them, is walked the same way into one list ([`walk_uncultured`]).
 //!
 //! # Culling
 //!
@@ -122,7 +126,7 @@ use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, Compos
 use crate::paint::display_list::DisplayList;
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
-    BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
+    BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, svg, text,
 };
 use crate::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::render::image::ImageRegistry;
@@ -130,22 +134,18 @@ use crate::render::picture::PictureKey;
 use crate::tree::document::Document;
 use crate::visual::container_timing::{ContainerHit, ContainerRect};
 use crate::visual::space::{self, SpaceKind, nearest_scroll, nearest_sticky};
-use crate::visual::{AutoBox, ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
+use crate::visual::{
+    AutoBox, ClipNode, LayerKind, PaintItem, PaintItemKind, PaintOrder, RenderLayer,
+};
 
 /// Where one walk's output goes.
 ///
 /// `Monolithic` is the pre-compose shape — one scene, everything inline —
-/// kept for the equivalence tests; production encodes through `Compose`, where
-/// walker-level pushes become program ops and content between them lands in
-/// per-space fragments.
+/// which an SVG image's walk draws into ([`walk_uncultured`]) and the
+/// equivalence tests compare against; a document's frame encodes through
+/// `Compose`, where walker-level pushes become program ops and content
+/// between them lands in per-space fragments.
 pub(crate) enum WalkSink<'s> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed only by the equivalence tests' monolithic walk"
-        )
-    )]
     Monolithic(
         &'s mut DisplayList,
         &'s dyn crate::render::image::FrameImages<PlatformFrame = std::convert::Infallible>,
@@ -288,6 +288,28 @@ impl WalkSink<'_> {
                 alpha: 1.0,
                 transform,
                 shape: CapturedShape::Box(shape),
+                space,
+                alpha_animation: None,
+            }),
+        }
+    }
+
+    /// Pushes one layer of an `svg` element's recording under `transform`:
+    /// through [`svg::Layer::push`] in the monolithic walk,
+    /// as the program op that replays the same push in the compose walk.
+    fn push_svg_layer(&mut self, space: Option<u32>, layer: &svg::Layer<'_>, transform: Affine) {
+        match self {
+            Self::Monolithic(scene, _) => layer.push(scene, transform),
+            Self::Compose(assembly) => assembly.push_op(ComposeOp::Push {
+                clip_only: layer.clip_only,
+                fill: layer.rule,
+                blend: BlendMode::new(Mix::Normal, Compose::SrcOver),
+                alpha: layer.alpha,
+                transform,
+                shape: match layer.shape {
+                    svg::LayerShape::Rect(rect) => CapturedShape::Rect(rect),
+                    svg::LayerShape::Path(path) => CapturedShape::Path(std::sync::Arc::clone(path)),
+                },
                 space,
                 alpha_animation: None,
             }),
@@ -950,11 +972,14 @@ pub(crate) fn walk_compose<T>(
     );
 }
 
-/// [`walk`] with culling switched off entirely.
+/// The monolithic walk with culling switched off entirely: every planned
+/// item is encoded into `scene`.
 ///
-/// The tests encode one frame both ways and compare, which is the statement
-/// that culling changes nothing an observer of the viewport can see.
-#[cfg(test)]
+/// An SVG image's scene is this walk over its plan
+/// (`Document::plan_svg_image`): a destination can show what lies outside
+/// the image's viewport, so nothing is culled against it. The tests also
+/// encode one frame both ways and compare, which is the statement that
+/// culling changes nothing an observer of the viewport can see.
 pub(crate) fn walk_uncultured<T>(
     scene: &mut DisplayList,
     scratch: &mut Scratch,
@@ -1042,7 +1067,12 @@ fn walk_within<T>(
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             if scratch.layer_live[next_open] {
-                open_scope(sink, scratch, painting, next_open);
+                match layers[next_open].kind {
+                    LayerKind::Element => open_scope(sink, scratch, painting, next_open),
+                    LayerKind::Svg { root, index } => {
+                        open_svg_scope(sink, scratch, painting, next_open, (root, index));
+                    }
+                }
             }
             next_open += 1;
         }
@@ -1385,6 +1415,55 @@ fn open_scope<T>(
         && alpha_animation.is_none()
         && !fades
     {
+        scratch.transparent_depth = Some(scratch.scopes.len());
+    }
+}
+
+/// Opens the scope of one layer push of an `svg` element's recording: the
+/// push itself, as the recording draws it (`paint::svg`), and nothing else.
+/// Such a scope has no filter, no backdrop and no mask, is no Backdrop Root
+/// and is never floored, so its items push the clip chains a scope around
+/// it would have them push. A singular map pushes an empty clip, which
+/// keeps everything inside from drawing.
+fn open_svg_scope<T>(
+    sink: &mut WalkSink<'_>,
+    scratch: &mut Scratch,
+    painting: Painting<'_, T>,
+    layer_index: usize,
+    recorded: (crate::tree::document::NodeId, u32),
+) {
+    let Painting {
+        document,
+        frame,
+        scale,
+        ..
+    } = painting;
+    let layer = &frame.layers()[layer_index];
+    let base = scratch.scopes.last().map_or(0, |scope| scope.base);
+    let floor = scratch.scopes.last().and_then(|scope| scope.floor);
+    // Outside the clips the enclosing scope's items pushed, as every scope.
+    pop_clips_to(sink, scratch, base);
+    let pushed = convert::item_affine(&frame.matrix(layer.transform), layer.size)
+        .and_then(|local| svg::layer_push(document, recorded, scale * local));
+    let transparent = if let Some((pushed, transform)) = &pushed {
+        sink.push_svg_layer(layer.space, pushed, *transform);
+        !pushed.clip_only && pushed.alpha <= 0.0
+    } else {
+        sink.push_clip_empty(layer.space);
+        false
+    };
+    scratch.scopes.push(Scope {
+        layer: layer_index,
+        base,
+        pushed: 1,
+        output: 0,
+        floor,
+        filtered: false,
+        blurred: false,
+        content_start: 0,
+        backdrop_root: false,
+    });
+    if scratch.track_transparent && scratch.transparent_depth.is_none() && transparent {
         scratch.transparent_depth = Some(scratch.scopes.len());
     }
 }
@@ -1742,6 +1821,7 @@ fn paint_item<T>(
     let (counts, attributes) = contentful_tests(scratch, document, item);
     let draws_before = (counts || attributes).then(|| sink.content_draws());
     let mut painted_text = false;
+    let mut painted_svg = false;
 
     match item.kind {
         PaintItemKind::ElementBox | PaintItemKind::Backdrop { .. } => {
@@ -1775,6 +1855,12 @@ fn paint_item<T>(
             }
         }
         PaintItemKind::InlineFragment { .. } => {}
+        PaintItemKind::Svg { root, index } => {
+            // SVG content counts as contentful as an image does.
+            painted_svg =
+                svg::paint_item(sink.scene_for(space), document, (root, index), transform)
+                    && (counts || attributes);
+        }
         PaintItemKind::TextRun { element } => {
             let Some(style) = document.paint_style(element) else {
                 return;
@@ -1831,7 +1917,9 @@ fn paint_item<T>(
             }
         }
     }
-    let drew = painted_text || draws_before.is_some_and(|before| sink.content_draws() > before);
+    let drew = painted_text
+        || painted_svg
+        || draws_before.is_some_and(|before| sink.content_draws() > before);
     if counts && drew {
         scratch.contentful = true;
     }
@@ -2631,16 +2719,21 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
     scratch.layer_live.clear();
     scratch.layer_floored.clear();
     for layer in layers {
-        let (backdrop, filtered) =
-            document
-                .paint_style(layer.node)
-                .map_or((false, false), |style| {
-                    let effects = style.get_effects();
-                    (
-                        !effects.backdrop_filter.0.is_empty(),
-                        !effects.filter.0.is_empty(),
-                    )
-                });
+        let (backdrop, filtered) = match layer.kind {
+            LayerKind::Element => {
+                document
+                    .paint_style(layer.node)
+                    .map_or((false, false), |style| {
+                        let effects = style.get_effects();
+                        (
+                            !effects.backdrop_filter.0.is_empty(),
+                            !effects.filter.0.is_empty(),
+                        )
+                    })
+            }
+            // An `svg` element's recorded layer has neither.
+            LayerKind::Svg { .. } => (false, false),
+        };
         scratch.layer_live.push(backdrop);
         scratch.layer_floored.push(backdrop || filtered);
     }
@@ -2726,6 +2819,10 @@ const BLUR_INK_SIGMAS: f64 = 3.0;
 /// non-uniform scale or a skew would make the spec's filter region
 /// anisotropic (recorded limit).
 fn layer_blur_sigma<T>(document: &Document<T>, frame: &PaintOrder, layer: &RenderLayer) -> f64 {
+    // An `svg` element's recorded layer draws no `filter`.
+    if layer.kind != LayerKind::Element {
+        return 0.0;
+    }
     let Some(style) = document.paint_style(layer.node) else {
         return 0.0;
     };
@@ -3117,6 +3214,23 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
             layer: 0.0,
             cull: 0.0,
         },
+        // A recorded path's box already holds its stroke
+        // (`crate::svg::ink_extent`). A text item's is its advance box,
+        // which glyph ink can leave as a text run's line box can, so it is
+        // culled the same way.
+        PaintItemKind::Svg { root, index } => {
+            if svg::is_text(document, (root, index)) {
+                Extents {
+                    layer: 0.5 * f64::from(item.size.height),
+                    cull: f64::INFINITY,
+                }
+            } else {
+                Extents {
+                    layer: 0.0,
+                    cull: 0.0,
+                }
+            }
+        }
         PaintItemKind::TextRun { element } => {
             let layer = document.paint_style(element).map_or(4.0, |style| {
                 0.5 * f64::from(style.get_font().slow_clone_font_size().computed_size().px())
@@ -4803,7 +4917,7 @@ mod tests {
                     CapturedShape::Rect(rect) | CapturedShape::Box(BoxShape::Rect(rect)) => {
                         Some(*rect)
                     }
-                    CapturedShape::Box(_) => None,
+                    CapturedShape::Box(_) | CapturedShape::Path(_) => None,
                 }),
                 _ => None,
             })

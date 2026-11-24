@@ -1,7 +1,9 @@
-//! Each test parses a hand-written document and compares the converter's
-//! list with one built from the display-list calls the rule names, through
-//! `assert_scenes_identical`, which compares every item, or
-//! reads the parsed items directly.
+//! The regression corpus of SVG images: each test takes a hand-written
+//! document through the image pipeline's own functions
+//! (`VectorDocument::parse`, `IsolatedSvg::build`, `IsolatedSvg::record`)
+//! and compares the recording with one built from the display-list calls
+//! the rule names, through `assert_scenes_identical`, which compares every
+//! item, or reads the recorded items directly.
 
 #![allow(clippy::float_cmp)]
 
@@ -9,9 +11,11 @@ use std::sync::Arc;
 
 use seldon::text::{FontBlob, TextContext};
 
+use super::image::{IsolatedSvg, SvgError, VectorDocument};
+use super::inline_tests::same_item;
+use super::recording::{Item, LayerClip, Recording};
 use super::shapes::{self, ARC_TOLERANCE};
 use super::text::{TextAnchor, TextPaint};
-use super::{Item, LayerClip, SvgError, VectorDocument, encode, parse};
 use crate::kurbo::{
     Affine, BezPath, Cap, Circle, Ellipse, Join, PathEl, Point, Rect, Shape, Stroke,
 };
@@ -20,12 +24,40 @@ use crate::paint::equivalence::assert_scenes_identical;
 use crate::peniko::color::DynamicColor;
 use crate::peniko::{BlendMode, Brush, Color, ColorStop, Compose, Extend, Fill, Gradient, Mix};
 use crate::render::image::{AspectAlign, AspectRatio};
+use crate::tree::xml::XmlError;
 
 const RED: Color = Color::from_rgba8(255, 0, 0, 255);
 const BLUE: Color = Color::from_rgba8(0, 0, 255, 255);
-const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-fn document(body: &str) -> VectorDocument {
+/// What the image pipeline makes of a document: its natural size, and its
+/// recording.
+#[derive(Clone, Debug)]
+struct Parsed {
+    natural: (u32, u32),
+    document: VectorDocument,
+    recording: Recording,
+}
+
+impl std::ops::Deref for Parsed {
+    type Target = Recording;
+
+    fn deref(&self) -> &Recording {
+        &self.recording
+    }
+}
+
+/// `bytes` parsed, built as an isolated document and recorded.
+fn parse(bytes: &[u8]) -> Result<Parsed, SvgError> {
+    let document = VectorDocument::parse(bytes)?;
+    Ok(Parsed {
+        natural: document.natural,
+        recording: IsolatedSvg::build(&document, 0.0).record(),
+        document,
+    })
+}
+
+fn document(body: &str) -> Parsed {
     let svg =
         format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#);
     parse(svg.as_bytes()).expect("a valid test document")
@@ -41,12 +73,27 @@ fn ahem() -> TextContext {
     context
 }
 
-fn encoded(parsed: &VectorDocument) -> DisplayList {
-    encode(parsed, &mut Some(Box::new(no_fonts())))
+fn encoded(parsed: &Parsed) -> DisplayList {
+    encode_with(parsed, no_fonts())
+}
+
+/// `parsed` drawn with `context` as an image is drawn.
+fn encode_with(parsed: &Parsed, context: TextContext) -> DisplayList {
+    drawn(parsed, &mut Some(Box::new(context)))
+}
+
+/// `parsed` as an image draws it: built, recorded, its text shaped through
+/// `context`, planned and painted (`IsolatedSvg::image`).
+fn drawn(parsed: &Parsed, context: &mut Option<Box<TextContext>>) -> DisplayList {
+    DisplayList::clone(
+        IsolatedSvg::build(&parsed.document, 0.0)
+            .image(context)
+            .scene(),
+    )
 }
 
 /// Every path item, in order, with its transform.
-fn paths(parsed: &VectorDocument) -> Vec<(&BezPath, Affine)> {
+fn paths(parsed: &Recording) -> Vec<(&BezPath, Affine)> {
     parsed
         .items
         .iter()
@@ -57,6 +104,21 @@ fn paths(parsed: &VectorDocument) -> Vec<(&BezPath, Affine)> {
             _ => None,
         })
         .collect()
+}
+
+/// `items` as their debug text, every element id written as `NodeId(_)`.
+fn without_ids(items: &[Item]) -> String {
+    let text = format!("{items:?}");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("NodeId(") {
+        out.push_str(&rest[..at]);
+        out.push_str("NodeId(_)");
+        rest = &rest[at..];
+        rest = &rest[rest.find(')').map_or(rest.len(), |close| close + 1)..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
@@ -152,7 +214,23 @@ fn a_stroke_carries_width_caps_join_miter_and_dashes() {
         None,
         shape,
     );
-    assert_scenes_identical(&encoded(&parsed), &expected);
+    // The image walk places the stroke by its ink rectangle's origin,
+    // (-2√2, 10 - 2√2), which the plan's f32 world matrix rounds: the draw
+    // transform is a translation by about (4.8e-8, -1.9e-7) where the
+    // recording's is the identity, held to the inline comparison's
+    // tolerance.
+    let scene = encoded(&parsed);
+    assert_eq!(scene.items().len(), expected.items().len());
+    assert!(
+        scene
+            .items()
+            .iter()
+            .zip(expected.items())
+            .all(|(left, right)| same_item(&scene, left, &expected, right, Affine::IDENTITY)),
+        "{:?} against {:?}",
+        scene.items(),
+        expected.items()
+    );
 }
 
 /// An odd dash list is repeated to an even one, as SVG asks, and a zero
@@ -758,7 +836,14 @@ fn a_multi_child_clip_concatenates_its_children() {
         ));
         let mut concatenated = rect_path(0.0, 0.0, 10.0, 10.0);
         let mut rotated = rect_path(20.0, 20.0, 30.0, 30.0);
-        rotated.apply_affine(Affine::rotate(10_f64.to_radians()));
+        // The cascade keeps a `transform` as CSS numbers, `f32`.
+        #[expect(clippy::cast_possible_truncation, reason = "CSS numbers are f32")]
+        let rotation = Affine::new(
+            Affine::rotate(10_f64.to_radians())
+                .as_coeffs()
+                .map(|coefficient| f64::from(coefficient as f32)),
+        );
+        rotated.apply_affine(rotation);
         concatenated.extend(rotated);
         let mut expected = DisplayList::new();
         if opacity == "0.5" {
@@ -900,7 +985,7 @@ fn a_recursive_use_draws_nothing() {
 /// host's decode pool gives the parse (tokio's 2 MiB blocking pool, in
 /// `bobcat-resources`), so a walk too deep for it fails the test the way
 /// it would abort the process.
-fn document_on_pool_stack(body: String) -> VectorDocument {
+fn document_on_pool_stack(body: String) -> Parsed {
     std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(move || document(&body))
@@ -909,14 +994,14 @@ fn document_on_pool_stack(body: String) -> VectorDocument {
         .expect("the parse returns")
 }
 
-/// Element nesting past [`MAX_NESTING`](super::parse::MAX_NESTING) is
-/// skipped with its subtree instead of recursing until the stack runs
-/// out, in `roxmltree` or in the walk; the levels above the bound still
-/// convert. `tspan`s nest the same way.
+/// Element nesting past [`MAX_NESTING`](crate::tree::xml::MAX_NESTING) is
+/// skipped with its subtree by the markup walk, so the builder and the
+/// recorder never recurse deeper; the levels above the bound still draw.
+/// `tspan`s nest the same way.
 #[test]
 fn nesting_past_the_bound_is_skipped() {
-    let bound = super::parse::MAX_NESTING as usize;
-    let levels = 3_000;
+    let bound = crate::tree::xml::MAX_NESTING as usize;
+    let levels = bound + 10;
     let parsed = document_on_pool_stack(format!(
         r#"{}<rect width="10" height="10"/>{}"#,
         r#"<g opacity="0.5">"#.repeat(levels),
@@ -967,56 +1052,6 @@ fn a_use_chain_past_the_bound_is_skipped() {
         1,
         "a chain within the bound draws"
     );
-}
-
-/// The pass ahead of `roxmltree` cuts each element nested past the bound
-/// with its content and leaves every other byte; comments, `CDATA`,
-/// processing instructions, declarations and quoted attribute values nest
-/// nothing, as in the parser.
-#[test]
-fn markup_past_the_bound_is_cut_before_the_parse() {
-    use std::borrow::Cow;
-
-    use super::nesting::bound;
-
-    let untouched = |text: &str, limit| {
-        assert!(
-            matches!(bound(text, limit), Some(Cow::Borrowed(kept)) if kept == text),
-            "{text} is left as it is",
-        );
-    };
-    untouched("<a><b>x</b><b/></a>", 2);
-    untouched(
-        "<a><!--<b><c>--><![CDATA[<b><c>]]><?p <b><c>?><b t='>'/></a>",
-        2,
-    );
-    untouched(r#"<!DOCTYPE a [<!ENTITY e "]>"><!--"-->]><a>&e;</a>"#, 1);
-    assert_eq!(
-        bound("<a><b><c>x<d/></c>y<e/></b>z</a>", 2).as_deref(),
-        Some("<a><b>y</b>z</a>"),
-    );
-    assert_eq!(
-        bound(r#"<a><b t="/>"><c/></b></a>"#, 2).as_deref(),
-        Some(r#"<a><b t="/>"></b></a>"#),
-        "a `/>` inside a value neither empties the tag nor ends it",
-    );
-    assert_eq!(
-        bound("<a><b><c>", 2).as_deref(),
-        Some("<a><b>"),
-        "an unclosed cut runs to the end"
-    );
-
-    // An entity's markup nests where it is referenced, up to ten
-    // references deep, inside the parser: the bound refuses what it cannot
-    // cut, and lets through what cannot reach it.
-    let entity = r#"<!DOCTYPE a [<!ENTITY e "<b><c/></b>">]><a>&e;</a>"#;
-    assert!(bound(entity, 2).is_none());
-    untouched(entity, 256);
-    let deep = format!(
-        r#"<!DOCTYPE svg [<!ENTITY e "{}">]><svg xmlns="http://www.w3.org/2000/svg">&e;</svg>"#,
-        "<g>".repeat(300) + &"</g>".repeat(300),
-    );
-    assert!(matches!(parse(deep.as_bytes()), Err(SvgError::TooDeep)));
 }
 
 /// A document nested well inside the bound draws its leaf.
@@ -1089,12 +1124,37 @@ fn a_switch_draws_its_first_unconditional_child() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// CSS inside the document is not read: a `<style>` rule, `!important`
-/// included, changes nothing, so each fill stays its presentation
-/// attribute's or the initial black, and a rule's stroke and `display`
-/// never apply.
+/// A path item's fill colour and stroke (width, colour).
+type PathPaint = (Option<Color>, Option<(f64, Color)>);
+
+/// Each path item's paint, in order.
+fn paints(parsed: &Recording) -> Vec<PathPaint> {
+    let solid = |brush: &Brush| match brush {
+        Brush::Solid(color) => *color,
+        other => panic!("a solid paint, found {other:?}"),
+    };
+    parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Path { fill, stroke, .. } => Some((
+                fill.as_ref().map(|fill| solid(&fill.brush)),
+                stroke
+                    .as_ref()
+                    .map(|stroke| (stroke.style.width, solid(&stroke.brush))),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `<style>` element's rules apply, as author rules above the
+/// presentation attributes: a type rule fills a rect with no `fill`, a
+/// class rule's `!important` fill beats the attribute and adds its stroke,
+/// and `display: none` from an id rule takes its element out.
 #[test]
-fn a_style_element_changes_nothing() {
+fn a_style_element_applies() {
+    const GREEN: Color = Color::from_rgba8(0, 255, 0, 255);
     let parsed = document(
         r##"<style>
               rect { fill: #0000ff; }
@@ -1106,43 +1166,41 @@ fn a_style_element_changes_nothing() {
             <rect id="b" width="10" height="10" fill="#0000ff"/>
             <g><rect class="a" width="10" height="10" fill="none"/></g>"##,
     );
-    let shape = rect_path(0.0, 0.0, 10.0, 10.0);
-    let mut expected = DisplayList::new();
-    solid_fill(
-        &mut expected,
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::from_rgba8(0, 0, 0, 255),
-        &shape,
+    assert_eq!(
+        paints(&parsed),
+        [
+            (Some(BLUE), None),
+            (Some(GREEN), Some((2.0, RED))),
+            (Some(GREEN), Some((2.0, RED))),
+        ]
     );
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
-    assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// The `style` attribute is not read either: its declarations, `!important`
-/// included, change neither a fill nor a group's opacity or blend.
+/// A `style` attribute applies above the presentation attributes: its fill,
+/// its `display: none`, and a group's `opacity`, which opens a layer. A
+/// layer is always `Normal`: `mix-blend-mode` is not recorded.
 #[test]
-fn a_style_attribute_changes_nothing() {
+fn a_style_attribute_applies() {
     let parsed = document(
         r##"<rect width="10" height="10" style="fill: #0000ff"/>
             <rect width="10" height="10" fill="#ff0000"
                   style="fill: #0000ff !important; stroke: #0000ff; display: none"/>
             <g style="opacity: 0.5; mix-blend-mode: multiply">
-              <rect width="10" height="10" fill="#0000ff"/>
+              <rect width="10" height="10" fill="#ff0000"/>
             </g>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
     let mut expected = DisplayList::new();
-    solid_fill(
-        &mut expected,
+    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
+    expected.push_layer(
         Fill::NonZero,
+        normal(),
+        0.5,
         Affine::IDENTITY,
-        Color::from_rgba8(0, 0, 0, 255),
-        &shape,
+        &Rect::new(0.0, 0.0, 10.0, 10.0),
     );
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
+    expected.pop_layer();
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
@@ -1323,12 +1381,15 @@ fn preserve_aspect_ratio_parses_into_the_image_aspect() {
 fn unreadable_documents_fail_with_their_own_error() {
     assert!(matches!(
         parse(b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>"),
-        Err(SvgError::Xml(_))
+        Err(SvgError::Xml(XmlError::Xml(_)))
     ));
-    assert!(matches!(parse(b"<svg \xff/>"), Err(SvgError::NotUtf8)));
+    assert!(matches!(
+        parse(b"<svg \xff/>"),
+        Err(SvgError::Xml(XmlError::NotUtf8))
+    ));
     assert!(matches!(
         parse(&[0x1f, 0x8b, 0x08, 0x00]),
-        Err(SvgError::NotUtf8)
+        Err(SvgError::Xml(XmlError::NotUtf8))
     ));
     assert!(matches!(
         parse(b"<html xmlns='http://www.w3.org/1999/xhtml'/>"),
@@ -1444,6 +1505,57 @@ fn a_collapsed_space_stays_in_its_chunk() {
     assert_eq!(spans, "A B");
 }
 
+/// White space between two `tspan`s is text of the `text` element: it
+/// joins the second span, as it did when the parse kept text only inside
+/// `text`.
+#[test]
+fn white_space_between_tspans_is_text() {
+    let parsed = document("<text><tspan>a</tspan> <tspan>b</tspan></text>");
+    let [Item::Text(text)] = parsed.items.as_slice() else {
+        panic!("one text item");
+    };
+    let [chunk] = text.chunks.as_slice() else {
+        panic!("one chunk");
+    };
+    let spans: Vec<&str> = chunk.spans.iter().map(|span| span.text.as_str()).collect();
+    assert_eq!(spans, ["a", " b"]);
+}
+
+/// White space between elements is text that SVG gives no meaning outside
+/// `text` content: a pretty-printed document records what its minified
+/// form records.
+#[test]
+fn white_space_between_elements_records_nothing() {
+    let minified = r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient><clipPath id="c"><rect width="8" height="8"/></clipPath><path id="p" d="M0 0 H4 V4 Z"/></defs><switch><g systemLanguage="xx"/><g opacity="0.5" clip-path="url(#c)"><rect width="10" height="10" fill="url(#g)"/><use href="#p" x="2"/></g></switch><text x="1" y="9">a<tspan>b</tspan></text>"##;
+    let pretty = r##"
+  <defs>
+    <linearGradient id="g">
+      <stop offset="0" stop-color="#ff0000"/>
+      <stop offset="1" stop-color="#0000ff"/>
+    </linearGradient>
+    <clipPath id="c">
+      <rect width="8" height="8"/>
+    </clipPath>
+    <path id="p" d="M0 0 H4 V4 Z"/>
+  </defs>
+  <switch>
+    <g systemLanguage="xx"/>
+    <g opacity="0.5" clip-path="url(#c)">
+      <rect width="10" height="10" fill="url(#g)"/>
+      <use href="#p" x="2"/>
+    </g>
+  </switch>
+  <text x="1" y="9">a<tspan>b</tspan></text>
+"##;
+    let minified = document(minified);
+    let pretty = document(pretty);
+    // The layer, the rectangle, the `use` instance, the pop and the text,
+    // as at the parse that dropped white space between elements.
+    assert_eq!(minified.items.len(), 5, "{:?}", minified.items);
+    // The element ids differ, since the pretty document has more nodes.
+    assert_eq!(without_ids(&pretty.items), without_ids(&minified.items));
+}
+
 /// Shaped through Ahem, each span is one glyph run placed by the pen:
 /// the chunk's start, then every span's `dx`/`dy` and advance; a chunk
 /// anchored `middle` or `end` is shifted back by half or all of its width.
@@ -1452,7 +1564,7 @@ fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
     let parsed = document(
         r##"<text x="10" y="20" font-size="10" font-family="Ahem" fill="#ff0000">ab<tspan dx="2" dy="3">c</tspan><tspan x="50" y="60" text-anchor="middle">de</tspan><tspan x="80" y="90" text-anchor="end">fgh</tspan></text>"##,
     );
-    let scene = encode(&parsed, &mut Some(Box::new(ahem())));
+    let scene = encode_with(&parsed, ahem());
     let runs = scene.runs();
     assert_eq!(runs.len(), 4, "one run per span");
     let placed: Vec<([f64; 2], usize, f32)> = runs
@@ -1491,7 +1603,7 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
         r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs>
             <text x="10" y="20" font-size="10" font-family="Ahem" fill="url(#g)" stroke="#0000ff" stroke-width="1">ab</text>"##,
     );
-    let scene = encode(&parsed, &mut Some(Box::new(ahem())));
+    let scene = encode_with(&parsed, ahem());
     let runs = scene.runs();
     assert_eq!(runs.len(), 2, "a fill run and a stroke run");
     let brush = runs[0].paint_transform.expect("the gradient's transform");
@@ -1521,7 +1633,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
     );
     // One context for both, so the font blob is the same registration.
     let mut context = Some(Box::new(ahem()));
-    let scene = encode(&parsed, &mut context);
+    let scene = drawn(&parsed, &mut context);
     let mut expected = DisplayList::new();
     expected.push_layer(
         Fill::NonZero,
@@ -1571,7 +1683,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
 #[test]
 fn text_without_any_font_encodes_without_glyphs() {
     let parsed = document(r#"<text x="0" y="10">dropped</text>"#);
-    let scene = encode(&parsed, &mut Some(Box::new(no_fonts())));
+    let scene = encode_with(&parsed, no_fonts());
     assert_eq!(scene.glyph_runs(), 0);
 }
 
@@ -1585,5 +1697,23 @@ fn a_document_is_sendable_and_clonable() {
         .join()
         .expect("the thread ran");
     assert_eq!(parsed.items.len(), 2);
-    assert!(format!("{parsed:?}").starts_with("VectorDocument"));
+    assert!(format!("{:?}", parsed.recording).starts_with("Recording"));
+}
+
+/// An image's root `currentcolor` is the isolated document's initial
+/// `color`, black, and text with no `font-family` is `sans-serif`, the
+/// family the shaper gives an empty list (the image sheet's rule).
+#[test]
+fn an_image_documents_initial_color_and_font_family() {
+    let parsed = document(r#"<rect width="10" height="10" fill="currentColor"/><text>a</text>"#);
+    assert_eq!(paints(&parsed), [(Some(Color::BLACK), None)]);
+    let Some(Item::Text(text)) = parsed.items.last() else {
+        panic!("a text item");
+    };
+    assert_eq!(
+        text.chunks[0].spans[0].font.families,
+        [seldon::text::ResolvedFamily::Generic(
+            seldon::text::GenericFamily::SansSerif
+        )]
+    );
 }

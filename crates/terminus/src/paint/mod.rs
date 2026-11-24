@@ -6,7 +6,8 @@
 
 //! Per-fragment CSS painters. The walker owns traversal, clipping, and
 //! group compositing; each submodule paints exactly one fragment family
-//! into the scene in the item's local coordinate space.
+//! into the scene in the item's local coordinate space, `svg` the recorded
+//! paths and text of an SVG image.
 
 mod background;
 mod border;
@@ -16,10 +17,11 @@ pub(crate) mod display_list;
 #[cfg(test)]
 pub(crate) mod equivalence;
 pub(crate) mod filters;
-mod mask;
+pub(crate) mod mask;
 pub(crate) mod painter;
 mod shadow;
 pub(crate) mod shape;
+pub(crate) mod svg;
 mod text;
 pub(crate) mod walker;
 

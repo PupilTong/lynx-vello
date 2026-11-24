@@ -404,6 +404,7 @@ impl<T> Document<T> {
             .set_picture(value);
         if key_changed && let Some(PictureKey::Url(previous)) = previous {
             self.images.unbind(&previous);
+            self.forget_animated_image(&previous);
         }
         let node = self.get(id).expect("the node was live a moment ago");
         let (is_replaced, natural_after) = (node.is_replaced(), node.natural_size());

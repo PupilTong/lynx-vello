@@ -22,5 +22,4 @@ pub(crate) mod image;
 pub(crate) mod picture;
 pub(crate) mod raster;
 pub(crate) mod sparse;
-pub(crate) mod svg;
 pub(crate) mod vector_textures;

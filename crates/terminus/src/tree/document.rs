@@ -126,6 +126,12 @@ pub struct Document<T> {
     /// The Container Timing roots ([`crate::visual::container_timing`]):
     /// what the paint walk and every insertion test before anything else.
     pub(crate) container_roots: crate::visual::container_timing::ContainerRoots,
+    /// The recording of each SVG image root this isolated document files
+    /// ([`crate::svg::present`]). Empty and unallocated without one.
+    pub(crate) svg_roots: crate::svg::present::SvgRoots,
+    /// The isolated documents of SVG images that still animate
+    /// ([`crate::svg::image`]). Empty and unallocated without one.
+    pub(crate) animated_images: crate::svg::image::AnimatedImages,
     /// Whether anything visually observable changed since the retained
     /// frame was built. This is the whole invalidation state: one bit, not
     /// a counter — a frame's identity is its commit id.
@@ -184,6 +190,8 @@ impl<T> Document<T> {
             commit_timer: crate::visual::timing::CommitTimer::default(),
             content_detection: crate::visual::timing::ContentDetection::Off,
             container_roots: crate::visual::container_timing::ContainerRoots::default(),
+            svg_roots: crate::svg::present::SvgRoots::default(),
+            animated_images: crate::svg::image::AnimatedImages::default(),
             visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,
@@ -939,6 +947,8 @@ impl<T> Document<T> {
         // entry, which names a dead node from here on. One test when no
         // loose text was ever boxed.
         self.forget_anonymous_boxes(id);
+        // An `svg` root's recorded drawing. One test without one.
+        self.forget_svg_root(id);
         let node = self.tree.remove_node(id);
         // A replaced box presenting a URL holds it in the image registry,
         // which is what keeps a document handed over as bytes alive while
@@ -946,6 +956,7 @@ impl<T> Document<T> {
         // without saying so.
         if let Some(crate::render::picture::PictureKey::Url(source)) = node.picture() {
             self.images.unbind(source);
+            self.forget_animated_image(source);
         }
         let slot = id;
         debug_assert_eq!(

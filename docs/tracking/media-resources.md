@@ -313,7 +313,9 @@ Where each reference renders an SVG document:
   `<image src>`, `background-image` and `mask-image`, with the browser's
   full SVG support.
 
-lynx-vello (2026-10-09, design in `docs/svg-lynx-component-design.md`)
+lynx-vello (2026-10-09, design in `docs/svg-lynx-component-design.md`;
+since 2026-11-23 every SVG is an SVG DOM subtree cascaded by stylo,
+`docs/svg-dom-design.md`)
 renders SVG documents in `<image src>`, `background-image` and `mask-image`,
 following web-core (native's `<image>` refuses SVG), and in the Lynx
 `<svg src|content>` component, as both references do. An SVG stays a vector
@@ -343,21 +345,20 @@ revision 4.1 of the design, ruled 2026-10-10):
 3. **Parse, in the host.** `bobcat-resources` parses a document where it
    would decode a bitmap: under a decode permit, in a blocking closure of its
    own on its tokio pool natively, inside the load's local task on the
-   Render Worker in the browser. The parse is `terminus`'s own converter
-   (`crates/terminus/src/render/svg/`), reached through
-   `terminus::link::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
-   presentation attribute values through `svgtypes` (CSS inside the
-   document, a `<style>` element or a `style` attribute, is not read; ruled
-   2026-10-09), and one walk producing a flat command list with geometry,
-   transforms and brushes resolved and text collected but not shaped. It
-   reads nothing outside the document. The host reports the parsed document
+   Render Worker in the browser. The parse is `terminus`'s own
+   (`crates/terminus/src/tree/xml/`, with the root checked in
+   `crates/terminus/src/svg/image.rs`), reached through
+   `terminus::link::ImageEvent::parse_document`: one `roxmltree` parse (DTD
+   allowed) into an owned markup value, plus the natural size from the
+   root's attributes. It reads nothing outside the document and needs no
+   fonts. The host reports the parsed document
    through `ImageReports::parsed_document`, and it crosses to the Lynx main
    thread inside the existing `ToMain::ImageEvents` message as
    `ImageEvent::ParsedDocument`; a document that does not parse is reported
    with `failed` and fails its source in the document's registry (`error` on
    `<image>`, nothing on `<svg>`). The host keeps nothing of a parsed
-   document (owner ruling 2026-10-11): the engine owns the scene it
-   encodes, nothing enters the bitmap memory tier or `memory_used_bytes`,
+   document (owner ruling 2026-10-11): the engine owns the display list
+   it paints, nothing enters the bitmap memory tier or `memory_used_bytes`,
    and a later request, from any view, fetches (for a URL) and parses
    again. A document request files no entry at all, so two requests for
    one markup are two parses and two reports, and the document's registry
@@ -370,10 +371,17 @@ revision 4.1 of the design, ruled 2026-10-10):
    `cm`, `mm`, `pt` or `pc`, converted at 96 px per inch (`10mm` is 38 px);
    `em`, `ex`, percentages and any other unit count as absent. An unsized
    `<svg>` lays out at it; `<image>` keeps its `contain: size` rule.
-5. **Encode, on the document thread.** Applying a parsed document shapes
-   its text through the document's own `TextContext` (fonts from the SVG's
-   own attributes, `@font-face` faces included) and records one display list,
-   held by `terminus`'s image registry as a ready vector image. The painter's
+5. **Build, record, plan and paint, on the document thread.** Applying a parsed
+   document builds it as an isolated SVG document of its own
+   (`crates/terminus/src/svg/image.rs`): the markup's elements under the
+   document element, its `style` elements as author sheets, its `use`
+   elements instantiated, styles flushed by stylo. Its subtree is recorded
+   from the computed styles, its text shaped through the page document's
+   own `TextContext` (fonts from the SVG's own cascade, `@font-face` faces
+   included), and the recording is planned and painted by the paint walk
+   into one display list, which `terminus`'s image registry holds as a ready
+   vector image; the isolated document is dropped unless it runs a CSS
+   animation or transition. The painter's
    `FrameImages`, the bitmap atlas and `ImageSizeHint` never see it.
 6. **Paint.** Where `paint/background.rs` would emit an image draw
    (replaced content for `<image>` and `<svg>`, a background layer, a mask
@@ -393,20 +401,18 @@ revision 4.1 of the design, ruled 2026-10-10):
    fires `load` with the element's border-box layout size read at delivery
    (native's detail), and no `error`.
 
-The converter draws path fills and strokes (fill rule, width, cap, join,
+The recorder draws path fills and strokes (fill rule, width, cap, join,
 miter limit, dashes, paint order), solid colours, linear and radial gradients
 (spread methods, focal circle, gradient transform, `href` chains), group
-opacity (blend modes need CSS, which is not read), `clipPath` (a multi-child clip uses the concatenated
+opacity (every layer `Normal`: `mix-blend-mode` is not recorded), `clipPath` (a multi-child clip uses the concatenated
 child paths under the nonzero rule, an approximation of their union), `use`
 and `symbol`, nested `svg`, and `<text>`/`<tspan>` as a subset (chunks
 started by absolute `x`/`y`, `dx`/`dy`, `text-anchor`, `letter-spacing`).
 Gaps, each documented in [components.md](components.md)'s `x-svg` row and in
-[deviations.md](deviations.md): CSS inside the document (`<style>` rules,
-the `style` attribute) is not read, by ruling, so only presentation
-attributes style it; a group with a `mask` is skipped rather than
+[deviations.md](deviations.md): a group with a `mask` is skipped rather than
 drawn unmasked, `filter` is ignored, `pattern` paint, `marker` and a nested
-`<image>` draw nothing, `.svgz` fails to parse, the `font` shorthand and the
-`current-color` attribute are not read, and text shaped before a later
+`<image>` draw nothing, `.svgz` fails to parse, the `current-color`
+attribute is not read, and text shaped before a later
 `@font-face` keeps its fallback glyphs. `mask-image: url(#id)` and
 `clip-path: url(#id)` element references remain unsupported (see
 [css-visual.md](css-visual.md)).

@@ -606,7 +606,7 @@ impl<T: Sync> Document<T> {
     /// ticking it. See the module docs.
     #[must_use]
     pub fn has_active_animations(&self) -> bool {
-        self.animations().is_active()
+        self.animations().is_active() || self.animated_images_run()
     }
 
     /// css-contain-2 §4: whether this element is part of some ancestor's
@@ -723,7 +723,13 @@ impl<T: Sync> Document<T> {
     /// standing still. That step promotes, iterates, ends and hints nothing,
     /// so it leaves the timeline exactly as idle as it found it.
     pub fn advance_animations(&mut self, now: f64) -> AnimationTick {
-        self.step_timeline(now, Pass::Tick)
+        let mut tick = self.step_timeline(now, Pass::Tick);
+        // SVG images with animations tick on this clock
+        // (`crate::svg::image`). One test on a page without one.
+        if !self.animated_images.is_empty() {
+            self.advance_animated_images(now, &mut tick);
+        }
+        tick
     }
 
     /// Moves the timeline to `now` at the start of a job, before any script

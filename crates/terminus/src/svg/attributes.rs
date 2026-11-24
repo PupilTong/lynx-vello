@@ -1,9 +1,21 @@
 //! Attribute values of SVG elements read as attributes rather than through
-//! the cascade: the root's sizes, `viewBox` and transform lists.
+//! the cascade: the root's sizes, `viewBox`, `preserveAspectRatio`, lengths
+//! and length lists, opacities, transform lists, and the `href` reference.
 
 use std::str::FromStr;
 
+use svgtypes::{Length, LengthListParser, LengthUnit};
+
+use super::gradient::plain;
 use crate::kurbo::Affine;
+use crate::render::image::{AspectAlign, AspectRatio};
+
+/// `node`'s `href`, or its `xlink:href` when it has no `href`: SVG 2
+/// ("Deprecated `XLink` URL reference attributes") gives `href`
+/// precedence. Every reader of an SVG element's reference goes through it.
+pub(super) fn href<T>(node: &crate::tree::node::Node<T>) -> Option<&str> {
+    plain(node, "href").or_else(|| plain(node, "xlink:href"))
+}
 
 /// The default object size of CSS Images 3, in CSS px.
 const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
@@ -102,7 +114,160 @@ pub(super) fn vector_sizes(
     (rounded, viewport)
 }
 
-/// A `transform` list as one affine, `None` for an invalid list. Also what an SVG element's
+/// A `preserveAspectRatio` value; an unparsable one is the default.
+pub(super) fn aspect_ratio(value: &str) -> AspectRatio {
+    use svgtypes::Align;
+    let Ok(parsed) = svgtypes::AspectRatio::from_str(value) else {
+        return AspectRatio::default();
+    };
+    let align = match parsed.align {
+        Align::None => None,
+        Align::XMinYMin => Some((AspectAlign::Min, AspectAlign::Min)),
+        Align::XMidYMin => Some((AspectAlign::Mid, AspectAlign::Min)),
+        Align::XMaxYMin => Some((AspectAlign::Max, AspectAlign::Min)),
+        Align::XMinYMid => Some((AspectAlign::Min, AspectAlign::Mid)),
+        Align::XMidYMid => Some((AspectAlign::Mid, AspectAlign::Mid)),
+        Align::XMaxYMid => Some((AspectAlign::Max, AspectAlign::Mid)),
+        Align::XMinYMax => Some((AspectAlign::Min, AspectAlign::Max)),
+        Align::XMidYMax => Some((AspectAlign::Mid, AspectAlign::Max)),
+        Align::XMaxYMax => Some((AspectAlign::Max, AspectAlign::Max)),
+    };
+    AspectRatio {
+        align,
+        slice: parsed.slice,
+    }
+}
+
+/// The transform that maps `view_box` onto a `width`×`height` viewport
+/// under `aspect` (SVG 2 §8.6).
+pub(super) fn view_box_transform(
+    view_box: svgtypes::ViewBox,
+    aspect: AspectRatio,
+    width: f64,
+    height: f64,
+) -> Affine {
+    let sx = width / view_box.w;
+    let sy = height / view_box.h;
+    let origin = Affine::translate((-view_box.x, -view_box.y));
+    let Some((align_x, align_y)) = aspect.align else {
+        return Affine::scale_non_uniform(sx, sy) * origin;
+    };
+    let scale = if aspect.slice { sx.max(sy) } else { sx.min(sy) };
+    let factor = |align: AspectAlign| match align {
+        AspectAlign::Min => 0.0,
+        AspectAlign::Mid => 0.5,
+        AspectAlign::Max => 1.0,
+    };
+    let tx = (width - view_box.w * scale) * factor(align_x);
+    let ty = (height - view_box.h * scale) * factor(align_y);
+    Affine::translate((tx, ty)) * Affine::scale(scale) * origin
+}
+
+/// The viewport percentages resolve against.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Viewport {
+    pub(super) width: f64,
+    pub(super) height: f64,
+}
+
+impl Viewport {
+    /// The reference for a length that is neither horizontal nor vertical
+    /// (`r`, `stroke-width`): SVG's normalised diagonal.
+    pub(super) fn diagonal(self) -> f64 {
+        f64::midpoint(self.width * self.width, self.height * self.height).sqrt()
+    }
+}
+
+/// Which axis a length is measured along, for percentages.
+#[derive(Clone, Copy)]
+pub(super) enum Axis {
+    Horizontal,
+    Vertical,
+    Diagonal,
+}
+
+/// `length` in user units: absolute units at 96 px per inch, `em`/`ex`
+/// of `font_size`, a percentage of `viewport` along `axis`.
+pub(super) fn resolve_length(
+    length: Length,
+    font_size: f64,
+    viewport: Viewport,
+    axis: Axis,
+) -> f64 {
+    let number = length.number;
+    match length.unit {
+        LengthUnit::None | LengthUnit::Px => number,
+        LengthUnit::Em => number * font_size,
+        LengthUnit::Ex => number * font_size / 2.0,
+        LengthUnit::In => number * 96.0,
+        LengthUnit::Cm => number * 96.0 / 2.54,
+        LengthUnit::Mm => number * 96.0 / 25.4,
+        LengthUnit::Pt => number * 4.0 / 3.0,
+        LengthUnit::Pc => number * 16.0,
+        LengthUnit::Percent => {
+            number / 100.0
+                * match axis {
+                    Axis::Horizontal => viewport.width,
+                    Axis::Vertical => viewport.height,
+                    Axis::Diagonal => viewport.diagonal(),
+                }
+        }
+    }
+}
+
+/// Parses `value` as one length and resolves it; `None` for a value that
+/// is not a length.
+pub(super) fn parse_length(
+    value: &str,
+    font_size: f64,
+    viewport: Viewport,
+    axis: Axis,
+) -> Option<f64> {
+    Length::from_str(value.trim())
+        .ok()
+        .map(|length| resolve_length(length, font_size, viewport, axis))
+        .filter(|length| length.is_finite())
+}
+
+/// The first length of a list attribute (`x="10 20 30"` reads `10`), the
+/// documented subset for `text` positions.
+pub(super) fn parse_first_length(
+    value: &str,
+    font_size: f64,
+    viewport: Viewport,
+    axis: Axis,
+) -> Option<f64> {
+    LengthListParser::from(value)
+        .next()
+        .and_then(Result::ok)
+        .map(|length| resolve_length(length, font_size, viewport, axis))
+        .filter(|length| length.is_finite())
+}
+
+/// A `<number>` or `<percentage>` clamped to the unit interval, as every
+/// opacity is.
+pub(super) fn parse_opacity(value: &str) -> Option<f32> {
+    let length = Length::from_str(value.trim()).ok()?;
+    let number = match length.unit {
+        LengthUnit::None => length.number,
+        LengthUnit::Percent => length.number / 100.0,
+        _ => return None,
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an opacity has no precision to lose"
+    )]
+    let opacity = number.clamp(0.0, 1.0) as f32;
+    Some(opacity)
+}
+
+/// A `transform` list folded into one affine, in SVG's order (the first
+/// function applies last to a point). An invalid list is the identity.
+pub(super) fn transform(value: &str) -> Affine {
+    transform_list(value).unwrap_or(Affine::IDENTITY)
+}
+
+/// [`transform`], `None` for an invalid list. Also what an SVG element's
 /// `transform` attribute is reflected into the CSS `transform` property
 /// with ([`crate::svg::presentation`]).
 pub(super) fn transform_list(value: &str) -> Option<Affine> {

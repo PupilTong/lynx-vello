@@ -162,8 +162,10 @@ document (`ImageReports::parsed_document`), exactly as the native targets
 do on their decode pool (`docs/svg-lynx-component-design.md`, revision 4.1).
 An `<svg content>`'s markup reaches the Render Worker as a document request
 (`ResourceFetcher::request_document`) and is parsed in a local task of its
-own. The Lynx main Worker (`bobcat-main`) parses nothing: it only shapes the
-document's text and encodes its scene when it applies the report, so a large
+own. The Lynx main Worker (`bobcat-main`) parses nothing: when it applies the
+report it builds the parsed markup as an isolated SVG document, records it,
+shapes its text, and plans and paints the recording into one display list
+(`docs/svg-dom-design.md`), so a large
 SVG costs the Render Worker its parse time rather than the Worker that runs
 the main-thread script. Nothing reaches the browser's main thread, and no
 bitmap is allocated on the resource side: the Render Worker's
@@ -171,7 +173,7 @@ painter rasterises each vector draw into a texture of its own
 (`crates/terminus/src/render/vector_textures.rs`), with the resident textures
 bounded by a 32 MiB budget on wasm32 (64 MiB natively), and an evicted
 texture is rebaked from the scene the frame carries. All three targets
-therefore render an SVG the same way. The engine's converter does not
+therefore render an SVG the same way. The engine's SVG parse does not
 decompress, so a body that is still gzip-compressed (a `.svgz` file served
 without `Content-Encoding: gzip`, or registered as is) fails to load on every
 target; this is a documented gap.
