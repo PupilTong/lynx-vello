@@ -200,12 +200,15 @@ frames are `ImageBitmap`s (`crates/bobcat-wasm`).
 **An SVG document is parsed by the host, where it decodes bitmaps**
 (`docs/svg-lynx-component-design.md`, revision 4.1, ruled 2026-10-10). A
 fetched SVG is parsed by the fetcher with the engine's own parser,
-`terminus::link::ImageEvent::parse_document` (re-exported as `ImageEvent`; the converter
-in `terminus`'s `render/svg`, which shapes no text), and reported through
+`terminus::link::ImageEvent::parse_document` (re-exported as `ImageEvent`; the markup
+parse in `terminus`'s `tree/xml/markup.rs`, under the SVG-image policy of
+`svg/image.rs`, which needs no fonts), and reported through
 `ImageReports::parsed_document(source, Arc<VectorDocument>)`, or `failed`
 when it does not parse; the report applies through
-`MainThreadRuntime::apply_image_events` like every other, where `terminus` shapes
-the document's text and encodes its scene, so the registry, the natural-size
+`MainThreadRuntime::apply_image_events` like every other, where `terminus`
+builds the document as an isolated SVG document cascaded by stylo, records
+it, shapes its text, and plans and paints the recording into one display
+list (`docs/svg-dom-design.md`), so the registry, the natural-size
 relayout and the `load`/`error` follow the path every other report takes.
 The markup an `<svg content>` hands the document (`Document::insert_image_document`)
 reaches the host the same way: the page's epilogue calls

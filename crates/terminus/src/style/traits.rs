@@ -200,7 +200,11 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
     where
         Self: 'b,
     {
-        Some(&self.shadow_data()?.styles.data)
+        let shadow = self.shadow_data()?;
+        // The instance tree of an SVG `use` element takes no style rules of
+        // its own: stylo skips it for the document's (SVG 2 §5.6), and
+        // asserts that it has none (`containing_shadow_ignoring_svg_use`).
+        (!shadow.svg_use_instance).then_some(&shadow.styles.data)
     }
 }
 

@@ -9,7 +9,7 @@ use std::f64::consts::TAU;
 
 use super::CanvasError;
 use crate::kurbo::{self, Affine, BezPath, PathEl, PathSeg, Point, Vec2};
-use crate::render::svg::{arc_tolerance, path_data};
+use crate::svg::shapes::{arc_tolerance, path_data};
 
 /// A `Path2D`: subpaths of lines and curves in its own coordinates.
 #[derive(Clone, Debug, Default)]

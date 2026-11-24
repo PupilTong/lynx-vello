@@ -397,8 +397,6 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     );
 }
 
-/// Two elements handed identical markup share one synthetic source and one
-/// parse, and it settles once, with the document's natural size, for both.
 #[test]
 fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     let mut doc = page("");
@@ -511,4 +509,207 @@ fn freeing_the_last_element_forgets_its_source() {
     let events: Vec<_> = requests.into_iter().map(host_parse).collect();
     assert!(doc.dom.apply_image_events(&events).is_empty());
     assert!(!doc.dom.knows_image_source(&source), "and stays forgotten");
+}
+
+/// The RGBA of `image` at `(x, y)`.
+fn pixel(image: &prime_radiant::Image, x: u32, y: u32) -> [u8; 4] {
+    let index = ((y * image.width() + x) * 4) as usize;
+    image.pixels()[index..index + 4]
+        .try_into()
+        .expect("four channels")
+}
+
+/// Whether `actual` is `expected` within a rasterizer's rounding.
+fn near(actual: [u8; 4], expected: [u8; 4]) -> bool {
+    actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2)
+}
+
+/// Draws `svg` as an `<image>` at (20, 20) and as a `background-image` at
+/// (100, 20), each 40 × 40, and answers the capture.
+fn image_and_background(test: &str, svg: &str) -> prime_radiant::Image {
+    let mut doc = page(
+        ".shown { left: 20px; top: 20px; width: 40px; height: 40px; }
+         .tiled { left: 100px; top: 20px; width: 40px; height: 40px;
+                  background-image: url(app:///drawn.svg); background-size: 40px 40px; }",
+    );
+    let images = TestImages::new();
+    images.insert_svg("app:///drawn.svg", svg);
+    let root = doc.root;
+    let node = doc.el_tag(root, "image", "shown");
+    doc.el_tag(root, "view", "tiled");
+    capture(test, &mut doc, &images, &[(node, "app:///drawn.svg")])
+}
+
+/// CSS inside an SVG image applies: a `style` element's class rule beats
+/// the presentation attribute, in an `<image>` and in a background.
+#[test]
+fn a_style_element_in_an_image_colours_its_class() {
+    let actual = image_and_background(
+        "a_style_element_in_an_image_colours_its_class",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+              <style>.hot { fill: #00ff00; }</style>
+              <rect class="hot" width="20" height="20" fill="#ff0000"/>
+            </svg>"##,
+    );
+    for (x, y) in [(40, 40), (120, 40)] {
+        let found = pixel(&actual, x, y);
+        assert!(near(found, [0, 255, 0, 255]), "({x}, {y}) is {found:?}");
+    }
+}
+
+/// A `use` draws its target and a gradient paints through a reference, in
+/// an image: left half a red-to-blue gradient, right half a green `use`.
+#[test]
+fn a_use_and_a_gradient_draw_in_an_image() {
+    let actual = image_and_background(
+        "a_use_and_a_gradient_draw_in_an_image",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+              <defs>
+                <linearGradient id="g"><stop offset="0" stop-color="#ff0000"/>
+                  <stop offset="1" stop-color="#0000ff"/></linearGradient>
+                <rect id="half" width="10" height="20"/>
+              </defs>
+              <rect width="10" height="20" fill="url(#g)"/>
+              <use href="#half" x="10" fill="#00ff00"/>
+            </svg>"##,
+    );
+    for left in [20, 100] {
+        let red_end = pixel(&actual, left + 2, 40);
+        let blue_end = pixel(&actual, left + 18, 40);
+        assert!(red_end[0] > 180 && red_end[2] < 80, "{red_end:?}");
+        assert!(blue_end[2] > 180 && blue_end[0] < 80, "{blue_end:?}");
+        let used = pixel(&actual, left + 30, 40);
+        assert!(near(used, [0, 255, 0, 255]), "{used:?}");
+    }
+}
+
+/// Markup without `xmlns` draws, as its elements count as SVG.
+#[test]
+fn markup_without_a_namespace_draws_in_an_image() {
+    let actual = image_and_background(
+        "markup_without_a_namespace_draws_in_an_image",
+        r##"<svg width="20" height="20"><rect width="20" height="20" fill="#00ff00"/></svg>"##,
+    );
+    for (x, y) in [(40, 40), (120, 40)] {
+        let found = pixel(&actual, x, y);
+        assert!(near(found, [0, 255, 0, 255]), "({x}, {y}) is {found:?}");
+    }
+}
+
+/// An SVG image whose `rect` fades from red to blue over one second and
+/// stays blue (`forwards`).
+const FADING: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+  <style>
+    @keyframes paint { from { fill: #ff0000; } to { fill: #0000ff; } }
+    rect { animation: paint 1s linear forwards; }
+  </style>
+  <rect width="20" height="20"/>
+</svg>"#;
+
+/// Whether the committed frame asks the host for further ticks.
+fn ticks_wanted(doc: &Doc) -> bool {
+    doc.dom
+        .committed_frame()
+        .is_some_and(|frame| frame.needs_main_ticks())
+}
+
+/// `FADING` drawn at (20, 20) by an `<image>` when `presented`, else as a
+/// CSS background, sampled at 0.1 s and 0.9 s: red, then blue, with frames
+/// asked for while it runs; at its end the frames stop and blue stays.
+fn assert_fades(test: &str, presented: bool) {
+    let mut doc = page(
+        ".shown { left: 20px; top: 20px; width: 40px; height: 40px; }
+         .tiled { left: 20px; top: 20px; width: 40px; height: 40px;
+                  background-image: url(app:///fading.svg); background-size: 40px 40px; }",
+    );
+    let images = TestImages::new();
+    images.insert_svg("app:///fading.svg", FADING);
+    let root = doc.root;
+    let uses: Vec<(NodeId, &str)> = if presented {
+        vec![(doc.el_tag(root, "image", "shown"), "app:///fading.svg")]
+    } else {
+        doc.el_tag(root, "view", "tiled");
+        Vec::new()
+    };
+    prime_radiant::render_presenting(&mut doc.dom, &images, &uses);
+    assert!(doc.dom.has_active_animations(), "the image runs");
+    assert!(ticks_wanted(&doc), "and asks for frames");
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    let early = pixel(&capture(test, &mut doc, &images, &uses), 40, 40);
+    assert!(ticks_wanted(&doc));
+    doc.dom.advance_animations(0.9);
+    let late = pixel(&capture(test, &mut doc, &images, &uses), 40, 40);
+    assert!(
+        early[0] > 200 && early[2] < 60,
+        "near red at 0.1 s: {early:?}"
+    );
+    assert!(
+        late[2] > 200 && late[0] < 60,
+        "near blue at 0.9 s: {late:?}"
+    );
+    doc.dom.advance_animations(2.0);
+    let ended = pixel(&capture(test, &mut doc, &images, &uses), 40, 40);
+    assert!(!doc.dom.has_active_animations(), "ended");
+    assert!(!ticks_wanted(&doc), "no frames after the end");
+    assert!(
+        near(ended, [0, 0, 255, 255]),
+        "the final state stays: {ended:?}"
+    );
+}
+
+#[test]
+fn an_animated_image_element_ticks_with_the_host() {
+    assert_fades("an_animated_image_element_ticks_with_the_host", true);
+}
+
+#[test]
+fn an_animated_background_ticks_with_the_host() {
+    assert_fades("an_animated_background_ticks_with_the_host", false);
+}
+
+/// Removing every use of an animated image stops the frame requests: the
+/// presenting element is freed, the background's element removed.
+#[test]
+fn an_unused_animated_image_asks_for_no_frames() {
+    let mut doc = page(
+        ".shown { left: 20px; top: 20px; width: 40px; height: 40px; }
+         .tiled { left: 100px; top: 20px; width: 40px; height: 40px;
+                  background-image: url(app:///fading.svg); }",
+    );
+    let images = TestImages::new();
+    images.insert_svg("app:///fading.svg", FADING);
+    let root = doc.root;
+    let image = doc.el_tag(root, "image", "shown");
+    let view = doc.el_tag(root, "view", "tiled");
+    prime_radiant::render_presenting(&mut doc.dom, &images, &[(image, "app:///fading.svg")]);
+    doc.dom.advance_animations(0.0);
+    doc.dom.render();
+    assert!(ticks_wanted(&doc));
+    doc.dom.remove_element(image);
+    doc.dom.drop_element(image);
+    doc.dom.render();
+    assert!(ticks_wanted(&doc), "the background still draws it");
+    doc.dom.remove_element(view);
+    doc.dom.render();
+    assert!(!ticks_wanted(&doc), "nothing uses it");
+    assert!(!doc.dom.has_active_animations());
+}
+
+/// SMIL is not run: `animate` is an unknown element, the static state
+/// draws, and nothing animates.
+#[test]
+fn smil_markup_draws_the_static_state() {
+    let actual = image_and_background(
+        "smil_markup_draws_the_static_state",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+              <rect width="20" height="20" fill="#00ff00">
+                <animate attributeName="fill" from="#00ff00" to="#ff0000" dur="1s"/>
+              </rect>
+            </svg>"##,
+    );
+    for (x, y) in [(40, 40), (120, 40)] {
+        let found = pixel(&actual, x, y);
+        assert!(near(found, [0, 255, 0, 255]), "({x}, {y}) is {found:?}");
+    }
 }

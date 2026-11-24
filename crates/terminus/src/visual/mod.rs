@@ -119,10 +119,11 @@ pub(crate) mod space;
 mod stacking;
 pub(crate) mod sticky;
 mod sticky_frame;
+mod svg;
 #[cfg(test)]
 mod tests;
 pub(crate) mod timing;
-mod transform;
+pub(crate) mod transform;
 
 use std::sync::Arc;
 
@@ -750,6 +751,17 @@ pub(crate) enum PaintItemKind {
     InlineFragment {
         paragraph: NodeId,
     },
+    /// One path or text item of an SVG image's recording
+    /// (`crate::svg::present`): `root` is the `svg` element it is filed
+    /// under, `index` the item's place in its recording. The item's node is
+    /// the SVG element the item was recorded from; its transform maps the
+    /// item's ink rectangle (`crate::svg::ink_extent`), placed at its
+    /// origin, onto the image, and its size is that rectangle's. Never
+    /// hit-testable.
+    Svg {
+        root: NodeId,
+        index: u32,
+    },
 }
 
 /// The world matrix of a paint item, clip, layer or `auto` box: its stacking
@@ -811,6 +823,25 @@ pub(crate) struct RenderLayer {
     /// stacking context paints atomically, so its members are always
     /// contiguous; an empty run is not recorded at all (the layer is popped).
     pub(crate) items: std::ops::Range<usize>,
+    /// What the group's effects are read from.
+    pub(crate) kind: LayerKind,
+}
+
+/// What a [`RenderLayer`]'s effects are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerKind {
+    /// The group effects of a stacking context: its element's computed
+    /// `opacity`, `mix-blend-mode`, `filter`, `backdrop-filter`,
+    /// `clip-path` and mask.
+    Element,
+    /// One layer push of an SVG image's recording
+    /// (`crate::paint::svg::layer`): a compositing layer at its alpha or a
+    /// clip, shaped by a rectangle or a path. `root` is the `svg` element,
+    /// `index` the push's place in its recording; the layer's node is the
+    /// element whose group effects the push records, its transform maps the
+    /// shape's bounding box, placed at its origin, onto the image, and its
+    /// size is that box's. Never floored, filtered or a Backdrop Root.
+    Svg { root: NodeId, index: u32 },
 }
 
 /// One overflow/`contain: paint` clip: a rounded padding-box rect in the
@@ -1279,10 +1310,7 @@ impl<T> Document<T> {
         for event in events {
             // `None` is a source reported twice, which one URL with one
             // content makes a no-op: nothing moved, so nothing is dirtied.
-            let applied = {
-                let (images, text_context) = self.image_apply_parts();
-                images.apply(event, text_context)
-            };
+            let applied = self.apply_image_event(event);
             let (Some(status), Some(source)) = (applied, event.source()) else {
                 continue;
             };

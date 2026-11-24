@@ -353,6 +353,13 @@ concretely, so the tables above are read as "the target" and this section as
   Transitions are wired (`transition_rule`, `has_css_transitions`) and their
   timeline start is covered by a test, but nothing else about them is.
   `element.animate()` has no producer and is out of scope.
+- **SVG.** CSS animations and transitions run on SVG elements (`fill`,
+  `stroke`, `stroke-dashoffset`, `opacity`, `transform` and every other
+  animatable SVG property stylo has), through the same driver: an SVG
+  image whose isolated document still animates ticks on the host's clock
+  while something uses it
+  (`docs/svg-dom-design.md`, "Animation"). SMIL (`animate`,
+  `animateTransform`, `animateMotion`, `set`) is not supported.
 
 ## Scroll-driven animations
 

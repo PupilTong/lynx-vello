@@ -1,5 +1,35 @@
 # SVG as the Lynx `<svg>` component: design (2026-10-09)
 
+> **Superseded in part, 2026-11-23 and 2026-11-24** (`docs/svg-dom-design.md`).
+> Every SVG the engine draws is now an SVG DOM subtree cascaded by stylo,
+> and the directory `crates/terminus/src/render/svg/` this document names
+> no longer exists: its surviving parts are in `crates/terminus/src/svg/`,
+> `crates/terminus/src/tree/xml/` and `crates/terminus/src/paint/svg.rs`.
+> Section 7 ("The converter") is superseded whole: the converter's walk,
+> its style resolver and its `encode` are deleted, a parsed document is a
+> `VectorDocument` holding the parsed markup and its natural size, and
+> applying it builds an isolated document, records it, and plans and paints
+> the recording with the paint walk into one display list. The section 2
+> rulings "Parser", "Fonts", "CSS inside SVG" and "No `TextShaper` trait"
+> are superseded: the markup is parsed by `crates/terminus/src/tree/xml/`
+> (still `roxmltree`), fonts and every other property come from the
+> cascade, `style` elements and `style` attributes apply, and text is
+> shaped into the recording (`svg::text::shape`). The `mix-blend-mode` row
+> stays true for what is drawn: every recorded layer is `Normal`. Section
+> 3's diagram and section 6's "encodes the scene" describe the deleted
+> encode; read them as the build, record, plan and paint above. Section 8's
+> producer half is superseded: a `VectorImage`'s key is minted by
+> `VectorImage::new` (`crates/terminus/src/render/image.rs`) each time
+> `IsolatedSvg::image` draws a document, not by
+> `VectorImage::from_document`. Sections 3, 5, 6 and 8 still
+> describe the registry, the host protocol and the raster cache, with
+> "converter" read as the parse in `tree/xml/` plus the recorder. The
+> nesting pre-scan section 7 describes ("Nesting bound", `nesting::bound`,
+> `TooDeep`) was removed on 2026-11-25 by a user decision, and `roxmltree`'s
+> dev profile is `opt-level = 3`: element nesting is no longer bounded before
+> `roxmltree` parses it (`docs/svg-dom-design.md`, "Risk: element nesting is
+> not bounded before the XML parse").
+
 > **2026-11-23.** The component's document tag is now `lynx-svg`
 > (`crates/bobcat-core/src/main/tree/lynx_svg.rs`); the tag `svg` is left
 > for the SVG element `terminus` defines (`crates/terminus/src/svg/`). A Lynx page still writes `svg`:

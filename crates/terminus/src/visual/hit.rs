@@ -118,6 +118,7 @@ impl PaintOrder {
         Some(match item.kind {
             PaintItemKind::ElementBox | PaintItemKind::InlineFragment { .. } => item.node,
             PaintItemKind::TextRun { element } | PaintItemKind::Backdrop { element } => element,
+            PaintItemKind::Svg { root, .. } => root,
         })
     }
 

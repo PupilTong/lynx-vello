@@ -23,6 +23,12 @@ fixtures on native and Wasm) pin them. This is deliberately not a fuzzer. See
 for the native parser's Lepus/CSS recursion bounds, overlapping-payload
 rejection and CSS fallback expansion cap.
 
+The SVG image parse (`terminus`'s `ImageEvent::parse_document`, over
+`roxmltree`) is an external-byte boundary too, and it does not hold that
+property: a document nested deeply enough overflows the parsing thread's
+stack and takes the process down (`docs/svg-dom-design.md`, section 9,
+"Risk: element nesting is not bounded before the XML parse").
+
 ## The unsafe floor
 
 `seldon`, `prime-radiant`, and `bobcat-source` carry `#![forbid(unsafe_code)]`. The

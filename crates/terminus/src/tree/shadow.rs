@@ -76,15 +76,20 @@ pub(crate) struct ShadowRootData {
     pub(crate) mode: ShadowRootMode,
     pub(crate) styles: AuthorStyles<ShadowStyleSheet>,
     slots: Option<Vec<NodeId>>,
+    /// The host is an SVG `use` element, so this tree is its instance
+    /// ([`crate::svg`]), which takes no style rules of its own. Decided at
+    /// attachment: a host never changes its tag or namespace.
+    pub(crate) svg_use_instance: bool,
 }
 
 impl ShadowRootData {
-    fn new(host: NodeSlot, mode: ShadowRootMode) -> Self {
+    fn new(host: NodeSlot, mode: ShadowRootMode, svg_use_instance: bool) -> Self {
         Self {
             host,
             mode,
             styles: AuthorStyles::new(),
             slots: None,
+            svg_use_instance,
         }
     }
 }
@@ -322,8 +327,13 @@ impl<T> Document<T> {
             "Document::attach_shadow: the host already hosts a shadow root"
         );
         let host_slot = self.live_slot(host);
+        let svg_use_instance = crate::svg::is_use(self.live(host));
         let root = self.allocate_node(|owner, id| {
-            Node::new_shadow_root(owner, id, ShadowRootData::new(host_slot, mode))
+            Node::new_shadow_root(
+                owner,
+                id,
+                ShadowRootData::new(host_slot, mode, svg_use_instance),
+            )
         });
         let root_slot = self.live_slot(root);
         self.live_node_mut(root).parent = Some(host_slot);

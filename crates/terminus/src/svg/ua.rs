@@ -33,3 +33,20 @@ impl<T> Document<T> {
         self.add_user_agent_stylesheet(&SVG_SHEET);
     }
 }
+
+/// The rule of an isolated SVG image document (`super::image`): its root
+/// sets `font-family: sans-serif`, the generic the text shaper takes for an
+/// empty family list (`seldon::text::line`'s `family_list`), so text with no
+/// `font-family` shapes with the family it always has in an SVG image,
+/// where stylo's initial family would be `serif`.
+const IMAGE_RULES: &str = ":root { font-family: sans-serif; }";
+
+static IMAGE_SHEET: LazyLock<UserAgentStylesheet> =
+    LazyLock::new(|| UserAgentStylesheet::parse(IMAGE_RULES));
+
+impl<T> Document<T> {
+    /// Mounts the isolated SVG image document's sheet ([`IMAGE_RULES`]).
+    pub(crate) fn add_svg_image_stylesheet(&mut self) {
+        self.add_user_agent_stylesheet(&IMAGE_SHEET);
+    }
+}

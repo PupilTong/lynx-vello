@@ -297,9 +297,10 @@ state.
 ## SVG-namespace elements
 
 `crates/terminus/src/svg/` puts SVG content in the document as real element
-nodes that stylo cascades. An `svg` element in a document draws nothing yet,
-and the converter in `crates/terminus/src/render/svg/` still draws every SVG
-image.
+nodes that stylo cascades, records a cascaded subtree into an item list, and
+draws every SVG image as an isolated SVG document of its own, planned and
+painted by the paint walk (`docs/svg-dom-design.md`). An `svg` element in a
+document draws nothing yet.
 
 **The namespace bit.** An element is in the HTML namespace or the SVG
 namespace (`http://www.w3.org/2000/svg`): bit 13 of `NodeFlags`, set when
@@ -374,6 +375,167 @@ rule Chromium's `svg.css` and Gecko's `svg.css` both carry. A document
 mounts it with `Document::add_svg_user_agent_stylesheet`, as an embedder
 adds the HTML elements' `UA_RULES`; `Document::new` does not, and `bobcat-core` does not, because pages of the
 Lynx runtime hold no SVG-namespace element.
+
+**XML** (`tree/xml/`). XML parsing and XML-to-DOM construction are the
+tree's, the analogue of a browser's XML parser behind `DOMParser`; the SVG
+module is their one caller. `XmlMarkup::parse(bytes, unqualified)`
+(`tree/xml/markup.rs`) reads a
+document into an owned `Send + Sync` value, so a resource fetcher can parse
+off the document's thread. The prologue (`with_xml`) takes UTF-8 only,
+parses with `roxmltree` (DTDs allowed) and fails with an `XmlError`. Nothing
+bounds element nesting before `roxmltree`, which recurses once per nested
+element, so a document nested deeper than the parsing thread's stack holds
+overflows it (`docs/svg-dom-design.md`, "Risk: element nesting is not
+bounded before the XML parse"). One walk, at most `MAX_NESTING` levels deep,
+keeps the elements whose
+namespace is one the tree has elements for that XML content builds
+(`XmlNamespace`, SVG only today), each recording its namespace; an element in
+no namespace is read in `unqualified`, or dropped when that is `None`; an
+element of any other namespace is dropped with its subtree; local names keep
+their case. A dropped root is `XmlError::ForeignRoot`. Attributes in no
+namespace keep their local name, those in the XML and XLink namespaces are
+kept as `xml:<local>` and `xlink:<local>`, and any other namespaced
+attribute is dropped, because the tree's attributes have no namespace. Every
+text node is kept, white space only included, wherever it is; `CDATA` is
+text; comments and processing instructions make no node. The representation
+is a preorder node vector (20 bytes a node: the name or text as a range of
+one string buffer, the subtree's end, the attribute range, the namespace in
+the padding), an attribute vector (16 bytes an attribute, two ranges) and
+the string buffer. `Document::append_xml(parent, &markup, payload, built)`
+builds it under `parent` in document order, each element through the
+creation path of its namespace and each attribute through `set_attribute`,
+and calls `built` once per element with its index, node and depth. Both are
+crate-private: a subtree built by `append_xml` alone has no `style` sheets
+mounted and no `use` instances, which the SVG builder adds.
+
+**The SVG image parse** (`svg/image.rs`). `VectorDocument::parse` calls
+`XmlMarkup::parse(bytes, Some(XmlNamespace::Svg))`: no namespace counts as
+SVG, so `<svg viewBox="…">` without `xmlns` draws, as it did under the
+engine's earlier converter; a browser refuses such a document as an image.
+That is SVG-image policy, not the XML layer's. The root must then be the SVG
+`svg` element; `SvgError` carries the `XmlError` or is `NotSvg`, and a root
+the XML layer dropped (`<x:svg xmlns:x="urn:x"/>`) is `NotSvg`.
+
+**The builder** (`svg/build.rs`). `Document::append_svg_markup(parent,
+&markup, payload)` builds the subtree under `parent` with
+`Document::append_xml`, so hints, `id`, `class` and `style` behave as for
+any caller, and answers the root `svg`. In the same walk its `built`
+callback collects the ids (first wins), the `use` elements with their depth
+and the `style` sheets. `payload` is a closure called once per node made.
+Then each `style` element
+whose `type` is absent, empty or `text/css` adds its text as an author sheet
+of the document (`add_stylesheet`), in document order: the builder is for a
+document whose content is this one SVG, so the sheets are the document's,
+and a `parent` inside a shadow tree is refused with a panic.
+
+**`use`** (`svg/use_element.rs`). After the build, each `use` whose `href`
+(or, without one, `xlink:href`: `svg/attributes.rs`, `href`) is a fragment
+(`#id`) naming a built element gets a closed shadow root holding a deep clone of it, as Gecko's `UpdateShadowTree` and Chromium's
+`CreateInstanceTree` build it; the clone's attributes go through
+`set_attribute`, and a `use` inside a clone is instantiated in turn. A
+reference resolves among the built elements only (first id wins), so a
+clone's `id` never shadows an original, and the document's own `#id` lookup
+(`query_selector`, a light-tree walk with no id map) never enters a shadow
+root. A `use` whose expansion reaches a cycle (its target is the `use` or an
+ancestor of it, or a target already being expanded) instantiates nothing; a
+target found cycle-free is remembered, so the check visits each target
+once. The expansion is a nesting level of its own and counts against
+`MAX_NESTING`, and one build clones at most `MAX_INSTANCE_NODES` (65 536)
+nodes, because a chain of `use`s naming the previous one several times
+grows exponentially. The clone inherits from the `use` through the flat
+tree. Stylo skips a shadow root whose host is an SVG `use` when it looks for
+the tree whose rules apply (`containing_shadow_ignoring_svg_use`, which reads
+the host's `is_svg_element` and local name), so the document's rules match
+the clone; it also asserts that such a root has no style data, which
+`TShadowRoot::style_data` answers `None` for. Whether a shadow root is a
+`use` instance is decided once, in `attach_shadow`, and kept in its
+`ShadowRootData` (`svg_use_instance`): a host never changes its tag or
+namespace, so `style_data` reads one flag.
+
+Limits: a later mutation of a `style` element, a `use`, its target or the
+target's subtree changes nothing, because no caller mutates a built tree.
+
+**Recording** (`svg/record.rs`, `svg/gradient.rs`). `record(document, root,
+group)` walks the subtree of an SVG `svg` element whose styles are flushed
+and answers a `svg::recording::Recording`: `Item`s in paint order, in viewport
+units, every transform absolute, every paint a brush, text unshaped. Each
+value is the element's computed style, so author rules, `style` elements
+and `style` attributes apply. `svg/record.rs`'s module docs list the
+elements and the drawing rules (groups, layers and clips, paint servers,
+text).
+
+- Properties: `fill`, `stroke`, their opacities, `fill-rule`, `clip-rule`, the stroke's width,
+  caps, join, miter limit (at least one), dashes and offset, `paint-order` and `text-anchor` from
+  `inherited_svg`; `opacity`; `visibility`; `display`; `clip-path: url()` and `mask-image` (an
+  element with a mask is skipped with its subtree) from `svg`; the font through
+  `seldon::text::ResolvedFont::from_computed`; `letter-spacing`, a percentage of the font size. A
+  `currentcolor` paint resolves against the element's own computed `color`
+  (`paint::convert::resolve_color`).
+- Geometry: computed `cx`, `cy`, `r`, `rx`, `ry`, `x`, `y`, `width`, `height` and `d` (`d` through
+  `paint::shape::svg_path` at `svg::shapes::ARC_TOLERANCE`). Percentages resolve against the
+  viewport's width, its height, or its normalised diagonal for `r`, the
+  stroke width, dashes and dash offset. Attribute-only geometry (`points`, `x1`…`y2`, `viewBox`,
+  `preserveAspectRatio`, the units attributes, `offset`, a `use`'s `width`/`height`, a `symbol`'s
+  viewport, text `x`/`y`/`dx`/`dy`, `xml:space`) goes through `svg/attributes.rs`.
+- `transform`: the computed list with `transform-origin` against the box `transform-box` names,
+  folded by `visual::transform::ContextMatrix`, the builder the CSS boxes use. `view-box` is the
+  nearest viewport at the user-space origin; `fill-box` the element's bounding box; `border-box`
+  and `stroke-box` the bounding box with the stroke's reach (css-transforms-1 gives an element
+  with no CSS box `stroke-box` for `border-box`). A container's box is known after its content:
+  the content is recorded under the parent's transform and its items are then mapped by the
+  element's. Text counts for no box before shaping, so a text-only box falls back to `view-box`.
+- References: one id map over the root's light subtree, first id wins; a `url()` is a reference
+  when it is a fragment of the document's URL. A `use` draws the instance in its shadow root at
+  its computed `x`/`y`; a `symbol` or `svg` instance is a viewport sized by the `use`'s
+  `width`/`height`. A gradient is resolved for each reference against the referencing element's
+  viewport and its own font size; stops take their own computed `stop-color` and `stop-opacity`.
+- `group`: `RootGroup::Recorded` draws the root's own `opacity`, `clip-path`, mask and
+  `transform` into the list, as an image's root.
+- An element with no computed style (inside a `display: none` subtree) draws nothing; the walk is
+  bounded by `MAX_NESTING`, counting element nesting, `tspan` nesting and `use` expansion.
+
+The layer machinery is `svg/layers.rs` (`open_layers`, `close_layers`,
+`ClipDef`, `items_bounds`, `ink_extent`, the stroke builder and the one
+stroke-reach function both bounds use); the recording's types are
+`svg/recording.rs`; the text chunk model, its whitespace rule and the
+shaping `svg/text.rs`; the gradient brush `svg/paint_server.rs`; the shape
+builders and path data `svg/shapes.rs`. Drawing a recorded item or layer
+into a display list is `paint/svg.rs`'s. `svg/record_tests.rs` is the corpus: each document goes
+through the image pipeline's own functions.
+
+**SVG images** (`svg/image.rs`). A host's `ImageEvent::parse_document` makes
+a `VectorDocument`: the parsed `XmlMarkup` and the natural size from the root's
+attributes. `Document::apply_image_events` passes each report to
+`Document::apply_image_event`, which hands `ImageRegistry::apply` a closure
+that builds an `IsolatedSvg` (`IsolatedSvg::build`: a `Document<()>` sized to the
+natural size, with the SVG UA sheet and the image sheet `:root { font-family:
+sans-serif }` mounted, the markup built under its document element, styles
+flushed), and asks it for its image (`IsolatedSvg::image`): the root is
+recorded with `RootGroup::Recorded`, its text shaped with the host
+document's `TextContext`, and the recording filed in the isolated
+document's own `svg_roots` (`keep_svg_recording`). `Document::plan_svg_image`
+plans it (`visual/svg.rs`, `plan_recording`) under the identity map and world, with no root box item,
+clip, space, scroll slot or animation slot, and claims a commit id for it;
+`paint::walker::walk_uncultured`, the monolithic sink with culling off,
+walks that plan into one display list, so every recorded item is drawn, one
+outside the viewport included, which a `meet` destination can show. No
+layout, render or stacking-context build runs for an image document. The
+isolated document is then dropped. The image sheet keeps text with no
+`font-family` on `sans-serif`, the generic the shaper takes for an empty
+family list (stylo's initial family is `serif`).
+
+An isolated document's timeline starts at the host document's animation
+clock. When it still has a running or pending animation or transition after
+its first flush, `Document::animated_images` keeps it by source (an empty,
+unallocated table otherwise), and `advance_animations` advances each kept
+document in use with the host's `now`: a tick that restyled something
+records it again and replaces the registry entry's `VectorImage`, and a
+document whose animations have finished is dropped, its last image staying.
+In use means presented by a replaced box or drawn by the frame being
+committed: `FramePainter::paint` passes the walk's vector draws to
+`note_drawn_images`, which also ORs a running image into the frame's
+`animations_active` and `needs_main_ticks`. `has_active_animations` and
+`AnimationTick::needs_next_frame` include it too.
 
 ## Layout host
 
@@ -766,9 +928,11 @@ into the retained display list (`paint::display_list`: shapes, paints,
 clips, layers and glyph runs as drawing semantics, replayed by
 `render::sparse` into `vello_gpu` per render). Item clip chains diff against
 its layer stack;
-`RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
+`RenderLayer` scopes composite opacity, filters, clip paths, and masks, or
+one recorded layer push of an SVG image (`LayerKind::Svg`); box
 fragments paint shadows, backgrounds, replaced content, borders, outlines, and
-retained Parley glyphs. Internal style access is `Document::paint_style`
+retained Parley glyphs, and an SVG image's recorded paths and text paint as
+items of their own (`paint/svg.rs`). Internal style access is `Document::paint_style`
 (post-flush, no `Arc` bump), geometry is the rounded layout, and the document
 Device supplies viewport/DPR so paint cannot disagree with layout. The
 authoritative paint limits are recorded in `crates/terminus/src/paint/painter.rs`;
@@ -999,7 +1163,7 @@ the element's.
   text painter draws them (`paint::display_list::synthesized_outlines`).
 - `Path` (`path.rs`) is `Path2D` and shares its builder with the context's default path
   (`path::builder_methods!`). `Path::from_svg` parses with SVG's own path data parser
-  (`render::svg::path_data`), which keeps the segments before the first one in error.
+  (`svg::shapes::path_data`), which keeps the segments before the first one in error.
 - `Gradient` and `Pattern` (`style.rs`) are shared by reference (`Arc<Mutex<_>>`): a stop or
   pattern transform set later shows in draws recorded after it.
 - `Image` (`image.rs`) is what `drawImage` and patterns sample: pixels not uploaded yet

@@ -459,6 +459,44 @@ pub(in crate::text) fn translate_font_family_list(family: &FontFamily) -> Parley
     ))
 }
 
+impl crate::text::ResolvedFont {
+    /// The font a computed style names, for a host that shapes one line
+    /// under it ([`crate::text::shape_line`]): the family list with each
+    /// generic translated as the paragraph translates it, and the computed
+    /// size, weight, style and width.
+    #[must_use]
+    pub fn from_computed(font: &stylo::properties::style_structs::Font) -> Self {
+        use crate::text::{ResolvedFamily, ResolvedFontStyle};
+
+        let families = font
+            .font_family
+            .families
+            .list
+            .iter()
+            .map(|single| match single {
+                SingleFontFamily::FamilyName(name) => ResolvedFamily::Named(name.name.to_string()),
+                SingleFontFamily::Generic(generic) => {
+                    ResolvedFamily::Generic(translate_generic_family(*generic))
+                }
+            })
+            .collect();
+        let style = font.font_style;
+        Self {
+            families,
+            size: font.font_size.computed_size().px(),
+            weight: font.font_weight.value(),
+            style: if style == FontStyle::NORMAL {
+                ResolvedFontStyle::Normal
+            } else if style == FontStyle::ITALIC {
+                ResolvedFontStyle::Italic
+            } else {
+                ResolvedFontStyle::Oblique(Some(style.oblique_degrees()))
+            },
+            stretch: font.font_width.to_percentage().0,
+        }
+    }
+}
+
 pub(in crate::text) fn translate_font_family_name(
     single: &SingleFontFamily,
 ) -> ParleyFontFamilyName<'_> {

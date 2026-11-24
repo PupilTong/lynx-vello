@@ -91,16 +91,18 @@
 //!
 //! An SVG document is not pixels, and the engine draws it itself. The host
 //! that fetched it parses it, on whatever thread it decodes bitmaps on,
-//! with the engine's own converter (`render/svg`), reached from outside this
-//! crate only through [`ImageEvent::parse_document`]: the result is a
-//! [`VectorDocument`], a flat command list with its geometry resolved and
-//! its text still unshaped, which the host reports through
-//! [`ImageReports::parsed_document`] and which travels to the document
-//! thread inside [`ImageEvent::ParsedDocument`]. A document that does not
-//! parse is reported with [`ImageReports::failed`]. Applying a parsed
-//! document shapes its text through the document's own `TextContext` and
-//! encodes the scene, on the document thread, into a [`VectorImage`]; the
-//! registry keeps that in the loaded entry. A vector image is never an image
+//! with the engine's own parser, reached from outside this crate only
+//! through [`ImageEvent::parse_document`]: the result is a
+//! [`VectorDocument`], the parsed markup and its natural size, which the
+//! host reports through [`ImageReports::parsed_document`] and which travels
+//! to the document thread inside [`ImageEvent::ParsedDocument`]. A document
+//! that does not parse is reported with [`ImageReports::failed`]. Applying a
+//! parsed document builds it as an isolated document cascaded by stylo,
+//! records it, shapes its text with the document's own `TextContext` and
+//! paints the recording's plan into one display list, on the document
+//! thread, into a [`VectorImage`] (`crate::svg::image`, the
+//! function the document hands [`ImageRegistry::apply`]); the registry keeps
+//! that in the loaded entry. A vector image is never an image
 //! draw: [`FrameImages`] is never asked for it, and no bitmap budget applies.
 //!
 //! # Documents the page hands over
@@ -129,7 +131,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
-use seldon::text::TextContext;
 use vant::image::DecodedImage;
 use vant::image::residency::{
     Decoded, Described, Refinement, Requested, Residency, ResidencyConfig, ViewKey,
@@ -142,20 +143,17 @@ use crate::render::gpu::SharedGpu;
 use crate::render::picture::{
     FrameWriter, PictureFrame, PictureId, PictureKey, PlaybackReport, TakenFrame,
 };
-use crate::render::svg::{self, VectorDocument};
+use crate::svg::image::VectorDocument;
 
 /// A parsed SVG document, encoded and drawable at any size.
 ///
-/// Built by [`VectorImage::from_document`] on the document thread from the
-/// [`VectorDocument`] the converter parsed (`render/svg`), which is what a
-/// host turns a document's bytes into with [`ImageEvent::parse_document`]
-/// and reports through [`ImageReports::parsed_document`]. It carries what a
-/// draw needs: the encoded scene and the **viewport**, the rectangle in
-/// scene units that a draw maps onto its destination rectangle (the
-/// `viewBox` size when the root has one, else the natural size), computed
-/// at the parse. How a viewport of another ratio maps onto the destination
-/// is the root's [`AspectRatio`]. The natural size layout reads (CSS Images
-/// 3 default sizing; see `docs/svg-lynx-component-design.md`) is the
+/// Built by [`VectorImage::new`] on the document thread from the drawing of
+/// a [`VectorDocument`] a host parsed and reported (`crate::svg::image`). It
+/// carries what a draw needs: the encoded scene and the **viewport**, the
+/// rectangle in scene units that a draw maps onto its destination rectangle
+/// (the `viewBox` size when the root has one, else the natural size). How a viewport of another
+/// ratio maps onto the destination is the root's [`AspectRatio`]. The natural size layout reads
+/// (CSS Images 3 default sizing; see `docs/svg-lynx-component-design.md`) is the
 /// registry entry's, as a bitmap's intrinsic size is.
 ///
 /// Cloning shares the scene.
@@ -213,29 +211,26 @@ const _: () = {
 };
 
 impl VectorImage {
-    /// Encodes `document` into a vector image, shaping its text through the
-    /// document's `context`. This is the one place a scene is built for a
-    /// document, on the document thread, once per source.
+    /// A vector image drawing `scene`, a display list in viewport units, with
+    /// the viewport and `preserveAspectRatio` of the document it was drawn
+    /// from, under a key of its own.
     #[must_use]
-    pub(crate) fn from_document(
-        document: &VectorDocument,
-        context: &mut Option<Box<TextContext>>,
-    ) -> Self {
+    pub(crate) fn new(scene: DisplayList, viewport: (f32, f32), aspect: AspectRatio) -> Self {
         Self {
-            scene: Arc::new(svg::encode(document, context)),
-            viewport: document.viewport,
-            aspect: document.aspect,
+            scene: Arc::new(scene),
+            viewport,
+            aspect,
             key: NEXT_VECTOR_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
-    /// Parses and encodes `svg` in one call, with a text context of its own
+    /// Parses and draws `svg` in one call, with a text context of its own
     /// created only if the document has text: the shortcut for a test that
     /// wants an image and has no document to apply an event to.
     #[cfg(test)]
-    pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, svg::SvgError> {
-        let document = svg::parse(svg)?;
-        Ok(Self::from_document(&document, &mut None))
+    pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, crate::svg::image::SvgError> {
+        let document = VectorDocument::parse(svg)?;
+        Ok(crate::svg::image::vector_image(&document, &mut None))
     }
 
     /// A process-unique identity for this image's picture: the painter's
@@ -608,7 +603,7 @@ impl ImageReports {
     /// `source` is a document the engine draws itself, and `document` is
     /// what [`ImageEvent::parse_document`] made of its bytes.
     ///
-    /// The host parses, with the engine's converter, wherever it decodes a
+    /// The host parses, with the engine's parser, wherever it decodes a
     /// bitmap; a document that does not parse is reported with
     /// [`ImageReports::failed`] instead. Otherwise the same contract as
     /// [`ImageReports::loaded`]: never retracted. The engine owns the scene
@@ -956,16 +951,18 @@ impl ImageEvent {
     /// parses, [`ImageEvent::Failed`] when it does not. The engine's one
     /// parser entry, for the host that reports the document.
     ///
-    /// The parse is the converter's (`render/svg`), which reads nothing
-    /// outside the document and needs no fonts. It runs on the calling
-    /// thread and may take as long as the document is large, so a host runs
-    /// it where it decodes bitmaps, off the thread it reports on. Its
-    /// recursion is bounded (see `render/svg`'s module docs) for a thread
-    /// with a 2 MiB stack.
+    /// The parse reads the markup into an owned value with the tree's XML
+    /// parser (`crate::tree::xml`): it reads nothing outside the document and
+    /// needs no fonts. It runs on the calling thread and may take as long as
+    /// the document is large, so a host runs it where it decodes bitmaps,
+    /// off the thread it reports on. Its recursion is not bounded: a
+    /// document nested deeper than the calling thread's stack holds
+    /// overflows it (`docs/svg-dom-design.md`, "Risk: element nesting is
+    /// not bounded before the XML parse").
     #[must_use]
     pub fn parse_document(source: Arc<str>, bytes: &[u8], kind: DocumentKind) -> Self {
         let parsed = match kind {
-            DocumentKind::Svg => svg::parse(bytes),
+            DocumentKind::Svg => VectorDocument::parse(bytes),
         };
         // The error itself goes nowhere: the source's failure is what the
         // document records, and the engine has no log to write it to.
@@ -1358,10 +1355,11 @@ impl ImageRegistry {
     /// `None` when nothing moved — a source reported twice, which one URL
     /// with one content makes a no-op.
     ///
-    /// A [`ImageEvent::ParsedDocument`] is encoded here, on the calling
-    /// thread, its text shaped through `context` (the document's own text
-    /// context, created on the first text shaped), and only when its source
-    /// is still pending. Nothing is parsed here: the host parsed it.
+    /// A [`ImageEvent::ParsedDocument`] becomes an image here, on the
+    /// calling thread, through `draw` (the document's: it builds the SVG
+    /// document, records it and encodes it with its own text context), and
+    /// only when its source is still pending. Nothing is parsed here: the
+    /// host parsed it.
     ///
     /// A report on a synthetic source that has been forgotten since its bytes
     /// were requested (every element let go while the host parsed) moves nothing:
@@ -1370,7 +1368,7 @@ impl ImageRegistry {
     pub(crate) fn apply(
         &mut self,
         event: &ImageEvent,
-        context: &mut Option<Box<TextContext>>,
+        draw: impl FnOnce(&VectorDocument) -> VectorImage,
     ) -> Option<ImageStatus> {
         let source = event.source()?;
         if is_synthetic_source(source) && !self.entries.contains_key(&**source) {
@@ -1399,20 +1397,52 @@ impl ImageRegistry {
                     animated: *animated,
                 },
             },
-            // The converter rounds a natural size to at least one px on each
-            // axis, so a parsed document is never refused for a zero axis.
+            // A natural size is rounded to at least one px on each axis, so a
+            // parsed document is never refused for a zero axis.
             ImageEvent::ParsedDocument { document, .. } => {
                 let (width, height) = document.natural;
                 ImageState::Ready {
                     width,
                     height,
-                    kind: ImageKind::Vector(VectorImage::from_document(document, context)),
+                    kind: ImageKind::Vector(draw(document)),
                 }
             }
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
             ImageEvent::Playback { .. } => unreachable!("a playback report names no source"),
         };
         Some(entry.state.status())
+    }
+
+    /// How many replaced boxes present `source`.
+    pub(crate) fn presenters(&self, source: &str) -> u32 {
+        self.entries.get(source).map_or(0, |entry| entry.presenters)
+    }
+
+    /// The key of `source`'s vector image, when it has settled as one.
+    pub(crate) fn vector_key(&self, source: &str) -> Option<u64> {
+        match &self.entries.get(source)?.state {
+            ImageState::Ready {
+                kind: ImageKind::Vector(image),
+                ..
+            } => Some(image.key()),
+            _ => None,
+        }
+    }
+
+    /// Replaces the vector image a settled `source` draws: an animated SVG
+    /// image recorded again (`crate::svg::image`). The natural size stays.
+    pub(crate) fn replace_vector(&mut self, source: &str, image: VectorImage) {
+        if let Some(Entry {
+            state:
+                ImageState::Ready {
+                    kind: kind @ ImageKind::Vector(_),
+                    ..
+                },
+            ..
+        }) = self.entries.get_mut(source)
+        {
+            *kind = ImageKind::Vector(image);
+        }
     }
 
     /// Whether the registry holds an entry for `source`.
@@ -1481,10 +1511,9 @@ mod tests {
         assert_eq!(registry.take_wanted().len(), 1);
     }
 
-    /// The text context of a document that has shaped nothing: what an
-    /// event with no text to shape is applied with.
-    fn no_text() -> Option<Box<seldon::text::TextContext>> {
-        None
+    /// What the document does with a parsed SVG, with no text context.
+    fn draw(document: &crate::svg::image::VectorDocument) -> super::VectorImage {
+        crate::svg::image::vector_image(document, &mut None)
     }
 
     use super::{ImageInbox, ImageReports};
@@ -1620,7 +1649,7 @@ mod tests {
         registry.take_wanted();
         assert!(registry.resolve("app:///a.png").is_none());
 
-        registry.apply(&loaded("app:///a.png", 40, 20), &mut no_text());
+        registry.apply(&loaded("app:///a.png", 40, 20), draw);
         let (source, dimensions, _) = registry
             .resolve("app:///a.png")
             .expect("a loaded image resolves");
@@ -1636,7 +1665,7 @@ mod tests {
         let mut registry = ImageRegistry::default();
         let _ = registry.resolve("app:///huge.png");
         registry.take_wanted();
-        registry.apply(&loaded("app:///huge.png", 12_000, 6_000), &mut no_text());
+        registry.apply(&loaded("app:///huge.png", 12_000, 6_000), draw);
 
         let (_, dimensions, _) = registry
             .resolve("app:///huge.png")
@@ -1670,7 +1699,7 @@ mod tests {
             let mut registry = ImageRegistry::default();
             let _ = registry.resolve("app:///bad.png");
             registry.take_wanted();
-            registry.apply(&loaded("app:///bad.png", width, height), &mut no_text());
+            registry.apply(&loaded("app:///bad.png", width, height), draw);
             assert!(
                 registry.resolve("app:///bad.png").is_none(),
                 "{width}x{height} has no usable intrinsic size"
@@ -1687,21 +1716,19 @@ mod tests {
         registry.take_wanted();
         assert!(
             registry
-                .apply(&loaded("app:///a.png", 10, 10), &mut no_text())
+                .apply(&loaded("app:///a.png", 10, 10), draw)
                 .is_some()
         );
 
         assert!(
-            registry
-                .apply(&failed("app:///a.png"), &mut no_text())
-                .is_none(),
+            registry.apply(&failed("app:///a.png"), draw).is_none(),
             "a late failure on a loaded image moves nothing"
         );
         assert!(registry.resolve("app:///a.png").is_some(), "still drawable");
 
         assert!(
             registry
-                .apply(&loaded("app:///a.png", 99, 99), &mut no_text())
+                .apply(&loaded("app:///a.png", 99, 99), draw)
                 .is_none(),
             "and a repeated report moves nothing"
         );
@@ -1717,11 +1744,11 @@ mod tests {
         let mut registry = ImageRegistry::default();
         let _ = registry.resolve("app:///a.png");
         registry.take_wanted();
-        registry.apply(&failed("app:///a.png"), &mut no_text());
+        registry.apply(&failed("app:///a.png"), draw);
         assert!(registry.resolve("app:///a.png").is_none());
         assert!(
             registry
-                .apply(&loaded("app:///a.png", 4, 4), &mut no_text())
+                .apply(&loaded("app:///a.png", 4, 4), draw)
                 .is_none(),
             "a failure is terminal: pixels arriving later change nothing"
         );
@@ -1735,7 +1762,7 @@ mod tests {
         let mut registry = ImageRegistry::default();
         let _ = registry.request("app:///a.png");
         assert_eq!(
-            registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text()),
+            registry.apply(&loaded("app:///a.png", 12, 6), draw),
             Some(ImageStatus::Bitmap {
                 width: 12,
                 height: 6,
@@ -1743,7 +1770,7 @@ mod tests {
             })
         );
         assert_eq!(
-            registry.apply(&failed("app:///b.png"), &mut no_text()),
+            registry.apply(&failed("app:///b.png"), draw),
             Some(ImageStatus::Failed),
             "a failure settles too, requested or not"
         );
@@ -1756,7 +1783,7 @@ mod tests {
         let mut registry = ImageRegistry::default();
         let _ = registry.request("app:///bad.png");
         assert_eq!(
-            registry.apply(&loaded("app:///bad.png", 0, 4), &mut no_text()),
+            registry.apply(&loaded("app:///bad.png", 0, 4), draw),
             Some(ImageStatus::Failed)
         );
         assert_eq!(registry.status("app:///bad.png"), ImageStatus::Failed);
@@ -1771,8 +1798,8 @@ mod tests {
         let _ = registry.request("app:///a.png");
         assert_eq!(registry.request("app:///a.png").1, ImageStatus::Pending);
 
-        registry.apply(&loaded("app:///a.png", 12, 6), &mut no_text());
-        registry.apply(&failed("app:///b.png"), &mut no_text());
+        registry.apply(&loaded("app:///a.png", 12, 6), draw);
+        registry.apply(&failed("app:///b.png"), draw);
         assert_eq!(
             registry.request("app:///a.png").1,
             ImageStatus::Bitmap {
@@ -1834,7 +1861,7 @@ mod tests {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod vector_tests {
     //! The registry's half of a vector image: the sizes and the drawing
-    //! rules themselves are the converter's tests (`render/svg/tests.rs`).
+    //! rules themselves are the image corpus (`svg/record_tests.rs`).
 
     use std::sync::Arc;
 
@@ -1873,7 +1900,9 @@ mod vector_tests {
 
         let mut registry = ImageRegistry::default();
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
-        let applied = registry.apply(&drained[0], &mut context);
+        let applied = registry.apply(&drained[0], |document| {
+            crate::svg::image::vector_image(document, &mut context)
+        });
         assert_eq!(
             applied,
             Some(super::ImageStatus::Vector {
@@ -1899,10 +1928,54 @@ mod vector_tests {
         let mut registry = ImageRegistry::default();
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
         assert_eq!(
-            registry.apply(&event, &mut context),
+            registry.apply(&event, |document| {
+                crate::svg::image::vector_image(document, &mut context)
+            }),
             Some(super::ImageStatus::Failed)
         );
         assert!(registry.resolve("app:///bad.svg").is_none());
+    }
+
+    /// Markup that does not parse as an SVG document is a failure too: not
+    /// UTF-8, or a root that is not `svg`.
+    #[test]
+    fn a_markup_error_reports_failed() {
+        for bytes in [
+            &b"<svg \xff/>"[..],
+            b"<html xmlns='http://www.w3.org/1999/xhtml'/>",
+        ] {
+            let event =
+                ImageEvent::parse_document(Arc::from("app:///bad.svg"), bytes, DocumentKind::Svg);
+            assert!(matches!(event, ImageEvent::Failed { .. }), "{bytes:?}");
+        }
+    }
+
+    /// Applying a parsed document leaves the registry holding the encoded
+    /// image and nothing else: the isolated document it was recorded from
+    /// is gone with the apply. A `Document` is not `Send`, and the settled
+    /// entry's image is, so the entry cannot hold one.
+    #[test]
+    fn the_isolated_document_is_gone_after_apply() {
+        fn sendable<T: Send + Sync>(_: &T) {}
+        let event = ImageEvent::parse_document(
+            Arc::from("app:///icon.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>"#,
+            DocumentKind::Svg,
+        );
+        let mut registry = ImageRegistry::default();
+        registry.apply(&event, |document| {
+            crate::svg::image::vector_image(document, &mut None)
+        });
+        let entry = registry.entries.get("app:///icon.svg").expect("filed");
+        let super::ImageState::Ready {
+            kind: super::ImageKind::Vector(image),
+            ..
+        } = &entry.state
+        else {
+            panic!("a settled vector image: {:?}", entry.state);
+        };
+        sendable(image);
+        assert!(!image.scene().is_empty());
     }
 
     /// Two images never share a key, and clones share theirs.
@@ -1988,7 +2061,7 @@ mod synthetic_tests {
         assert_eq!(
             registry.apply(
                 &ImageEvent::parse_document(source, &bytes, kind),
-                &mut context,
+                |document| { crate::svg::image::vector_image(document, &mut context) }
             ),
             Some(ImageStatus::Vector {
                 width: 8,
@@ -2095,18 +2168,32 @@ mod synthetic_tests {
 
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let event = ImageEvent::parse_document(source, &bytes, kind);
-        assert!(registry.apply(&event, &mut context).is_none());
+        assert!(
+            registry
+                .apply(&event, |document| {
+                    crate::svg::image::vector_image(document, &mut context)
+                })
+                .is_none()
+        );
         assert!(!registry.knows(&icon));
 
         let again = registry.insert_document(ICON, DocumentKind::Svg);
         registry.bind(&again);
         assert_eq!(registry.take_document_requests().len(), 1);
         assert!(
-            registry.apply(&event, &mut context).is_some(),
+            registry
+                .apply(&event, |document| {
+                    crate::svg::image::vector_image(document, &mut context)
+                })
+                .is_some(),
             "the new entry is pending"
         );
         assert!(
-            registry.apply(&event, &mut context).is_none(),
+            registry
+                .apply(&event, |document| {
+                    crate::svg::image::vector_image(document, &mut context)
+                })
+                .is_none(),
             "a second report for the settled source moves nothing"
         );
     }
@@ -2241,12 +2328,19 @@ mod residency_tests {
             picture,
             report: crate::render::picture::PlaybackReport::LoopComplete,
         };
-        assert_eq!(registry.apply(&playback, &mut None), None);
+        assert_eq!(
+            registry.apply(&playback, |document| crate::svg::image::vector_image(
+                document, &mut None
+            )),
+            None
+        );
         let (reports, inbox) = ImageInbox::new();
         reports.loaded_animated("a.png", 40, 20);
         for event in inbox.drain() {
             assert_eq!(
-                registry.apply(&event, &mut None),
+                registry.apply(&event, |document| crate::svg::image::vector_image(
+                    document, &mut None
+                )),
                 Some(super::ImageStatus::Bitmap {
                     width: 40,
                     height: 20,

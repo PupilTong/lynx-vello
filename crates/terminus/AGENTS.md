@@ -40,6 +40,25 @@ Subsystems:
   css-grid-1 §6). `LayoutTree::children` answers the boxes in place of the
   text, they are re-derived after each style flush from what mutations
   recorded, and a hit on one targets its container.
+- `tree/xml/` — XML content, the analogue of a browser's XML parser behind
+  `DOMParser`, crate-private. `XmlMarkup::parse(bytes, unqualified)`
+  (`tree/xml/markup.rs`) reads
+  bytes into an owned `Send + Sync` value (`with_xml`: UTF-8, `roxmltree`;
+  nothing bounds element nesting before `roxmltree`, whose recursion can
+  overflow the parsing thread's stack: `docs/svg-dom-design.md`, "Risk:
+  element nesting is not bounded before the XML parse"). The walk keeps no
+  element deeper than `MAX_NESTING`. It keeps the elements of the namespaces the tree
+  has elements for that XML builds (`XmlNamespace`: SVG only), an element in
+  no namespace read in `unqualified` or dropped when that is `None`, any
+  other namespace dropped with its subtree, a dropped root
+  `XmlError::ForeignRoot`; attributes in no namespace under their local
+  name, `xml:*` and `xlink:*` under those names, other namespaced ones
+  dropped; every text node, white space included. Comments and processing
+  instructions make no node. `Document::append_xml(parent, &markup,
+  payload, built)` creates each element by its recorded namespace, sets
+  attributes through `set_attribute`, and calls `built(index, node, depth)`
+  per element. It holds no SVG vocabulary; `style` and `use` are applied by
+  `svg/build.rs`, which is why the entry is not on `terminus::link`.
 - `html/` — HTML elements `terminus` implements over its own tree, never
   defined by `Document::new` (a test that builds a `<dialog>` by hand gets a
   plain element) but by `Document::define_html_elements`, which an embedder
@@ -116,8 +135,43 @@ Subsystems:
   natural size follows `width`, `height` and `viewBox` by CSS Images 3
   default sizing (`svg/attributes.rs`, `vector_sizes`). `svg/ua.rs` holds
   the shared SVG UA sheet (`transform-origin: 0 0`), mounted by
-  `Document::add_svg_user_agent_stylesheet` and never by `Document::new`.
-  Nothing draws an `svg` element yet. Tests: `tests/svg_dom.rs`.
+  `Document::add_svg_user_agent_stylesheet` and never by `Document::new`,
+  and the isolated image document's sheet (`:root { font-family:
+  sans-serif }`). XML is the tree's (`tree/xml/`, above), not this
+  module's. `svg/build.rs`: `Document::append_svg_markup` builds an
+  `XmlMarkup` under a parent (not inside a shadow tree) through
+  `Document::append_xml`, collecting ids, `use` elements and `style`
+  sheets in the same walk, and adds each CSS `style` element's text as a
+  document author sheet. `svg/attributes.rs`, `href`: an element's `href`,
+  else its `xlink:href` (SVG 2 precedence); the gradient `href` chain and
+  `use` read it. `svg/use_element.rs`: each `use` with a `#id` `href`
+  gets a closed shadow root holding a deep clone of its target; cycles instantiate nothing; stylo's `use`-scope rule
+  needs `TShadowRoot::style_data` to answer `None` for a `use` host's root,
+  from a flag `attach_shadow` sets in the root's `ShadowRootData`. Neither
+  `style` nor `use` follows later mutations. Markup, builder and `use`
+  instances are crate-private; no crate feature exists for SVG.
+  `svg/record.rs`: `record(document, root, RootGroup)` turns a cascaded
+  subtree into a `Recording` (`svg/recording.rs`), every value from computed style
+  (`transform-box` honoured; references through one id map over the root's
+  light subtree; gradients per reference, `svg/gradient.rs`; group effects
+  `svg/layers.rs`; attribute-only values `svg/attributes.rs`; `xml:space`
+  `svg/text.rs`); its module docs list the elements, values and drawing
+  rules. `svg/image.rs`: SVG images (see "Vector images" below).
+  `svg/present.rs`: the document's side table (`svg_roots`, empty and
+  unallocated without an entry, emptied in `free_node`) where an SVG
+  image's isolated document files its root's shaped `Recording`.
+  `visual/svg.rs` plans it (`Document::plan_svg_image`: one
+  `PaintItemKind::Svg` item per path or text item, one `LayerKind::Svg`
+  group layer per layer push); `paint/svg.rs` draws an item
+  (`paint::svg::draw`) and describes a recorded layer (`paint::svg::layer`),
+  which the monolithic walk pushes with `Layer::push` and the compose walk
+  emits as a `ComposeOp::Push` (`paint::walker`, `push_svg_layer`; a
+  recorded path rides it as `CapturedShape::Path`). An `svg` element in a
+  document draws nothing yet.
+  Tests: `tests/svg_dom.rs`, `src/svg/tests.rs`,
+  `src/svg/record_tests.rs` (the image corpus; `src/svg/inline_tests.rs`
+  holds its display-list comparison),
+  `tests/svg_images.rs`. `docs/svg-dom-design.md` is the design.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
   sheets and inline styles, and the one process-wide lock every user-agent
@@ -319,34 +373,57 @@ Subsystems:
   (`Painter::drain_changed`); `bobcat-core`'s `Painter` facade is its link to
   one view.
 
-**Vector images** (`docs/svg-lynx-component-design.md`): an SVG document used
-as an image — `<image src>`, `background-image`, `mask-image`, the Lynx
+**Vector images** (`docs/svg-dom-design.md`): an SVG document used as an
+image — `<image src>`, `background-image`, `mask-image`, the Lynx
 `<svg src|content>` — reaches the document parsed. The host parses it, where
 it decodes bitmaps, with `ImageEvent::parse_document(source, bytes, kind)`
 and reports `ImageReports::parsed_document(source, Arc<VectorDocument>)`,
 carried by `ImageEvent::ParsedDocument`, or `failed` (`DocumentKind`, what
 the host passes the parser, is `#[non_exhaustive]`, so a second engine-drawn
-format is one more variant). The parse is `terminus`'s own
-converter, `render/svg/` over `roxmltree` and `svgtypes` (no `usvg`; its
-module docs list the supported subset). It reads presentation attributes
-only: CSS inside an SVG document (a `<style>` element, a `style` attribute)
-is not read, by ruling, because native's ServalSVG has no `style` element
-and the project keeps stylo as its one styling engine. `svg::parse` produces a
-`VectorDocument`, a flat paint-order command list with geometry, transforms
-and brushes resolved and text collected but unshaped, so it needs no fonts and
-is `Send + Sync`; it is `pub` with no public member, and shared in an `Arc`
-so every report of one parse (one per view waiting on a load) holds one copy.
-`ImageEvent::parse_document` is the only entry to the converter from outside
-`terminus`, and returns `ImageEvent::ParsedDocument` or `Failed`.
-`Document::apply_image_events` never parses. Applying a parsed document shapes its `<text>` through the document's own
-`TextContext` (`seldon::text::shape_line`; font family, weight, style,
-stretch and size come from the SVG's own attributes, not the host element's
-style) and records it once into a crate-private `VectorImage` (an
-`Arc<DisplayList>`, its viewport, its `preserveAspectRatio`, a process-unique key),
-kept in `ImageState::Ready { width, height, kind: ImageKind::Vector(..) }`
-with the document's natural size in whole CSS px (at least one per axis). Every
-layer the converter opens is `Normal`: no blend can be set without CSS. A later
-`@font-face` does not re-shape already-encoded text.
+format is one more variant). The parse is `tree/xml/` over `roxmltree`,
+an element in no namespace read as SVG (SVG-image policy, `svg/image.rs`),
+the root required to be the SVG `svg` element
+(no `usvg`). A `VectorDocument` (`svg/image.rs`) holds the parsed `XmlMarkup`
+and the natural size from the root's attributes; it needs no fonts, is
+`Send + Sync`, is `pub` with no public member, and is shared in an `Arc` so
+every report of one parse holds one copy. `ImageEvent::parse_document` is
+the only entry to the parse from outside `terminus`.
+`Document::apply_image_events` never parses: `Document::apply_image_event`
+(`svg/image.rs`) hands `ImageRegistry::apply` a closure that builds an
+`IsolatedSvg` (`IsolatedSvg::build`: a `Document<()>`
+of its own sized to the natural size, the SVG UA sheet and the image sheet
+mounted, the `svg` built with `append_svg_markup`, styles flushed) and,
+through `IsolatedSvg::image`, records it with `RootGroup::Recorded`, shapes its text with the host document's own
+`TextContext`, so glyphs come from the page's fonts and `@font-face`
+registrations, files the recording in the isolated document's own
+`svg_roots`, plans it
+(`Document::plan_svg_image`: identity placement, no root box, clip, space or
+slot) and paints the plan with the paint walk, culling nothing
+(`walk_uncultured`), into one display list. No layout or render runs for
+it. CSS inside the document applies through stylo: `style`
+elements are author sheets of the isolated document and `style` attributes
+inline styles. The isolated document's timeline starts at the host's
+animation clock. It is dropped after the paint unless it runs a CSS
+animation or transition; then `Document::animated_images` keeps it by
+source (empty and unallocated without one) and `advance_animations` ticks it
+with the host's clock while it is in use (presented by a replaced box, or
+drawn by the frame `FramePainter::paint` just built, read through
+`note_drawn_images`), re-recording it and replacing the registry entry's
+image after each tick that restyled it; it is dropped when its animations
+finish, the last image staying. While an image in use runs, the frame's
+`animations_active` and `needs_main_ticks` are true. The result
+is a crate-private `VectorImage` (an `Arc<DisplayList>`, its viewport, its
+`preserveAspectRatio`, a process-unique key), kept in
+`ImageState::Ready { width, height, kind: ImageKind::Vector(..) }` with the
+document's natural size in whole CSS px (at least one per axis). Every
+recorded layer is `Normal`. A later `@font-face` does not re-shape
+already-shaped text. What a recording is and what makes it lives in
+`svg/`: the item types (`svg/recording.rs`: `Recording`, `Item`), the text
+item types with their whitespace rule and `shape` (text shaped once, into
+the recording; `svg/text.rs`), the gradient brush (`svg/paint_server.rs`)
+and the shape builders (`svg/shapes.rs`, also `Path2D`'s path data). The
+per-item drawing the paint walk calls (`draw`, `layer`, `Layer::push`, the
+glyph runs) is `paint/svg.rs`'s.
 
 The frame carries the scene, never pixels: each visible tile of a vector
 image becomes a `VectorDraw` in `Presentation.vector_draws`, referenced by

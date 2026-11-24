@@ -7,7 +7,7 @@ use crate::kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Ve
 /// The tolerance arcs (elliptical arcs, circles, rounded corners) are
 /// turned into cubic Béziers at, in user units. Small: a 24-unit icon is
 /// routinely drawn at ten times its size.
-pub(super) const ARC_TOLERANCE: f64 = 0.01;
+pub(crate) const ARC_TOLERANCE: f64 = 0.01;
 
 /// The smallest tolerance an arc is turned into cubics at, as a fraction
 /// of its larger radius. `kurbo::Arc::append_iter` makes
@@ -172,7 +172,7 @@ fn append_arc(path: &mut BezPath, arc: SvgArc) {
 
 /// A `rect`: `rx`/`ry` complete each other when one is missing and are
 /// clamped to half the side. Nothing for a non-positive side.
-pub(super) fn rect(
+pub(crate) fn rect(
     x: f64,
     y: f64,
     width: f64,
@@ -226,13 +226,13 @@ pub(super) fn rect(
 }
 
 /// A `circle`; nothing for a non-positive radius.
-pub(super) fn circle(cx: f64, cy: f64, r: f64) -> Option<BezPath> {
+pub(crate) fn circle(cx: f64, cy: f64, r: f64) -> Option<BezPath> {
     (r > 0.0).then(|| Circle::new((cx, cy), r).to_path(ARC_TOLERANCE))
 }
 
 /// An `ellipse`; a missing radius takes the other (SVG 2 `auto`), and a
 /// non-positive one draws nothing.
-pub(super) fn ellipse(cx: f64, cy: f64, rx: Option<f64>, ry: Option<f64>) -> Option<BezPath> {
+pub(crate) fn ellipse(cx: f64, cy: f64, rx: Option<f64>, ry: Option<f64>) -> Option<BezPath> {
     let (rx, ry) = match (rx, ry) {
         (Some(rx), Some(ry)) => (rx, ry),
         (Some(r), None) | (None, Some(r)) => (r, r),
@@ -242,7 +242,7 @@ pub(super) fn ellipse(cx: f64, cy: f64, rx: Option<f64>, ry: Option<f64>) -> Opt
 }
 
 /// A `line`.
-pub(super) fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> BezPath {
+pub(crate) fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> BezPath {
     let mut path = BezPath::new();
     path.move_to((x1, y1));
     path.line_to((x2, y2));
@@ -251,7 +251,7 @@ pub(super) fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> BezPath {
 
 /// A `polyline`, or a `polygon` when `close`. An odd coordinate count
 /// drops the last number, as the specification's error handling says.
-pub(super) fn polyline(points: &str, close: bool) -> BezPath {
+pub(crate) fn polyline(points: &str, close: bool) -> BezPath {
     let mut path = BezPath::new();
     for (index, (x, y)) in PointsParser::from(points).enumerate() {
         if index == 0 {

@@ -1922,10 +1922,12 @@ consequential choice about whether to follow the spec or the quirk.
   (`js_libraries/types/skills/image.md:268-269`); web-core's `x-svg` and
   `x-image` are shadow `<img>`s, so the browser renders SVG in
   `<svg src|content>`, `<image src>`, `background-image` and `mask-image`.
-  Here the engine parses every SVG with its own converter
-  (`crates/terminus/src/render/svg/`) and the painter rasterises each draw at its
-  device size (`crates/terminus/src/render/vector_textures.rs`); design in
-  `docs/svg-lynx-component-design.md`, pipeline in
+  Here the engine parses every SVG (`crates/terminus/src/tree/xml/`),
+  builds it as an isolated SVG document cascaded by stylo and records it
+  (`crates/terminus/src/svg/image.rs`, since 2026-11-23), and the painter
+  rasterises each draw at its device size
+  (`crates/terminus/src/render/vector_textures.rs`); design in
+  `docs/svg-dom-design.md` and `docs/svg-lynx-component-design.md`, pipeline in
   [media-resources.md](media-resources.md), status in
   [components.md](components.md)'s `x-svg` row. Where the references
   disagree, and which side was followed (user rulings 2026-10-08 and
@@ -1949,23 +1951,30 @@ consequential choice about whether to follow the spec or the quirk.
     onto its box by the root's `preserveAspectRatio` (`none` stretches,
     `meet`/`slice` scale uniformly and align), as the browser does; the
     revision-3 stretch to the box is gone.
-  - *Fonts come from the SVG's own attributes* (architect's choice under the
-    owner's permission): `font-family`, `font-weight`, `font-style`,
-    `font-stretch` and `font-size`, inherited down the SVG tree; the host
-    element's computed style is not read, which is also what an SVG inside
-    web-core's `<img>` sees. A missing family resolves through the document's
-    default family; glyphs come from the document's own `TextContext`, so
-    `@font-face` faces apply, but text shaped before a face arrives keeps its
-    fallback glyphs.
-  - *CSS inside an SVG document is ignored* (native, ruled 2026-10-09): the
-    converter reads presentation attributes only, so a `<style>` element's
-    rules and a `style` attribute change nothing, `!important` included.
-    web-core's shadow `<img>` hands the document to the browser, which
-    applies both; native's ServalSVG has no `style` element in its tag
-    subset. The project keeps one styling engine, stylo, and adds no second
-    one for SVG. A document coloured only by a `<style>` sheet (an
-    Illustrator export's `.st0 { fill: … }` classes) draws with the initial
-    black fill here.
+  - *Fonts come from the SVG document's own cascade*: `font-family`,
+    `font-weight`, `font-style`, `font-stretch` and `font-size` from its
+    presentation attributes, `style` elements and `style` attributes,
+    inherited down the SVG tree; the host element's computed style is not
+    read, which is also what an SVG inside web-core's `<img>` sees. Text with
+    no `font-family` is `sans-serif` (the isolated document's root rule,
+    `crates/terminus/src/svg/ua.rs`); glyphs come from the page document's
+    own `TextContext`, so `@font-face` faces apply, but text shaped before a
+    face arrives keeps its fallback glyphs.
+  - *CSS inside an SVG document applies* (web-core, ruled 2026-11-23,
+    reversing the 2026-10-09 ruling that followed native): a `<style>`
+    element's rules and a `style` attribute apply through stylo, as the
+    browser behind web-core's shadow `<img>` applies them. Native's ServalSVG
+    has no `style` element in its tag subset, so a document coloured only by
+    a `<style>` sheet (an Illustrator export's `.st0 { fill: … }` classes)
+    draws its classes here and draws black in native. The 2026-10-09 ruling
+    existed because a second styling engine was unacceptable; stylo styles
+    SVG now.
+  - *SMIL is not run* (since 2026-11-23, animation is CSS only): `animate`,
+    `animateTransform`, `animateMotion` and `set` are unknown elements and
+    the static state draws, where web-core's browser runs SMIL. CSS
+    animations and transitions inside an SVG image run; an
+    animated SVG image is recorded again and its texture baked again after
+    every tick that changes it, where a browser repaints its own SVG image.
   - *Masks, filters, patterns, markers and a nested `image` draw nothing*,
     where the browser draws them all and native's subset lists `image`: a
     masked group is skipped with its subtree (drawing it unmasked would show

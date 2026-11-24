@@ -35,7 +35,6 @@ pub use crate::render::picture::{
     MediaSettings, PictureFrame, PictureId, PictureKey, PictureSlot, PlayPolicy, PlaybackControl,
     PlaybackReport, PlaybackRequest, TakenFrame,
 };
-pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]
@@ -46,6 +45,7 @@ pub use crate::style::engine::{
 };
 pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
 pub use crate::style::query::InvalidSelector;
+pub use crate::svg::image::VectorDocument;
 pub use crate::tree::custom::{CustomElement, MethodCall, MethodError, MethodOutcome};
 pub use crate::tree::document::{Document, NodeId};
 pub use crate::tree::footprint::MemoryFootprint;

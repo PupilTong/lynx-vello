@@ -232,7 +232,7 @@ fn basic_shape(shape: &BasicShape, reference: Rect) -> (BoxShape, Fill) {
         }
         BasicShape::PathOrShape(GenericPathOrShapeFunction::Path(path)) => {
             let fill = fill_rule(path.fill);
-            let mut bez = svg_path(&path.path);
+            let mut bez = svg_path(&path.path, 0.1);
             bez.apply_affine(crate::kurbo::Affine::translate((
                 reference.x0,
                 reference.y0,
@@ -440,7 +440,10 @@ fn resolve(length: &LengthPercentage, basis: f64) -> f64 {
     length.resolve(Length::new(basis as f32)).px() as f64
 }
 
-fn svg_path(data: &SVGPathData) -> BezPath {
+/// `data` as a kurbo path, its arcs turned into cubics at `tolerance`
+/// (bounded per radius by `svg::shapes::arc_tolerance`). Also what
+/// an SVG `path` element's computed `d` is drawn from (`crate::svg::record`).
+pub(crate) fn svg_path(data: &SVGPathData, tolerance: f64) -> BezPath {
     let reduce_commands = true;
     let normalized = data.normalize(reduce_commands);
     let mut path = BezPath::new();
@@ -499,7 +502,9 @@ fn svg_path(data: &SVGPathData) -> BezPath {
                     ),
                 };
                 match crate::kurbo::Arc::from_svg_arc(&arc) {
-                    Some(arc) => path.extend(arc.append_iter(0.1)),
+                    Some(arc) => path.extend(
+                        arc.append_iter(crate::svg::shapes::arc_tolerance(&arc, tolerance)),
+                    ),
                     None => path.line_to(to),
                 }
                 current = to;
