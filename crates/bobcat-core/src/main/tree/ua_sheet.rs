@@ -5,7 +5,7 @@
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
 //! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::overlay`],
 //! [`super::text`], [`super::raw_text`], [`super::frame`], [`super::image`],
-//! [`super::svg`], and HTML's [`terminus::link::html::dialog`] and
+//! [`super::lynx_svg`], and HTML's [`terminus::link::html::dialog`] and
 //! [`terminus::link::html::popover`] — and this module only decides what they all
 //! agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
@@ -55,8 +55,8 @@
 //! it (see [`super::swiper`]'s "Boolean attributes and `"false"`").
 //!
 //! Order within the Lynx rules is mostly documentation, with one exception
-//! that is mechanism: [`super::image`]'s and [`super::svg`]'s child suppression ties on specificity
-//! with the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
+//! that is mechanism: [`super::image`]'s and [`super::lynx_svg`]'s child suppression ties on
+//! specificity with the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
 //! spellings each of `viewpager` and `viewpager-item`, `x-swiper`,
 //! `x-swiper-item`, `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`,
 //! the ten `scroll-coordinator` tags, `blur-view`, `x-blur-view`, `overlay`,
@@ -68,13 +68,14 @@ use terminus::link::html::dialog::DIALOG_TAG;
 use terminus::link::html::{dialog, popover};
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
+use super::lynx_svg::SVG_TAG;
 use super::markdown::{MARKDOWN_TAG, X_MARKDOWN_TAG};
 use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    frame, image, list, markdown, overlay, raw_text, refresh_view, scroll_container,
-    scroll_coordinator, svg, swiper, text, text_field, video, viewpager,
+    frame, image, list, lynx_svg, markdown, overlay, raw_text, refresh_view, scroll_container,
+    scroll_coordinator, swiper, text, text_field, video, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -145,7 +146,7 @@ impl Default for PageConfig {
 /// ([`super::frame`]).
 /// Every tag that generates a box of its own — the containers, the two
 /// markdown tags ([`super::markdown`], which keep the column display of
-/// `x-markdown.css` rather than the switch's), `text`, `image`, `svg` and
+/// `x-markdown.css` rather than the switch's), `text`, `image`, `lynx-svg` and
 /// `frame` — also gets the rest of that common block: `border-width: 0` with
 /// `border-style: solid`, `position: relative` (which is what makes a
 /// coordinator the containing block of its header and slot,
@@ -270,7 +271,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, svg, video, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, {SVG_TAG}, video, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -318,7 +319,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         carriers = raw_text::UA_RULES.as_str(),
         frames = frame::UA_RULES,
         images = image::UA_RULES,
-        svgs = svg::UA_RULES,
+        svgs = lynx_svg::UA_RULES,
         videos = video::UA_RULES,
     )
 }
@@ -436,13 +437,13 @@ mod tests {
         let mut boxes = containers(&mut document);
         boxes.push(child(&mut document, "text", ""));
         boxes.push(child(&mut document, "image", ""));
-        boxes.push(child(&mut document, "svg", ""));
+        boxes.push(child(&mut document, super::SVG_TAG, ""));
         boxes.push(child(&mut document, "frame", ""));
         document.layout();
 
         for (tag, element) in CONTAINER_TAGS
             .iter()
-            .chain(&["text", "image", "svg", "frame"])
+            .chain(&["text", "image", super::SVG_TAG, "frame"])
             .zip(boxes)
         {
             let style = style_of(&document, element);

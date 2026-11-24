@@ -149,6 +149,9 @@ impl NodeFlags {
     /// unmarked or after the node moves out from under it, which costs only
     /// an ancestor walk that finds nothing.
     const SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING: u16 = 1 << 10;
+    /// The element is in the SVG namespace rather than the HTML one
+    /// ([`crate::svg`]). Set at creation and never changed.
+    const SVG_NAMESPACE: u16 = 1 << 13;
     /// The element's [`CustomElementState`], two bits from
     /// [`Self::CUSTOM_STATE_SHIFT`].
     const CUSTOM_STATE: u16 = 0b11 << Self::CUSTOM_STATE_SHIFT;
@@ -327,6 +330,18 @@ impl<T> Node<T> {
         node
     }
 
+    /// An element in the SVG namespace ([`crate::svg`]): `local_name` keeps
+    /// its case (`linearGradient`, `clipPath`).
+    pub(crate) fn new_svg_element(
+        owner: *mut TreeArenas<T>,
+        id: NodeId,
+        local_name: LocalName,
+    ) -> Self {
+        let mut node = Self::new_element(owner, id, local_name);
+        node.flags.set(NodeFlags::SVG_NAMESPACE, true);
+        node
+    }
+
     /// Files the embedder's payload on a node it creates.
     #[must_use]
     pub(crate) fn with_payload(mut self, payload: T) -> Self {
@@ -454,6 +469,21 @@ impl<T> Node<T> {
     /// Records [`Self::has_line_if_empty`], answering what it was.
     pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
+    }
+
+    /// Whether this element is in the SVG namespace ([`crate::svg`]); every
+    /// other element is in the HTML namespace.
+    #[must_use]
+    #[inline]
+    pub(crate) const fn in_svg_namespace(&self) -> bool {
+        self.flags.get(NodeFlags::SVG_NAMESPACE)
+    }
+
+    /// Whether this element is in the SVG namespace (the DOM's
+    /// `namespaceURI` test); every other element is in the HTML namespace.
+    #[must_use]
+    pub fn is_svg_element(&self) -> bool {
+        self.in_svg_namespace()
     }
 
     /// Whether this is a `::backdrop` box's node ([`crate::tree::top_layer`]).

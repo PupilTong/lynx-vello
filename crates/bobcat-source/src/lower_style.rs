@@ -43,18 +43,23 @@
 //! unchanged, and its script never calls `__SetCSSId`. `@keyframes` and
 //! `@font-face` stay global, as web-core emits them verbatim.
 //!
+//! web-core's tag map is applied to one tag only: a `Type` component `svg`
+//! is written as the document tag `lynx-svg` ([`write_component`] over
+//! `bobcat_core::document_tag`), as web-core's decoder writes `x-svg`.
 //! web-core's other selector rewrites are absent, because nothing here needs
-//! them: Lynx tag names are this DOM's real element names (no `view` →
-//! `x-view` mapping), the `page` element really is the document element (so
-//! `:root` matches natively), and there is no entry-name `:not([l-e-name])`
-//! guard. That guard separates a lazy bundle's own `StyleInfo` from its host
-//! card's, and a lazy bundle's `StyleInfo` is not mounted
-//! (`docs/tracking/deviations.md`).
+//! them: every other Lynx tag name is this DOM's real element name (no
+//! `view` → `x-view` mapping), the `page` element really is the document
+//! element (so `:root` matches natively), and there is no entry-name
+//! `:not([l-e-name])` guard. That guard separates a lazy bundle's own
+//! `StyleInfo` from its host card's, and a lazy bundle's `StyleInfo` is not
+//! mounted (`docs/tracking/deviations.md`).
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
+use bobcat_core::{
+    PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, document_tag,
+};
 
 use crate::web::css_property::DeclarationRead;
 use crate::web::style_info::{
@@ -251,9 +256,13 @@ fn scoped_selector_text(
     if selectors.is_empty() {
         return None;
     }
-    // Each component writes its value plus at most two characters of
-    // punctuation, and each copy adds a comma.
-    let len = |component: &dyn ComponentRead| component.value().len() + 2;
+    // Each component writes its value — a type selector's as its document
+    // tag — plus at most two characters of punctuation, and each copy adds a
+    // comma.
+    let len = |component: &dyn ComponentRead| match component.kind() {
+        SimpleSelectorKind::Type => document_tag(component.value()).len(),
+        _ => component.value().len() + 2,
+    };
     let selector_len: usize = selectors
         .iter()
         .flat_map(SelectorRead::components)
@@ -270,22 +279,33 @@ fn scoped_selector_text(
                 text.push(',');
             }
             first = false;
-            match scope {
-                None => selector.write_css_string(&mut text),
-                Some(guard) => {
-                    let (before, after) = selector.components().split_at(at);
-                    for component in before {
-                        component.write_css_string(&mut text);
-                    }
-                    ComponentRead::write_css_string(guard, &mut text);
-                    for component in after {
-                        component.write_css_string(&mut text);
-                    }
-                }
+            let (before, after) = selector.components().split_at(at);
+            for component in before {
+                write_component(component, &mut text);
+            }
+            if let Some(guard) = scope {
+                ComponentRead::write_css_string(guard, &mut text);
+            }
+            for component in after {
+                write_component(component, &mut text);
             }
         }
     }
     Some(text)
+}
+
+/// Appends one component's CSS text, with a type selector naming the
+/// document tag of its Lynx tag (`bobcat_core::document_tag`: `svg` is the
+/// document's `lynx-svg`), as web-core's decoder maps a `TypeSelector`
+/// through its tag map (`style_info_decoder.rs:148-156`). Only a `Type`
+/// component is a tag: a class, an id, an attribute and a pseudo-class's
+/// argument text (`:not(svg)`) are written as they are, as in web-core.
+fn write_component(component: &impl ComponentRead, text: &mut String) {
+    if component.kind() == SimpleSelectorKind::Type {
+        text.push_str(document_tag(component.value()));
+    } else {
+        component.write_css_string(text);
+    }
 }
 
 /// Where a scope guard goes: just after the last component that is compound
@@ -1205,5 +1225,54 @@ mod tests {
             lowered(&info),
             ["@keyframes spin to", "@font-face font-family:Custom;"]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The Lynx `svg` type selector
+    // -----------------------------------------------------------------------
+
+    /// One unscoped selector, in fragment 0.
+    fn unscoped(components: &[(SimpleSelectorKind, &str)]) -> String {
+        let info = style_info(vec![(
+            0,
+            sheet(vec![], vec![red(vec![selector(components)])]),
+        )]);
+        lowered(&info).remove(0)
+    }
+
+    /// A `Type` component `svg` names the document's `lynx-svg`
+    /// (`bobcat_core::document_tag`), as web-core's decoder maps a
+    /// `TypeSelector` to `x-svg`, alone, in a compound, across a combinator
+    /// and before a scope guard.
+    #[test]
+    fn the_type_selector_svg_is_written_as_lynx_svg() {
+        use SimpleSelectorKind::{Class, Combinator, PseudoClass, Type};
+        assert_eq!(unscoped(&[(Type, "svg")]), "lynx-svg");
+        assert_eq!(
+            unscoped(&[(Type, "svg"), (Class, "icon"), (PseudoClass, "hover")]),
+            "lynx-svg.icon:hover"
+        );
+        assert_eq!(
+            unscoped(&[(Type, "view"), (Combinator, ">"), (Type, "svg")]),
+            "view > lynx-svg"
+        );
+        assert_eq!(
+            scoped_once(&[(Type, "svg"), (Combinator, " "), (Type, "svg")]),
+            r#"lynx-svg lynx-svg:where([l-css-id="1"])"#
+        );
+    }
+
+    /// Only a `Type` component is a tag: a class, an id, an attribute and a
+    /// pseudo-class's argument text keep `svg`, as in web-core; and no other
+    /// tag is renamed.
+    #[test]
+    fn nothing_but_the_type_selector_svg_is_renamed() {
+        use SimpleSelectorKind::{Attribute, Class, Id, PseudoClass, Type};
+        assert_eq!(unscoped(&[(Class, "svg")]), ".svg");
+        assert_eq!(unscoped(&[(Id, "svg")]), "#svg");
+        assert_eq!(unscoped(&[(Attribute, "[svg]")]), "[svg]");
+        assert_eq!(unscoped(&[(PseudoClass, "not(svg)")]), ":not(svg)");
+        assert_eq!(unscoped(&[(Type, "x-svg")]), "x-svg");
+        assert_eq!(unscoped(&[(Type, "view")]), "view");
     }
 }

@@ -178,7 +178,7 @@
 /// was removed on 2026-10-17. Without the `!important`, a UA rule that hides
 /// an element's children hides a `text` among them too, as a browser would:
 /// `list > *:not(list-item):not(wrapper)`, `x-swiper > :not(x-swiper-item,
-/// wrapper)`, `image > *` and `svg > *`. The rule for anything written
+/// wrapper)`, `image > *` and `lynx-svg > *`. The rule for anything written
 /// directly inside a `text` therefore names the three text tags, and keeps
 /// its old specificity with `:where`, so the `wrapper`, `view` and `image`
 /// rules after it still outrank it. `inline-truncation` shows only directly

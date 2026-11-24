@@ -38,10 +38,23 @@ use stylo_dom::ElementState;
 
 use crate::tree::node::{ChildrenIter, Node};
 
-fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
-    static EMPTY: OnceLock<Namespace> = OnceLock::new();
-    &EMPTY.get_or_init(Namespace::default).0
+/// The namespace an element is in: HTML's, or SVG's for an element
+/// [`Node::in_svg_namespace`] marks ([`crate::svg`]).
+fn element_namespace(
+    svg: bool,
+) -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
+    static HTML: OnceLock<Namespace> = OnceLock::new();
+    static SVG: OnceLock<Namespace> = OnceLock::new();
+    if svg {
+        &SVG.get_or_init(|| Namespace::from(crate::svg::SVG_NAMESPACE))
+            .0
+    } else {
+        &HTML.get_or_init(|| Namespace::from(HTML_NAMESPACE)).0
+    }
 }
+
+/// The HTML namespace, which every element but an SVG one is in.
+const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 
 /// The key an element's animation state is filed under, or `None` when the
 /// element owns no animation state at all.
@@ -215,7 +228,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn is_html_element(&self) -> bool {
-        Node::is_element(self)
+        Node::is_element(self) && !self.in_svg_namespace()
     }
 
     fn is_mathml_element(&self) -> bool {
@@ -223,7 +236,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn is_svg_element(&self) -> bool {
-        false
+        self.in_svg_namespace()
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
@@ -490,7 +503,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
-        empty_namespace()
+        element_namespace(self.in_svg_namespace())
     }
 
     /// The content box this element last committed as a size query
@@ -592,8 +605,10 @@ impl<T: Sync> Element for &Node<T> {
         None
     }
 
+    /// False for an SVG element, so selectors match its local name and
+    /// its attribute names case-sensitively.
     fn is_html_element_in_html_document(&self) -> bool {
-        Node::is_element(self)
+        Node::is_element(self) && !self.in_svg_namespace()
     }
 
     fn has_local_name(
@@ -609,11 +624,14 @@ impl<T: Sync> Element for &Node<T> {
         &self,
         ns: &<Self::Impl as selectors::SelectorImpl>::BorrowedNamespaceUrl,
     ) -> bool {
-        self.is_element() && ns.is_empty()
+        self.is_element() && *ns == *element_namespace(self.in_svg_namespace())
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
-        self.is_element() && other.is_element() && self.local_name == other.local_name
+        self.is_element()
+            && other.is_element()
+            && self.local_name == other.local_name
+            && self.in_svg_namespace() == other.in_svg_namespace()
     }
 
     fn attr_matches(

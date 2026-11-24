@@ -1,5 +1,15 @@
 # SVG as the Lynx `<svg>` component: design (2026-10-09)
 
+> **2026-11-23.** The component's document tag is now `lynx-svg`
+> (`crates/bobcat-core/src/main/tree/lynx_svg.rs`); the tag `svg` is left
+> for the SVG element `terminus` defines (`crates/terminus/src/svg/`). A Lynx page still writes `svg`:
+> `crates/bobcat-core/src/main/tree/tag_map.rs` maps it to `lynx-svg` in
+> `__CreateElement`, back to `svg` in `__GetTag`, and in a `StyleInfo` type
+> selector; a selector query and a CSS-text sheet are not mapped, as in
+> web-core. Where this document names the
+> element `svg` in a UA rule or a module path, read `lynx-svg` and
+> `tree::lynx_svg`. This document will be replaced.
+
 Status: implemented, PR #373; stack #375/#376/#377 merged. Every section
 below describes the code at the tip of PR #373. This document supersedes
 `docs/svg-vector-images-design.md` (revision 3, withdrawn). Rulings are the

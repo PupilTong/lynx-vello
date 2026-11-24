@@ -635,6 +635,11 @@ impl<T> Document<T> {
             !local_name.is_empty(),
             "Document::define: the local name cannot be empty"
         );
+        assert!(
+            local_name != crate::svg::SVG_TAG,
+            "Document::define: `svg` is the SVG namespace's `svg` element, which \
+             `create_element` makes, and an SVG element takes no definition"
+        );
         let name = LocalName::from(local_name);
         assert!(
             !self.custom_elements.by_name.contains_key(&name),
@@ -670,7 +675,12 @@ impl<T> Document<T> {
 
         let arenas = self.arenas();
         let existing = arenas.ids().find(|&id| {
-            id != DOCUMENT_ELEMENT_NODE_ID && arenas.live(id).local_name.as_ref() == Some(&name)
+            let node = arenas.live(id);
+            // An SVG element of the same local name never takes the
+            // definition, so it is no element created before it.
+            id != DOCUMENT_ELEMENT_NODE_ID
+                && !node.in_svg_namespace()
+                && node.local_name.as_ref() == Some(&name)
         });
         assert!(
             existing.is_none(),
@@ -975,7 +985,13 @@ impl<T> Document<T> {
         }
     }
 
+    /// Gives a new HTML-namespace element the definition of its local name,
+    /// if there is one. An SVG-namespace element is never passed here.
     pub(crate) fn note_custom_element_created(&mut self, element: NodeId, local_name: &LocalName) {
+        debug_assert!(
+            !self.live(element).in_svg_namespace(),
+            "an SVG element takes no custom element definition"
+        );
         let Some(definition) = self.custom_elements.by_name.get(local_name).copied() else {
             return;
         };

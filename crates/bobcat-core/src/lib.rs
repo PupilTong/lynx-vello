@@ -118,7 +118,7 @@ pub mod editing {
 
 pub use code_cache::{MIN_CACHED_SOURCE_BYTES, script_engine_id};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
-pub use main::tree::PageConfig;
+pub use main::tree::{PageConfig, document_tag};
 pub use native_module::{
     ModuleCall, ModuleCallback, NativeModule, NativeModuleEsm, compile_native_module_esm,
 };

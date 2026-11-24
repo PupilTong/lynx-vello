@@ -242,6 +242,15 @@ pub struct ShadowSheet {
     owner: StdArc<SharedRwLock>,
 }
 
+/// Why [`StyleEngine::parse_style_update`] answered no update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoStyleUpdate {
+    /// The property name or the value does not parse.
+    Invalid,
+    /// The block already reads as the update would leave it.
+    Unchanged,
+}
+
 /// One `setProperty` call, parsed and checked against the block it updates
 /// ([`StyleEngine::parse_style_update`]): it is known to change that block,
 /// and carries the positions in it the change lands on, so applying it
@@ -486,24 +495,26 @@ impl StyleEngine {
 
     /// Parses one CSSOM-style property update — `setProperty`'s semantics:
     /// an empty value removes the property — against the declaration block
-    /// an element holds.
+    /// an element holds, under `mode` (`ParsingMode::DEFAULT` but for an SVG
+    /// presentation attribute, which allows unitless lengths).
     ///
-    /// Answers `None` for a property name or value that does not parse and
-    /// for an update that would not change the block, so a caller can return
-    /// before it records anything about the write.
+    /// Answers why there is no update for a property name or value that
+    /// does not parse and for an update that would not change the block, so
+    /// a caller can return before it records anything about the write.
     pub(crate) fn parse_style_update(
         &self,
         block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
         property: &str,
         value: &str,
-    ) -> Option<PropertyUpdate> {
+        mode: ParsingMode,
+    ) -> Result<PropertyUpdate, NoStyleUpdate> {
         let context = self.parser_context(CssRuleType::Style);
-        let property = PropertyId::parse(property, &context).ok()?;
+        let property =
+            PropertyId::parse(property, &context).map_err(|()| NoStyleUpdate::Invalid)?;
         if value.is_empty() {
-            let first = block?
-                .read_with(&self.lock.read())
-                .first_declaration_to_remove(&property)?;
-            return Some(PropertyUpdate::Remove { property, first });
+            return self
+                .removal_update(block, &property)
+                .ok_or(NoStyleUpdate::Unchanged);
         }
         let mut source = SourcePropertyDeclaration::default();
         parse_one_declaration_into(
@@ -513,11 +524,39 @@ impl StyleEngine {
             Origin::Author,
             &self.url_data,
             None,
-            ParsingMode::DEFAULT,
+            mode,
             QuirksMode::NoQuirks,
             CssRuleType::Style,
         )
-        .ok()?;
+        .map_err(|()| NoStyleUpdate::Invalid)?;
+        self.declaration_update(block, source)
+            .ok_or(NoStyleUpdate::Unchanged)
+    }
+
+    /// The update that removes `property` from `block`, `None` when the
+    /// block does not hold it.
+    pub(crate) fn removal_update(
+        &self,
+        block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
+        property: &PropertyId,
+    ) -> Option<PropertyUpdate> {
+        let first = block?
+            .read_with(&self.lock.read())
+            .first_declaration_to_remove(property)?;
+        Some(PropertyUpdate::Remove {
+            property: property.clone(),
+            first,
+        })
+    }
+
+    /// The update that writes declarations already built — by
+    /// [`Self::parse_style_update`], or by a caller that made the value
+    /// itself — into `block`, `None` when it would not change it.
+    pub(crate) fn declaration_update(
+        &self,
+        block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
+        source: SourcePropertyDeclaration,
+    ) -> Option<PropertyUpdate> {
         let guard = self.lock.read();
         let mut updates = SourcePropertyDeclarationUpdate::default();
         let empty;

@@ -18,7 +18,9 @@ use stylo::shared_lock::Locked;
 use stylo::stylesheets::CssRuleType;
 use stylo::stylist::CascadeData;
 use stylo_atoms::Atom;
+use stylo_traits::ParsingMode;
 
+use crate::style::engine::PropertyUpdate;
 use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::tree::node::Node;
 use crate::tree::popover::is_popover_attribute;
@@ -462,8 +464,13 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, Some(value));
         self.note_attribute_change(id, &name);
-        self.live_node_mut(id)
-            .set_attr_local_name(name, value.to_owned());
+        let node = self.live_node_mut(id);
+        if node.in_svg_namespace() {
+            node.set_attr_local_name(name.clone(), value.to_owned());
+            self.reflect_svg_attribute(id, &name);
+        } else {
+            node.set_attr_local_name(name, value.to_owned());
+        }
         if let Some(on) = pseudo {
             self.note_pseudo_attribute(id, on);
         }
@@ -520,7 +527,12 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, None);
         self.note_attribute_change(id, &name);
-        self.live_node_mut(id).remove_attr_local_name(&name);
+        let node = self.live_node_mut(id);
+        let svg = node.in_svg_namespace();
+        node.remove_attr_local_name(&name);
+        if svg {
+            self.reflect_svg_attribute(id, &name);
+        }
         if pseudo {
             self.note_pseudo_attribute(id, false);
         }
@@ -669,10 +681,11 @@ impl<T> Document<T> {
     /// is CSS syntax (for example `background-color` or `--theme-color`), not a
     /// Rust or wire-format property id.
     pub fn set_inline_style_property(&mut self, id: NodeId, property: &str, value: &str) {
-        let Some(update) = self.style_engine().parse_style_update(
+        let Ok(update) = self.style_engine().parse_style_update(
             self.live_element(id).parsed_inline_style.as_ref(),
             property,
             value,
+            ParsingMode::DEFAULT,
         ) else {
             return;
         };
@@ -700,13 +713,20 @@ impl<T> Document<T> {
     /// An empty value removes the hint; invalid names or values are no-ops,
     /// as in [`Self::set_inline_style_property`].
     pub fn set_presentational_hint(&mut self, id: NodeId, property: &str, value: &str) {
-        let Some(update) = self.style_engine().parse_style_update(
+        let Ok(update) = self.style_engine().parse_style_update(
             self.live_element(id).presentational_hints.as_ref(),
             property,
             value,
+            ParsingMode::DEFAULT,
         ) else {
             return;
         };
+        self.apply_presentational_hint_update(id, update);
+    }
+
+    /// Applies an update checked against `id`'s presentational-hint block
+    /// and schedules the restyle it owes.
+    pub(crate) fn apply_presentational_hint_update(&mut self, id: NodeId, update: PropertyUpdate) {
         let (engine, tree) = self.style_and_tree_parts();
         let node = tree
             .get_mut(id)

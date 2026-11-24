@@ -36,6 +36,7 @@ mod painter;
 mod render;
 mod scroll;
 mod style;
+mod svg;
 mod tree;
 mod visual;
 
