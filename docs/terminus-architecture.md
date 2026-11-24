@@ -294,6 +294,87 @@ of mutations pays one spine walk. Equivalence tests
 root-reaching — to the geometry of a fresh document built directly in the final
 state.
 
+## SVG-namespace elements
+
+`crates/terminus/src/svg/` puts SVG content in the document as real element
+nodes that stylo cascades. An `svg` element in a document draws nothing yet,
+and the converter in `crates/terminus/src/render/svg/` still draws every SVG
+image.
+
+**The namespace bit.** An element is in the HTML namespace or the SVG
+namespace (`http://www.w3.org/2000/svg`): bit 13 of `NodeFlags`, set when
+the node is created and never changed, so the node stride is unchanged.
+`Document::create_element("svg", …)` creates the SVG `svg` element, which is
+HTML's tree-construction rule for an `svg` start tag in HTML content; every
+other tag is an HTML element. `Document::create_svg_element` (the DOM's
+`createElementNS` for the SVG namespace) creates an SVG element of any local name with its case kept. The stylo
+traits answer from the bit (`style/traits.rs`): `namespace()` is the SVG or
+the HTML namespace, `is_svg_element()` is the bit, and `is_html_element()`
+and `is_html_element_in_html_document()` are false for an SVG element, which
+makes selectors match its local name and its attribute names
+case-sensitively (`linearGradient`, `[viewBox]`). `has_namespace` and
+`is_same_type` compare the namespace as well as the name; stylo's style
+sharing cache compares `namespace()` itself. Attributes stay in no
+namespace, which is what the invalidation snapshot's `AttrIdentifier`
+already says. An SVG element named `slot` is not HTML's `<slot>`. Custom
+element definitions are keyed by local name in the HTML namespace: an SVG
+element never takes one, an SVG element created before a definition of its
+name does not trip `define`'s precondition, and `define`/`define_shared`
+refuse `svg`.
+
+**Presentation attributes** (`svg/presentation.rs`). `set_attribute` and
+`remove_attribute` store the attribute, and then, for an SVG element only
+(a non-SVG element pays one bit test), `Document::reflect_svg_attribute`
+updates the element's presentational-hint block, the same block
+`set_presentational_hint` writes and the cascade reads at
+`CascadeOrigin::PresHints` — below author rules and the `style` attribute,
+above UA rules. Three groups, as Gecko (`SVGElement.cpp`) and Chromium
+(`svg_element.cc`) have them:
+
+- attributes named as their CSS property on every SVG element: Chromium's
+  `CssPropertyIdForSVGAttributeName` table less the properties this build
+  does not have (the dropped ones are listed beside `PROPERTY_ATTRIBUTES`;
+  a unit test fails if a listed property leaves the build);
+- geometry attributes that are CSS properties on some elements: `cx`, `cy`,
+  `r` on `circle`; `cx`, `cy`, `rx`, `ry` on `ellipse`; `x`, `y`, `width`,
+  `height`, `rx`, `ry` on `rect`; `x`, `y`, `width`, `height` on `svg`; `x`,
+  `y` on `use`;
+- `transform`, an SVG transform list parsed by `svg/attributes.rs`'s
+  `transform_list` and written as one `matrix()` declaration, and `d` on
+  `path`, parsed by stylo's `SVGPathData::parse_bytes` (the parser `path()`
+  uses) and kept up to its first error, as SVG's error handling asks.
+  Both declarations are built directly, with no CSS text in between.
+
+The first two groups parse through `StyleEngine::parse_style_update` with
+`ParsingMode::ALLOW_UNITLESS_LENGTH` (the mode is that function's argument;
+every other caller passes `DEFAULT`). Under that mode the fork's `lynx`
+grammar also takes the absolute units `in`, `cm`, `mm`, `q`, `pt` and `pc`,
+which it refuses everywhere else, so `stroke-width="1pt"` is a length while
+`style="width: 1in"` is no declaration. A value that does not parse removes
+the hint, so the attribute is as if absent; removing the attribute removes
+it too.
+
+**The `svg` element's box** (`svg/root.rs`). Every SVG `svg` element is
+replaced content from its creation: `layout/host.rs` lays it out as a leaf
+and hides its descendants, which generate no box. Its natural size is
+recomputed on creation and on every change of `width`, `height` or
+`viewBox`, through `Document::set_natural_size`, by `svg/attributes.rs`'s
+`vector_sizes` over `absolute_length` and `view_box`: both lengths, one
+length and the `viewBox` ratio, the largest `viewBox`-ratio size that fits
+300 × 150, or 300 × 150. An axis authored with anything but an absolute
+length (`width="100%"`) has no natural size, because the attribute is also
+the CSS `width` hint and sizes the box itself. This is the image-sizing rule,
+not a browser's inline-SVG rule (a browser gives an inline `svg` with only a
+`viewBox` the containing block's width).
+
+**The UA sheet** (`svg/ua.rs`). One `UserAgentStylesheet`, parsed once per
+process, whose default namespace is SVG's, so it matches SVG elements only:
+`*:not(svg), *:not(foreignObject) > svg { transform-origin: 0 0; }`, the
+rule Chromium's `svg.css` and Gecko's `svg.css` both carry. A document
+mounts it with `Document::add_svg_user_agent_stylesheet`, as an embedder
+adds the HTML elements' `UA_RULES`; `Document::new` does not, and `bobcat-core` does not, because pages of the
+Lynx runtime hold no SVG-namespace element.
+
 ## Layout host
 
 Its `layout` module is the concrete `seldon` host: `Document::layout` flushes

@@ -443,7 +443,15 @@ impl<T> Document<T> {
         FlushPhaseToken { flag }
     }
 
+    /// Creates an element with the local name `tag`.
+    ///
+    /// `svg` is the SVG namespace's `svg` element, as HTML's tree
+    /// construction makes an `svg` start tag in HTML content
+    /// ([`crate::svg`]); every other tag is an HTML-namespace element.
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
+        if tag == crate::svg::SVG_TAG {
+            return self.create_svg_namespace_element(tag, payload);
+        }
         let local_name = LocalName::from(tag);
         let base = self.begin_reactions();
         let id = self.allocate_node({
@@ -454,6 +462,28 @@ impl<T> Document<T> {
         self.note_custom_element_created(id, &local_name);
         self.drain_reactions(base);
         self.unpin_node(id);
+        id
+    }
+
+    /// Creates an SVG-namespace element with the local name `tag`, case
+    /// kept (`linearGradient`): the DOM's `createElementNS` for the SVG
+    /// namespace. [`Self::create_element`] makes only the `svg` element in it.
+    pub fn create_svg_element(&mut self, tag: &str, payload: T) -> NodeId {
+        self.create_svg_namespace_element(tag, payload)
+    }
+
+    /// An SVG-namespace element. It never takes a custom element
+    /// definition: definitions are keyed by local name in the HTML
+    /// namespace. An `svg` element is replaced content from the start
+    /// ([`crate::svg::root`]).
+    pub(crate) fn create_svg_namespace_element(&mut self, tag: &str, payload: T) -> NodeId {
+        let local_name = LocalName::from(tag);
+        let id = self.allocate_node(|owner, id| {
+            Node::new_svg_element(owner, id, local_name).with_payload(payload)
+        });
+        if tag == crate::svg::SVG_TAG {
+            self.update_svg_natural_size(id);
+        }
         id
     }
 

@@ -215,7 +215,7 @@ browser's UA sheet under web-core (a `<view popover>` keeps its Lynx
 Stylo's rule-tree ordering assertion, whose root node carries an unlayered UA
 rule's priority (`docs/style-assumptions.md` §31).
 The UA assembly order is mostly documentation, with one exception that is
-mechanism: `image`'s and `svg`'s child suppression ties on specificity with the
+mechanism: `image`'s and `lynx-svg`'s child suppression ties on specificity with the
 `display` rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and
 `wrapper` carry, so it wins only by being assembled last.
 
@@ -271,17 +271,38 @@ report for a picture that has ended is dropped. `object-fit` is the UA
 sheet's (`video { object-fit: contain }` and two attribute rules), and
 `video > *` has `image > *`'s ordering constraint.
 
-`tree::svg` is the Lynx `<svg>` component
+`tree::lynx_svg` is the Lynx `<svg>` component
 (`docs/svg-lynx-component-design.md`): one picture, never a subtree, as
-web-core's `x-svg` and native draw it. `src` is its one source (the host
+web-core's `x-svg` and native draw it. Its document tag is `lynx-svg`, not
+`svg`, which is left for the SVG element (ruled 2026-11-23). `tree::tag_map`
+holds the one mapping, `svg` to `lynx-svg`, read where web-core reads its tag
+map (`web-core/src/constants.rs:25-55`): the host member `createElement`
+(every `__Create*`) creates `document_tag(tag)`; the host member `tagName`
+(`__GetTag`, a `SelectorQuery`'s `tag` field) answers `lynx_tag(tag)`; and
+`bobcat-source`'s `StyleInfo` lowering writes a `Type` component through the
+public `bobcat_core::document_tag`, as web-core's decoder maps a
+`TypeSelector` (`style_info_decoder.rs:148-156`). That covers a
+`.web.bundle`'s `StyleInfo` and named `CustomSectionsStyleInfo` sheets and a
+`.lynx.bundle`'s CSS, which `native/style.rs` decodes into the same
+components. Not mapped, as in web-core: a selector query
+(`queryElementIds`, `__QuerySelector(All)`, `lynx.createSelectorQuery`),
+which web-core hands to the browser unchanged (`pureElementPAPIs.ts:242`), so
+`svg` finds nothing there and `lynx-svg` finds the element; a stylesheet
+supplied as text (a fetched `.css`); a legacy JSON custom section's
+`selectorText`; and selector text inside a pseudo-class argument
+(`:not(svg)`), which both encoders carry as the pseudo-class's text. The
+table is in `bobcat-core`, not `bobcat-source`, because `bobcat-source`
+depends on `bobcat-core` and not the reverse. A page that creates `lynx-svg`
+itself gets the same component, and `__GetTag` answers `svg` for it. The UA
+rules, `raw_text`'s list of Lynx tags and `tree::is_svg` name `lynx-svg`. `src` is its one source (the host
 fetches the document and reports its bytes); `content` goes to
 `Document::insert_image_document` as its bytes, filed under a synthetic
 `svg-content:<128-bit hash>` source that is parsed by the engine, once per
 distinct markup, and never asked of the host, and that source becomes the
 element's one source. An empty or
 removed `content` keeps the current source (web-core's `_handleContent`); the
-last attribute written wins. UA rules `svg { display: flex; }` and
-`svg > * { display: none; }`, with `svg` in the shared box block: no size
+last attribute written wins. UA rules `lynx-svg { display: flex; }` and
+`lynx-svg > * { display: none; }`, with `lynx-svg` in the shared box block: no size
 containment, so an unsized `<svg>` takes its natural size. Its `load` carries
 the element's border-box layout size read at delivery (native's detail, 0x0
 without a box; `dispatch_component_events` tells it apart with

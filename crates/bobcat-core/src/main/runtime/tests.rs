@@ -13405,3 +13405,113 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
     assert!(timing.style_start <= timing.style_end);
     assert!(timing.frame_build_start <= timing.frame_build_end);
 }
+
+/// A pre-parsed page stylesheet sizing the type selector `svg`, as
+/// `bobcat-source` lowers a `StyleInfo` `Type` component `svg`: written as
+/// the document tag `lynx-svg` (`bobcat_core::document_tag`).
+fn svg_sheet() -> crate::resource::LoadedSource {
+    use crate::resource::{LoadedSource, StyleSheetSource};
+    let rule = |selectors: &str, property: &'static str, value: &str| crate::PreparsedRule::Style {
+        selectors: selectors.into(),
+        declarations: vec![crate::PreparsedDeclaration {
+            property: property.into(),
+            value: value.into(),
+            important: false,
+        }],
+    };
+    let svg = crate::document_tag("svg");
+    LoadedSource::StyleSheet(StyleSheetSource::Preparsed(Arc::new(
+        crate::PreparsedStyleSheet {
+            rules: vec![
+                rule(svg, "width", "30px"),
+                rule(svg, "height", "20px"),
+                rule(&format!("view > {svg}"), "height", "25px"),
+            ],
+        },
+    )))
+}
+
+/// The Lynx `svg` is the document element `lynx-svg`
+/// (`crate::main::tree::tag_map`): `__CreateElement('svg')` creates a
+/// `lynx-svg`, `__GetTag` answers `svg` for it and for a `lynx-svg` the page
+/// created itself, a pre-parsed sheet's type selector sizes it, and the
+/// component's UA rule still hides what is inside it. A selector query is
+/// not mapped, as in web-core, which hands it to the browser unchanged
+/// (`web-core/ts/client/mainthread/elementAPIs/pureElementPAPIs.ts:242`):
+/// `svg` finds nothing, `lynx-svg` and a class find the elements.
+#[test]
+fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
+    use terminus::link::stylo::values::computed::Display;
+
+    let (mut js, mut runtime, elements, _far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script_over_sheets(
+            &mut js,
+            vec![("app:///index.css", svg_sheet())],
+            r"
+        const page = __CreatePage();
+        const holder = __CreateView(0);
+        const svg = __CreateElement('svg', 0);
+        const own = __CreateElement('lynx-svg', 0);
+        const inside = __CreateView(0);
+        __SetClasses(svg, 'icon');
+        __SetClasses(own, 'icon');
+        __AppendElement(page, holder);
+        __AppendElement(holder, svg);
+        __AppendElement(page, own);
+        __AppendElement(svg, inside);
+        globalThis.held = [page, holder, svg, own, inside];
+    ",
+            "app:///main.js",
+        )
+        .unwrap();
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+            import {
+              __FlushElementTree,
+              __GetTag,
+              __QuerySelector,
+              __QuerySelectorAll,
+            } from 'bobcat:element';
+            const [page, holder, svg, own] = held;
+            if (__GetTag(svg) !== 'svg' || __GetTag(own) !== 'svg') {
+              throw new Error('tags: ' + __GetTag(svg) + ', ' + __GetTag(own));
+            }
+            if (__GetTag(holder) !== 'view') throw new Error('another tag mapped');
+            if (__QuerySelector(page, 'svg', {}) !== undefined ||
+                __QuerySelectorAll(page, 'svg', {}).length !== 0) {
+              throw new Error('a query selector was mapped');
+            }
+            for (const selector of ['lynx-svg', '.icon']) {
+              const all = __QuerySelectorAll(page, selector, {});
+              if (all.length !== 2 || all[0] !== svg || all[1] !== own) {
+                throw new Error(selector + ' matched ' + all.length);
+              }
+            }
+            __FlushElementTree();
+            ",
+            "app:///verify-svg.js",
+            "verifying",
+        )
+        .expect("verification");
+
+    let mut tree = elements.tree();
+    let page = tree.document_element().id();
+    let found = tree.query_selector_all(page, "lynx-svg").unwrap();
+    assert_eq!(found.len(), 2, "both elements are lynx-svg in the document");
+    tree.layout();
+    let size = |tree: &LynxDocument, node| {
+        let layout = tree.rounded_layout(node).unwrap();
+        (layout.size.width, layout.size.height)
+    };
+    assert_eq!(size(&tree, found[0]), (30.0, 25.0));
+    assert_eq!(size(&tree, found[1]), (30.0, 20.0));
+    let inside = tree.get(found[0]).unwrap().child_ids()[0];
+    assert_eq!(
+        crate::main::tree::test_support::display(&tree, inside),
+        Display::None,
+        "the component's `lynx-svg > *` rule"
+    );
+}

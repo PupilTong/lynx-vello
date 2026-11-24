@@ -31,7 +31,8 @@ use std::sync::LazyLock;
 /// `lynx-stack/packages/web-platform/web-elements/src/elements/`). Except
 /// `input` and `textarea`: HTML element names, which follow HTML here (user
 /// ruling 2026-10-19), so the text fields are `x-input` and `x-textarea`
-/// only (`super::text_field`).
+/// only (`super::text_field`). Every name here is a document tag, so Lynx's
+/// `svg` is listed as `lynx-svg`, the element it creates (`super::tag_map`).
 const LYNX_TAGS: &[&str] = &[
     "blur-view",
     "component",
@@ -44,6 +45,7 @@ const LYNX_TAGS: &[&str] = &[
     "list",
     "list-item",
     "list-row",
+    "lynx-svg",
     "lynx-wrapper",
     "markdown",
     "overlay",
@@ -57,7 +59,6 @@ const LYNX_TAGS: &[&str] = &[
     "scroll-coordinator-slot-drag",
     "scroll-coordinator-toolbar",
     "scroll-view",
-    "svg",
     "text",
     "title-bar-view",
     "video",

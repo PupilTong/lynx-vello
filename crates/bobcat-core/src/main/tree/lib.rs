@@ -9,14 +9,18 @@
 //! mutation preconditions before entering `terminus`, returning misuse as a
 //! JavaScript error.
 //!
+//! A Lynx tag is the document element's tag, with one exception: the Lynx
+//! `svg` is the document element `lynx-svg`, mapped at creation, at the tag
+//! read and in a `StyleInfo` type selector ([`tag_map`]).
+//!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `svg`, `video`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
+//! `lynx-svg`, `video`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
 //! `scroll_container`, `list`, `scroll_coordinator`, `overlay`,
-//! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
-//! as a document handed to the host as its bytes), the video element's picture, its `play` and
-//! `pause` UI methods and its `firstframe`, `ended` and `error` events ([`video`]), blur hints,
-//! the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
+//! `markdown`, `frame` and `text_field` need components: for image resources (a `lynx-svg`'s
+//! `content` as a document handed to the host as its bytes), the video element's picture, its
+//! `play` and `pause` UI methods and its `firstframe`, `ended` and `error` events ([`video`]), blur
+//! hints, the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
 //! and its events ([`refresh_view`]), the viewpager's `selectTab` UI method and events, the
@@ -97,6 +101,7 @@ mod frame;
 mod image;
 mod image_sources;
 mod list;
+mod lynx_svg;
 mod markdown;
 mod overlay;
 #[cfg(test)]
@@ -106,8 +111,8 @@ pub(crate) mod raw_text;
 pub(crate) mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
-mod svg;
 pub(crate) mod swiper;
+mod tag_map;
 /// Reached from `main` as well as from the tags here: the exposure tests
 /// build their documents the same way.
 #[cfg(test)]
@@ -135,9 +140,11 @@ pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_fr
 pub(crate) use self::image_sources::{
     ImageOutcome, ImageSources, START_PLAY_EVENT, apply_image_events,
 };
+pub(crate) use self::lynx_svg::is_svg;
 pub(crate) use self::scroll_container::relevance_span;
-pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
+pub use self::tag_map::document_tag;
+pub(crate) use self::tag_map::lynx_tag;
 pub(crate) use self::text::{SelectionReports, is_text, report_selection_changes};
 pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
@@ -215,7 +222,7 @@ pub(crate) fn new_document(
     document.set_queued_event_sink(Rc::new(events.clone()));
     blur_view::define(&mut document);
     image::define(&mut document, events.clone(), images.clone());
-    svg::define(&mut document, events.clone(), images);
+    lynx_svg::define(&mut document, events.clone(), images);
     video::define(&mut document, events.clone(), videos);
     swiper::define(&mut document, autoplays, events.clone());
     refresh_view::define(&mut document, events.clone());

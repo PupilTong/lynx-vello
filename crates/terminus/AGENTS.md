@@ -100,6 +100,24 @@ Subsystems:
   `crates/seldon/tests/fixtures`), which need a GPU adapter.
   `docs/terminus-architecture.md` "Canvas 2D context" has the replay rules
   and the decisions the standard leaves open.
+- `svg/` — SVG elements as DOM nodes cascaded by stylo. An element is in
+  the HTML or the SVG namespace (`NodeFlags` bit 13, set at creation;
+  `Node::in_svg_namespace`). `create_element("svg")` makes the SVG `svg`
+  element, every other tag is HTML; `create_svg_element` (`createElementNS`
+  for SVG) makes an SVG element of any local name, case kept;
+  `Node::is_svg_element` reads the namespace. An SVG element is not an HTML element to stylo (case-sensitive
+  local and attribute names, the SVG namespace for `@namespace`
+  selectors), never takes a custom element definition, and `define`
+  refuses `svg`. `svg/presentation.rs` reflects presentation attributes
+  into the presentational-hint block on `set_attribute`/`remove_attribute`
+  (unitless lengths allowed; `transform` folded to one `matrix()`; `d` on
+  `path` kept up to its first error; an invalid value is no hint).
+  `svg/root.rs` makes every SVG `svg` element replaced content whose
+  natural size follows `width`, `height` and `viewBox` by CSS Images 3
+  default sizing (`svg/attributes.rs`, `vector_sizes`). `svg/ua.rs` holds
+  the shared SVG UA sheet (`transform-origin: 0 0`), mounted by
+  `Document::add_svg_user_agent_stylesheet` and never by `Document::new`.
+  Nothing draws an `svg` element yet. Tests: `tests/svg_dom.rs`.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
   sheets and inline styles, and the one process-wide lock every user-agent

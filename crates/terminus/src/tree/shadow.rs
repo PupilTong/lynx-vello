@@ -100,7 +100,8 @@ pub(crate) struct ShadowLinks {
 impl<T> Node<T> {
     #[must_use]
     pub(crate) fn is_slot(&self) -> bool {
-        self.local_name.as_ref().is_some_and(|name| *name == *SLOT)
+        // HTML's `<slot>`; an SVG element named `slot` is not one.
+        !self.in_svg_namespace() && self.local_name.as_ref().is_some_and(|name| *name == *SLOT)
     }
 
     pub(crate) fn flat_children(&self) -> &[NodeSlot] {

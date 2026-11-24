@@ -1,4 +1,14 @@
-//! The `svg` component: Lynx's vector picture tag, drawn as one image.
+//! The `lynx-svg` component: Lynx's vector picture tag, drawn as one image.
+//!
+//! A Lynx page names it `svg`; the document element is `lynx-svg`, because
+//! the tag `svg` is left for the SVG element itself (ruled 2026-11-23). The
+//! name is mapped where web-core maps its tags ([`super::tag_map`]):
+//! `__CreateElement("svg")` creates a `lynx-svg`, `__GetTag` answers `svg`
+//! for it, and a `StyleInfo` type selector `svg` is lowered as `lynx-svg`.
+//! A selector query and a stylesheet supplied as text are not mapped: there
+//! the element is `lynx-svg`. A page that creates `lynx-svg` gets the same
+//! component, and `__GetTag` answers `svg` for it too. The rest
+//! of this module calls the element by its Lynx name, `svg`.
 //!
 //! Lynx never treats an SVG document as a subtree. Native's `<svg>` takes a
 //! URL in `src` or raw markup in `content` and renders the result at the
@@ -59,7 +69,7 @@
 //! `preserveAspectRatio`. web-core's `contain: content` is not adopted: the
 //! element is a replaced leaf here and has nothing to contain.
 //!
-//! `svg > * { display: none; }` has the same ordering constraint as
+//! `lynx-svg > * { display: none; }` has the same ordering constraint as
 //! `image > *` ([`super::image`]'s module docs): it ties on specificity with
 //! the container tags' `display` rules and wins on source order, so
 //! [`super::ua_sheet`] assembles it after them. Children are never read
@@ -81,20 +91,21 @@ use terminus::link::{CustomElement, DocumentKind, NodeId};
 use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
 
-/// Lynx's vector picture tag, and the two attributes this module reflects.
-const SVG_TAG: &str = "svg";
+/// The document tag of Lynx's vector picture element, whose Lynx tag is
+/// `svg` ([`super::tag_map`]), and the two attributes this module reflects.
+pub(super) const SVG_TAG: &str = "lynx-svg";
 const SRC_ATTRIBUTE: &str = "src";
 const CONTENT_ATTRIBUTE: &str = "content";
 
 /// The box an `svg` draws into, and the suppression of its children.
 ///
 /// The border box and the rest of `web-elements`' common block come from
-/// [`super::ua_sheet`], which lists `svg` beside `image`. `display: flex`
-/// is `x-svg.css`'s, and keeps the tag out of the `defaultDisplayLinear`
-/// list as `image` is. Nothing here is `!important`: see
-/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
-pub(super) const UA_RULES: &str = r"svg { display: flex; }
-svg > * { display: none; }
+/// [`super::ua_sheet`], which lists `lynx-svg` beside `image`. `display:
+/// flex` is `x-svg.css`'s, and keeps the tag out of the
+/// `defaultDisplayLinear` list as `image` is. Nothing here is `!important`:
+/// see `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
+pub(super) const UA_RULES: &str = r"lynx-svg { display: flex; }
+lynx-svg > * { display: none; }
 ";
 
 /// Installs the component, over the queue its write-time outcomes go into
@@ -108,7 +119,7 @@ pub(super) fn define(
     document.define(SVG_TAG, Box::new(Svg { outcomes, sources }));
 }
 
-/// Whether `node` is a live `svg` element: the runtime builds an `svg`
+/// Whether `node` is a live `lynx-svg` element: the runtime builds an `svg`
 /// node's `load` detail from its layout box and dispatches no `error` for it.
 pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
     document

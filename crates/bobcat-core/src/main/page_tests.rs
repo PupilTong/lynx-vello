@@ -3033,7 +3033,9 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
         );
         assert!(harness.view.published.commit().is_none());
 
-        harness.answer_style_sheet_at("app:///a.css", "svg{width:50px;height:40px}");
+        // A sheet supplied as text is not mapped (`tree::tag_map`): it names
+        // the document tag.
+        harness.answer_style_sheet_at("app:///a.css", "lynx-svg{width:50px;height:40px}");
         answer_module_at(&mut harness, "app:///dep.js", "export const value = 1;");
         harness.until("boot never finished", |h| h.finished()).await;
         let mut seen = None;

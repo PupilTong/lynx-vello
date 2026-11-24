@@ -328,7 +328,7 @@ revision 4.1 of the design, ruled 2026-10-10):
    the load skips the platform decoder and parses the preprocessed bytes
    instead (step 3). The browser embedder does not decode SVG through
    `createImageBitmap`, so every target parses the same bytes.
-2. **Markup, in `terminus`.** `<svg content>` (`crates/bobcat-core/src/main/tree/svg.rs`)
+2. **Markup, in `terminus`.** `<svg content>` (`crates/bobcat-core/src/main/tree/lynx_svg.rs`)
    hands its markup to `Document::insert_image_document` as bytes. The registry
    files it under a synthetic source, `svg-content:` and the 32 hex digits of
    a 128-bit SipHash-1-3 of the bytes, created pending with its bytes queued

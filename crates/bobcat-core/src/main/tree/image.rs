@@ -143,7 +143,7 @@
 //! # Two cascade facts worth knowing before editing [`UA_RULES`]
 //!
 //! **These rules have to stay after the container rules.** Only
-//! [`super::svg`]'s, which carry the same constraint, follow them in the
+//! [`super::lynx_svg`]'s, which carry the same constraint, follow them in the
 //! sheet. `image > *` is specificity
 //! (0,0,1) and merely *ties* with the (0,0,1) `display` rules `view`,
 //! `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper` carry in

@@ -4681,7 +4681,10 @@ fn install_host_module(
         fn createPage() |document| {
             Ok(node_id_value(document.document_element().id()))
         }
+        // The page's tag, as `crate::main::tree::document_tag` maps it: a
+        // Lynx `svg` is the document's `lynx-svg`.
         fn createElement(tag: string_argument) |document| {
+            let tag = crate::main::tree::document_tag(tag);
             Ok(node_id_value(document.create_element(tag, ())))
         }
         fn parentNode(node: node_id_argument) |document| {
@@ -5423,7 +5426,8 @@ fn install_attribute_members(
                 .ok_or_else(|| {
                     "bobcat-internal:host.tagName requires a live element tag".to_owned()
                 })?;
-            Ok(HostValue::String(tag.to_owned()))
+            // The page's name for the tag (`crate::main::tree::lynx_tag`).
+            Ok(HostValue::String(crate::main::tree::lynx_tag(tag).to_owned()))
         }
         fn attributeNames(node: node_id_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;

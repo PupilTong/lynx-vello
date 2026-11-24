@@ -81,5 +81,7 @@ the main-thread flush binding — and
 - [Page policy: tags, text and the UA sheet](docs/page-policy.md) — Lynx page
   policy in the `tree` module (`tree/lib.rs`, `ua_sheet.rs`): tags, text, the
   UA sheet, the sources of the `image` and `svg` elements
-  (`tree/image_sources.rs`) and the `video` element (`tree/video.rs`), which
-  `bobcat-core` owns and `terminus` does not.
+  (`tree/image_sources.rs`), the Lynx `svg`'s document tag `lynx-svg` and
+  its mapping (`tree/lynx_svg.rs`, `tree/tag_map.rs`) and the `video`
+  element (`tree/video.rs`), which `bobcat-core` owns and `terminus` does
+  not.
