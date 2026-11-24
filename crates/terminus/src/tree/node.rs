@@ -265,6 +265,8 @@ pub(crate) struct StyleRefresh {
     /// transparent box, or a box of its own, so the anonymous boxes on both
     /// sides of it are re-derived ([`crate::tree::anonymous`]).
     pub(crate) box_tree_changed: bool,
+    /// Whether the element had no computed style before this one.
+    pub(crate) first: bool,
 }
 
 impl StyleRefresh {
@@ -273,6 +275,7 @@ impl StyleRefresh {
         paragraph_limits_changed: false,
         containing_block_changed: false,
         box_tree_changed: false,
+        first: false,
     };
 }
 
@@ -967,16 +970,18 @@ impl<T> Node<T> {
                         containing_block_changed: false,
                         box_tree_changed: *old.get_display() != *new.get_display()
                             || old.get_counters().content != new.get_counters().content,
+                        first: false,
                     }
                 }
             }
             // A first style has no old role to flip from: the element's
             // descendants have never been laid out under it.
-            _ => StyleRefresh {
+            (old, _) => StyleRefresh {
                 changed: true,
                 paragraph_limits_changed: false,
                 containing_block_changed: false,
                 box_tree_changed: true,
+                first: old.is_none(),
             },
         };
         if !refresh.changed {

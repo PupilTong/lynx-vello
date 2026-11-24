@@ -43,6 +43,7 @@ use seldon::tree::{Layout, LayoutTree};
 use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::PointerEvents;
+use stylo::values::computed::transform::Transform as ComputedTransform;
 
 use super::anchored::AnchoredSlot;
 use super::curves::TransformTrack;
@@ -52,7 +53,7 @@ use super::transform::{ContextMatrix, ParentPerspective, as_translation, same_bi
 use super::{
     AnimationSlot, AutoBox, ClipNode, CornerRadii, FrameBuffers, ItemTransform, LayerKind,
     PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space,
-    SpaceKind, StickySlot, stacking,
+    SpaceKind, StickySlot, stacking, svg,
 };
 use crate::layout::inline_flow::is_inline_box;
 use crate::layout::{
@@ -370,6 +371,9 @@ struct ItemRecord {
     hit_testable: bool,
     slot: Option<u32>,
     space: Option<u32>,
+    /// Whether this is the box of an outermost `svg` element, whose
+    /// recording the emission appends after it (`svg`).
+    svg_root: bool,
 }
 
 /// One member of a stacking context, awaiting the `(level, seq)` sort.
@@ -629,85 +633,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         Some(u32::try_from(self.stickies.len() - 1).expect("a frame cannot hold 2^32 sticky boxes"))
     }
 
-    /// Records `node` in the frame's animation-slot table when it carries a
-    /// composite-exportable animation.
-    ///
-    /// Every refusal happens here, before the slot exists: a transform track
-    /// needs a planar, invertible committed world and contributors that stay
-    /// planar (see [`TransformTrack::new`]), a moving element must fit
-    /// [`MAX_MOVING_EXTENT_VIEWPORTS`], and the group enclosing it must bound
-    /// it wherever its curve carries it ([`super::space::movers_bounded`]),
-    /// which a curve without a bounded reach never is. A refusal allocates
-    /// nothing; the element keeps animating through main-thread ticks, which
-    /// cull it exactly.
-    ///
-    /// `clip` is the clip chain enclosing the element; `context` and
-    /// `parent_world` fold its world, `world` being the committed one.
-    fn allocate_animation_slot(
-        &mut self,
-        node: NodeId,
-        style: &ComputedValues,
-        (context, parent_world, world): (&ContextMatrix, &Transform3D<f32>, &Transform3D<f32>),
-        clip: Option<usize>,
-    ) -> Option<u32> {
-        let node_ref = self.node(node);
-        if !node_ref.animates_opacity() && !node_ref.animates_transform() {
-            return None;
-        }
-        let ExportedComposite {
-            mut curve,
-            opacity,
-            transform,
-        } = self.document.composite_export(node_ref)?;
-        // The export reads the same set the driver's bits do, so the group an
-        // opacity curve retargets and the containing block a transform curve
-        // moves both exist.
-        debug_assert!(!opacity || node_ref.animates_opacity());
-        debug_assert!(!transform || node_ref.animates_transform());
-        if transform {
-            let enclosing = self.current_layer.map(|layer| self.layers[layer].space);
-            let bounded = enclosing.is_none_or(|group| {
-                super::space::movers_bounded(
-                    &self.spaces,
-                    &self.clips,
-                    &self.animations,
-                    clip,
-                    group,
-                )
-            });
-            if !bounded || !self.moving_extent_fits(node) {
-                return None;
-            }
-            let track = TransformTrack::new(
-                &curve,
-                context.clone(),
-                *parent_world,
-                world,
-                &style.get_box().transform,
-            )?;
-            if enclosing.is_some() && !track.reach.is_bounded() {
-                return None;
-            }
-            curve.transform = Some(track);
-        }
-        self.animations.push(AnimationSlot { node, curve });
-        Some(
-            u32::try_from(self.animations.len() - 1)
-                .expect("a frame cannot hold 2^32 animation slots"),
-        )
-    }
-
-    /// Whether `node`'s extent — the box spanning its border box and its
-    /// content overflow, `max(size, content_size)` per axis — has an area
-    /// inside the moving-export budget. See [`MAX_MOVING_EXTENT_VIEWPORTS`].
-    fn moving_extent_fits(&self, node: NodeId) -> bool {
-        let layout = self.rounded(node);
-        let width = layout.size.width.max(layout.content_size.width);
-        let height = layout.size.height.max(layout.content_size.height);
-        let viewport = self.document.viewport_size();
-        width * height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
-    }
-
     /// The top-layer tail (`tree::top_layer`): each entry whose element is
     /// rendered, in layer order, as a stacking context of its own — its
     /// `::backdrop` first, when it generates a box, then the element. Both
@@ -822,12 +747,33 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let world = context
             .with_list(&values.get_box().transform)
             .then(parent_world);
-        let own_animation = self.allocate_animation_slot(
-            root,
-            values,
-            (&context, parent_world, &world),
-            seed.current.clip,
-        );
+        let own_animation = {
+            let layout = self.rounded(root);
+            allocate_animation_slot(
+                self.document,
+                self.node(root),
+                Mover {
+                    track: Some(TrackInputs {
+                        context: &context,
+                        parent_world,
+                        world: &world,
+                        committed: &values.get_box().transform,
+                    }),
+                    extent: Size2D::new(
+                        layout.size.width.max(layout.content_size.width),
+                        layout.size.height.max(layout.content_size.height),
+                    ),
+                    clip: seed.current.clip,
+                },
+                SlotTables {
+                    spaces: &self.spaces,
+                    clips: &self.clips,
+                    layers: &self.layers,
+                    current_layer: self.current_layer,
+                    animations: &mut self.animations,
+                },
+            )
+        };
         if let Some(index) = own_animation {
             box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
         }
@@ -887,6 +833,23 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 slot: own_slot.or(seed.current.chain),
                 space: box_space,
             });
+            // An outermost `svg` element, replaced content, draws its
+            // recording after its own box and inside its own group (`svg`).
+            // One test per box on a document without one.
+            if self.document.has_svg_roots() && self.node(root).is_replaced() {
+                svg::plan_root(
+                    self.document,
+                    svg::Tables {
+                        items: &mut self.items,
+                        matrices: &mut self.matrices,
+                        clips: &mut self.clips,
+                        layers: &mut self.layers,
+                        spaces: &mut self.spaces,
+                        animations: &mut self.animations,
+                        current_layer: self.current_layer,
+                    },
+                );
+            }
         }
 
         self.record_initial_target(root, values, seed.current.chain);
@@ -947,16 +910,36 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             self.emit_member(member, root, child_perspective, &world);
         }
         {
-            // Two disjoint field borrows: nothing in this loop recurses, so
-            // the records are read in place instead of copied out.
+            // Disjoint field borrows: nothing in this loop recurses, so the
+            // records are read in place instead of copied out.
             let Builder {
+                document,
                 items,
                 matrices,
+                clips,
+                layers,
+                spaces,
+                animations,
+                current_layer,
                 scratch,
                 ..
             } = self;
             for record in &scratch.stream[stream_base..stream_end] {
                 push_record(items, matrices, record, &world);
+                if record.svg_root {
+                    svg::plan_root(
+                        *document,
+                        svg::Tables {
+                            items,
+                            matrices,
+                            clips,
+                            layers,
+                            spaces,
+                            animations,
+                            current_layer: *current_layer,
+                        },
+                    );
+                }
             }
         }
         while index < member_end {
@@ -1208,6 +1191,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     hit_testable,
                     slot: content.chain,
                     space: content.space,
+                    svg_root: false,
                 })
             })
             .collect()
@@ -1327,19 +1311,21 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let inner =
             descend.then(|| self.enter_element(child.node, style, &world, outer, own_scroll));
         if visible {
-            self.push_stream(
-                target,
-                element_record(
-                    child.node,
-                    style,
-                    child.offset,
-                    child.size,
-                    outer.current.clip,
-                    hit_testable,
-                    own_slot.or(outer.current.chain),
-                    outer.current.space,
-                ),
+            let mut record = element_record(
+                child.node,
+                style,
+                child.offset,
+                child.size,
+                outer.current.clip,
+                hit_testable,
+                own_slot.or(outer.current.chain),
+                outer.current.space,
             );
+            // An outermost `svg` element's recording follows its box item
+            // when the record is emitted (`svg`). One test per box on a
+            // document without one.
+            record.svg_root = self.document.has_svg_roots() && self.node(child.node).is_replaced();
+            self.push_stream(target, record);
             if crate::layout::paragraph::establishes_paragraph(child.mode) {
                 // A second record, after the element's own box, so the glyphs
                 // paint over the background and border the block draws.
@@ -1367,6 +1353,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                         hit_testable,
                         slot: content.chain,
                         space: content.space,
+                        svg_root: false,
                     },
                 );
                 for record in self.fragment_records(child.node, content_offset, content) {
@@ -1435,17 +1422,37 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 self.build_stacking_context(member_node, &style, offset, world, perspective, clips);
             }
             MemberPayload::Pseudo { stream } => {
-                // Three disjoint field borrows at once; nothing here recurses,
-                // so the records are drained in place.
+                // Disjoint field borrows at once; nothing here recurses, so
+                // the records are drained in place.
                 let Builder {
+                    document,
                     items,
                     matrices,
+                    clips,
+                    layers,
+                    spaces,
+                    animations,
+                    current_layer,
                     scratch,
                     ..
                 } = self;
                 let buffer = &mut scratch.pseudo_pool[stream as usize];
                 for record in buffer.iter() {
                     push_record(items, matrices, record, world);
+                    if record.svg_root {
+                        svg::plan_root(
+                            *document,
+                            svg::Tables {
+                                items,
+                                matrices,
+                                clips,
+                                layers,
+                                spaces,
+                                animations,
+                                current_layer: *current_layer,
+                            },
+                        );
+                    }
                 }
                 buffer.clear();
                 scratch.pseudo_free.push(stream);
@@ -1580,6 +1587,7 @@ fn element_record(
         hit_testable,
         slot,
         space,
+        svg_root: false,
     }
 }
 
@@ -1681,4 +1689,108 @@ pub(super) fn intern(
     ItemTransform::Matrix(
         u32::try_from(matrices.len() - 1).expect("a frame cannot hold 2^32 matrices"),
     )
+}
+
+/// What the track of an element's transform curve folds a sampled list
+/// with: the element's matrix around its list, its parent's world and its
+/// committed world, and the list committed. See [`TransformTrack::new`].
+pub(super) struct TrackInputs<'a> {
+    pub(super) context: &'a ContextMatrix,
+    pub(super) parent_world: &'a Transform3D<f32>,
+    pub(super) world: &'a Transform3D<f32>,
+    pub(super) committed: &'a ComputedTransform,
+}
+
+/// An element asking for an animation slot: what its transform track folds
+/// with, `None` when its transform cannot follow a curve; the size its
+/// moving content spans (a CSS box's `max(size, content_size)`, an SVG
+/// element's ink extent); and the clip chain enclosing it.
+pub(super) struct Mover<'a> {
+    pub(super) track: Option<TrackInputs<'a>>,
+    pub(super) extent: Size2D<f32>,
+    pub(super) clip: Option<usize>,
+}
+
+/// The tables of the frame being built that an animation slot is checked
+/// against and appended to, with the group layer open where it is asked.
+pub(super) struct SlotTables<'a> {
+    pub(super) spaces: &'a [Space],
+    pub(super) clips: &'a [ClipNode],
+    pub(super) layers: &'a [RenderLayer],
+    pub(super) current_layer: Option<usize>,
+    pub(super) animations: &'a mut Vec<AnimationSlot>,
+}
+
+/// Records `node` in the frame's animation-slot table when it carries a
+/// composite-exportable animation, and answers its slot: a CSS box that
+/// is a stacking context (`Builder::build_stacking_context`) or an SVG
+/// element below an `svg` root (`svg::plan_root`).
+///
+/// Every refusal happens here, before the slot exists: a transform curve
+/// needs track inputs, a planar, invertible committed world and
+/// contributors that stay planar (see [`TransformTrack::new`]), a moving
+/// element's extent must fit [`MAX_MOVING_EXTENT_VIEWPORTS`], and the group
+/// enclosing it must bound it wherever its curve carries it
+/// ([`super::space::movers_bounded`]), which a curve without a bounded reach
+/// never is. A refusal allocates nothing; the element keeps animating
+/// through main-thread ticks, which cull it exactly.
+pub(super) fn allocate_animation_slot<T: Sync>(
+    document: &Document<T>,
+    node: &Node<T>,
+    mover: Mover<'_>,
+    tables: SlotTables<'_>,
+) -> Option<u32> {
+    let SlotTables {
+        spaces,
+        clips,
+        layers,
+        current_layer,
+        animations,
+    } = tables;
+    if !node.animates_opacity() && !node.animates_transform() {
+        return None;
+    }
+    let ExportedComposite {
+        mut curve,
+        opacity,
+        transform,
+    } = document.composite_export(node)?;
+    // The export reads the same set the driver's bits do, so the group an
+    // opacity curve retargets and the containing block a transform curve
+    // moves both exist.
+    debug_assert!(!opacity || node.animates_opacity());
+    debug_assert!(!transform || node.animates_transform());
+    if transform {
+        let inputs = mover.track?;
+        let enclosing = current_layer.map(|layer| layers[layer].space);
+        let bounded = enclosing.is_none_or(|group| {
+            super::space::movers_bounded(spaces, clips, animations, mover.clip, group)
+        });
+        if !bounded || !moving_extent_fits(document, mover.extent) {
+            return None;
+        }
+        let track = TransformTrack::new(
+            &curve,
+            inputs.context.clone(),
+            *inputs.parent_world,
+            inputs.world,
+            inputs.committed,
+        )?;
+        if enclosing.is_some() && !track.reach.is_bounded() {
+            return None;
+        }
+        curve.transform = Some(track);
+    }
+    animations.push(AnimationSlot {
+        node: node.id(),
+        curve,
+    });
+    Some(u32::try_from(animations.len() - 1).expect("a frame cannot hold 2^32 animation slots"))
+}
+
+/// Whether a moving element whose content spans `extent` has an area inside
+/// the moving-export budget. See [`MAX_MOVING_EXTENT_VIEWPORTS`].
+fn moving_extent_fits<T>(document: &Document<T>, extent: Size2D<f32>) -> bool {
+    let viewport = document.viewport_size();
+    extent.width * extent.height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
 }

@@ -64,6 +64,14 @@
 //!   shaping). A `clip-path` basic shape on an SVG element is not recorded.
 //! - An element with a mask is skipped with its whole subtree: drawing it unmasked would show what
 //!   the author hid.
+//! - In a recording of an `svg` element in a document ([`RootGroup::Box`]), an element whose
+//!   `opacity` or `transform` animates is marked in [`Recording::animated`] with its item range,
+//!   its parent's absolute transform and the reference box its transform was folded against, for
+//!   the visual plan to hand to the painter. An animated `opacity` opens the compositing layer at
+//!   any value, 1 included. The reference box is left out, so no curve moves the element, when an
+//!   enclosing element drew something from the extent of its content: a layer shaped by its bounds,
+//!   a clip in `objectBoundingBox` units, a transform against its bounding box. An element with no
+//!   animation records as it always has, and an SVG image's recording marks nothing.
 //! - A nested `svg` and a `symbol` clip to their viewport and map their `viewBox` by their
 //!   `preserveAspectRatio`. The root's `preserveAspectRatio` is carried as [`Recording::aspect`]
 //!   for the painter, which maps the viewport onto the destination box.
@@ -122,7 +130,7 @@ use super::layers::{
     ClipDef, OpenLayers, close_layers, is_rendered, is_shape, items_bounds, open_layers, stroke,
 };
 use super::paint_server::{GradientSpec, brush, fold_opacity};
-use super::recording::{FillPaint, Item, Recording, StrokePaint};
+use super::recording::{Animated, FillPaint, Item, Recording, StrokePaint};
 use super::shapes::ARC_TOLERANCE;
 use super::text::{
     Space, TextAnchor, TextChunk, TextItem, TextPaint, TextSpan, normalize_whitespace,
@@ -143,6 +151,10 @@ pub(crate) enum RootGroup {
     /// In the item list: an SVG document used as an image has no box to
     /// carry them.
     Recorded,
+    /// By the root's own CSS box, which the paint walk composites like any
+    /// box's: an `svg` element in a document. The list holds its content
+    /// only.
+    Box,
 }
 
 /// Records the subtree of the SVG `svg` element `root`, whose styles are
@@ -162,6 +174,9 @@ pub(crate) fn record<T>(document: &Document<T>, root: NodeId, group: RootGroup) 
         base: &document.root_node().document_url_data().0,
         items: Vec::new(),
         has_text: false,
+        animated: Vec::new(),
+        marks: group == RootGroup::Box,
+        content_bound: 0,
     };
     let context = Context {
         transform: root_view_box.map_or(Affine::IDENTITY, |v| Affine::translate((-v.x, -v.y))),
@@ -177,6 +192,7 @@ pub(crate) fn record<T>(document: &Document<T>, root: NodeId, group: RootGroup) 
         aspect,
         items: recorder.items,
         has_text: recorder.has_text,
+        animated: recorder.animated,
     }
 }
 
@@ -230,6 +246,15 @@ struct Recorder<'d, T> {
     base: &'d url::Url,
     items: Vec<Item>,
     has_text: bool,
+    animated: Vec<Animated>,
+    /// Whether elements whose `transform` or `opacity` animates are marked
+    /// in [`Recording::animated`]: for an `svg` element in a document, whose
+    /// plan can hand them to the painter, and not for an SVG image.
+    marks: bool,
+    /// How many elements enclosing the one being recorded drew something
+    /// from the extent of their content: a bounds layer, a bounding-box
+    /// clip, a transform against their bounding box.
+    content_bound: u32,
 }
 
 impl<'d, T> Recorder<'d, T> {
@@ -253,6 +278,13 @@ impl<'d, T> Recorder<'d, T> {
             return;
         };
         match group {
+            RootGroup::Box => self.children(
+                root,
+                Context {
+                    depth: context.depth + 1,
+                    ..context
+                },
+            ),
             RootGroup::Recorded => {
                 if hidden(style) {
                     return;
@@ -318,8 +350,22 @@ impl<'d, T> Recorder<'d, T> {
         draw: impl FnOnce(&mut Self, Context),
     ) {
         let first = self.items.len();
-        let reference = has_transform(style).then(|| reference(style, context.viewport));
-        match reference {
+        let (fades, moves) = self.animates(id);
+        // Marked before its content, so the list is in document order.
+        let entry = (fades || moves).then(|| {
+            self.animated.push(Animated {
+                node: id,
+                items: first..first,
+                parent: context.transform,
+                reference: None,
+            });
+            self.animated.len() - 1
+        });
+        // A curve moving the element would leave what an enclosing element
+        // drew from the extent of its content stale.
+        let moves = moves && self.content_bound == 0;
+        let reference = (moves || has_transform(style)).then(|| reference(style, context.viewport));
+        let reference = match reference {
             None | Some(Reference::Before(_)) => {
                 let rect = match reference {
                     Some(Reference::Before(rect)) => Some(rect),
@@ -332,10 +378,14 @@ impl<'d, T> Recorder<'d, T> {
                     viewport: context.viewport,
                     depth: context.depth + 1,
                 };
-                let layers = self.open_layers(id, style, inner);
+                let layers = self.open_layers(id, style, inner, fades);
+                let bound = u32::from(layers.binds_content());
                 let content_start = self.items.len();
+                self.content_bound += bound;
                 draw(self, inner);
+                self.content_bound -= bound;
                 close_layers(&mut self.items, layers, content_start, transform);
+                rect.filter(|_| moves)
             }
             Some(Reference::After { include_stroke }) => {
                 // Recorded as if the element had no transform of its own,
@@ -345,9 +395,12 @@ impl<'d, T> Recorder<'d, T> {
                     viewport: context.viewport,
                     depth: context.depth + 1,
                 };
-                let mut layers = self.open_layers(id, style, provisional);
+                let nested = self.animated.len();
+                let mut layers = self.open_layers(id, style, provisional, fades);
                 let content_start = self.items.len();
+                self.content_bound += 1;
                 draw(self, provisional);
+                self.content_bound -= 1;
                 let invertible = context.transform.determinant().abs() >= f64::EPSILON;
                 let bounds = invertible
                     .then(|| {
@@ -366,6 +419,9 @@ impl<'d, T> Recorder<'d, T> {
                         map_item(item, map);
                     }
                     layers.map_groups(map);
+                    for marked in &mut self.animated[nested..] {
+                        marked.parent = map * marked.parent;
+                    }
                 }
                 close_layers(
                     &mut self.items,
@@ -373,17 +429,36 @@ impl<'d, T> Recorder<'d, T> {
                     content_start,
                     context.transform * own,
                 );
+                Some(bounds).filter(|_| moves && invertible)
             }
+        };
+        if let Some(entry) = entry {
+            let marked = &mut self.animated[entry];
+            marked.items.end = self.items.len();
+            marked.reference = reference;
         }
     }
 
+    /// Whether element `id`'s `opacity` and its `transform` animate, as
+    /// the stacking contexts of the CSS boxes read it
+    /// (`visual::stacking`), when this recording marks such elements.
+    fn animates(&self, id: NodeId) -> (bool, bool) {
+        if !self.marks {
+            return (false, false);
+        }
+        self.document.get(id).map_or((false, false), |node| {
+            (node.animates_opacity(), node.animates_transform())
+        })
+    }
+
     /// [`open_layers`] for element `id` of `style`, its clip path resolved
-    /// first.
+    /// first; `fades` opens its compositing layer whatever its opacity.
     fn open_layers(
         &mut self,
         id: NodeId,
         style: &'d ComputedValues,
         context: Context,
+        fades: bool,
     ) -> OpenLayers {
         let clip = self
             .clip_url(style)
@@ -391,7 +466,7 @@ impl<'d, T> Recorder<'d, T> {
         open_layers(
             &mut self.items,
             id,
-            style.get_effects().opacity,
+            (style.get_effects().opacity, fades),
             clip,
             context.transform,
         )
@@ -1074,7 +1149,8 @@ fn box_transform(style: &ComputedValues, reference: Rect) -> Affine {
 /// The matrix builder of the CSS boxes around an SVG element's transform
 /// list, its reference box `reference` in the element's user space standing
 /// for the border box at its offset: the factors [`box_transform`] folds a
-/// list with.
+/// list with, and an animation slot's track folds a sampled list with
+/// (`visual::svg`).
 pub(crate) fn context_matrix(style: &ComputedValues, reference: Rect) -> ContextMatrix {
     #[expect(clippy::cast_possible_truncation, reason = "CSS geometry is f32")]
     let (x, y, width, height) = (

@@ -397,6 +397,91 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     );
 }
 
+/// An `svg` element in the page draws its own subtree, recorded from the
+/// cascade, exactly as an `<image>` draws the same markup through the
+/// converter: a presentation-attribute-only document, laid out at the same
+/// place and size, gives the same pixels.
+#[test]
+fn an_inline_svg_root_draws_as_the_same_document_as_an_image() {
+    const TEST: &str = "an_inline_svg_root_draws_as_the_same_document_as_an_image";
+    let css = ".icon, svg { left: 20px; top: 20px; width: 160px; height: 80px; }
+               svg { display: flex; position: absolute; }";
+
+    let images = TestImages::new();
+    images.insert_svg("app:///icon.svg", ICON);
+    let mut as_image = page(css);
+    let root = as_image.root;
+    let node = as_image.el_tag(root, "image", "icon");
+    let as_image = capture(TEST, &mut as_image, &images, &[(node, "app:///icon.svg")]);
+
+    // `ICON`, element by element, through the DOM's own operations.
+    let mut doc = page(css);
+    doc.dom.add_svg_user_agent_stylesheet();
+    let svg = doc.dom.create_element("svg", ());
+    for (name, value) in [("width", "48"), ("height", "24"), ("viewBox", "0 0 48 24")] {
+        doc.dom.set_attribute(svg, name, value);
+    }
+    let root = doc.root;
+    doc.dom.append_child(root, svg);
+    let shapes: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "rect",
+            &[("width", "48"), ("height", "24"), ("fill", "#dbeafe")],
+        ),
+        (
+            "circle",
+            &[("cx", "12"), ("cy", "12"), ("r", "8"), ("fill", "#dc2626")],
+        ),
+        (
+            "path",
+            &[
+                ("d", "M26 20 L34 4 L42 20 Z"),
+                ("fill", "#16a34a"),
+                ("stroke", "#14532d"),
+                ("stroke-width", "2"),
+                ("stroke-linejoin", "round"),
+            ],
+        ),
+        (
+            "rect",
+            &[
+                ("x", "1"),
+                ("y", "1"),
+                ("width", "46"),
+                ("height", "22"),
+                ("fill", "none"),
+                ("stroke", "#1f2937"),
+                ("stroke-width", "2"),
+            ],
+        ),
+    ];
+    for (name, attributes) in shapes {
+        let shape = doc.dom.create_svg_element(name, ());
+        for (attribute, value) in attributes {
+            doc.dom.set_attribute(shape, attribute, value);
+        }
+        doc.dom.append_child(svg, shape);
+    }
+    let inline = capture(TEST, &mut doc, &TestImages::new(), &[]);
+    assert!(
+        doc.dom
+            .committed_frame()
+            .is_some_and(|frame| !frame.draws_vectors()),
+        "the root draws its subtree as paint items, not as a vector draw"
+    );
+
+    assert_eq!(
+        (inline.width(), inline.height()),
+        (as_image.width(), as_image.height())
+    );
+    assert!(
+        inline.pixels() == as_image.pixels(),
+        "the inline root and the image draw the same picture"
+    );
+}
+
+/// Two elements handed identical markup share one synthetic source and one
+/// parse, and it settles once, with the document's natural size, for both.
 #[test]
 fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     let mut doc = page("");
@@ -594,6 +679,46 @@ fn markup_without_a_namespace_draws_in_an_image() {
         let found = pixel(&actual, x, y);
         assert!(near(found, [0, 255, 0, 255]), "({x}, {y}) is {found:?}");
     }
+}
+
+/// A CSS animation on an inline root's `fill`, sampled at two clock values,
+/// draws two colours: the root records again on each tick.
+#[test]
+fn an_inline_fill_animation_draws_two_colours() {
+    const TEST: &str = "an_inline_fill_animation_draws_two_colours";
+    let mut doc = page(
+        "@keyframes paint { from { fill: #ff0000; } to { fill: #0000ff; } }
+         svg { display: flex; position: absolute; left: 20px; top: 20px;
+               width: 40px; height: 40px; }
+         rect { animation: paint 1s linear; }",
+    );
+    doc.dom.add_svg_user_agent_stylesheet();
+    let svg = doc.dom.create_element("svg", ());
+    for (name, value) in [("width", "20"), ("height", "20")] {
+        doc.dom.set_attribute(svg, name, value);
+    }
+    let rect = doc.dom.create_svg_element("rect", ());
+    for (name, value) in [("width", "20"), ("height", "20")] {
+        doc.dom.set_attribute(rect, name, value);
+    }
+    doc.dom.append_child(svg, rect);
+    let root = doc.root;
+    doc.dom.append_child(root, svg);
+    let images = TestImages::new();
+    doc.dom.render();
+    doc.dom.advance_animations(0.0);
+    doc.dom.advance_animations(0.1);
+    let early = pixel(&capture(TEST, &mut doc, &images, &[]), 40, 40);
+    doc.dom.advance_animations(0.9);
+    let late = pixel(&capture(TEST, &mut doc, &images, &[]), 40, 40);
+    assert!(
+        early[0] > 200 && early[2] < 60,
+        "near red at 0.1 s: {early:?}"
+    );
+    assert!(
+        late[2] > 200 && late[0] < 60,
+        "near blue at 0.9 s: {late:?}"
+    );
 }
 
 /// An SVG image whose `rect` fades from red to blue over one second and

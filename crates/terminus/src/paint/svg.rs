@@ -1,6 +1,8 @@
 //! The paint walk's SVG painter: one path or text item, or one layer push,
-//! of an SVG image's recording (`crate::svg::present`), as the visual plan
-//! placed it (`crate::visual::svg`).
+//! of an outermost `svg` element's recording (`crate::svg::present`), as
+//! the visual plan placed it (`crate::visual::svg`), for an `svg` element in
+//! a document and for an SVG image, whose isolated document files its
+//! root's recording the same way.
 //!
 //! An item is drawn by [`draw`], under the transform the walk resolved for
 //! the item in place of the item's own absolute one. A layer push is

@@ -1248,8 +1248,8 @@ impl<T: Sync> Document<T> {
         let mut anchor_restyled = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let (harvested, refresh) = {
-                let (harvested, refresh, descend, anchor_restyle) = {
+            let (harvested, refresh, svg) = {
+                let (harvested, refresh, descend, anchor_restyle, svg) = {
                     let Some(node) = self.arenas_mut().get_mut(current) else {
                         continue;
                     };
@@ -1276,6 +1276,7 @@ impl<T: Sync> Document<T> {
                         refresh,
                         node.has_animation_dirty_descendants() || refresh.changed,
                         anchor_restyle,
+                        node.in_svg_namespace(),
                     )
                 };
                 if let Some(declares) = anchor_restyle
@@ -1295,7 +1296,7 @@ impl<T: Sync> Document<T> {
                             .map(|&slot| arenas.at(slot).id()),
                     );
                 }
-                (harvested, refresh)
+                (harvested, refresh, svg)
             };
             // As in the style harvest: before the damage test.
             self.note_box_restyle(
@@ -1307,12 +1308,15 @@ impl<T: Sync> Document<T> {
                 continue;
             };
             tick.restyled += 1;
+            // As in the style harvest: an animated SVG element redraws its
+            // `svg` root (`svg::present`), and one below the root has no box.
+            let boxless = svg && self.note_svg_restyle(current);
             // An animated `filter` or `perspective` leaving or reaching
             // `none` flips the role as a class change does.
             if refresh.containing_block_changed {
                 containing_blocks.push(current);
             }
-            if damage.needs_relayout() {
+            if damage.needs_relayout() && !boxless {
                 tick.relayout = true;
                 self.invalidate_layout(current);
             }

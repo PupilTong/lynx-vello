@@ -157,20 +157,40 @@ Subsystems:
   `svg/layers.rs`; attribute-only values `svg/attributes.rs`; `xml:space`
   `svg/text.rs`); its module docs list the elements, values and drawing
   rules. `svg/image.rs`: SVG images (see "Vector images" below).
-  `svg/present.rs`: the document's side table (`svg_roots`, empty and
-  unallocated without an entry, emptied in `free_node`) where an SVG
-  image's isolated document files its root's shaped `Recording`.
-  `visual/svg.rs` plans it (`Document::plan_svg_image`: one
+  `svg/present.rs`: an outermost `svg` element draws its recorded subtree
+  as paint items of the ordinary visual order, painted into the frame's
+  display list by the ordinary walk; it makes no vector draw and no
+  texture. The document's side table (`svg_roots`, empty and unallocated
+  without a root, emptied in `free_node`) holds one `Recording` per root,
+  its text shaped, recorded at the start of `build_frame` when dirty.
+  `visual/svg.rs` plans it after the root's box item (one
   `PaintItemKind::Svg` item per path or text item, one `LayerKind::Svg`
-  group layer per layer push); `paint/svg.rs` draws an item
+  group layer per layer push, clipped to the content box and the
+  `object-fit` destination); `paint/svg.rs` draws an item
   (`paint::svg::draw`) and describes a recorded layer (`paint::svg::layer`),
   which the monolithic walk pushes with `Layer::push` and the compose walk
   emits as a `ComposeOp::Push` (`paint::walker`, `push_svg_layer`; a
-  recorded path rides it as `CapturedShape::Path`). An `svg` element in a
-  document draws nothing yet.
+  recorded path rides it as `CapturedShape::Path`). The recorded items are not hit-testable, so a
+  point inside the root hits the root. Dirty marks: SVG attribute and `id` writes,
+  child insertion or removal and text changes under an SVG element, and an
+  SVG element's style damage in both harvests (one namespace-bit test per
+  harvested element), and the first style of an outermost `svg` in the
+  style harvest (one shown again after a `display: none` ancestor, which
+  reports no damage); an SVG element below its root invalidates no layout,
+  since it has no box. CSS animations and transitions on SVG elements run
+  through the document's driver: each tick that re-cascades one marks its
+  root dirty. A `transform` or `opacity` animation below the root runs in
+  the painter: the recorder marks the element (`Recording::animated`, with
+  a compositing layer at any opacity while `opacity` animates), the plan
+  gives it an animation slot through `allocate_animation_slot`, the box
+  path's function, and its subtree's items an animation space; a
+  main-thread tick that restyles such an element all the same records its
+  root again, and the next plan builds a new track.
   Tests: `tests/svg_dom.rs`, `src/svg/tests.rs`,
-  `src/svg/record_tests.rs` (the image corpus; `src/svg/inline_tests.rs`
-  holds its display-list comparison),
+  `src/svg/present.rs`, `src/svg/record_tests.rs` (the image corpus),
+  `src/svg/inline_tests.rs` (the plan, the paint against the image's
+  list for the same corpus, placement, hits), `src/svg/animation_tests.rs`
+  (curves of elements below a root against the main thread's drawing),
   `tests/svg_images.rs`. `docs/svg-dom-design.md` is the design.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, the document's own `SharedRwLock` for its author
@@ -396,7 +416,7 @@ mounted, the `svg` built with `append_svg_markup`, styles flushed) and,
 through `IsolatedSvg::image`, records it with `RootGroup::Recorded`, shapes its text with the host document's own
 `TextContext`, so glyphs come from the page's fonts and `@font-face`
 registrations, files the recording in the isolated document's own
-`svg_roots`, plans it
+`svg_roots`, plans it with the inline root's planning function
 (`Document::plan_svg_image`: identity placement, no root box, clip, space or
 slot) and paints the plan with the paint walk, culling nothing
 (`walk_uncultured`), into one display list. No layout or render runs for

@@ -3,7 +3,8 @@
 //! in paint order and viewport units, every transform absolute and every
 //! paint a final peniko brush, with text collected and shaped later
 //! (`super::text::shape`). The visual plan (`visual::svg`) and the paint
-//! walk (`paint::svg`) draw it for an SVG image.
+//! walk (`paint::svg`) draw it, for an `svg` element in a document and for
+//! an SVG image alike.
 
 use std::sync::Arc;
 
@@ -26,6 +27,31 @@ pub(crate) struct Recording {
     pub(crate) items: Vec<Item>,
     /// Whether any item is text, so [`shape`](super::text::shape) knows whether it will shape.
     pub(crate) has_text: bool,
+    /// The elements whose `transform` or `opacity` animates, in document
+    /// order, each with the items it draws: what the visual plan of an `svg`
+    /// element in a document gives an animation slot (`visual::svg`). Empty,
+    /// and unallocated, for a recording with no such element and for every
+    /// SVG image's.
+    pub(crate) animated: Vec<Animated>,
+}
+
+/// One element of a [`Recording`] whose `transform` or `opacity` animates:
+/// where its drawing is in the item list, and what the track of a curve
+/// moving it is folded from.
+#[derive(Clone, Debug)]
+pub(crate) struct Animated {
+    pub(crate) node: NodeId,
+    /// The items of the element and its subtree: its own layer pushes, its
+    /// content and its pops.
+    pub(crate) items: std::ops::Range<usize>,
+    /// The absolute transform of the element's parent, in viewport units.
+    pub(crate) parent: Affine,
+    /// The reference box `transform-box` names, in the element's user
+    /// space, when a curve may move the element; `None` when what the
+    /// recording drew around it depends on where its content is (an
+    /// enclosing element's bounds layer, bounding-box clip or bounding-box
+    /// transform), which a curve moving the content would leave stale.
+    pub(crate) reference: Option<Rect>,
 }
 
 /// One drawing command. Transforms are absolute (viewport space); shapes

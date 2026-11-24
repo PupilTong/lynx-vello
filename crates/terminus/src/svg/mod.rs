@@ -31,10 +31,13 @@
 //!   [`attributes`] the attribute values it reads, [`text`] the text chunk model, its whitespace
 //!   rule and the shaping into the recording. Drawing a recording is `paint::svg`'s.
 //! - [`image`]: an SVG document used as an image, built as an isolated document, recorded, and
-//!   planned and painted by the paint walk.
-//! - [`present`]: the document's side table of recordings, where an isolated document files its
-//!   root's.
+//!   planned and painted as an inline root's recording is.
+//! - [`present`]: an outermost `svg` element draws its recorded subtree into its box, recorded
+//!   again when something under it changes.
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod animation_tests;
 mod attributes;
 pub(crate) mod build;
 pub(crate) mod gradient;
@@ -61,6 +64,7 @@ pub(crate) mod ua;
 pub(crate) mod use_element;
 
 pub(crate) use layers::ink_extent;
+pub(crate) use record::context_matrix;
 
 /// The SVG namespace.
 pub(crate) const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
