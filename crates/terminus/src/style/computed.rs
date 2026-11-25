@@ -334,11 +334,7 @@ mod tests {
         let mut doc = Doc::with_css("page { color: red }");
 
         assert_eq!(doc.dom.computed_style_text(doc.root, "color", false), None);
-        assert!(
-            doc.dom
-                .computed_style_entries(doc.root, &[], false)
-                .is_empty()
-        );
+        assert_eq!(doc.dom.computed_style_entries(doc.root, &[], false), []);
 
         doc.flush();
 

@@ -29,6 +29,11 @@
 //! the view it was watching is gone.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// Proving a wgpu handle `Send`/`Sync` walks wgpu-core's whole context type
+// (`Texture` → `CoreTexture` → `ContextWgpuCore` → ...), deeper than the
+// default limit of 128; nightly reports that overflow as the future-error
+// `recursion_depth_exceeding_limit` (rust-lang/rust#159228).
+#![recursion_limit = "256"]
 
 #[cfg(target_arch = "wasm32")]
 mod alarm;

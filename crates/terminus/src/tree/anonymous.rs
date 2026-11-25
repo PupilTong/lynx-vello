@@ -959,7 +959,7 @@ mod tests {
         let last = doc.el(root, "view");
         doc.flush();
 
-        assert!(boxes(&doc, root).is_empty());
+        assert_eq!(boxes(&doc, root), []);
         assert_eq!(rect(&doc, last).0, 30.0, "one gap, not two");
     }
 
@@ -1097,7 +1097,7 @@ mod tests {
 
         doc.dom.set_text_node_data(data, "   ");
         doc.flush();
-        assert!(boxes(&doc, root).is_empty());
+        assert_eq!(boxes(&doc, root), []);
         assert_eq!(rect(&doc, last).0, 0.0);
 
         doc.dom.set_text_node_data(data, "abcde");
@@ -1115,7 +1115,7 @@ mod tests {
         text(&mut doc, span, "cd");
         doc.flush();
         assert_eq!(boxes(&doc, root).len(), 1);
-        assert!(boxes(&doc, span).is_empty());
+        assert_eq!(boxes(&doc, span), []);
 
         doc.remove_class(span, "contents");
         doc.dom.set_inline_style(span, "width: auto; height: auto");
@@ -1148,7 +1148,7 @@ mod tests {
 
         doc.add_class(div, "paragraph");
         doc.flush();
-        assert!(boxes(&doc, div).is_empty());
+        assert_eq!(boxes(&doc, div), []);
         assert!(!doc.dom.contains_node(anonymous));
         assert_eq!(
             doc.dom.text_block_size(div).map(|size| size.width),
@@ -1307,7 +1307,7 @@ mod tests {
         // A flush while `div` is detached: its record finds no style and is
         // dropped.
         doc.flush();
-        assert!(boxes(&doc, div).is_empty());
+        assert_eq!(boxes(&doc, div), []);
 
         doc.dom.append_child(doc.root, div);
         doc.flush();
@@ -1369,7 +1369,7 @@ mod tests {
 
         doc.dom.append_child(to, moving);
         doc.flush();
-        assert!(boxes(&doc, from).is_empty());
+        assert_eq!(boxes(&doc, from), []);
         let [anonymous] = boxes(&doc, to)[..] else {
             panic!("one box")
         };
@@ -1492,7 +1492,7 @@ mod tests {
         text(&mut doc, paragraph, "abc");
         let view = doc.el(root, "view");
         doc.flush();
-        assert!(boxes(&doc, root).is_empty());
+        assert_eq!(boxes(&doc, root), []);
 
         // An element inserted, text inserted into a paragraph and edited
         // there, and a removal: none can give a container a source.
@@ -1502,7 +1502,7 @@ mod tests {
         doc.dom.remove_element(view);
         assert_eq!(pending(&doc), 0);
         doc.flush();
-        assert!(boxes(&doc, root).is_empty());
+        assert_eq!(boxes(&doc, root), []);
     }
 
     /// A block container stands for every paragraph mode a restyle can
@@ -1515,7 +1515,7 @@ mod tests {
         let div = doc.el(root, "div.paragraph");
         text(&mut doc, div, "abc");
         doc.flush();
-        assert!(boxes(&doc, div).is_empty());
+        assert_eq!(boxes(&doc, div), []);
 
         doc.remove_class(div, "paragraph");
         doc.flush();
@@ -1534,7 +1534,7 @@ mod tests {
         let carrier = doc.el(paragraph, "span");
         let data = text(&mut doc, carrier, "abc");
         doc.flush();
-        assert!(boxes(&doc, root).is_empty());
+        assert_eq!(boxes(&doc, root), []);
 
         doc.dom.remove_element(carrier);
         doc.dom.append_child(root, carrier);

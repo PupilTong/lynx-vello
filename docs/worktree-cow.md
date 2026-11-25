@@ -62,10 +62,10 @@ not build: Git runs it before submodules or generated JS fixtures may exist.
   directory that replaces it.
 - Use the primary checkout's offline, locked Cargo metadata to identify
   immutable registry/Git dependencies. Remove local/path and unknown historical
-  package fingerprints plus their build-script directories. Leave incremental
+  package build directories, with their fingerprints. Leave incremental
   compilation settings unchanged, but omit the seed's accumulated incremental
-  directories and compiled examples, plus dependency artifacts whose crate
-  names are not recognized as external packages. They must rebuild anyway;
+  directories and compiled examples, plus `<profile>/build/<package>`
+  directories whose names are not external packages. They must rebuild anyway;
   cloning them can multiply hundreds of thousands of obsolete object files.
   Force Cargo to invoke rustc for local packages even if this branch's source
   timestamps predate the seed's build. Never backdate or touch sources.
@@ -74,6 +74,11 @@ not build: Git runs it before submodules or generated JS fixtures may exist.
   Compiled external build scripts and other reusable artifacts remain available.
 - Use the conventional repository `target` layout only. Custom target/build
   directories are outside this script's scope. Symlinked targets are refused.
+- Target Cargo's build-dir layout v2, the default of the pinned toolchain,
+  which keeps each unit's artifacts and fingerprint in
+  `<profile>/build/<package>/<hash>/`. The previous layout's `<profile>/deps/`
+  and `<profile>/.fingerprint/`, still present in a target built by an older
+  toolchain, are not cloned.
 - Ordinary hook failures warn and leave checkout successful; explicit migration
   failures return a nonzero status. No source files or Git index are rewritten.
 

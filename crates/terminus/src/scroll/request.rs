@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn an_auto_scroll_change_travels_beside_the_slots_with_a_scroll_request() {
         let (mut document, scroller) = scroller();
-        assert!(document.commit().auto_scroll_requests().is_empty());
+        assert_eq!(document.commit().auto_scroll_requests(), []);
         document.scroll_to_with(scroller, Vector2D::new(0.0, 40.0), ScrollBehavior::Instant);
         document.auto_scroll(scroller, 60.0, false, true);
         assert_eq!(
@@ -614,7 +614,7 @@ mod tests {
         document.auto_scroll(scroller, 60.0, false, true);
         document.set_inline_style(scroller, "overflow: visible");
         let frame = document.commit();
-        assert!(frame.auto_scroll_requests().is_empty());
+        assert_eq!(frame.auto_scroll_requests(), []);
         assert_eq!(document.pending_auto_scroll(scroller), None);
     }
 
@@ -624,6 +624,6 @@ mod tests {
         document.auto_scroll(scroller, 60.0, false, true);
         assert_eq!(document.layout_state().auto_scroll_requests.len(), 1);
         document.drop_subtree(scroller);
-        assert!(document.layout_state().auto_scroll_requests.is_empty());
+        assert_eq!(document.layout_state().auto_scroll_requests, []);
     }
 }

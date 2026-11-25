@@ -893,7 +893,7 @@ fn a_commit_with_no_skipping_change_queues_nothing() {
 
     // And an idle render commits nothing at all.
     assert!(!page.doc.dom.render());
-    assert!(page.changes().is_empty());
+    assert_eq!(page.changes(), []);
 }
 
 /// A nested `auto` box is determined by a later pass of the very same
@@ -924,7 +924,7 @@ fn a_nested_auto_box_queues_its_change_in_the_commit_that_revealed_it() {
             .all(|change| !change.skipped && change.node != page.rows[ROWS - 1]),
         "and nothing below the window changed state: {queued:?}",
     );
-    assert!(page.doc.dom.take_content_visibility_changes().is_empty());
+    assert_eq!(page.doc.dom.take_content_visibility_changes(), []);
 }
 
 /// A row freed between the commit and the drain leaves its change queued,
@@ -1238,7 +1238,7 @@ fn a_document_with_no_definitions_drains_the_queue_and_does_nothing_else() {
         !page.doc.dom.has_pending_content_visibility_changes(),
         "the queue is the record of one commit, so it is drained whether or not anyone listens",
     );
-    assert!(page.doc.dom.take_content_visibility_changes().is_empty());
+    assert_eq!(page.doc.dom.take_content_visibility_changes(), []);
 }
 
 /// A handler may mutate the tree it is being called about: the write lands in
@@ -1273,7 +1273,7 @@ fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
         document.define("x-item", Box::new(item));
     });
     assert!(page.doc.dom.render());
-    assert!(take(&log).is_empty());
+    assert_eq!(take(&log), [] as [String; 0]);
 
     page.doc.dom.dispatch_content_visibility_changes(0.0);
     let delivered = take(&log);

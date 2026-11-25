@@ -956,7 +956,7 @@ fn two_pictures_of_one_url_play_apart_over_one_set_of_frames() {
         unique.len(),
         "no frame decoded twice: {decoded:?}"
     );
-    assert!(reports(&inbox).is_empty());
+    assert_eq!(reports(&inbox), []);
 }
 
 /// The four controls: a pause keeps the frame shown and a resume
@@ -1071,7 +1071,7 @@ fn a_picture_not_drawn_waits_and_one_that_ends_lets_go() {
     rig.set(ms(60_000));
     crate::images::service(&rig.resources);
     assert_eq!(rig.picture_position(picture), (0, 0, 0, false));
-    assert!(reports(&inbox).is_empty());
+    assert_eq!(reports(&inbox), []);
 
     view.retain(&[PictureKey::Id(picture)]);
     let (_, image) = adopt(&view, picture);
@@ -1096,7 +1096,7 @@ fn a_picture_not_drawn_waits_and_one_that_ends_lets_go() {
     assert!(view.take_frame(picture).is_none());
     // A drawn set still naming it changes nothing.
     view.retain(&[PictureKey::Id(picture)]);
-    assert!(rig.held("app:///a.png").is_empty());
+    assert_eq!(rig.held("app:///a.png"), [] as [usize; 0]);
 }
 
 /// A view that goes ends the pictures it asked to play.

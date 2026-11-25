@@ -473,7 +473,7 @@ async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_once_wanted() {
     let restored = harness.restore(&source, ImageSizeHint::new(32, 32));
     assert_eq!((restored.width, restored.height), (32, 32));
     assert_eq!(&restored.data.as_ref()[..4], &[255, 0, 0, 255]);
-    assert!(harness.resources.take_notes().is_empty());
+    assert_eq!(harness.resources.take_notes(), [] as [String; 0]);
 }
 
 /// An SVG document whose root carries `attributes`, with one filled rect.
@@ -829,7 +829,7 @@ fn an_svg_document_is_never_described_and_never_resident() {
     );
     assert!(!harness.resources.is_resident("app:///icon.svg"));
     assert_eq!(harness.resources.memory_used_bytes(), 0);
-    assert!(harness.resources.take_notes().is_empty());
+    assert_eq!(harness.resources.take_notes(), [] as [String; 0]);
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

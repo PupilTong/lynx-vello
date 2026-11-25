@@ -1671,7 +1671,7 @@ pub(super) mod tests {
         );
         let frame = document.commit();
         assert_eq!(frame.slot_of(view), None);
-        assert!(frame.auto_scroll_requests().is_empty());
+        assert_eq!(frame.auto_scroll_requests(), []);
         assert_eq!(document.pending_auto_scroll(view), None);
     }
 

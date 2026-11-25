@@ -1345,7 +1345,7 @@ mod tests {
         ];
         let block = css(&items);
         assert_eq!(shown(&block), "ab");
-        assert!(block.edges.is_empty());
+        assert_eq!(block.edges, []);
         assert_eq!(block.slot_edges, [(Some(0), Some(0))]);
         assert_eq!(block.spans[0].slots, 0..1);
     }

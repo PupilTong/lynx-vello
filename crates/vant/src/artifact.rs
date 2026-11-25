@@ -1533,7 +1533,7 @@ mod tests {
         // Admitting a queued key means a Store has it already.
         artifacts.admit(ENGINE, b, bytes(b"bb"));
         assert!(!artifacts.has_pending());
-        assert!(artifacts.take_pending().is_empty());
+        assert_eq!(artifacts.take_pending(), []);
     }
 
     #[test]

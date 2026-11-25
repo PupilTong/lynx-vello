@@ -570,7 +570,11 @@ mod tests {
                 size.height
             );
             assert!(
-                captured.chunks_exact(4).any(|pixel| pixel != [255; 4]),
+                captured
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|&pixel| pixel != [255; 4]),
                 "{}x{}: the scene drew something to compare",
                 size.width,
                 size.height

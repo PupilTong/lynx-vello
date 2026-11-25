@@ -598,7 +598,7 @@ fn unobserve_keeps_the_queue_and_disconnect_drops_it() {
     doc.flush();
     assert!(doc.dom.update_resize_observations());
     doc.dom.disconnect_resize_observer(observer);
-    assert!(doc.dom.take_resize_records(observer).is_empty());
+    assert_eq!(doc.dom.take_resize_records(observer), []);
     assert!(
         doc.dom.resize_observer(observer).is_some(),
         "a disconnected observer lives on"

@@ -73,7 +73,7 @@ pub(crate) fn encode(screenshot: &Screenshot) -> Result<Vec<u8>, BmpError> {
     output.extend_from_slice(&0_u32.to_le_bytes());
     output.extend_from_slice(&0_u32.to_le_bytes());
 
-    for pixel in rgba[..expected].chunks_exact(4) {
+    for pixel in rgba[..expected].as_chunks::<4>().0 {
         output.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     Ok(output)

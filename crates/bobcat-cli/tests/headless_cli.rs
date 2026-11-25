@@ -72,8 +72,10 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
     assert!(
         image
             .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255]),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|&pixel| pixel != [255, 255, 255, 255]),
         "the screenshot-first command must wait for the script's non-white frame"
     );
 
@@ -128,8 +130,10 @@ fn author_css_from_the_style_info_section_renders() {
     assert_eq!((image.width(), image.height()), (32, 24));
     let red = image
         .pixels()
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == [255, 0, 0, 255])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|&&pixel| pixel == [255, 0, 0, 255])
         .count();
     assert_eq!(
         red,
@@ -186,8 +190,10 @@ fn author_css_from_raw_lynx_xml_renders() {
     assert_eq!((image.width(), image.height()), (32, 24));
     let red = image
         .pixels()
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == [255, 0, 0, 255])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|&&pixel| pixel == [255, 0, 0, 255])
         .count();
     assert_eq!(
         red,

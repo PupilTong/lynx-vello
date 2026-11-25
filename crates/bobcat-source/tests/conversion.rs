@@ -571,7 +571,7 @@ fn external_page_entry_must_be_selected_explicitly() {
     let page = bobcat_source::PageSource::from_native_bundle(&url, &bytes, "library__main-thread")
         .unwrap();
     assert!(page.config().enable_css_selector);
-    assert!(!page.view_sources(SCREEN, "en-US").entry.is_empty());
+    assert_ne!(page.view_sources(SCREEN, "en-US").entry, "");
 }
 
 #[test]

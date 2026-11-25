@@ -170,7 +170,7 @@ impl Image {
         pixels.truncate(frame.buffer_size());
         if color_type == png::ColorType::Rgb {
             let mut rgba = Vec::with_capacity(pixels.len() / 3 * 4);
-            for pixel in pixels.chunks_exact(3) {
+            for pixel in pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(pixel);
                 rgba.push(u8::MAX);
             }

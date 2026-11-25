@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn without_a_disk_configuration_neither_tier_is_opened() {
         let (platform, notes) = NativePlatform::new(None);
-        assert!(cache_notes(&notes).is_empty());
+        assert_eq!(cache_notes(&notes), [] as [&String; 0]);
         let parts = platform.into_parts();
         assert!(parts.bytes.is_none());
         assert!(parts.artifacts.is_none());

@@ -89,7 +89,7 @@ fn a_foreign_namespace_subtree_is_dropped() {
 Some(XmlNamespace::Svg))
     .expect("parses");
     let svg = doc.dom.append_svg_markup(doc.root, &markup, || ());
-    assert!(doc.dom.get(svg).expect("live").child_ids().is_empty());
+    assert_eq!(doc.dom.get(svg).expect("live").child_ids(), []);
 }
 
 #[test]

@@ -220,7 +220,7 @@ fn focus_moves_between_hosts_with_the_four_events_in_order() {
 
     assert!(!doc.focus(plain), "only editing hosts are focusable");
     assert_eq!(doc.focused(), None);
-    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.take_focus_events(), []);
 
     assert!(doc.focus(first));
     assert!(doc.focus(first), "focusing the focused element is a no-op");
@@ -301,7 +301,7 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
     doc.take_focus_events();
     doc.set_attribute(host, "contenteditable", "False");
     assert_eq!(doc.focused(), None, "no longer a host");
-    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.take_focus_events(), []);
     doc.set_attribute(host, "contenteditable", "true");
     assert!(doc.focus(host));
     doc.remove_attribute(host, "contenteditable");
@@ -381,7 +381,7 @@ fn delete_backward_takes_a_code_point_an_emoji_or_a_line_break() {
         select(&mut doc, 0..0);
         let outcome = doc.apply_editing(Command::DeleteBackward);
         assert!(!outcome.applied);
-        assert!(outcome.events.is_empty());
+        assert_eq!(outcome.events, []);
     }
 }
 
@@ -783,7 +783,7 @@ fn an_element_child_makes_the_host_read_only() {
         ] {
             let outcome = doc.apply_editing(command.clone());
             assert!(!outcome.applied, "{command:?}");
-            assert!(outcome.events.is_empty());
+            assert_eq!(outcome.events, []);
         }
         assert_eq!(value(&doc), "ab");
         assert!(
@@ -845,7 +845,7 @@ fn the_input_state_reports_value_offsets_and_geometry() {
             input.caret,
             rect(origin.x + 5.0 + 10.0, origin.y + 3.0 + 10.0, 1.0, 10.0)
         );
-        assert!(input.composition_bounds.is_empty());
+        assert_eq!(input.composition_bounds, []);
 
         doc.set_attribute(host, "inputmode", "bogus");
         assert_eq!(state(&doc).input_mode, InputMode::Default);
@@ -981,7 +981,7 @@ fn a_retained_selection_outlives_editing_but_not_the_node() {
     select(&mut doc, 2..4);
     doc.set_attribute(host, "contenteditable", "false");
     assert_eq!(doc.focused(), None);
-    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.take_focus_events(), []);
     assert_eq!(doc.host_selection(host), Some(2..4), "read-only keeps it");
     doc.set_attribute(host, "contenteditable", "");
     assert!(doc.focus(host));
@@ -1591,7 +1591,7 @@ fn a_host_that_is_not_rendered_cannot_hold_focus() {
         assert_eq!(doc.focused(), Some(host), "until the pass");
         doc.layout();
         assert_eq!(doc.focused(), None);
-        assert!(doc.take_focus_events().is_empty());
+        assert_eq!(doc.take_focus_events(), []);
         assert!(
             !doc.get(host)
                 .unwrap()
@@ -2240,7 +2240,7 @@ fn a_root_s_session_ends_with_its_root() {
     doc.remove_element(root);
     assert_eq!(doc.selection_host(), None, "left the document");
     assert!(took_selectionchange(&mut doc));
-    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.take_focus_events(), []);
 
     doc.append_child(doc.document_element().id(), root);
     doc.layout();

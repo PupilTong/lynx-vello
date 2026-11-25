@@ -251,7 +251,7 @@ fn query_selector_id_last(bencher: divan::Bencher, rows: usize) {
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_class_present(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
-    assert!(!query_all(&page, ".warm").is_empty());
+    assert_ne!(query_all(&page, ".warm"), []);
     bench_query(bencher, &page, ".warm", true);
 }
 
@@ -260,7 +260,7 @@ fn query_selector_all_class_absent(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
     // The whole walk is dead work: a populated subtree bloom filter rejects
     // this at the root instead.
-    assert!(query_all(&page, ".absent").is_empty());
+    assert_eq!(query_all(&page, ".absent"), []);
     bench_query(bencher, &page, ".absent", true);
 }
 
@@ -269,7 +269,7 @@ fn query_selector_all_class_absent(bencher: divan::Bencher, rows: usize) {
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_descendant_hit(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
-    assert!(!query_all(&page, ".hot row").is_empty());
+    assert_ne!(query_all(&page, ".hot row"), []);
     bench_query(bencher, &page, ".hot row", true);
 }
 
@@ -279,7 +279,7 @@ fn query_selector_all_descendant_miss(bencher: divan::Bencher, rows: usize) {
     // Every row matches the rightmost compound, then climbs to the root before
     // giving up — the same rightmost `row` as the hit case, so the difference
     // is the ancestor walk alone.
-    assert!(query_all(&page, ".absent row").is_empty());
+    assert_eq!(query_all(&page, ".absent row"), []);
     bench_query(bencher, &page, ".absent row", true);
 }
 

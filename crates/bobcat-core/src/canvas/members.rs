@@ -410,7 +410,7 @@ fn install_context_members(
             // Each radius is an `[x, y]` pair; a caller writes a number `r`
             // as `r, r`.
             let pairs: SmallVec<[[f64; 2]; 4]> =
-                radii.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+                radii.as_chunks::<2>().0.iter().copied().collect();
             on_path!(this, target, |path| path.round_rect(x, y, w, h, &pairs)).map(outcome)
         }
 

@@ -1382,7 +1382,7 @@ mod tests {
             first.execute("delete globalThis.observer;");
             second.collect();
             assert_eq!(first.messages(), [r#""finalized""#]);
-            assert!(second.messages().is_empty());
+            assert_eq!(second.messages(), [] as [String; 0]);
         });
     }
 

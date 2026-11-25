@@ -279,7 +279,7 @@ fn an_empty_box_with_padding_takes_part_in_the_line() {
     // Without an edge it is nothing at all: no line, no fragment.
     let bare = committed(&[open(&style, 0.0, 0.0), CLOSE], None);
     assert_eq!(bare.size().height, 0.0);
-    assert!(bare.fragments().is_empty());
+    assert_eq!(bare.fragments(), []);
 }
 
 #[test]

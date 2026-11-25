@@ -651,7 +651,7 @@ mod tests {
         let inner = element_under(&mut document, view, "view", "width: 10px; height: 10px");
         document.set_attribute(view, SRC_ATTRIBUTE, SOURCE);
 
-        assert!(document.take_wanted_images().is_empty());
+        assert_eq!(document.take_wanted_images(), []);
         document.layout();
         assert_eq!(
             document.rounded_layout(inner).expect("laid out").size.width,
@@ -744,7 +744,7 @@ mod tests {
         ] {
             let mut document = document();
             let element = image(&mut document, "width: 100px; height: 60px");
-            assert!(document.take_wanted_images().is_empty());
+            assert_eq!(document.take_wanted_images(), []);
 
             set(&mut document, element, attribute, Some(url));
             assert_eq!(

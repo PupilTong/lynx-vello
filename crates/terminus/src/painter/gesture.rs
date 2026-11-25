@@ -1225,7 +1225,7 @@ mod tests {
         harness.out.clear();
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.2);
         harness.feed_routed(mouse(1, PointerPhase::Up, 10.0, 10.0), None, 0.3);
-        assert!(clicks(&harness).is_empty());
+        assert_eq!(clicks(&harness), [] as [String; 0]);
     }
 
     #[test]
@@ -1835,7 +1835,7 @@ mod tests {
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(mouse(1, PointerPhase::Move, 12.0, 10.0), 0.05);
         harness.feed(mouse(1, PointerPhase::Up, 12.0, 10.0), 0.1);
-        assert!(harness.touch_trace().is_empty());
+        assert_eq!(harness.touch_trace(), [] as [String; 0]);
         assert_eq!(
             harness.emitted(),
             [

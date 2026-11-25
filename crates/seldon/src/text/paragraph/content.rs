@@ -1389,7 +1389,7 @@ mod tests {
         // nothing; 'b' and a surrogate pair.
         assert_eq!(block.item_units, [0..3, 3..4, 4..6, 6..9]);
         assert_eq!(block.map.source_len(), 9);
-        assert!(normalize(&[]).item_units.is_empty());
+        assert_eq!(normalize(&[]).item_units, []);
     }
 
     #[test]
@@ -1435,8 +1435,8 @@ mod tests {
     fn leading_boxes_and_box_only_content_normalize_without_text() {
         let style = RunStyle::default();
         let block = normalize(&[atom(1), atom(2)]);
-        assert!(block.text.is_empty());
-        assert!(block.ranges.is_empty());
+        assert_eq!(block.text, "");
+        assert_eq!(block.ranges, []);
         assert_eq!(block.map.source_len(), 2);
         assert_eq!(
             block.boxes,
@@ -1481,13 +1481,13 @@ mod tests {
     fn fully_collapsible_and_empty_inputs_produce_nothing() {
         let style = RunStyle::default();
         let whitespace = normalize(&[run(&style, " \t\r\n")]);
-        assert!(whitespace.text.is_empty());
-        assert!(whitespace.ranges.is_empty());
+        assert_eq!(whitespace.text, "");
+        assert_eq!(whitespace.ranges, []);
         assert_eq!(whitespace.map.source_len(), 4);
         assert_eq!(whitespace.map.unit_to_byte("", 2), Some(0));
 
         let nothing = normalize(&[]);
-        assert!(nothing.text.is_empty());
+        assert_eq!(nothing.text, "");
         assert_eq!(nothing.map.source_len(), 0);
         assert_eq!(nothing.map.unit_to_byte("", 0), None);
     }
@@ -1968,7 +1968,7 @@ mod tests {
             "a\nb"
         );
         // Only whitespace: nothing at all.
-        assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
+        assert_eq!(normalize(&[run(&style, " \n\t ")]).text, "");
     }
     #[test]
     fn a_masked_run_shows_one_mask_per_source_character_white_space_included() {
@@ -1977,7 +1977,7 @@ mod tests {
         let block = normalize(&[masked(&style, "a\u{1F600} \n\tb")]);
         assert_eq!(block.text, "\u{2022}".repeat(6));
         // Nothing collapses, nothing breaks, no tab stop.
-        assert!(block.tabs.is_empty());
+        assert_eq!(block.tabs, []);
         assert_eq!(block.map.source_len(), 7);
         assert_eq!(block.item_units.first(), Some(&(0..7)));
         // Masks start at bytes 0, 3, …, 15; their source chars at units
@@ -2094,7 +2094,7 @@ mod tests {
         let style = RunStyle::default();
         let (_, plain) = super::normalize(&[run(&style, "a  b \n c ")], WhiteSpaceProcessing::Css);
         assert!(plain.markers.is_empty());
-        assert!(plain.space_kept.is_empty());
+        assert_eq!(plain.space_kept, []);
 
         // A removed sequence at the start, a kept one between `a` and `b`,
         // and a marker in none.

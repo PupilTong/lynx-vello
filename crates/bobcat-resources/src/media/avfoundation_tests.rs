@@ -340,6 +340,6 @@ fn an_unreadable_file_fails() {
         panic!("one failure: {events:?}");
     };
     assert_eq!(error.kind, MediaErrorKind::Playback);
-    assert!(!error.message.is_empty());
-    assert!(sink.frames().is_empty());
+    assert_ne!(error.message, "");
+    assert_eq!(sink.frames(), [] as [[u8; 4]; 0]);
 }

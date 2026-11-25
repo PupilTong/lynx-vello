@@ -1412,10 +1412,6 @@ fn painted(frame: &CommittedFrame, property: LonghandId, t: f64) -> AnimationVal
 /// progress the old one had reached — rather than from the last tick's. The
 /// next frame anchors it, and the export resumes from that value.
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "a linear progress at a binary fraction is exact"
-)]
 fn a_retarget_mid_flight_reverses_from_the_painted_value() {
     let (mut fixture, card) = card(
         ".card { transform: translate(0px, 0px); transition: transform 1s linear; }",

@@ -5315,7 +5315,7 @@ mod implementation {
                 "{}",
                 error.message
             );
-            assert!(host.borrow().loads.is_empty());
+            assert_eq!(host.borrow().loads, [] as [String; 0]);
         }
 
         #[test]
@@ -7280,7 +7280,7 @@ mod implementation {
                  if (loaded.value.answer !== 42 || globalThis.runs !== 1) throw Error('runs');",
             )
             .unwrap();
-            assert!(host.borrow().loads.is_empty());
+            assert_eq!(host.borrow().loads, []);
             assert!(realm.take_compiled().is_none());
         }
 
@@ -9166,7 +9166,7 @@ mod implementation {
             // SAFETY: the descriptor borrows `owned`, which is alive.
             let read = unsafe { std::slice::from_raw_parts(described.text, described.text_len) };
             assert_eq!(read, &stream);
-            assert!(TransferredBytes::new(&[], 0).unwrap().bytes().is_empty());
+            assert_eq!(TransferredBytes::new(&[], 0).unwrap().bytes(), []);
         }
 
         #[test]

@@ -79,11 +79,9 @@ impl Placement {
         let bytes = index(0, self.span, 0);
         for (row, from) in (self.y0..).zip(read.chunks_exact(bytes)) {
             let dst = index(row, self.x0, self.stride);
-            for (to, from) in out[dst..dst + bytes]
-                .chunks_exact_mut(4)
-                .zip(from.chunks_exact(4))
-            {
-                to.copy_from_slice(&unpremultiply(from));
+            let (texels, _) = out[dst..dst + bytes].as_chunks_mut::<4>();
+            for (to, &from) in texels.iter_mut().zip(from.as_chunks::<4>().0) {
+                *to = unpremultiply(from);
             }
         }
         Ok(out)
@@ -110,7 +108,7 @@ pub(super) fn index(y: i64, x: i64, stride: i64) -> usize {
     usize::try_from((y * stride + x) * 4).expect("pixel inside the buffer")
 }
 
-fn unpremultiply(pixel: &[u8]) -> [u8; 4] {
+fn unpremultiply(pixel: [u8; 4]) -> [u8; 4] {
     let a = u32::from(pixel[3]);
     match a {
         0 => [0; 4],
@@ -128,7 +126,7 @@ fn unpremultiply(pixel: &[u8]) -> [u8; 4] {
     }
 }
 
-pub(super) fn premultiply(pixel: &[u8]) -> [u8; 4] {
+pub(super) fn premultiply(pixel: [u8; 4]) -> [u8; 4] {
     let a = u32::from(pixel[3]);
     let channel = |c: u8| u8::try_from((u32::from(c) * a + 127) / 255).unwrap_or(255);
     [

@@ -1590,10 +1590,6 @@ mod tests {
     /// iteration boundary, here — but re-cascades nothing and owes no
     /// commit; the next tick re-cascades what moved.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the clock is set to exact readings, never computed"
-    )]
     fn a_clock_sync_steps_states_without_a_recascade() {
         let (mut doc, card) = animated_card("animation: slide 1s linear 3");
         doc.dom.advance_animations(0.0);
@@ -1653,10 +1649,6 @@ mod tests {
     /// The timeline never runs backwards, idle or not: a frame post older
     /// than the clock a job synced to leaves the clock where it was.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the clock is set to exact readings, never computed"
-    )]
     fn an_idle_tick_behind_a_sync_keeps_the_clock() {
         let (mut doc, _) = animated_card("");
         doc.dom.sync_animation_clock(1.012);

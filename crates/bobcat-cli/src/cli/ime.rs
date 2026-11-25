@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn an_empty_preedit_with_nothing_composed_sends_nothing() {
         let mut bridge = ImeBridge::default();
-        assert!(bridge.ime(Ime::Preedit(String::new(), None)).is_empty());
+        assert_eq!(bridge.ime(Ime::Preedit(String::new(), None)), []);
         assert_eq!(bridge.flush(), None);
         assert_eq!(
             feed(&mut bridge, vec![Ime::Commit("y".to_owned())]),

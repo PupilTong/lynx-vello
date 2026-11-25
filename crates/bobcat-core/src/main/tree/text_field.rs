@@ -2027,7 +2027,7 @@ mod tests {
         };
         edit(&mut document, compose("n"));
         edit(&mut document, compose("ni"));
-        assert!(queued(&events).is_empty());
+        assert_eq!(queued(&events), []);
         edit(
             &mut document,
             Command::CommitText {

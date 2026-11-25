@@ -908,7 +908,7 @@ fn a_no_op_class_mutation_reports_nothing_unlike_dom_token_list() {
     doc.dom.add_class(element, "one");
     doc.dom.remove_class(element, "absent");
 
-    assert!(take(&log).is_empty());
+    assert_eq!(take(&log), [] as [String; 0]);
 }
 
 #[test]
@@ -1421,7 +1421,7 @@ fn slotchange_does_not_leave_a_nested_components_shadow_tree() {
         }),
     );
     let outer = doc.el(root, "x-outer");
-    assert!(take(&log).is_empty());
+    assert_eq!(take(&log), [] as [String; 0]);
 
     let outer_shadow = doc
         .dom

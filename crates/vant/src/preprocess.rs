@@ -171,11 +171,12 @@ fn windows_1252(byte: u8) -> char {
 }
 
 fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
-    let units = bytes.chunks_exact(2).map(|pair| unit([pair[0], pair[1]]));
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    let units = pairs.iter().map(|&pair| unit(pair));
     let mut text: String = char::decode_utf16(units)
         .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect();
-    if bytes.len() % 2 == 1 {
+    if !rest.is_empty() {
         text.push(char::REPLACEMENT_CHARACTER);
     }
     text

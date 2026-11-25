@@ -520,7 +520,7 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     assert_eq!(present_markup(&mut doc, third, ICON), source);
     assert_eq!(doc.dom.request_image(&source), ICON_STATUS);
     assert_eq!(size_of(&mut doc, third), (48.0, 24.0));
-    assert!(doc.dom.take_document_requests().is_empty());
+    assert_eq!(doc.dom.take_document_requests(), []);
 }
 
 /// New markup presents a new source and forgets the old one, whose bytes
@@ -558,7 +558,7 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
         !doc.dom.needs_render(),
         "the same markup again changes nothing"
     );
-    assert!(doc.dom.take_document_requests().is_empty());
+    assert_eq!(doc.dom.take_document_requests(), []);
 
     // Back to the first markup: a new parse, and the settled one is gone.
     let icon = present_markup(&mut doc, node, ICON);
@@ -592,7 +592,7 @@ fn freeing_the_last_element_forgets_its_source() {
     );
 
     let events: Vec<_> = requests.into_iter().map(host_parse).collect();
-    assert!(doc.dom.apply_image_events(&events).is_empty());
+    assert_eq!(doc.dom.apply_image_events(&events), []);
     assert!(!doc.dom.knows_image_source(&source), "and stays forgotten");
 }
 

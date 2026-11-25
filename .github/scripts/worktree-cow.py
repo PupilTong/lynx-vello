@@ -55,7 +55,7 @@ def primary_checkout(root: Path) -> Path:
 
 def profiles(target: Path) -> list[Path]:
     # Native and cross-compilation layouts, including custom profiles. Avoid
-    # recursively traversing the hundreds of thousands of files in deps/.
+    # recursively traversing the hundreds of thousands of files in build/.
     return sorted({p.parent for pattern in ("*/.cargo-lock", "*/*/.cargo-lock")
                    for p in target.glob(pattern) if not p.parent.is_symlink()})
 
@@ -90,21 +90,20 @@ def clone_tree(source: Path, destination: Path, external: set[str] | None = None
     clone.restype = ctypes.c_int
     links: dict[tuple[int, int], str] = {}
     profile_paths = set(profiles(source)) if external is not None else set()
-    artifact_names = {name.replace("-", "_") for name in (external or set())}
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         path = Path(directory)
         if path in profile_paths:
             # Local packages must rebuild. Copying their accumulated incremental
             # sessions and object files only multiplies obsolete file metadata.
-            return {"incremental", "examples"} & set(names)
-        if path.parent in profile_paths and path.name == "deps":
-            def reusable(name: str) -> bool:
-                crate = name.split("-", 1)[0]
-                return crate in artifact_names or (
-                    crate.startswith("lib") and crate[3:] in artifact_names
-                )
-            return {name for name in names if not reusable(name)}
+            # deps/ and .fingerprint/ belong to Cargo's previous build-dir
+            # layout; a target built by an older toolchain keeps them, but
+            # layout v2 never reads them.
+            return {"incremental", "examples", "deps", ".fingerprint"} & set(names)
+        if path.parent in profile_paths and path.name == "build":
+            # Layout v2 keeps each unit in build/<package>/<hash>/, its
+            # artifacts and fingerprint together; only external packages reuse.
+            return {name for name in names if name not in external}
         return set()
 
     def copy_file(src: str, dst: str) -> str:
@@ -127,28 +126,25 @@ def clone_tree(source: Path, destination: Path, external: set[str] | None = None
 
 def invalidate_local_builds(target: Path, external: set[str]) -> None:
     for profile in profiles(target):
-        fingerprint = profile / ".fingerprint"
-        if not fingerprint.is_dir() or fingerprint.is_symlink():
+        build = profile / "build"
+        if not build.is_dir() or build.is_symlink():
             continue
-        for entry in fingerprint.iterdir():
-            name = entry.name.rsplit("-", 1)[0]
-            if not entry.is_dir() or entry.is_symlink():
+        for package in build.iterdir():
+            if not package.is_dir() or package.is_symlink():
                 continue
-            if name not in external:
+            if package.name not in external:
                 # Also invalidate historical packages no longer in metadata.
                 # Old source mtimes must not make another branch look fresh.
-                shutil.rmtree(entry)
-            else:
+                shutil.rmtree(package)
+                continue
+            for unit in package.iterdir():
+                fingerprint = unit / "fingerprint"
+                if unit.is_symlink() or not fingerprint.is_dir() or fingerprint.is_symlink():
+                    continue
                 # Even external build scripts emit absolute OUT_DIR paths.
                 # Keep their compiled executables, but rerun the scripts.
-                for stamp in entry.glob("run-build-script-*"):
+                for stamp in fingerprint.glob("run-build-script-*"):
                     stamp.unlink()
-        build = profile / "build"
-        if build.is_dir() and not build.is_symlink():
-            for entry in build.iterdir():
-                if entry.is_dir() and not entry.is_symlink():
-                    if entry.name.rsplit("-", 1)[0] not in external:
-                        shutil.rmtree(entry)
 
 
 def seed(source: Path, root: Path, external: set[str], replace: bool) -> bool:

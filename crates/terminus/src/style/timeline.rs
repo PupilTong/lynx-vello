@@ -141,7 +141,7 @@ impl ProgressTiming {
             None => Some((0.0, length / iterations)),
             Some(duration) => {
                 let total = delay + duration * iterations;
-                (total > 0.0).then(|| (delay * length / total, duration * length / total))
+                (total > 0.0).then_some((delay * length / total, duration * length / total))
             }
         };
         let (start_delay, iteration, end) = proportions

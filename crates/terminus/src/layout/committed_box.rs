@@ -720,7 +720,7 @@ mod tests {
         for key in 1..8 {
             table.note(id(key), CommittedBox::default());
         }
-        assert!(publish(&mut table).is_empty());
+        assert_eq!(publish(&mut table), []);
         assert!(table.get(4).is_empty());
         assert!(!table.uses_container_units());
     }
@@ -736,7 +736,7 @@ mod tests {
 
         // Re-recording the published size is not a move.
         table.note(id, container(200.0, Some(100.0)));
-        assert!(publish(&mut table).is_empty());
+        assert_eq!(publish(&mut table), []);
 
         // Two commits in one pass publish the last of them. Ending where
         // they started still reports a move — once per record replayed —
@@ -768,7 +768,7 @@ mod tests {
         // Recording nothing for an unreached key leaves the table empty, which
         // is what a page with no `auto` keyword does on every commit.
         table.note(id(9), CommittedBox::default());
-        assert!(publish(&mut table).is_empty());
+        assert_eq!(publish(&mut table), []);
         assert_eq!(table.get(9), CommittedBox::default());
     }
 

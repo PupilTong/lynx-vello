@@ -664,7 +664,7 @@ mod rust_walk {
             document.take_observed_name_changes().is_empty(),
             "a change undone before the drain is not reported"
         );
-        assert!(take(&log).is_empty());
+        assert_eq!(take(&log), [] as [String; 0]);
     }
 
     #[test]

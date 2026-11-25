@@ -35,7 +35,7 @@ fn decodes_card_with_css() {
     let style_info = template.style_info.as_ref().unwrap();
     assert_eq!(style_info.css_id_to_style_sheet.len(), 1);
     let sheet = &style_info.css_id_to_style_sheet[&0];
-    assert!(sheet.imports.is_empty());
+    assert_eq!(sheet.imports, [] as [i32; 0]);
     assert_eq!(sheet.rules.len(), 1);
     let rule = &sheet.rules[0];
     assert_eq!(rule.kind, RuleKind::Style);
@@ -98,8 +98,8 @@ fn decodes_large_style_info() {
     for sheet in style_info.css_id_to_style_sheet.values() {
         for rule in &sheet.rules {
             for declaration in &rule.declaration_block.declarations {
-                assert!(!declaration.property.name().is_empty());
-                assert!(!declaration.value_text().is_empty());
+                assert_ne!(declaration.property.name(), "");
+                assert_ne!(declaration.value_text(), "");
             }
         }
     }

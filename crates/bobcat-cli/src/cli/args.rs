@@ -423,7 +423,7 @@ mod tests {
         else {
             panic!("expected a runnable invocation");
         };
-        assert!(options.preload_scripts.is_empty());
+        assert_eq!(options.preload_scripts, [] as [String; 0]);
 
         let Invocation::Run(options) = parse(args(&[
             "-i",

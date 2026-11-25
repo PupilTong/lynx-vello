@@ -532,7 +532,7 @@ fn empty_and_whitespace_only_content_has_no_line_box() {
     let style = ahem(10.0, LineHeight::Normal);
     for runs in [vec![], vec![run(&style, "  \n\t ")]] {
         let flow = committed(container(style.clone()), &runs, Some(100.0));
-        assert!(flow.line_geometry().is_empty());
+        assert_eq!(flow.line_geometry(), []);
         assert_close(flow.size().height, 0.0);
         assert_close(flow.size().width, 0.0);
         assert_eq!(flow.first_baseline(), None);
@@ -567,8 +567,8 @@ fn empty_content_that_keeps_a_strut_line_lays_out_one_empty_line() {
             assert_eq!(flow.last_baseline(), Some(15.0));
             assert_close(flow.min_content_width(&mut context, 0.0), 0.0);
             assert_close(flow.max_content_width(&mut context, 0.0), 0.0);
-            assert!(flow.atoms().is_empty());
-            assert!(flow.fragments().is_empty());
+            assert_eq!(flow.atoms(), []);
+            assert_eq!(flow.fragments(), []);
             assert_eq!(
                 flow.range_boxes(0, 0).map(|boxes| boxes.len()),
                 Some(1),
@@ -588,7 +588,7 @@ fn empty_content_that_keeps_a_strut_line_lays_out_one_empty_line() {
 fn the_strut_line_is_only_for_empty_content_that_asks_for_it() {
     let style = ahem(10.0, LineHeight::Normal);
     let flow = committed(container(style.clone()), &[], Some(100.0));
-    assert!(flow.line_geometry().is_empty());
+    assert_eq!(flow.line_geometry(), []);
 
     let keeping = InlineFlowStyle {
         strut_line_when_empty: true,

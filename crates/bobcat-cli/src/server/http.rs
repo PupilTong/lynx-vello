@@ -591,7 +591,7 @@ mod tests {
                 "error": {"message": "The screenshot could not be uploaded to TOS."}
             })
         );
-        assert!(store.stored_objects().is_empty());
+        assert_eq!(store.stored_objects(), []);
         headless.shutdown().unwrap();
     }
 
@@ -810,7 +810,7 @@ mod tests {
             let error: Value = serde_json::from_slice(&body).unwrap();
             assert!(error["error"]["message"].is_string());
         }
-        assert!(store.stored_objects().is_empty());
+        assert_eq!(store.stored_objects(), []);
         headless.shutdown().unwrap();
     }
 
