@@ -732,6 +732,16 @@ impl LynxGroup {
         // `bobcat-main`, parked in its scheduler, never does.
         #[cfg(target_arch = "wasm32")]
         let alarm_clock = crate::alarm::start()?;
+        // On wasm32 a canvas's GPU steps are queued for this thread, which
+        // holds the device; queuing one wakes it, and its painter applies
+        // the queue at the start of each turn (`Painter::pump`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let requester = Arc::clone(&event_requester);
+            terminus::link::render::canvas::set_waker(Arc::new(move || {
+                requester.request_event();
+            }));
+        }
         // The group's second runtime, started here beside `bobcat-main`
         // rather than by it: `bobcat-main` is handed one sender on it and its
         // trap flag, and nothing else. First, because a `bobcat-main` that
@@ -931,6 +941,7 @@ impl LynxGroup {
         // anywhere later would already be behind them. It needs no document —
         // fonts and the default family are a `terminus::link::TextContext`'s business,
         // and a document only ever adopts a finished one.
+        let worker_fonts = Arc::new(WorkerFonts::of(&sources));
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
             std::mem::take(&mut sources.fonts),
@@ -952,6 +963,8 @@ impl LynxGroup {
         // until then, and its first `__FlushElementTree` parks on this.
         let (metrics, metric_receiver) = watch::channel(None);
         let scroll = Arc::new(ScrollMailbox::default());
+        let canvases = Arc::new(crate::paint::CanvasPictures::default());
+        let to_main = commands.downgrade();
         // The sink comes first and the store is built *from* it, so a store
         // without its report channel is unrepresentable and the two are paired
         // by construction. That pairing is per view: a host whose registry
@@ -1000,6 +1013,7 @@ impl LynxGroup {
                 // fonts, the sheets and the entry were spent above.
                 sources,
                 text_context,
+                worker_fonts,
                 startup: StartupSources { sheets, entry },
                 native_modules: crate::native_module::encode_table(&table),
                 native_esms: Arc::new(native_esms),
@@ -1013,6 +1027,8 @@ impl LynxGroup {
                 style_sheet_probe: fetcher.style_sheet_probe(),
                 base_url,
                 registry: Arc::clone(&registry),
+                canvases: Arc::clone(&canvases),
+                to_main,
             })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
@@ -1031,6 +1047,7 @@ impl LynxGroup {
                 metrics,
                 images: Rc::clone(&fetcher)
                     as Rc<dyn FrameImages<PlatformFrame = F::PlatformFrame>>,
+                canvases,
                 scroll,
                 registry,
             }),
@@ -1823,6 +1840,8 @@ pub(crate) struct ViewAttachment {
     /// This view's fonts, default family and locale, already registered and
     /// validated on the embedder's thread.
     pub(crate) text_context: terminus::link::TextContext,
+    /// The same fonts, family and locale, for the view's worker realms.
+    pub(crate) worker_fonts: Arc<WorkerFonts>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
     /// The embedder's native modules as the BTS realm hears about them: one
@@ -1859,6 +1878,11 @@ pub(crate) struct ViewAttachment {
     pub(crate) base_url: Arc<url::Url>,
     /// The view's pipeline registry, shared with its seat.
     pub(crate) registry: Arc<PipelineRegistry>,
+    /// The view's placeholder canvases, shared with its seat.
+    pub(crate) canvases: Arc<crate::paint::CanvasPictures>,
+    /// The view's command channel, held weakly and outside the seat's
+    /// count, for a canvas presenter's `ToMain::CanvasResized`.
+    pub(crate) to_main: mpsc::WeakUnboundedSender<ToMain>,
 }
 
 /// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
@@ -2005,6 +2029,43 @@ pub(crate) fn stage_text_context(
         return Err(EngineError::InvalidLocale(locale.to_owned()).into());
     }
     Ok(text)
+}
+
+/// A view's [`ViewSources::fonts`], [`ViewSources::default_font_family`],
+/// [`ViewSources::fallback_fonts`] and [`ViewSources::locale`], which a
+/// worker realm of the view shapes its canvas text with: the host's fonts,
+/// and on wasm32, which has no system fonts, the only ones there are. Not
+/// the document's `@font-face` faces.
+#[derive(Debug, Default)]
+pub(crate) struct WorkerFonts {
+    fonts: Vec<FontBlob>,
+    default_font_family: Option<String>,
+    fallback_fonts: Vec<FontBlob>,
+    locale: String,
+}
+
+impl WorkerFonts {
+    fn of(sources: &ViewSources) -> Self {
+        Self {
+            fonts: sources.fonts.clone(),
+            default_font_family: sources.default_font_family.clone(),
+            fallback_fonts: sources.fallback_fonts.clone(),
+            locale: sources.locale.clone(),
+        }
+    }
+
+    /// A text context over these fonts and the system's. The view staged
+    /// the same set once already, so only the default value, which no view
+    /// holds, takes the fallback: the system fonts alone.
+    pub(crate) fn text_context(&self) -> terminus::link::TextContext {
+        stage_text_context(
+            self.fonts.clone(),
+            self.default_font_family.as_deref(),
+            self.fallback_fonts.clone(),
+            &self.locale,
+        )
+        .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

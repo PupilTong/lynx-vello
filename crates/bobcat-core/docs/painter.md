@@ -222,3 +222,55 @@ trait's default does nothing, so on a host without document support an
 target, and `bobcat-core` has no SVG parser dependency of its own. The
 `JsThread` runtime runs no blocking work and is dropped plainly at group
 teardown (`DetachingRuntime` went with the engine-side parse).
+
+## Placeholder canvases (`paint/canvas_pictures.rs`)
+
+The `<canvas>` element, its context mode and `transferControlToOffscreen()`
+are `terminus`'s (`terminus::link::html::canvas`, defined with
+`Document::define_html_elements`); this crate owns the parts that are not a
+DOM concept. `create_lynx_view` makes one `CanvasPictures` per view, kept
+in the view's seat and in its `ViewOutbox` (`ViewOutbox::canvases`), with
+a weak, uncounted handle on the view's command channel
+(`ViewOutbox::main`).
+
+- `paint::canvas_pictures::transfer_control_to_offscreen(outbox, document,
+  canvas)` runs on `bobcat-main`: it calls `terminus`'s, registers the
+  answered `CanvasFrames` in the view's `CanvasPictures`, and answers a
+  `Transferred { width, height, presenter }`, or `InvalidState`. The MTS
+  realm's `canvasTransferControl` member calls it, and the realm's canvas
+  table commits through the presenter at the end of each entry that
+  changed the canvas (`docs/canvas.md`).
+- `CanvasPresenter` is `Send` and `Clone`, and holds its registry entry
+  weakly; the entry holds the element's link weakly, the view's
+  `EventRequester` and the weak command handle.
+  `commit(&mut terminus::link::html::canvas::OffscreenCanvas)` is HTML's update of
+  the placeholder: the canvas replays what it recorded and its texture is copied, on the GPU, into the
+  texture the picture draws from (`OffscreenCanvas::commit`, over `terminus`'s
+  `Surface::commit`), and only then is the new generation published, so the
+  painter never draws a commit half copied. Nothing queues. When the commit
+  owes a wake it calls `EventRequester::request_event`; when it owes a
+  resize it sends one `ToMain::CanvasResized`, which carries no pixels, is
+  sent outside the seat's `CommandSender` and is not counted by a frame
+  post's fence, and on which main calls `update_placeholders`. After the
+  element is freed or the view is gone a commit does nothing and wakes
+  nobody.
+- The painter adopts through `ViewImages`, built per poll over the seat's
+  `CanvasPictures` and its store: a registered picture is described from
+  its link (`CanvasFrames::describe`: the newest commit's generation, no
+  pixels), has no frame to take and is never wanted from the store; every
+  other picture is asked of the store unchanged, and `retain` and `release`
+  go to the store. The painter draws the picture's texture once its
+  written generation is the described one. A canvas never transferred has
+  no entry, so the store answers `None` for it; a placeholder with nothing
+  committed describes as `None`. Neither draws or makes
+  `Painter::awaits_pictures` true. The picture's texture is leased by the
+  element's link until the element is freed, so the bitmap budget never
+  releases it. Entries of freed canvases are dropped at the next
+  registration.
+- On wasm32 the canvas GPU steps of every engine thread queue for the
+  thread that holds the device: `LynxViewGroup::new` registers the group's
+  `EventRequester` as the queue's waker, and `Painter::pump` applies the
+  queue first in each turn (`terminus::link::render::canvas::drain`).
+
+Tests: `paint/canvas_tests.rs`, through a real view and an offscreen
+painter.

@@ -2622,6 +2622,64 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// A `canvas`'s `transferControlToOffscreen` answers through both invoke
+/// paths: the background thread's `invoke` gets `{token, width, height}`,
+/// plain numbers in the reply; the canvas, now a placeholder, answers the
+/// main thread's `__InvokeUIMethod` of it with 7, `INVALID_STATE_ERROR`; a
+/// `view` takes the generic path and answers 3. The token attaches in the
+/// main thread's realm too, at the placeholder's size.
+#[test]
+fn invokes_of_transfer_control_to_offscreen_answer_a_token_then_7() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        const canvas = __CreateElement('canvas', 0); __SetID(canvas, 'c');
+        __SetAttribute(canvas, 'width', '4'); __SetAttribute(canvas, 'height', '2');
+        const view = __CreateView(0);
+        __AppendElement(page, canvas);
+        __AppendElement(page, view);
+        globalThis.canvas = canvas;
+        globalThis.view = view;
+        globalThis.result = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
+        ",
+        Some(
+            r"
+        import { lynx } from 'bobcat:bts-runtime';
+        lynx.createSelectorQuery().select('#c').invoke({
+            method: 'transferControlToOffscreen',
+            fail: result => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:result}),
+            success: data => lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{code:0, data}}),
+        }).exec();
+        ",
+        ),
+    );
+    // The invoke crosses the Worker, then the application result.
+    for _ in 0..2 {
+        pair.deliver();
+    }
+    pair.check(
+        r"
+        import { __InvokeUIMethod } from 'bobcat:element';
+        import { canvasAttach } from 'bobcat-internal:host';
+        const { code, data } = result;
+        if (code !== 0 || typeof data.token !== 'number' || data.width !== 4 || data.height !== 2) {
+            throw Error(JSON.stringify(result));
+        }
+        let answer;
+        __InvokeUIMethod(canvas, 'transferControlToOffscreen', {}, value => { answer = value; });
+        if (answer.code !== 7 || answer.data !== undefined) throw Error(JSON.stringify(answer));
+        __InvokeUIMethod(view, 'transferControlToOffscreen', {}, value => { answer = value; });
+        if (answer.code !== 3) throw Error(JSON.stringify(answer));
+        const attached = canvasAttach(data.token);
+        if (!(attached instanceof ArrayBuffer)) throw Error('not attached: ' + attached);
+        const [, width, height] = new Float64Array(attached);
+        if (width !== 4 || height !== 2) throw Error(`${width}x${height}`);
+    ",
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
 /// Every realm sends its own console output and `lynx.reportError`s to the
 /// view's host, named by its source: the BTS's reach the embedder without a
 /// message to the main-thread realm, and a level is spelled as the console

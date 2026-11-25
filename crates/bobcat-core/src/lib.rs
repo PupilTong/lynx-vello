@@ -38,6 +38,7 @@ mod background;
 /// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
+mod canvas;
 mod clock;
 mod code_cache;
 mod esm;

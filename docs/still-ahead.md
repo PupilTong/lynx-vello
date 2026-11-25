@@ -86,6 +86,70 @@ would host it:
   image's frames by index; gdk-pixbuf and the browser's `Image` decoder answer
   the first frame (`docs/picture-source-design.md` step 5 takes up the
   browser). No `region-to-decode` and no `blur-radius` post-processing.
+- **Canvas for cards** (`crates/bobcat-core/docs/canvas.md`, "Cards"). The
+  engine gives cards no canvas API and no canvas globals. The Canvas 2D API
+  exists as `canvas*` host members of `bobcat-internal:host` in every realm
+  kind, declared in `packages/bobcat-element/src/canvas-host.d.ts`; a canvas
+  moves between a view's realms by token (`canvasDetach`/`canvasAttach`),
+  and a `canvas`'s `transferControlToOffscreen` UI method answers such a
+  token through `__InvokeUIMethod` and the background thread's
+  `SelectorQuery.invoke`. A card-facing API is an embedder's to write, in
+  the ES module of a `NativeModule` (`lynx:<name>`, `NativeModule::esm`),
+  which writes itself:
+  - the class layer and Web IDL's argument conversions, since a member
+    converts nothing;
+  - a `DOMException` to throw the exception names the members answer,
+    since no realm has one;
+  - the values the members do not read back: `fillStyle`, `strokeStyle`,
+    `shadowColor` and `font`;
+  - `canvasDrop` of an entry once its object is collected, through a
+    `FinalizationRegistry`.
+
+  What the engine lacks for that route:
+  - an image source other than a canvas, an image bitmap or raw RGBA8
+    pixels: nothing decodes an image from a URL or from bytes;
+  - `lynx:` modules in the MTS realm: `bobcat-main`'s runtime reserves the
+    prefix (`crates/bobcat-core/src/esm.rs`, `build_main_runtime`), so the
+    route covers the BTS and `Worker`s;
+  - an `esm()` from the browser embedder: no native module `bobcat-wasm`
+    registers supplies one and `BobcatCanvas.create` has no option that takes
+    one, while `bobcat-core`'s `esm` path is the same on wasm32.
+- **The rest of the canvas surface** (`crates/bobcat-core/docs/canvas.md`,
+  `docs/terminus-architecture.md` "Canvas 2D context"). Not built:
+  - A bitmap of a network image: `canvasBitmapFrom` takes a canvas or an
+    image bitmap and `canvasBitmapFromPixels` RGBA8 pixels, with no `Blob`
+    or URL source. It would decode through the platform decoder
+    (`vant::ImageDecoder`; `BrowserDecoder` on wasm32) into a
+    `terminus::link::html::canvas::Image`, from a host member in
+    `crates/bobcat-core/src/canvas/members.rs`.
+  - Encoding a canvas (HTML's `toDataURL`/`toBlob`/`convertToBlob`):
+    nothing encodes an image. It would read the bitmap back as
+    `canvasGetImageData` does (`Context2d::read_image_data`) and need an
+    encoder; `vant::Platform` has a decoder and no encoder.
+  - A `2d` context mode on the `<canvas>` element itself: the element has
+    context modes `none` and `placeholder` only
+    (`crates/terminus/src/html/canvas/mod.rs`); a `2d` mode would bind a
+    `terminus::link::html::canvas::OffscreenCanvas` to the element's
+    picture.
+  - `x-canvas`, web-elements' deprecated wrapper: no component is defined
+    for the tag (`crates/bobcat-core/src/main/tree/`).
+  - The `bitmaprenderer`, `webgl`, `webgl2` and `webgpu` contexts: a
+    context would be a new mode of the canvas entry in
+    `crates/bobcat-core/src/canvas/mod.rs` over its own `Surface` texture
+    (`crates/terminus/src/render/canvas.rs`, which is private to `terminus`,
+    as the 2D context's is).
+  - The context's `filter`, `letterSpacing`, `wordSpacing`, `fontKerning`,
+    `fontStretch`, `fontVariantCaps`, `textRendering` and `lang`
+    attributes; `small-caps` parses and is not drawn. They are
+    `terminus::link::html::canvas::Context2d` state
+    (`crates/terminus/src/html/canvas/context2d/`) with no host member.
+  - Bitmap color glyphs (`sbix`/`CBDT` emoji), which draw nothing
+    (`crates/terminus/src/html/canvas/context2d/text.rs`).
+  - A test that runs the wasm32 canvas path: the Render Worker's op queue
+    (`terminus::link::render::canvas::drain`), which renders every canvas
+    replay and readback on wasm32, and the parked `canvasGetImageData`
+    wait (`crates/bobcat-core/src/canvas/mod.rs`, `ReadWait`) are compiled
+    and run by no test.
 - **Import maps, import attributes, JSON *ESM* modules and Lynx component-bundle
   imports**, and the asynchronous half of the compiled-bundle loader:
   `requireModuleAsync` and `loadScriptAsync`. Lazy containers themselves are

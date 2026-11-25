@@ -438,6 +438,9 @@ impl Worker {
                         },
                         // A worker's children get the core alone.
                         None,
+                        // A worker sees the view's host fonts and the
+                        // platform's, not a document's.
+                        crate::canvas::CanvasHost::Worker(Arc::clone(self.host.worker_fonts())),
                         |engine| {
                             let events = self.events.clone();
                             let key = self.key;

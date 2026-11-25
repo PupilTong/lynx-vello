@@ -228,9 +228,10 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
                     let ViewAttachment {
-                        viewport, sources, text_context, startup, native_modules, native_esms,
+                        viewport, sources, text_context, worker_fonts, startup, native_modules,
+                        native_esms,
                         commands, metrics, scroll, notices, frames, cancel, fetch_probe,
-                        style_sheet_probe, base_url, registry,
+                        style_sheet_probe, base_url, registry, canvases, to_main,
                     } = *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
@@ -242,7 +243,9 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         base_url,
                         registry,
                     )
-                    .with_native_esms(native_esms);
+                    .with_native_esms(native_esms)
+                    .with_worker_fonts(worker_fonts)
+                    .with_canvases(canvases, to_main);
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     crate::threads::add_script_panic_reporter({
                         let outbox = outbox.clone();

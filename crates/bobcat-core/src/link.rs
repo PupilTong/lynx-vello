@@ -47,12 +47,14 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::background::{WorkerKey, WorkerMessage};
+use crate::canvas::CanvasHandOver;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::{ModuleReply, NativeModuleEsms};
+use crate::paint::CanvasPictures;
 use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
-use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
+use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport, WorkerFonts};
 
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
@@ -83,6 +85,12 @@ pub(crate) struct HostOutbox {
     /// completes an import of `lynx:<name>` from. It rides here because a
     /// worker's outbox is what travels to the worker thread.
     native_esms: Arc<NativeModuleEsms>,
+    /// The view's store of canvases handed from one realm to another
+    /// (`canvasDetach`/`canvasAttach`). It rides here because every realm
+    /// of the view, a worker's included, opens its canvas table over it.
+    canvas_hand_over: Arc<CanvasHandOver>,
+    /// The view's fonts, which a worker realm's canvas text shapes with.
+    worker_fonts: Arc<WorkerFonts>,
 }
 
 impl HostOutbox {
@@ -102,6 +110,8 @@ impl HostOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            canvas_hand_over: Arc::default(),
+            worker_fonts: Arc::default(),
         }
     }
 
@@ -109,6 +119,28 @@ impl HostOutbox {
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
+    }
+
+    /// This outbox with the view's canvas hand-over store.
+    pub(crate) fn with_canvas_hand_over(mut self, store: Arc<CanvasHandOver>) -> Self {
+        self.canvas_hand_over = store;
+        self
+    }
+
+    /// The view's canvas hand-over store.
+    pub(crate) const fn canvas_hand_over(&self) -> &Arc<CanvasHandOver> {
+        &self.canvas_hand_over
+    }
+
+    /// This outbox with the view's fonts.
+    pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
+        self.worker_fonts = worker_fonts;
+        self
+    }
+
+    /// The view's fonts, for a worker realm's canvas text.
+    pub(crate) const fn worker_fonts(&self) -> &Arc<WorkerFonts> {
+        &self.worker_fonts
     }
 
     /// The view's native module ES modules.
@@ -237,6 +269,12 @@ pub(crate) enum ToMain {
         index: u32,
         arguments: Option<String>,
     },
+    /// A placeholder canvas committed a frame of a new size: main applies
+    /// the committed sizes (`terminus`'s `update_placeholders`). Sent by a
+    /// [`CanvasPresenter`](crate::paint::canvas_pictures::CanvasPresenter) on any thread,
+    /// outside the seat's [`CommandSender`] like [`Self::ModuleCallback`],
+    /// at most once until main has applied it; it carries no pixels.
+    CanvasResized,
     /// A monitor was turned on, or changed, by one of `LynxView`'s
     /// monitor setters: start the view's task that serves it, for as long
     /// as that configuration is the monitor's current one.
@@ -714,6 +752,10 @@ pub(crate) struct ViewSeat<P = std::convert::Infallible> {
     /// of it. A clone of the view's own handle, so the store is released when
     /// the view drops both — seat first, by declaration order there.
     pub(crate) images: Rc<dyn FrameImages<PlatformFrame = P>>,
+    /// The view's placeholder canvases, which the painter answers ahead of
+    /// `images`. Main holds a clone of its own, in the view's
+    /// [`ViewOutbox`].
+    pub(crate) canvases: Arc<CanvasPictures>,
     /// Where the painter posts its scroll offsets, its frame requests and its
     /// clock. Main holds a clone of its own: the seat never leaves this
     /// thread.
@@ -760,6 +802,18 @@ pub(crate) struct ViewOutbox {
     /// This view's native module ES modules, read by `create_lynx_view` and
     /// handed to every [`HostOutbox`] the view makes, a worker's included.
     native_esms: Arc<NativeModuleEsms>,
+    /// This view's fonts, handed to every [`HostOutbox`] the view makes.
+    worker_fonts: Arc<WorkerFonts>,
+    /// This view's placeholder canvases, made by `create_lynx_view` and
+    /// shared with its seat.
+    canvases: Arc<CanvasPictures>,
+    /// This view's command channel, held weakly and outside the seat's
+    /// count: what a canvas presenter sends [`ToMain::CanvasResized`] on.
+    /// `None` for an outbox no view built.
+    main: Option<mpsc::WeakUnboundedSender<ToMain>>,
+    /// This view's store of canvases handed from one realm to another, made
+    /// with the outbox and handed to every [`HostOutbox`] it makes.
+    canvas_hand_over: Arc<CanvasHandOver>,
 }
 
 impl ViewOutbox {
@@ -787,6 +841,10 @@ impl ViewOutbox {
             base,
             registry,
             native_esms: Arc::default(),
+            worker_fonts: Arc::default(),
+            canvases: Arc::default(),
+            main: None,
+            canvas_hand_over: Arc::default(),
         }
     }
 
@@ -795,6 +853,41 @@ impl ViewOutbox {
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
+    }
+
+    /// This outbox with the view's fonts, which every [`HostOutbox`] it
+    /// makes carries.
+    pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
+        self.worker_fonts = worker_fonts;
+        self
+    }
+
+    /// This outbox with the view's placeholder canvases, which its seat
+    /// shares, and the weak handle on the view's command channel a canvas
+    /// presenter sends on.
+    pub(crate) fn with_canvases(
+        mut self,
+        canvases: Arc<CanvasPictures>,
+        main: mpsc::WeakUnboundedSender<ToMain>,
+    ) -> Self {
+        self.canvases = canvases;
+        self.main = Some(main);
+        self
+    }
+
+    /// This view's placeholder canvases.
+    pub(crate) const fn canvases(&self) -> &Arc<CanvasPictures> {
+        &self.canvases
+    }
+
+    /// The weak handle on this view's command channel.
+    pub(crate) const fn main(&self) -> Option<&mpsc::WeakUnboundedSender<ToMain>> {
+        self.main.as_ref()
+    }
+
+    /// What wakes the embedder's thread: see [`Self::wake`].
+    pub(crate) const fn requester(&self) -> &Arc<dyn EventRequester> {
+        &self.requester
     }
 
     /// This view's pipeline registry.
@@ -828,6 +921,8 @@ impl ViewOutbox {
             Arc::clone(&self.registry),
         )
         .with_native_esms(Arc::clone(&self.native_esms))
+        .with_canvas_hand_over(Arc::clone(&self.canvas_hand_over))
+        .with_worker_fonts(Arc::clone(&self.worker_fonts))
     }
 
     /// Announces one notice, then wakes the thread that paints.

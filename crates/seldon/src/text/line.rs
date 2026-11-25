@@ -22,6 +22,7 @@ use parley::{
     BaseDirection, FontFamily, FontFamilyName, FontStyle as ParleyFontStyle,
     FontWeight as ParleyFontWeight, FontWidth, GenericFamily, PositionedLayoutItem, StyleProperty,
 };
+use stylo::values::computed::font::{FontStyle, GenericFontFamily, SingleFontFamily};
 
 use super::TextContext;
 use super::paragraph::Direction;
@@ -68,6 +69,29 @@ impl ResolvedFamily {
     }
 }
 
+impl From<&SingleFontFamily> for ResolvedFamily {
+    /// One entry of a `font-family` list as stylo parsed it.
+    fn from(single: &SingleFontFamily) -> Self {
+        match single {
+            SingleFontFamily::FamilyName(name) => Self::Named(name.name.to_string()),
+            SingleFontFamily::Generic(generic) => Self::Generic(generic_family(*generic)),
+        }
+    }
+}
+
+/// A stylo generic family as parley names it; `none`, the absence of a
+/// generic, is `sans-serif`.
+pub(in crate::text) const fn generic_family(value: GenericFontFamily) -> GenericFamily {
+    match value {
+        GenericFontFamily::None | GenericFontFamily::SansSerif => GenericFamily::SansSerif,
+        GenericFontFamily::Serif => GenericFamily::Serif,
+        GenericFontFamily::Monospace => GenericFamily::Monospace,
+        GenericFontFamily::Cursive => GenericFamily::Cursive,
+        GenericFontFamily::Fantasy => GenericFamily::Fantasy,
+        GenericFontFamily::SystemUi => GenericFamily::SystemUi,
+    }
+}
+
 /// The `font-style` value.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ResolvedFontStyle {
@@ -77,6 +101,30 @@ pub enum ResolvedFontStyle {
     /// `oblique`, with its angle in degrees when the value names one; with
     /// none, parley's default angle, 14 degrees.
     Oblique(Option<f32>),
+}
+
+impl From<FontStyle> for ResolvedFontStyle {
+    /// A computed `font-style`: `normal`, which is `oblique 0deg`, is
+    /// [`Self::Normal`], and any other oblique keeps its angle.
+    fn from(style: FontStyle) -> Self {
+        if style == FontStyle::NORMAL {
+            Self::Normal
+        } else if style == FontStyle::ITALIC {
+            Self::Italic
+        } else {
+            Self::Oblique(Some(style.oblique_degrees()))
+        }
+    }
+}
+
+impl From<ResolvedFontStyle> for ParleyFontStyle {
+    fn from(style: ResolvedFontStyle) -> Self {
+        match style {
+            ResolvedFontStyle::Normal => Self::Normal,
+            ResolvedFontStyle::Italic => Self::Italic,
+            ResolvedFontStyle::Oblique(angle) => Self::Oblique(angle),
+        }
+    }
 }
 
 /// How [`shape_line`] lays its text out, beside the font.
@@ -180,11 +228,7 @@ pub fn shape_line(
     let attributes = Attributes {
         width: FontWidth::from_ratio(font.stretch),
         weight: ParleyFontWeight::new(font.weight),
-        style: match font.style {
-            ResolvedFontStyle::Normal => ParleyFontStyle::Normal,
-            ResolvedFontStyle::Italic => ParleyFontStyle::Italic,
-            ResolvedFontStyle::Oblique(angle) => ParleyFontStyle::Oblique(angle),
-        },
+        style: font.style.into(),
     };
     context.cover(text, [(0..text.len(), &families, attributes)]);
     let (font_context, layout_context, layout) = context.shaping_parts();

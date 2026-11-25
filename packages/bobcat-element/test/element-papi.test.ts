@@ -34,6 +34,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     tagName: native.tagName,
     attributeNames: native.attributeNames,
     callElementMethod: native.callElementMethod,
+    canvasTransferControl: (native as MockBobcat).canvasTransferControl,
+    canvasDetach: (native as MockBobcat).canvasDetach,
     getComputedStyleMap: native.getComputedStyleMap,
     childElementIds: native.childElementIds,
     parentNode: native.parentNode,
@@ -156,6 +158,13 @@ type MockBobcat = BobcatNative & {
    * an element that has not been through a flush.
    */
   answerElementMethod: (nodeId: number, method: string, params: string) => string | number;
+  /**
+   * `canvasTransferControl`: entry 10, 300 × 150, for a node's first
+   * transfer, and `InvalidStateError` after.
+   */
+  canvasTransferControl: (nodeId: number) => ArrayBuffer | string;
+  /** `canvasDetach`: token 40 plus the entry's id. */
+  canvasDetach: (id: number) => number;
   answerComputedStyle: (
     nodeId: number,
     properties: string,
@@ -217,6 +226,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     return id;
   };
   const parents: Map<number, number> = new Map();
+  const transferred: Set<number> = new Set();
   // The real boundary keeps its own child order and reports element children
   // in it, so a mock that only knew parent links could not stand in for the
   // one member whose whole contract is that order.
@@ -382,6 +392,17 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       return tag;
     },
     answerElementMethod: () => 3,
+    canvasTransferControl: (node: unknown) => {
+      const id = nodeId("canvasTransferControl", node);
+      calls.push(["canvasTransferControl", id]);
+      if (transferred.has(id)) return "InvalidStateError";
+      transferred.add(id);
+      return new Float64Array([10, 300, 150]).buffer;
+    },
+    canvasDetach: (id: number) => {
+      calls.push(["canvasDetach", id]);
+      return 40 + id;
+    },
     callElementMethod: (node: unknown, method: unknown, params: unknown) => {
       const id = nodeId("callElementMethod", node);
       calls.push(["callElementMethod", id, method, params]);
@@ -5472,6 +5493,44 @@ function styleRecord(...fields: string[]): string {
 }
 
 describe("__InvokeUIMethod", () => {
+  it("answers a canvas's transferControlToOffscreen with a hand-over token", () => {
+    const canvas = __CreateElement("canvas", 0);
+    const view = __CreateView(0);
+    const answers: unknown[] = [];
+    mock.calls.length = 0;
+    for (const element of [canvas, canvas, view]) {
+      __InvokeUIMethod(element, "transferControlToOffscreen", {}, (result: unknown) =>
+        answers.push(result));
+    }
+    expect(answers).toStrictEqual([
+      { code: 0, data: { token: 50, width: 300, height: 150 } },
+      // Already transferred: native's code for `InvalidStateError`.
+      { code: 7, data: undefined },
+      // Not a canvas: the generic path, whose host has no such method.
+      { code: 3, data: undefined },
+    ]);
+    const id = __GetElementUniqueID(canvas);
+    expect(mock.named("canvasTransferControl")).toEqual([
+      ["canvasTransferControl", id],
+      ["canvasTransferControl", id],
+    ]);
+    // The entry leaves this realm's table in the same call.
+    expect(mock.named("canvasDetach")).toEqual([["canvasDetach", 10]]);
+    expect(mock.named("callElementMethod")).toEqual([
+      ["callElementMethod", __GetElementUniqueID(view), "transferControlToOffscreen", "{}"],
+    ]);
+  });
+
+  it("answers another method on a canvas through the generic path", () => {
+    const canvas = __CreateElement("canvas", 0);
+    const answers: unknown[] = [];
+    mock.calls.length = 0;
+    __InvokeUIMethod(canvas, "getContext", {}, (result: unknown) => answers.push(result));
+    expect(answers).toStrictEqual([{ code: 3, data: undefined }]);
+    expect(mock.named("canvasTransferControl")).toEqual([]);
+    expect(mock.named("canvasDetach")).toEqual([]);
+  });
+
   it("reports a method the engine does not have as code 3", () => {
     const view = __CreateView(0);
     const callback = rstest.fn();

@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 /// One positioned glyph of a run.
 pub use glifo::Glyph;
+use seldon::text::ShapedLine;
 use smallvec::SmallVec;
 
 use crate::kurbo::{Affine, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Stroke};
@@ -454,6 +455,43 @@ pub(crate) fn synthesized_outlines(
     let glyph_transform =
         skew.map(|degrees| Affine::skew(-f64::from(degrees).to_radians().tan(), 0.0));
     (embolden, glyph_transform)
+}
+
+/// Records every glyph run of `line` under `transform`, its alphabetic
+/// baseline at y = 0: each run with its font, size, variation coordinates
+/// and synthetic bold and oblique ([`synthesized_outlines`]), unhinted,
+/// painted with `paint` under `paint_transform`, filled or stroked as
+/// `style` says. SVG `<text>` and the Canvas 2D context draw a
+/// [`ShapedLine`] through here.
+pub(crate) fn draw_shaped_line(
+    list: &mut DisplayList,
+    line: &ShapedLine,
+    transform: Affine,
+    paint: &Paint,
+    paint_transform: Option<Affine>,
+    style: StyleRef<'_>,
+) {
+    for run in &line.runs {
+        let (embolden, glyph_transform) =
+            synthesized_outlines(run.synthesis.embolden, run.synthesis.skew, run.size);
+        list.draw_glyphs(&run.font)
+            .font_size(run.size)
+            .transform(transform)
+            .glyph_transform(glyph_transform)
+            .font_embolden(embolden)
+            .normalized_coords(&run.normalized_coords)
+            .hint(false)
+            .paint(paint.clone())
+            .brush_transform(paint_transform)
+            .draw(
+                style,
+                run.glyphs.iter().map(|glyph| Glyph {
+                    id: glyph.id,
+                    x: glyph.x,
+                    y: glyph.y,
+                }),
+            );
+    }
 }
 
 /// Synthetic bold: how far a run's outlines are widened, with the controls

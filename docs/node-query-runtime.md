@@ -229,12 +229,17 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s four, a `list`'s five, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, an `image`'s four and a dialog's four (a `list`'s and a coordinator's `getScrollInfo` among them), animation methods
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s four, a `list`'s five, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, an `image`'s four, a dialog's four and a `canvas`'s `transferControlToOffscreen` (a `list`'s and a coordinator's `getScrollInfo` among them), animation methods
 and cross-realm host objects remain pending.
 An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
 are built (`tree::image`): each answers code 0 with native's message as its
 `data` and sends its control to the picture the element plays an animated
 `src` into.
+A `canvas`'s `transferControlToOffscreen` is answered by `element-papi.ts`
+over the canvas host members, not by the element's kind: `data` is
+`{token, width, height}`, the token `canvasAttach` takes in the BTS or any
+other realm of the view, and a canvas already transferred answers code 7
+(`crates/bobcat-core/docs/canvas.md`, "Cards").
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
 those names behavior this engine does not have. Query failures and invalid legacy ReactRef chaining

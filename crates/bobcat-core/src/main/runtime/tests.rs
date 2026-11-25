@@ -9109,7 +9109,9 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
 /// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
-    let expected = MTS_HOST_MEMBERS.join(",");
+    let expected = crate::canvas::host_members_with_canvas(
+        &[&MTS_HOST_MEMBERS[..], &[crate::canvas::DOCUMENT_MEMBER]].concat(),
+    );
     let native_modules = "invokeNativeModule";
     let (mut js, mut runtime, _elements) = runtime();
     runtime
@@ -9144,7 +9146,9 @@ fn an_mts_realm_declares_these_host_members() {
 /// all.
 #[test]
 fn a_frame_realm_declares_the_page_members() {
-    let expected = MTS_HOST_MEMBERS.join(",");
+    let expected = crate::canvas::host_members_with_canvas(
+        &[&MTS_HOST_MEMBERS[..], &[crate::canvas::DOCUMENT_MEMBER]].concat(),
+    );
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -9162,8 +9166,8 @@ fn a_frame_realm_declares_the_page_members() {
         .unwrap();
 }
 
-/// The page realm's `bobcat-internal:host` exports, sorted as a namespace
-/// lists them.
+/// The page realm's `bobcat-internal:host` exports beside the canvas members
+/// every realm has, sorted as a namespace lists them.
 const MTS_HOST_MEMBERS: [&str; 62] = [
     "adoptStyleSheet",
     "attributeNames",
@@ -13514,4 +13518,154 @@ fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
         Display::None,
         "the component's `lynx-svg > *` rule"
     );
+}
+
+/// Each canvas entry lives in the realm's table until `canvasDrop` names
+/// it: a collection drops nothing, since no JavaScript object stands for
+/// an entry. A canvas drawn and not read keeps its draws recorded until
+/// the per-entry step replays them, once per canvas drawn.
+#[test]
+fn canvas_entries_live_until_dropped_and_draws_are_settled_per_entry() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import * as H from 'bobcat-internal:host';
+        __CreatePage();
+        globalThis.kept = H.canvasCreate(8, 8);
+        globalThis.dropped = [
+            H.canvasCreate(2, 2),
+            H.canvasPathFromSvg('M0 0 h1'),
+            H.canvasLinearGradient(0, 0, 1, 1),
+        ];
+        H.canvasFillRect(kept, 0, 0, 4, 4);
+        globalThis.bitmap = H.canvasTransferToBitmap(kept);
+        H.canvasFillRect(kept, 0, 0, 4, 4);
+    ",
+            "app:///canvas.js",
+        )
+        .unwrap();
+    let canvases = Rc::clone(&runtime.core().canvases);
+    // Canvases, paths, gradients, patterns, bitmaps.
+    assert_eq!(canvases.census(), [2, 1, 1, 0, 1]);
+    assert!(canvases.has_pending_draws(), "nothing has read the draw");
+    runtime.core().settle_drawn_canvases();
+    assert!(!canvases.has_pending_draws());
+    assert_eq!(canvases.settled.get(), 1, "the one canvas drawn");
+    // An entry that drew nothing settles nothing.
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(canvases.settled.get(), 1);
+
+    runtime.core().engine.collect_garbage(&mut js).unwrap();
+    assert_eq!(
+        canvases.census(),
+        [2, 1, 1, 0, 1],
+        "a collection drops no entry"
+    );
+    let drop = |runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime, ids: &str| {
+        let script = format!(
+            "import {{ canvasDrop }} from 'bobcat-internal:host';\nfor (const id of {ids}) canvasDrop(id);"
+        );
+        runtime
+            .evaluate_module(js, &script, "app:///drop.js", "dropping")
+            .unwrap();
+    };
+    drop(&mut runtime, &mut js, "dropped");
+    assert_eq!(canvases.census(), [1, 0, 0, 0, 1]);
+    drop(&mut runtime, &mut js, "[bitmap]");
+    assert_eq!(canvases.census(), [1, 0, 0, 0, 0]);
+}
+
+/// A realm's table keeps the thread's canvas replay state while it holds a
+/// canvas and lets go of it when `canvasDrop` removes its last canvas; a
+/// bitmap left behind keeps nothing.
+#[test]
+fn a_realm_keeps_the_canvas_replay_state_while_it_holds_a_canvas() {
+    let (mut js, mut runtime, _elements) = runtime();
+    let canvases = Rc::clone(&runtime.core().canvases);
+    assert!(!canvases.keeps_replay_state(), "no canvas yet");
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import * as H from 'bobcat-internal:host';
+        __CreatePage();
+        globalThis.first = H.canvasCreate(4, 4);
+        globalThis.second = H.canvasCreate(4, 4);
+        const pixels = new Uint8Array(4);
+        globalThis.bitmap = H.canvasBitmapFromPixels(pixels.buffer, 0, 4, 1, 1);
+    ",
+            "app:///canvas.js",
+        )
+        .unwrap();
+    assert_eq!(canvases.census(), [2, 0, 0, 0, 1]);
+    assert!(canvases.keeps_replay_state());
+
+    let drop = |runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime, name: &str| {
+        let script =
+            format!("import {{ canvasDrop }} from 'bobcat-internal:host';\ncanvasDrop({name});");
+        runtime
+            .evaluate_module(js, &script, "app:///drop.js", "dropping")
+            .unwrap();
+    };
+    drop(&mut runtime, &mut js, "first");
+    assert_eq!(canvases.census(), [1, 0, 0, 0, 1]);
+    assert!(canvases.keeps_replay_state(), "a canvas is left");
+    drop(&mut runtime, &mut js, "second");
+    assert_eq!(canvases.census(), [0, 0, 0, 0, 1], "the bitmap is left");
+    assert!(!canvases.keeps_replay_state());
+}
+
+/// The replay state follows the last canvas out of a table and into it:
+/// `canvasDetach` of the realm's last canvas lets go of it, an image bitmap
+/// detached or attached changes nothing, and `canvasAttach` of a canvas
+/// takes it again. A canvas detached with draws not replayed is listed as
+/// drawn where it is attached.
+#[test]
+fn the_canvas_replay_state_follows_the_last_canvas_out_and_in() {
+    let (mut js, mut runtime, _elements) = runtime();
+    let canvases = Rc::clone(&runtime.core().canvases);
+    let run = |runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime, script: &str| {
+        let script = format!("import * as H from 'bobcat-internal:host';\n{script}");
+        runtime
+            .evaluate_module(js, &script, "app:///hand-over.js", "handing over")
+            .unwrap();
+    };
+    run(
+        &mut runtime,
+        &mut js,
+        "const canvas = H.canvasCreate(4, 4);
+        H.canvasFillRect(canvas, 0, 0, 4, 4);
+        globalThis.bitmap = H.canvasBitmapFromPixels(new Uint8Array(4).buffer, 0, 4, 1, 1);
+        globalThis.canvasToken = H.canvasDetach(canvas);",
+    );
+    assert_eq!(canvases.census(), [0, 0, 0, 0, 1]);
+    assert!(!canvases.keeps_replay_state(), "the last canvas left");
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(
+        canvases.settled.get(),
+        0,
+        "a detached canvas leaves the drawn list"
+    );
+
+    run(
+        &mut runtime,
+        &mut js,
+        "globalThis.bitmapToken = H.canvasDetach(bitmap);",
+    );
+    assert_eq!(canvases.census(), [0, 0, 0, 0, 0]);
+    run(&mut runtime, &mut js, "H.canvasAttach(bitmapToken);");
+    assert!(
+        !canvases.keeps_replay_state(),
+        "a bitmap takes no replay state"
+    );
+
+    run(&mut runtime, &mut js, "H.canvasAttach(canvasToken);");
+    assert_eq!(canvases.census(), [1, 0, 0, 0, 1]);
+    assert!(canvases.keeps_replay_state(), "an attached canvas takes it");
+    assert!(canvases.has_pending_draws());
+    runtime.core().settle_drawn_canvases();
+    assert_eq!(canvases.settled.get(), 1, "its recorded draws are settled");
+    assert!(!canvases.has_pending_draws());
 }

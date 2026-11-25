@@ -98,8 +98,11 @@ pub trait NativeModule {
     /// module's name, by this build of the engine; no source text reaches the
     /// view. Its `import.meta.url` is `lynx:<name>`, and it may import the
     /// engine's built-ins — `callNativeModule` from `bobcat:native-modules`
-    /// is how it calls this module's own methods. The default is `None`: a
-    /// module without one, whose `lynx:<name>` import fails.
+    /// is how it calls this module's own methods. It may also import the
+    /// canvas members of `bobcat-internal:host` and define a card-facing
+    /// canvas API over them; `crates/bobcat-core/docs/canvas.md` describes
+    /// the members. The default is `None`: a module without one, whose
+    /// `lynx:<name>` import fails.
     fn esm(&self) -> Option<NativeModuleEsm> {
         None
     }
