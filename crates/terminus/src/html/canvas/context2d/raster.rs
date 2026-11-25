@@ -9,8 +9,8 @@ use super::CompositeOp;
 use super::context::State;
 use super::style::{Paint, canvas_rect};
 use crate::kurbo::{Affine, BezPath, Rect, Stroke};
-use crate::paint::display_list::{self, DisplayList, Glyph, synthesized_outlines};
-use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
+use crate::paint::display_list::{self, DisplayList, draw_shaped_line};
+use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler, StyleRef};
 use crate::render::canvas::{Init, MAX_SURFACE_SIDE, Surface, SurfaceImage};
 
 /// How many bytes of draws are recorded before they are replayed with no
@@ -298,7 +298,11 @@ impl Raster {
                 );
             }
             Outline::Glyphs { line, stroke } => {
-                draw_glyphs(list, line, *stroke, geometry, brush, brush_transform);
+                let style = match stroke {
+                    Some(stroke) => StyleRef::Stroke(stroke),
+                    None => StyleRef::Fill(Fill::NonZero),
+                };
+                draw_shaped_line(list, line, geometry, brush, brush_transform, style);
             }
         }
         if paint.bounds.is_some() {
@@ -355,39 +359,4 @@ fn shadow_filter(state: &State, size: Rect) -> Option<ShadowFilter> {
         dy: state.shadow_offset_y,
         std_dev: (state.shadow_blur / 2.0).min(rx.min(ry) / 3.0),
     })
-}
-
-/// Records every glyph run of `line` under `geometry`, its alphabetic
-/// baseline at y = 0, with the run's synthetic bold and oblique.
-fn draw_glyphs(
-    list: &mut DisplayList,
-    line: &ShapedLine,
-    stroke: Option<&Stroke>,
-    geometry: Affine,
-    brush: &display_list::Paint,
-    brush_transform: Option<Affine>,
-) {
-    for run in &line.runs {
-        let (embolden, glyph_transform) =
-            synthesized_outlines(run.synthesis.embolden, run.synthesis.skew, run.size);
-        let builder = list
-            .draw_glyphs(&run.font)
-            .font_size(run.size)
-            .transform(geometry)
-            .glyph_transform(glyph_transform)
-            .font_embolden(embolden)
-            .normalized_coords(&run.normalized_coords)
-            .hint(false)
-            .paint(brush.clone())
-            .brush_transform(brush_transform);
-        let glyphs = run.glyphs.iter().map(|glyph| Glyph {
-            id: glyph.id,
-            x: glyph.x,
-            y: glyph.y,
-        });
-        match stroke {
-            Some(stroke) => builder.draw(stroke, glyphs),
-            None => builder.draw(Fill::NonZero, glyphs),
-        }
-    }
 }

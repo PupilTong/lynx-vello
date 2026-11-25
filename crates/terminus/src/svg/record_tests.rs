@@ -1654,26 +1654,14 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
         },
         seldon::text::LineOptions::default(),
     );
-    for run in &line.runs {
-        expected
-            .draw_glyphs(&run.font)
-            .font_size(run.size)
-            .transform(Affine::translate((5.0, 5.0)) * Affine::translate((10.0, 20.0)))
-            .normalized_coords(&run.normalized_coords)
-            .hint(false)
-            .brush(&Brush::Solid(Color::BLACK))
-            .brush_transform(None)
-            .draw(
-                Fill::NonZero,
-                run.glyphs
-                    .iter()
-                    .map(|glyph| crate::paint::display_list::Glyph {
-                        id: glyph.id,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }),
-            );
-    }
+    crate::paint::display_list::draw_shaped_line(
+        &mut expected,
+        &line,
+        Affine::translate((5.0, 5.0)) * Affine::translate((10.0, 20.0)),
+        &crate::paint::display_list::Paint::Solid(Color::BLACK),
+        None,
+        Fill::NonZero.into(),
+    );
     expected.pop_layer();
     assert_scenes_identical(&scene, &expected);
 }
