@@ -143,28 +143,41 @@ class WorktreeCowTests(unittest.TestCase):
         self.assertTrue((dest / "link").is_symlink())
 
     def test_external_fingerprint_kept_but_build_script_reruns(self):
-        profile = self.root / "target/debug"
-        entry = profile / ".fingerprint/external-abcdef"
-        entry.mkdir()
-        (entry / "lib-external").write_text("fingerprint")
-        (entry / "run-build-script-build-script-build").write_text("must rerun")
-        unknown = profile / ".fingerprint/historical-local-abcdef"
-        unknown.mkdir()
+        build = self.root / "target/debug/build"
+        fingerprint = build / "external/abcdef/fingerprint"
+        fingerprint.mkdir(parents=True)
+        (fingerprint / "lib-external").write_text("fingerprint")
+        (fingerprint / "run-build-script-build-script-build").write_text("must rerun")
+        unknown = build / "historical-local/abcdef"
+        (unknown / "fingerprint").mkdir(parents=True)
         cow.invalidate_local_builds(self.root / "target", {"external"})
-        self.assertTrue((entry / "lib-external").exists())
-        self.assertFalse((entry / "run-build-script-build-script-build").exists())
-        self.assertFalse(unknown.exists())
+        self.assertTrue((fingerprint / "lib-external").exists())
+        self.assertFalse((fingerprint / "run-build-script-build-script-build").exists())
+        self.assertFalse(unknown.parent.exists())
 
     def test_seed_omits_local_objects_and_old_incremental_sessions(self):
         profile = self.root / "target/debug"
-        (profile / "deps/libexternal_name-123.rlib").write_bytes(b"external")
-        (profile / "deps/local_value-old.rcgu.o").write_bytes(b"old local object")
+        external = profile / "build/external-name/123/out/libexternal_name-123.rlib"
+        external.parent.mkdir(parents=True)
+        external.write_bytes(b"external")
+        local = profile / "build/local-value/456/out/local_value-old.rcgu.o"
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"old local object")
+        for obsolete in ("deps/libexternal_name-old.rlib", ".fingerprint/external-name-old/lib"):
+            (profile / obsolete).parent.mkdir(parents=True)
+            (profile / obsolete).write_bytes(b"previous build-dir layout")
+        self.assertTrue((profile / "incremental").is_dir())
         clone = self.root.parent / "filtered-target"
         cow.clone_tree(self.root / "target", clone, {"external-name"})
-        self.assertEqual((clone / "debug/deps/libexternal_name-123.rlib").read_bytes(), b"external")
-        self.assertFalse((clone / "debug/deps/local_value-old.rcgu.o").exists())
+        self.assertEqual(
+            (clone / "debug/build/external-name/123/out/libexternal_name-123.rlib").read_bytes(),
+            b"external",
+        )
+        self.assertFalse((clone / "debug/build/local-value").exists())
         self.assertFalse((clone / "debug/incremental").exists())
-        self.assertTrue((profile / "deps/local_value-old.rcgu.o").exists())
+        self.assertFalse((clone / "debug/deps").exists())
+        self.assertFalse((clone / "debug/.fingerprint").exists())
+        self.assertTrue(local.exists())
 
 
 if __name__ == "__main__":
