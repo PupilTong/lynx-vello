@@ -360,7 +360,7 @@ fn the_first_update_after_observe_queues_one_entry_per_target() {
     doc.el(doc.root, "view.cell");
     assert!(doc.dom.render());
     assert!(!update(&mut doc));
-    assert!(doc.dom.take_intersection_records(observer).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(observer), []);
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn no_update_runs_before_the_first_render() {
     doc.dom.observe_intersection(observer, cell);
     doc.flush();
     assert!(!update(&mut doc), "no frame was ever committed");
-    assert!(doc.dom.take_intersection_records(observer).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(observer), []);
 
     doc.dom.render();
     assert!(
@@ -528,7 +528,7 @@ fn unobserving_stops_entries() {
     doc.set_inline(cell, "transform: translateY(1000px)");
     doc.dom.render();
     assert!(!update(&mut doc));
-    assert!(doc.dom.take_intersection_records(observer).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(observer), []);
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn disconnecting_clears_targets_but_keeps_the_queue() {
     doc.set_inline(first, "transform: translateY(1000px)");
     doc.dom.render();
     assert!(!update(&mut doc), "no target is registered");
-    assert!(doc.dom.take_intersection_records(observer).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(observer), []);
 
     // Still alive, and a target observed again starts from scratch.
     doc.dom.observe_intersection(observer, first);
@@ -572,7 +572,7 @@ fn taking_records_empties_the_queue() {
     update(&mut doc);
     assert!(doc.dom.has_pending_intersection_notifications());
     assert_eq!(records(&mut doc, observer), vec![(cell, true, 1.0)]);
-    assert!(doc.dom.take_intersection_records(observer).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(observer), []);
     assert!(!doc.dom.has_pending_intersection_notifications());
     let log = Log::default();
     assert!(
@@ -708,7 +708,7 @@ fn notifications_come_in_creation_order_over_any_handler_types() {
     );
     assert!(!doc.dom.has_pending_intersection_notifications());
     assert!(notify(&mut doc, &log).is_empty(), "the queues drained");
-    assert!(doc.dom.take_intersection_records(idle).is_empty());
+    assert_eq!(doc.dom.take_intersection_records(idle), []);
     for observer in [first, second, third] {
         assert!(
             doc.dom.intersection_observer(observer).handler().is_some(),
@@ -798,7 +798,7 @@ fn an_element_handler_drops_entries_for_a_freed_or_unconstructed_element() {
     assert!(update(&mut doc));
     log.borrow_mut().clear();
 
-    assert!(notify(&mut doc, &log).is_empty());
+    assert_eq!(notify(&mut doc, &log), [] as [String; 0]);
     assert!(!doc.dom.has_pending_intersection_notifications());
 
     doc.set_inline(plain, "transform: translateY(1000px)");

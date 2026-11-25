@@ -39,10 +39,6 @@ fn pipeline(origin: &TimeOrigin) -> PipelineTiming {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the origin's own reading converts exactly, both rounded alike"
-)]
 fn the_origin_instant_converts_to_the_origin_unix_reading() {
     let origin = TimeOrigin::now();
     assert_eq!(origin.instant().unix_millis(&origin), origin.unix_millis());
@@ -138,7 +134,7 @@ fn a_flagged_flush_completes_at_the_present_of_its_commit() {
     registry.mark(id, "diffVdomStart");
     assert!(!registry.bind_commit(flush(OpenerId::PAGE, id, &["f"], 3)));
     // An older commit's present completes nothing.
-    assert!(registry.note_presented(frame(2)).is_empty());
+    assert_eq!(registry.note_presented(frame(2)), []);
     assert_eq!(registry.generation(), 0);
     registry.note_presented(frame(3));
     assert_eq!(registry.generation(), 1);
@@ -193,10 +189,10 @@ fn a_worker_observer_is_owed_the_entries_of_its_realm() {
     registry.observe_worker(worker, Some(EntryTypes::NONE));
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["mine"], 1));
     assert_eq!(registry.note_presented(frame(1)), vec![worker]);
-    assert!(registry.take_completed_for_rust().is_empty());
+    assert_eq!(registry.take_completed_for_rust(), []);
     let entries = registry.take_completed_for_worker(worker);
     assert_eq!(entries.len(), 1);
-    assert!(registry.take_completed_for_worker(worker).is_empty());
+    assert_eq!(registry.take_completed_for_worker(worker), []);
     assert!(registry.records_for_test().is_empty());
 }
 
@@ -290,11 +286,7 @@ fn paint_marks_complete_once_for_whoever_asked_for_paint() {
         vec![worker]
     );
     assert!(!registry.wants_content_detection());
-    assert!(
-        registry
-            .note_paint(Some(first), Some(contentful))
-            .is_empty()
-    );
+    assert_eq!(registry.note_paint(Some(first), Some(contentful)), []);
     let names = |entries: Vec<PerformanceEntry>| -> Vec<(PaintName, Timestamp)> {
         entries
             .into_iter()
@@ -313,7 +305,7 @@ fn paint_marks_complete_once_for_whoever_asked_for_paint() {
     ];
     assert_eq!(names(registry.take_completed_for_rust()), expected);
     assert_eq!(names(registry.take_completed_for_worker(worker)), expected);
-    assert!(registry.take_completed_for_worker(other).is_empty());
+    assert_eq!(registry.take_completed_for_worker(other), []);
     assert!(registry.records_for_test().is_empty(), "taken and freed");
 }
 
@@ -351,7 +343,7 @@ fn a_waiting_record_wants_presentation_timing_and_an_untimed_present_completes_i
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["waits"], 2));
     assert!(registry.wants_presentation_timing());
     // The painter drew commit 2 before it read the switch on.
-    assert!(registry.note_untimed_present(2).is_empty());
+    assert_eq!(registry.note_untimed_present(2), []);
     assert_eq!(registry.generation(), 1);
     assert!(!registry.wants_presentation_timing());
     assert_eq!(registry.take_completed_for_rust().len(), 1);
@@ -382,12 +374,12 @@ fn a_delivered_entry_reaches_the_audiences_that_asked_for_its_type_in_order() {
         vec![paint(1), paint(2)],
         "in production order"
     );
-    assert!(registry.take_completed_for_worker(plain).is_empty());
-    assert!(registry.take_completed_for_rust().is_empty());
+    assert_eq!(registry.take_completed_for_worker(plain), []);
+    assert_eq!(registry.take_completed_for_rust(), []);
     // A worker that stops observing drops what it had not taken.
     assert!(registry.deliver_entry(paint(3), EntryTypes::PAINT, WorkerAudience::Every));
     registry.observe_worker(painting, None);
-    assert!(registry.take_completed_for_worker(painting).is_empty());
+    assert_eq!(registry.take_completed_for_worker(painting), []);
 }
 
 #[test]
@@ -716,7 +708,7 @@ fn the_memory_monitor_is_off_by_default_and_reads_nothing() {
     assert_eq!(registry.set_memory_monitor(None), None);
     assert!(!registry.memory_is_current(epoch));
     assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
-    assert!(memory_entries(&registry).is_empty());
+    assert_eq!(memory_entries(&registry), []);
     assert_eq!(registry.generation(), 0);
 }
 
@@ -927,7 +919,7 @@ fn a_lazy_bundle_is_timed_while_observed_and_reaches_rust_and_the_fetching_realm
         bundle_urls(registry.take_completed_for_worker(page_bts)),
         ["app:///page.bundle", "app:///bts.bundle"]
     );
-    assert!(registry.take_completed_for_worker(card_bts).is_empty());
+    assert_eq!(registry.take_completed_for_worker(card_bts), []);
 
     registry.observe_rust(EntryTypes::NONE);
     registry.forget_worker(page_bts);
@@ -1040,7 +1032,7 @@ fn a_card_s_load_is_owed_as_loadmetrics_once_whoever_observes_and_the_page_s_nev
         open_time: Some(SystemTime::now()),
         ..ExtraTiming::default()
     }));
-    assert!(registry.take_frame_loads().is_empty());
+    assert_eq!(registry.take_frame_loads(), []);
 }
 
 fn node(bits: u64) -> NodeId {
@@ -1048,7 +1040,6 @@ fn node(bits: u64) -> NodeId {
 }
 
 #[test]
-#[expect(clippy::float_cmp, reason = "whole CSS px are exact")]
 fn a_container_entry_is_the_draft_s_json_for_the_rust_embedder_alone() {
     use terminus::link::{Point2D, Size2D};
     assert!(EntryTypes::ALL.contains(EntryTypes::CONTAINER));
@@ -1074,8 +1065,8 @@ fn a_container_entry_is_the_draft_s_json_for_the_rust_embedder_alone() {
 
     registry.observe_rust(EntryTypes::CONTAINER);
     assert!(registry.note_container_paints(&[paint(5), paint(9)]));
-    assert!(registry.take_wakes().is_empty());
-    assert!(registry.take_completed_for_worker(worker).is_empty());
+    assert_eq!(registry.take_wakes(), []);
+    assert_eq!(registry.take_completed_for_worker(worker), []);
     let entries = registry.take_completed_for_rust();
     let [first, unnamed] = &entries[..] else {
         panic!("two entries: {entries:?}");

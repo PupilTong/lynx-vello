@@ -1567,7 +1567,7 @@ mod scope_tests {
         });
         images::service(&replacement);
         assert!(!replacement.knows_image("image.png"));
-        assert!(replacement.take_notes().is_empty());
+        assert_eq!(replacement.take_notes(), [] as [String; 0]);
         assert!(old.unregister(url));
         assert!(replacement.unregister(url));
     }

@@ -697,8 +697,13 @@ fn pixels(buffer: &SampleBuffer) -> Option<ImageData> {
             for row in 0..height {
                 let source = std::slice::from_raw_parts(base.add(row * stride), width * 4);
                 let target = &mut rgba[row * width * 4..(row + 1) * width * 4];
-                for (texel, bgra) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
-                    texel.copy_from_slice(&[bgra[2], bgra[1], bgra[0], bgra[3]]);
+                for (texel, bgra) in target
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(source.as_chunks::<4>().0)
+                {
+                    *texel = [bgra[2], bgra[1], bgra[0], bgra[3]];
                 }
             }
             converted = u32::try_from(width)

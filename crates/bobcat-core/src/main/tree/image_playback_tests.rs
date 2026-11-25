@@ -211,7 +211,7 @@ fn an_animated_src_plays_its_loop_count_and_fires_its_events_in_order() {
     page.document.set_attribute(image, "loop-count", "2");
     page.document.set_attribute(image, "src", SRC);
     assert!(page.settle().is_empty(), "nothing has loaded");
-    assert!(page.host.take_requests().is_empty());
+    assert_eq!(page.host.take_requests(), []);
 
     page.report(&[loaded(SRC, true)]);
     let picture = page.picture(image).expect("a picture of its own");
@@ -316,7 +316,7 @@ fn attributes_are_read_when_the_src_loads_and_a_src_change_starts_over() {
 
     page.document.set_attribute(image, "autoplay", "true");
     page.document.set_attribute(image, "loop-count", "1");
-    assert!(page.settle().is_empty());
+    assert_eq!(page.settle(), [] as [String; 0]);
     assert!(
         page.host.take_requests().is_empty(),
         "nothing until the next load"
@@ -433,7 +433,7 @@ fn stop_resume_and_start_animate_play_whole_counts_again() {
     page.run(ms(60_700));
     let _ = page.invoke(image, "pauseAnimation");
     page.settle();
-    assert!(page.run(ms(70_000)).is_empty());
+    assert_eq!(page.run(ms(70_000)), [] as [String; 0]);
     let _ = page.invoke(image, "startAnimate");
     page.settle();
     assert_eq!(
@@ -460,8 +460,8 @@ fn an_animated_placeholder_plays_the_shared_url_and_fires_nothing() {
         page.document.picture(image),
         Some(&PictureKey::Url(Arc::from(OTHER_SRC)))
     );
-    assert!(page.settle().is_empty());
-    assert!(page.host.take_requests().is_empty());
+    assert_eq!(page.settle(), [] as [String; 0]);
+    assert_eq!(page.host.take_requests(), []);
     assert_eq!(page.sources.playing(image), None);
 }
 
@@ -477,7 +477,7 @@ fn a_still_src_is_unaffected() {
         Some(&PictureKey::Url(Arc::from(STILL)))
     );
     assert_eq!(page.settle(), [at(image, "load")]);
-    assert!(page.host.take_requests().is_empty());
+    assert_eq!(page.host.take_requests(), []);
 }
 
 /// A freed `image` ends its picture, and a report the host made before it
@@ -496,7 +496,7 @@ fn a_freed_image_ends_its_picture_and_a_late_report_is_dropped() {
         picture,
         report: PlaybackReport::LoopComplete,
     }]);
-    assert!(page.settle().is_empty());
+    assert_eq!(page.settle(), [] as [String; 0]);
     assert_eq!(
         page.host.take_requests(),
         [PlaybackRequest::End { picture }]

@@ -4,6 +4,11 @@
 // check in `TreeArenas` — so the live path stays fall-through.
 #![feature(likely_unlikely)]
 #![deny(unreachable_pub)]
+// Proving a wgpu handle `Send`/`Sync` walks wgpu-core's whole context type
+// (`Texture` → `CoreTexture` → `ContextWgpuCore` → ...), deeper than the
+// default limit of 128; nightly reports that overflow as the future-error
+// `recursion_depth_exceeding_limit` (rust-lang/rust#159228).
+#![recursion_limit = "256"]
 // The crate's whole `unsafe` surface is two blocks — the arena-set backpointer
 // deref and Stylo's `TElement::ensure_data` contract call — and each states the
 // invariant it rests on; a third, test-only one hands wgpu a bare

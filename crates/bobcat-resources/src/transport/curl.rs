@@ -828,13 +828,13 @@ mod tests {
             curl().get(&request),
             Err(TransportError::TooLarge { limit: 1000 })
         ));
-        assert!(
+        assert_eq!(
             curl()
                 .get(&HttpRequest::new(format!("{base}/big")))
                 .expect("get")
                 .body
-                .len()
-                == 200_000
+                .len(),
+            200_000
         );
     }
 

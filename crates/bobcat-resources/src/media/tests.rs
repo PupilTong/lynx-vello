@@ -428,7 +428,7 @@ fn a_source_that_cannot_be_fetched_fails_as_a_source() {
     };
     assert_eq!(*failed, picture);
     assert_eq!(error.kind, MediaErrorKind::Source);
-    assert!(rig.media.log.lock().unwrap().opens.is_empty());
+    assert_eq!(rig.media.log.lock().unwrap().opens, []);
 }
 
 /// An end closes the player and lets go of the picture; so does dropping

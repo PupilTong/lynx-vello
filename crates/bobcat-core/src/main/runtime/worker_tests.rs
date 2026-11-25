@@ -3399,7 +3399,7 @@ fn disposal_does_not_wait_for_a_worker_that_already_closed() {
     let mut pair = Pair::with_background("", Some("close();"));
     pair.deliver();
     assert_eq!(pair.live_workers(), 0);
-    assert!(pair.dispose().is_empty());
+    assert_eq!(pair.dispose(), [] as [String; 0]);
 }
 
 #[test]

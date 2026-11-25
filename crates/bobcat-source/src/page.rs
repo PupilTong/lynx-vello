@@ -1075,7 +1075,7 @@ mod tests {
             sources.background_entry.as_deref(),
             Some("https://example.test/card.web.bundle#background-thread")
         );
-        assert!(sources.style_sheets.is_empty());
+        assert_eq!(sources.style_sheets, [] as [String; 0]);
 
         let resources = resources();
         page.register_with(&resources);
@@ -1770,7 +1770,7 @@ mod tests {
             registered.background_thread_url().map(Url::as_str),
             Some("https://cdn.example/final/card.lynx.xml?revision=2#background-thread")
         );
-        assert!(registered.compatibility_warnings().is_empty());
+        assert_eq!(registered.compatibility_warnings(), [] as [String; 0]);
         assert!(resources.unregister(registered.entry_url().as_str()));
         assert!(
             resources.unregister(
@@ -1939,9 +1939,8 @@ mod tests {
                     .style_sheets
                     .is_empty()
             {
-                expected.style_sheets = vec![format!(
-                    "https://cdn.test/app/card.web.bundle/style-info.css?rev=1"
-                )];
+                expected.style_sheets =
+                    vec!["https://cdn.test/app/card.web.bundle/style-info.css?rev=1".to_string()];
             }
             assert_eq!(
                 format!("{:?}", deferred.view_sources(screen, "en-US")),
@@ -2031,7 +2030,7 @@ mod tests {
         for (url, _) in container.scripts() {
             assert!(resources.unregister(url.as_str()), "{url}");
         }
-        assert!(resources.take_notes().is_empty());
+        assert_eq!(resources.take_notes(), [] as [String; 0]);
     }
 
     /// A bundle whose sections fail to decode is deferred all the same; its

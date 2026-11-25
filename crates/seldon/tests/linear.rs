@@ -733,7 +733,7 @@ fn layout_contained_auto_measure_uses_known_child_size_without_a_probe() {
     assert_size(output.size, Size::new(20.0, 10.0));
     assert_eq!(output.first_baseline, None);
     assert_eq!(tree.child_layout_calls.get(), 1);
-    assert!(tree.measure_inputs(child).is_empty());
+    assert_eq!(tree.measure_inputs(child), []);
 }
 
 #[test]
@@ -1369,7 +1369,7 @@ fn hoisted_children_record_static_position_without_local_commit() {
         Point::new(40.0, 40.0),
     );
     assert_eq!(tree.layout(hoisted), Layout::default());
-    assert!(!tree.measure_inputs(hoisted).is_empty());
+    assert_ne!(tree.measure_inputs(hoisted), []);
     assert!(
         tree.measure_inputs(hoisted)
             .iter()

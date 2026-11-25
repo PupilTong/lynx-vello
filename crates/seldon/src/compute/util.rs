@@ -913,7 +913,7 @@ pub(super) fn apply_border_box_ratio(
 pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     match value.ratio {
         PreferredRatio::None => None,
-        PreferredRatio::Ratio(ratio) => (!ratio.is_degenerate()).then(|| ratio.0.0 / ratio.1.0),
+        PreferredRatio::Ratio(ratio) => (!ratio.is_degenerate()).then_some(ratio.0.0 / ratio.1.0),
     }
 }
 

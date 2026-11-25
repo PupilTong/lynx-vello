@@ -945,10 +945,10 @@ mod tests {
     #[test]
     fn nothing_is_asked_while_the_runs_own_families_cover_the_text() {
         let mut context = system_context_with_ahem("ko");
-        assert!(fallback_of(&mut context, "Hang", Some("ko")).is_empty());
-        assert!(fallback_of(&mut context, "Hani", None).is_empty());
+        assert_eq!(fallback_of(&mut context, "Hang", Some("ko")), []);
+        assert_eq!(fallback_of(&mut context, "Hani", None), []);
         cover_in_ahem(&mut context, "Ahem covers this, \n and its space.");
-        assert!(context.answered_scripts.is_empty());
+        assert_eq!(context.answered_scripts, []);
         assert_eq!(known_fallback("Hang", "ko"), None);
     }
 

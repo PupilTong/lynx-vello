@@ -1033,8 +1033,8 @@ fn an_empty_block_lays_out_to_nothing() {
         Some(50.0),
     );
 
-    assert!(block.lines().is_empty());
-    assert!(block.boxes().is_empty());
+    assert_eq!(block.lines(), []);
+    assert_eq!(block.boxes(), []);
     assert_close(block.size().width, 0.0);
     assert_close(block.size().height, 0.0);
     assert_eq!(block.first_baseline(), None);
@@ -1081,7 +1081,7 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
                     assert_eq!(block.first_baseline(), Some(15.0));
                     assert_eq!(block.last_baseline(), Some(15.0));
                     assert!(!block.truncated());
-                    assert!(block.boxes().is_empty());
+                    assert_eq!(block.boxes(), []);
                     // The substitute space parley shapes is in the strut.
                     for index in 0..block.style_count() {
                         assert_eq!(
@@ -1216,7 +1216,7 @@ fn the_strut_line_is_only_for_empty_content() {
         None,
         Some(50.0),
     );
-    assert!(block.lines().is_empty());
+    assert_eq!(block.lines(), []);
     assert_close(block.size().height, 0.0);
 }
 

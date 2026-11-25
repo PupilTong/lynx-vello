@@ -1074,12 +1074,7 @@ mod tests {
     #[test]
     fn whitespace_only_text_makes_no_line_box() {
         let (doc, block, _) = page(COLUMN, "  \n  ");
-        assert!(
-            doc.inline_flow(block)
-                .expect("a flow")
-                .line_geometry()
-                .is_empty()
-        );
+        assert_eq!(doc.inline_flow(block).expect("a flow").line_geometry(), []);
         assert_eq!(size(&doc, block).height, 0.0);
     }
 

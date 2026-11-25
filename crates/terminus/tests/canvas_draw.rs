@@ -1,6 +1,11 @@
 //! Pixel checks for the drawing surface, away from antialiased edges, read
 //! back from the GPU replay.
 
+// Proving a wgpu handle `Send`/`Sync` walks wgpu-core's whole context type
+// (`Texture` → `CoreTexture` → `ContextWgpuCore` → ...), deeper than the
+// default limit of 128; nightly reports that overflow as the future-error
+// `recursion_depth_exceeding_limit` (rust-lang/rust#159228).
+#![recursion_limit = "256"]
 #![allow(
     clippy::float_cmp,
     reason = "the transforms compared are products of exact binary values"

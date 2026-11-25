@@ -1962,7 +1962,7 @@ mod tests {
 
         doc.remove_class(anchor, "a");
         doc.flush();
-        assert!(name(&doc, "--a").is_empty());
+        assert_eq!(name(&doc, "--a"), []);
         assert!(doc.dom.arenas().anchors().knows(anchor), "still a scoper");
 
         // A detached element keeps its entries — the lookup skips anything

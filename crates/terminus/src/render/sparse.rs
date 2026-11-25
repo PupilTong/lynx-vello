@@ -1591,13 +1591,12 @@ fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
     let bytes = &bytes[..row * height];
     if image.format == ImageFormat::Rgba8 && image.alpha_type == ImageAlphaType::AlphaPremultiplied
     {
-        let opaque = bytes.chunks_exact(4).all(|px| px[3] == 255);
+        let opaque = bytes.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
         return Some((Cow::Borrowed(bytes), opaque));
     }
     let mut data = Vec::with_capacity(row * height);
     let mut opaque = true;
-    for px in bytes.chunks_exact(4) {
-        let [mut r, g, mut b, a] = [px[0], px[1], px[2], px[3]];
+    for &[mut r, g, mut b, a] in bytes.as_chunks::<4>().0 {
         if image.format == ImageFormat::Bgra8 {
             std::mem::swap(&mut r, &mut b);
         }

@@ -106,9 +106,11 @@ fn red_left_edge(engine: &mut TestEngine) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
-        .filter(|(_, pixel)| *pixel == [255, 0, 0, 255])
+        .filter(|&(_, &pixel)| pixel == [255, 0, 0, 255])
         .map(|(index, _)| index % width)
         .min()
         .expect("the animated square is painted")

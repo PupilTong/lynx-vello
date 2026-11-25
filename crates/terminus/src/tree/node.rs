@@ -1412,7 +1412,6 @@ impl<T> Node<T> {
         self.child_index.wrapping_sub(parent.child_index_base) as usize
     }
 
-    #[must_use]
     pub fn children(&self) -> impl ExactSizeIterator<Item = &Node<T>> {
         self.children_iter()
     }

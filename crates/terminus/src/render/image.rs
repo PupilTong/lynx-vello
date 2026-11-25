@@ -2073,7 +2073,7 @@ mod synthetic_tests {
         // queues nothing.
         let third = registry.insert_document(ICON, DocumentKind::Svg);
         registry.bind(&third);
-        assert!(registry.take_document_requests().is_empty());
+        assert_eq!(registry.take_document_requests(), []);
         assert!(registry.status(&third).natural_size().is_some());
     }
 
@@ -2085,7 +2085,7 @@ mod synthetic_tests {
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
         registry.bind(&icon);
         assert_eq!(registry.take_document_requests().len(), 1);
-        assert!(registry.take_document_requests().is_empty());
+        assert_eq!(registry.take_document_requests(), []);
 
         let other = registry.insert_document(OTHER, DocumentKind::Svg);
         registry.bind(&other);
@@ -2107,7 +2107,7 @@ mod synthetic_tests {
                 .resolve(&synthetic_source(OTHER, DocumentKind::Svg))
                 .is_none()
         );
-        assert!(registry.take_wanted().is_empty());
+        assert_eq!(registry.take_wanted(), []);
     }
 
     /// A page naming a synthetic source itself files nothing, so the markup
@@ -2119,7 +2119,7 @@ mod synthetic_tests {
         assert_eq!(registry.request(&named).1, ImageStatus::Pending);
         registry.bind(&named);
         assert!(!registry.knows(&named));
-        assert!(registry.take_wanted().is_empty());
+        assert_eq!(registry.take_wanted(), []);
 
         let icon = registry.insert_document(ICON, DocumentKind::Svg);
         assert_eq!(&*icon, named);

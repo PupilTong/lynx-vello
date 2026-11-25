@@ -665,8 +665,10 @@ globalThis.renderPage = function renderPage() {
     let shot = painter.capture().expect("capture the restyled page");
     let count = |wanted: [u8; 4]| {
         shot.pixels
-            .chunks_exact(4)
-            .filter(|pixel| *pixel == wanted)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|&&pixel| pixel == wanted)
             .count()
     };
     assert_eq!(

@@ -2581,7 +2581,7 @@ mod tests {
             [Alignment::Left, Alignment::Center, Alignment::Right]
         );
         // markdown-it writes no `<tbody>` for a table without body rows.
-        assert!(body.is_empty());
+        assert_eq!(body[..], [] as [TableRow; 0]);
     }
 
     fn append(inlines: &[Inline]) -> String {
@@ -2721,7 +2721,7 @@ mod tests {
         assert_eq!(classes[..], ["a"]);
         assert_eq!(append(one), "one two");
         assert_eq!(append(third), "three four");
-        assert!(empty.is_empty());
+        assert_eq!(empty[..], [] as [Inline; 0]);
         // A `span` alone on its line is an HTML block: inline content with
         // no paragraph, its text raw HTML (no emphasis), references decoded.
         let tree = parse(
@@ -2763,7 +2763,7 @@ mod tests {
         assert_eq!(tag_classes(" CLASS='q'"), ["q"]);
         assert_eq!(tag_classes(" data-class=z"), ["z"]);
         assert_eq!(tag_classes(" class=&quot;w&quot;"), ["w"]);
-        assert!(tag_classes(" title=\"x\"").is_empty());
+        assert_eq!(tag_classes(" title=\"x\""), [] as [String; 0]);
         assert_eq!(
             sanitized_markup("<SPAN class=\"a\" style=x/>"),
             "<span class=\"a\"></span>"

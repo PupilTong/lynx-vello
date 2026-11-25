@@ -1623,7 +1623,6 @@ mod tests {
     /// from nothing to something — costs it no second pass and leaves no
     /// restyle behind.
     #[test]
-    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn a_query_container_without_container_units_never_recascades() {
         let (mut document, item) = query_container_document("width: 10px; height: 10px;");
         document.layout();
@@ -1640,7 +1639,6 @@ mod tests {
     /// recascade, and the pass after it settles — the container's size did
     /// not move again, so the changed list is empty and the call ends.
     #[test]
-    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn a_settled_query_container_leaves_no_pass_owing() {
         let (mut document, item) = query_container_document("width: 25cqw; height: 50cqh;");
         document.layout();
@@ -1972,7 +1970,6 @@ mod tests {
     /// is published after the run that laid it out, and the units under it
     /// re-resolve in the run after that — the pre-interleave path, intact.
     #[test]
-    #[expect(clippy::float_cmp, reason = "Ahem runs have exact pixel geometry")]
     fn a_text_query_container_is_settled_by_the_loop() {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
@@ -2092,7 +2089,6 @@ mod tests {
     /// call the run makes, against a page whose readers are already at their
     /// final size.
     #[test]
-    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn a_resized_container_marks_only_its_container_unit_readers() {
         let (mut document, [reading, plain_only], reader, plain) = mixed_container_document("size");
 
@@ -2196,7 +2192,6 @@ mod tests {
     /// cascade requirement propagates `RECASCADE_SELF` down when an inherited
     /// value moves.
     #[test]
-    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn an_inherited_container_unit_reaches_an_unmarked_grandchild() {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
@@ -2448,7 +2443,6 @@ mod tests {
     /// offered 5px shrinks no narrower than "a" after the 15px indent, with
     /// "b" on the next line, so 25.
     #[test]
-    #[expect(clippy::float_cmp, reason = "Ahem advances are exact")]
     fn a_text_block_s_min_content_counts_its_indent() {
         let (mut document, label, _run) = label_document_parts("a b", 5.0);
         document.add_stylesheet(
@@ -2460,7 +2454,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn cascaded_paragraph_limits_update_ancestor_and_following_sibling_geometry() {
         for (property, initial, limit) in [
             ("--lynx-text-maxline", "0", "1"),
@@ -2524,10 +2517,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "explicit line heights have exact pixel metrics"
-    )]
     fn interpolated_integer_paragraph_limits_relayout_without_reshaping() {
         use seldon::style::LynxTextStyle;
 
@@ -2922,7 +2911,7 @@ mod tests {
             }
         );
         assert_eq!(document.request_image(OTHER_SRC), ImageStatus::Failed);
-        assert!(document.take_wanted_images().is_empty());
+        assert_eq!(document.take_wanted_images(), []);
     }
 
     /// The natural size a picture is presented with sizes the box wherever

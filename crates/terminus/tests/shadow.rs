@@ -815,7 +815,7 @@ fn a_detached_slot_drops_its_assignments_and_survives_their_removal() {
     // Freeing what it used to hold must leave the detached slot readable.
     harness.doc.dom.drop_element(slottable);
     assert!(harness.doc.dom.get(slottable).is_none());
-    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+    assert_eq!(harness.doc.dom.assigned_nodes(slot), []);
 
     // And it must still be usable as an ordinary element afterwards.
     harness.doc.dom.append_child(harness.doc.root, slot);
@@ -835,11 +835,11 @@ fn a_slot_detached_inside_a_container_also_drops_its_assignments() {
     assert_eq!(harness.doc.dom.assigned_nodes(slot), [slottable]);
 
     harness.doc.dom.remove_element(container);
-    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+    assert_eq!(harness.doc.dom.assigned_nodes(slot), []);
     assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
 
     harness.doc.dom.drop_element(slottable);
-    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+    assert_eq!(harness.doc.dom.assigned_nodes(slot), []);
     harness.doc.flush();
 }
 

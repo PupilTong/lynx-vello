@@ -511,9 +511,13 @@ fn live_picture_frames_match_reference() {
     let mirrored: Vec<u8> = second
         .data
         .data()
-        .chunks_exact(4 * 64)
+        .as_chunks::<{ 4 * 64 }>()
+        .0
+        .iter()
         .flat_map(|row| {
-            row.chunks_exact(4)
+            row.as_chunks::<4>()
+                .0
+                .iter()
                 .rev()
                 .flatten()
                 .copied()

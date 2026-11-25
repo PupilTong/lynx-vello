@@ -1824,7 +1824,7 @@ fn plain_absolute_boxes_report_nothing() {
         },
         Size::new(10.0, 10.0),
     );
-    assert!(tree.anchor_outcomes(id).is_empty());
+    assert_eq!(tree.anchor_outcomes(id), []);
 }
 
 // ---------------------------------------------------------------------------

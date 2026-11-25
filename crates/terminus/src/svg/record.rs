@@ -429,7 +429,7 @@ impl<'d, T> Recorder<'d, T> {
                     content_start,
                     context.transform * own,
                 );
-                Some(bounds).filter(|_| moves && invertible)
+                (moves && invertible).then_some(bounds)
             }
         };
         if let Some(entry) = entry {

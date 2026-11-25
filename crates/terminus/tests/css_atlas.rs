@@ -8,6 +8,12 @@
 //! share one isolated 640×640 atlas readback; a full audit compares all
 //! 1,000 against temporary Chromium references.
 
+// Proving a wgpu handle `Send`/`Sync` walks wgpu-core's whole context type
+// (`Texture` → `CoreTexture` → `ContextWgpuCore` → ...), deeper than the
+// default limit of 128; nightly reports that overflow as the future-error
+// `recursion_depth_exceeding_limit` (rust-lang/rust#159228).
+#![recursion_limit = "256"]
+
 #[path = "support/html.rs"]
 mod html;
 #[path = "paint_common/mod.rs"]

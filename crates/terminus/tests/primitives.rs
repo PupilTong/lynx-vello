@@ -184,7 +184,7 @@ fn drop_subtree_frees_detaches_and_returns_payloads() {
     assert!(doc.get(child).is_none());
     assert!(doc.get(grandchild).is_none());
     assert!(doc.get(container).is_some());
-    assert!(doc.get(container).unwrap().child_ids().is_empty());
+    assert_eq!(doc.get(container).unwrap().child_ids(), []);
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn remove_element_unlinks_without_freeing() {
         "and keeps its own subtree"
     );
     assert!(!doc.is_connected(leaf));
-    assert!(doc.get(root).unwrap().child_ids().is_empty());
+    assert_eq!(doc.get(root).unwrap().child_ids(), []);
 
     doc.append_child(root, container);
     assert!(doc.is_connected(leaf), "the same ids re-insert intact");

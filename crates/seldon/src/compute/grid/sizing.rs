@@ -1906,7 +1906,7 @@ impl GroupMaxima {
                         }
                         // The track's fixed maximum joins the member's own
                         // maximum below, a clamp the shim would follow.
-                        debug_assert!(item.baseline_shim == 0.0);
+                        debug_assert_eq!(item.baseline_shim, 0.0);
                         let explicit_max = axis
                             .size(item.max_size)
                             .map(|value| value + margin_sum(item, axis));
@@ -2779,7 +2779,7 @@ mod tests {
             &mut affected,
             &mut non_affected,
         );
-        assert!(touched.is_empty());
+        assert_eq!(touched, []);
 
         let cases = [
             (

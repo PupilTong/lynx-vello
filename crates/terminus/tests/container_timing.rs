@@ -133,7 +133,7 @@ fn a_page_with_no_root_reports_nothing() {
     let mut doc = page();
     let root = doc.root;
     text_at(&mut doc, root, 10.0, 10.0, "Hello");
-    assert!(present(&mut painter, &mut doc).is_empty());
+    assert_eq!(present(&mut painter, &mut doc), []);
 }
 
 #[test]
@@ -190,11 +190,11 @@ fn a_frame_that_paints_nothing_new_under_a_root_reports_nothing() {
     // A new commit whose one change is a paint outside the root: the
     // child paints the same area again.
     text_at(&mut doc, root, 500.0, 500.0, "Out");
-    assert!(present(&mut painter, &mut doc).is_empty());
+    assert_eq!(present(&mut painter, &mut doc), []);
     // Painted again in a new frame at the same place.
     doc.dom
         .set_inline_style(child, "left: 10px; top: 10px; color: red");
-    assert!(present(&mut painter, &mut doc).is_empty());
+    assert_eq!(present(&mut painter, &mut doc), []);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn an_ignored_subtree_counts_toward_no_root_above_it() {
     let aside = area(&mut doc, hero, 0.0, 100.0, (400.0, 100.0));
     doc.dom.set_container_timing_ignored(aside, true);
     text_at(&mut doc, aside, 0.0, 0.0, "Aside");
-    assert!(present(&mut painter, &mut doc).is_empty());
+    assert_eq!(present(&mut painter, &mut doc), []);
 
     // A root that is also ignored keeps its paints to itself.
     doc.dom.set_container_timing(aside, true);
@@ -284,7 +284,7 @@ fn stopping_or_forgetting_the_view_ends_the_recording() {
     assert!(painter.draw_offscreen(now, false).expect("drawn"));
     painter.forget_view();
     painter.forget_target();
-    assert!(painter.take_container_paints().is_empty());
+    assert_eq!(painter.take_container_paints(), []);
     doc.dom.set_inline_style(second, "left: 0px; top: 120px");
     let paint = only(&present(&mut painter, &mut doc));
     assert!(paint.first_render > first.first_render);
@@ -293,5 +293,5 @@ fn stopping_or_forgetting_the_view_ends_the_recording() {
     // Stopped: a later paint under the root reports nothing.
     doc.dom.stop_container_timing();
     text_at(&mut doc, hero, 0.0, 200.0, "Three");
-    assert!(present(&mut painter, &mut doc).is_empty());
+    assert_eq!(present(&mut painter, &mut doc), []);
 }

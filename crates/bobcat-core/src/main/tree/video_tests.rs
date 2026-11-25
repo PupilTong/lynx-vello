@@ -354,7 +354,7 @@ fn play_with_no_source_fails_and_fires_an_error() {
         MethodOutcome::Data("1:1".to_owned())
     );
     page.settle();
-    assert!(page.host.take_requests().is_empty());
+    assert_eq!(page.host.take_requests(), []);
 }
 
 /// `ended` fires once when playback reaches the end of a video that does not
@@ -379,7 +379,7 @@ fn ended_fires_at_the_end_unless_the_video_loops() {
     page.settle();
     assert_eq!(page.events(), ["ended {}"]);
     let ended = page.events.take();
-    assert!(ended.is_empty());
+    assert_eq!(ended, []);
 
     let _ = page.invoke(once, "play");
     page.settle();
@@ -492,7 +492,7 @@ fn a_freed_video_ends_its_picture() {
         page.host.take_requests(),
         [PlaybackRequest::End { picture }]
     );
-    assert!(page.events().is_empty());
+    assert_eq!(page.events(), [] as [String; 0]);
     assert!(page.host.players.is_empty());
 }
 
@@ -518,7 +518,7 @@ fn the_reduced_surface_answers_nothing_else() {
         page.document.set_attribute(video, name, value);
     }
     page.settle();
-    assert!(page.host.take_requests().is_empty());
+    assert_eq!(page.host.take_requests(), []);
 }
 
 /// `object-fit` reaches the engine as a UA attribute rule: `contain`,

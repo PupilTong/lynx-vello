@@ -160,7 +160,7 @@ mod tests {
                 (measured.width - width).abs() < f32::EPSILON,
                 "{value:?}: {measured:?}"
             );
-            assert!(document.get(raw).unwrap().child_ids().is_empty());
+            assert_eq!(document.get(raw).unwrap().child_ids(), []);
         }
         document.add_stylesheet(
             "raw-text { content: 'CSS'; }",

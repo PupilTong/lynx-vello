@@ -314,10 +314,8 @@ impl ScrollSlot {
         let axis = |pending: f32, committed: f32, low: f32, high: f32| {
             if pending < committed {
                 pending - low < (committed - low) / 2.0
-            } else if pending > committed {
-                high - pending < (high - committed) / 2.0
             } else {
-                false
+                pending > committed && high - pending < (high - committed) / 2.0
             }
         };
         let (low, high) = self.encode_window();

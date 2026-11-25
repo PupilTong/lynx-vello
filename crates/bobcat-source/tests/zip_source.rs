@@ -176,7 +176,10 @@ fn selects_real_binary_bundle_through_the_shared_page_adapter() {
         page.view_sources(SCREEN, "en-US").card_url.as_deref(),
         Some("https://cdn.example/dist/main.web.bundle")
     );
-    assert!(!page.view_sources(SCREEN, "en-US").style_sheets.is_empty());
+    assert_ne!(
+        page.view_sources(SCREEN, "en-US").style_sheets,
+        [] as [String; 0]
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

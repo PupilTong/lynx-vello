@@ -36,7 +36,9 @@ fn ink_columns(canvas: &mut OffscreenCanvas, y: i32) -> Option<(i32, i32)> {
     let width = i32::try_from(canvas.width()).unwrap();
     let row = canvas.context_2d().get_image_data(0, y, width, 1).unwrap();
     let inked: Vec<i32> = row
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, px)| px[3] > 0)
         .map(|(x, _)| i32::try_from(x).unwrap())

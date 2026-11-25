@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn none_template_expands_to_no_tracks() {
         let expanded = expand_template(&GridTemplateComponent::None, Some(100.0), None, 0.0);
-        assert!(expanded.tracks.is_empty());
+        assert_eq!(expanded.tracks, [] as [&TrackSize; 0]);
         assert_eq!(expanded.auto_fit, None);
     }
 

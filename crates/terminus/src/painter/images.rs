@@ -1310,7 +1310,7 @@ mod tests {
             assert!(!painter.take_redraw(), "nothing it draws changed");
         }
         assert!(!store.described.borrow().contains(&hidden));
-        assert!(store.generations_taken(hidden).is_empty());
+        assert_eq!(store.generations_taken(hidden), [] as [u64; 0]);
         assert!(store.wants.borrow().is_empty());
     }
 

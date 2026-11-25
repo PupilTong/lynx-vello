@@ -2027,16 +2027,13 @@ impl Taken {
     /// that built no frame, and the present's.
     fn pipeline(record: &Record, commit: Commit, presented: PresentedFrame) -> PipelineTiming {
         let at = Timestamp(commit.at);
-        let (resolve, layout, build) = commit.timing.map_or_else(
-            || (at..at, at..at, at..at),
-            |timing| {
-                (
-                    Timestamp(timing.style_start)..Timestamp(timing.style_end),
-                    Timestamp(timing.layout_start)..Timestamp(timing.layout_end),
-                    Timestamp(timing.frame_build_start)..Timestamp(timing.frame_build_end),
-                )
-            },
-        );
+        let (resolve, layout, build) = commit.timing.map_or((at..at, at..at, at..at), |timing| {
+            (
+                Timestamp(timing.style_start)..Timestamp(timing.style_end),
+                Timestamp(timing.layout_start)..Timestamp(timing.layout_end),
+                Timestamp(timing.frame_build_start)..Timestamp(timing.frame_build_end),
+            )
+        });
         let paint_end = Timestamp(presented.presented);
         let compose = Timestamp(presented.compose_start)..Timestamp(presented.compose_end);
         PipelineTiming {

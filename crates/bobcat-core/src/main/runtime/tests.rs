@@ -40,7 +40,6 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 }
 
 #[test]
-#[expect(clippy::float_cmp, reason = "explicit pixel widths are exact")]
 fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
     let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
     runtime
@@ -1782,7 +1781,7 @@ fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
         )
         .expect("registration");
     runtime.commit_if_dirty();
-    assert!(names.names().is_empty());
+    assert_eq!(names.names(), [] as [String; 0]);
 }
 
 /// The replica is what the painting side filters against, so a
@@ -5078,10 +5077,6 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
 /// record whose first field is the code `0`, the component's fields after it
 /// unchanged.
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the status codes are small integers, exact in f64"
-)]
 fn a_method_outcome_answers_its_status_code_or_a_record() {
     let number = |outcome| match method_answer(outcome) {
         HostValue::Number(code) => code,
@@ -7366,10 +7361,6 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "explicit line heights have exact pixel metrics"
-)]
 fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
@@ -7416,10 +7407,6 @@ fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "explicit line heights have exact pixel metrics"
-)]
 fn text_limits_from_papi_relayout_after_an_earlier_flush() {
     for (attribute, width) in [("text-maxline", 40.0), ("text-maxlength", 20.0)] {
         let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -7452,10 +7439,6 @@ fn text_limits_from_papi_relayout_after_an_earlier_flush() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "explicit line heights have exact pixel metrics"
-)]
 fn replacing_inline_styles_preserves_attribute_text_limits() {
     for (attribute, width) in [("text-maxline", 40.0), ("text-maxlength", 20.0)] {
         let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -7506,7 +7489,6 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
 /// both directions: `ellipsis` widens the clamped paragraph by the three-dot
 /// marker, and `clip` takes it away again.
 #[test]
-#[expect(clippy::float_cmp, reason = "Ahem em squares have exact metrics")]
 fn the_text_overflow_attribute_from_papi_reaches_the_paragraph_marker() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
@@ -7581,7 +7563,7 @@ fn rewriting_the_text_attribute_updates_generated_content() {
     let tree = elements.tree();
     let carrier = tree.get(node_id(4)).expect("carrier");
     assert_eq!(carrier.attribute("text").as_deref(), Some("hi"));
-    assert!(carrier.child_ids().is_empty());
+    assert_eq!(carrier.child_ids(), []);
     assert!(
         tree.text_block_size(node_id(3))
             .is_some_and(|size| (size.width - 40.0).abs() < f32::EPSILON),
@@ -7617,14 +7599,7 @@ fn a_collected_raw_text_releases_its_attribute_content() {
             .as_deref(),
         Some("hello")
     );
-    assert!(
-        elements
-            .tree()
-            .get(node_id(4))
-            .unwrap()
-            .child_ids()
-            .is_empty()
-    );
+    assert_eq!(elements.tree().get(node_id(4)).unwrap().child_ids(), []);
 
     // Let go of the handle only now: a collection the engine starts on its
     // own may otherwise free it before the probe above.
@@ -10502,7 +10477,6 @@ fn sheet_source(text: bool, width: &str) -> crate::resource::LoadedSource {
 }
 
 #[test]
-#[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
 fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
     use crate::resource::StyleSheetSource;
     for text in [true, false] {
@@ -10602,7 +10576,6 @@ fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
 // inside another one is what tokio refuses. Production is the same shape — the
 // wait happens in a job, which the top loop runs outside its `block_on`.
 #[test]
-#[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
 fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
     for outcome in ["success", "failure", "dropped", "cancelled"] {
         let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
@@ -11135,7 +11108,6 @@ fn frame_page_refuses_past_eight_frames_deep() {
 /// built under it, removes the sheet, and builds the next card a fresh
 /// page, which `framePage` answers.
 #[test]
-#[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
 fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
     for text in [true, false] {
         let (mut js, mut runtime, elements, far) = runtime_over_watching_names(ingredients());
@@ -11850,7 +11822,7 @@ fn a_cards_composed_synthetic_event_reaches_the_page_realm_first() {
             "card-answer true".to_owned(),
         ]
     );
-    assert!(listener_failures(&mut far).is_empty());
+    assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
 /// A non-composed synthetic event at a card's node ends at the frame's
@@ -11998,7 +11970,7 @@ fn a_listener_of_another_realm_dispatches_into_the_dispatching_realm_again() {
             "card-answer true".to_owned(),
         ]
     );
-    assert!(listener_failures(&mut far).is_empty());
+    assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
 /// A detail the structured clone refuses — one holding a function — throws
@@ -12080,7 +12052,7 @@ other.evaluate(`(report) => {{
         "the closed card is freed"
     );
     assert_eq!(keyup(&mut js, &mut runtime), expected);
-    assert!(listener_failures(&mut far).is_empty());
+    assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
 /// What a listener of the dispatching realm itself throws is reported the
@@ -12164,7 +12136,7 @@ fn a_dispatch_reaches_a_card_whose_timer_callback_is_running() {
             "card-answer true".to_owned(),
         ]
     );
-    assert!(listener_failures(&mut far).is_empty());
+    assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
 /// The dispatching realm walks the event object its `__DispatchEvent` was
@@ -12222,7 +12194,7 @@ fn a_nested_synthetic_dispatch_walks_its_own_object_and_keeps_the_outer_one() {
             "card-answer true".to_owned(),
         ]
     );
-    assert!(listener_failures(&mut far).is_empty());
+    assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
 /// `__DispatchEvent` of an event no realm listens for still runs the

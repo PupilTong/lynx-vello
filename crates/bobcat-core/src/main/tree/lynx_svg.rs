@@ -351,7 +351,7 @@ mod tests {
         let markup = r##"<svg fill="#f00">50% é</svg>"##;
         document.set_attribute(element, CONTENT_ATTRIBUTE, markup);
 
-        assert!(document.take_wanted_images().is_empty());
+        assert_eq!(document.take_wanted_images(), []);
         let requests = document.take_document_requests();
         assert_eq!(requests.len(), 1);
         let (source, bytes, kind) = &requests[0];
@@ -394,7 +394,7 @@ mod tests {
         let (mut document, _, sources) = images();
         let element = svg(&mut document, "");
         document.set_attribute(element, SRC_ATTRIBUTE, "");
-        assert!(document.take_wanted_images().is_empty());
+        assert_eq!(document.take_wanted_images(), []);
 
         for clear in [Some(""), None] {
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);

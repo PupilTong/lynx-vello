@@ -657,7 +657,7 @@ mod generated_content_tests {
             doc.layout();
             assert_eq!(contents(&doc, text), value.unwrap_or_default());
             width(&doc, text, expected);
-            assert!(doc.get(text).unwrap().child_ids().is_empty());
+            assert_eq!(doc.get(text).unwrap().child_ids(), []);
             assert_eq!(
                 doc.query_selector(doc.document_element().id(), "text:empty")
                     .unwrap(),

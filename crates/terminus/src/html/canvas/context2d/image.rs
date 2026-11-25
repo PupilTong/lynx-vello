@@ -212,7 +212,7 @@ fn fits(width: u32, height: u32) -> bool {
 /// `data`'s pixels as premultiplied RGBA8.
 fn premultiplied(data: &ImageData) -> Vec<u8> {
     let mut pixels = data.data.data().to_vec();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         if data.format == ImageFormat::Bgra8 {
             pixel.swap(0, 2);
         }

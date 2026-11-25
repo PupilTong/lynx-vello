@@ -225,9 +225,9 @@ mod tests {
     #[test]
     fn eviction_is_least_recently_used_first() {
         let mut cache = MemoryCache::new(30);
-        assert!(cache.insert(key("a"), 1, 10).evicted.is_empty());
-        assert!(cache.insert(key("b"), 2, 10).evicted.is_empty());
-        assert!(cache.insert(key("c"), 3, 10).evicted.is_empty());
+        assert_eq!(cache.insert(key("a"), 1, 10).evicted, []);
+        assert_eq!(cache.insert(key("b"), 2, 10).evicted, []);
+        assert_eq!(cache.insert(key("c"), 3, 10).evicted, []);
         assert_eq!(
             cache.get("a"),
             Some(&1),

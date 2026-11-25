@@ -1120,7 +1120,14 @@ impl Context2d<'_> {
         for row in cy0..cy1 {
             let src = index(row - dy, cx0 - dx, iw);
             let src = src..src + index(0, cx1 - cx0, 0);
-            texels.extend(data[src].chunks_exact(4).flat_map(premultiply));
+            texels.extend(
+                data[src]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .flat_map(premultiply),
+            );
         }
         raster.surface.write(
             (to_u32(cx0), to_u32(cy0)),
