@@ -158,6 +158,26 @@ pub(crate) fn rule_guards(author: &SharedRwLock) -> RuleGuards<'_> {
     }
 }
 
+/// The context an author-origin value, declaration or rule of `rule_type`
+/// parses in: no quirks, the default parsing mode, no error reporter, and
+/// `url_data` as the base of its URLs.
+pub(crate) fn author_parser_context(
+    url_data: &UrlExtraData,
+    rule_type: CssRuleType,
+) -> ParserContext<'_> {
+    ParserContext::new(
+        Origin::Author,
+        url_data,
+        Some(rule_type),
+        ParsingMode::DEFAULT,
+        QuirksMode::NoQuirks,
+        Cow::default(),
+        None,
+        None,
+        AttrTaint::default(),
+    )
+}
+
 /// A user-agent stylesheet parsed once, for any number of documents to mount.
 ///
 /// Parsed under the process-wide user-agent lock, so every document reads it
@@ -1019,17 +1039,7 @@ impl StyleEngine {
     }
 
     fn parser_context(&self, rule_type: CssRuleType) -> ParserContext<'_> {
-        ParserContext::new(
-            Origin::Author,
-            &self.url_data,
-            Some(rule_type),
-            ParsingMode::DEFAULT,
-            QuirksMode::NoQuirks,
-            Cow::default(),
-            None,
-            None,
-            AttrTaint::default(),
-        )
+        author_parser_context(&self.url_data, rule_type)
     }
 
     /// Re-evaluates the media queries against the device that was just

@@ -17,10 +17,10 @@ use std::borrow::Cow;
 use parley::setting::Tag;
 use parley::{
     Alignment, FontFamily as ParleyFontFamily, FontFamilyName as ParleyFontFamilyName, FontFeature,
-    FontFeatures, FontStyle as ParleyFontStyle, FontVariation, FontVariations,
-    FontWeight as ParleyFontWeight, GenericFamily as ParleyGenericFamily, IndentOptions,
-    LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
-    TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
+    FontFeatures, FontVariation, FontVariations, FontWeight as ParleyFontWeight,
+    GenericFamily as ParleyGenericFamily, IndentOptions, LineHeight as ParleyLineHeight,
+    OverflowWrap as ParleyOverflowWrap, TextStyle as ParleyTextStyle,
+    TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
 use stylo::values::computed::font::{GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{
@@ -28,6 +28,7 @@ use stylo::values::computed::{
 };
 
 use crate::style::TextBrush;
+use crate::text::line::generic_family;
 
 /// The fully resolved effective style of one text run.
 ///
@@ -308,13 +309,7 @@ pub(in crate::text) fn parley_style(
     ParleyTextStyle {
         font_family: translate_font_family_list(&run.font_family),
         font_size: run.font_size,
-        font_style: if run.font_style == FontStyle::NORMAL {
-            ParleyFontStyle::Normal
-        } else if run.font_style == FontStyle::ITALIC {
-            ParleyFontStyle::Italic
-        } else {
-            ParleyFontStyle::Oblique(Some(run.font_style.oblique_degrees()))
-        },
+        font_style: crate::text::ResolvedFontStyle::from(run.font_style).into(),
         font_weight: ParleyFontWeight::new(run.font_weight.value()),
         font_variations: if variations.is_empty() {
             FontVariations::empty()
@@ -473,25 +468,13 @@ impl crate::text::ResolvedFont {
             .families
             .list
             .iter()
-            .map(|single| match single {
-                SingleFontFamily::FamilyName(name) => ResolvedFamily::Named(name.name.to_string()),
-                SingleFontFamily::Generic(generic) => {
-                    ResolvedFamily::Generic(translate_generic_family(*generic))
-                }
-            })
+            .map(ResolvedFamily::from)
             .collect();
-        let style = font.font_style;
         Self {
             families,
             size: font.font_size.computed_size().px(),
             weight: font.font_weight.value(),
-            style: if style == FontStyle::NORMAL {
-                ResolvedFontStyle::Normal
-            } else if style == FontStyle::ITALIC {
-                ResolvedFontStyle::Italic
-            } else {
-                ResolvedFontStyle::Oblique(Some(style.oblique_degrees()))
-            },
+            style: ResolvedFontStyle::from(font.font_style),
             stretch: font.font_width.to_percentage().0,
         }
     }
@@ -505,21 +488,8 @@ pub(in crate::text) fn translate_font_family_name(
             ParleyFontFamilyName::Named(Cow::Borrowed(name.name.as_ref()))
         }
         SingleFontFamily::Generic(generic) => {
-            ParleyFontFamilyName::Generic(translate_generic_family(*generic))
+            ParleyFontFamilyName::Generic(generic_family(*generic))
         }
-    }
-}
-
-pub(in crate::text) const fn translate_generic_family(
-    value: GenericFontFamily,
-) -> ParleyGenericFamily {
-    match value {
-        GenericFontFamily::None | GenericFontFamily::SansSerif => ParleyGenericFamily::SansSerif,
-        GenericFontFamily::Serif => ParleyGenericFamily::Serif,
-        GenericFontFamily::Monospace => ParleyGenericFamily::Monospace,
-        GenericFontFamily::Cursive => ParleyGenericFamily::Cursive,
-        GenericFontFamily::Fantasy => ParleyGenericFamily::Fantasy,
-        GenericFontFamily::SystemUi => ParleyGenericFamily::SystemUi,
     }
 }
 
@@ -528,6 +498,7 @@ pub(in crate::text) const fn translate_generic_family(
 mod tests {
     #![allow(clippy::float_cmp)]
 
+    use parley::FontStyle as ParleyFontStyle;
     use stylo::values::generics::font::{FeatureTagValue, FontSettings, FontTag, VariationValue};
 
     use super::*;

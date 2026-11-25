@@ -9,9 +9,21 @@
 //! the bitmap and its commit. Each context method and attribute is one call taking numbers,
 //! `&str`, small enums or the module's own value types ([`Path`],
 //! [`Gradient`], [`Pattern`], [`Image`]); errors name the exception the
-//! standard throws ([`CanvasError`]). There is no JavaScript, document or CSS
-//! parsing here: colors arrive as [`peniko::Color`](crate::peniko::Color),
-//! fonts as a [`ResolvedFont`], and the caller owns the
+//! standard throws ([`CanvasError`]). There is no JavaScript here.
+//!
+//! The attributes that take a CSS string have HTML's setter steps here, in
+//! two forms. A string form — [`Context2d::set_fill_style_css`],
+//! `set_stroke_style_css`, `set_shadow_color_css`, `set_font_css` and
+//! [`Gradient::add_color_stop_css`] — parses the string with stylo
+//! (`css.rs`): one that does not parse leaves the attribute as it was and
+//! answers `None`, one that does sets it and answers the serialization the
+//! attribute's getter gives. Colors are a CSS `<color>` (`currentcolor` as
+//! opaque black) serialized as `#rrggbb` or `rgba(r, g, b, a)`; fonts are
+//! the `font` shorthand, computed with no document and no device, relative
+//! sizes against the default font's 10px, serialized with the size in px
+//! and no line height. A typed form takes the parsed value: a
+//! [`peniko::Color`](crate::peniko::Color), a [`Style`] (for a gradient or
+//! a pattern) or a [`ResolvedFont`]. The caller owns the
 //! [`TextContext`](seldon::text::TextContext) text is shaped in, through
 //! the one-line shaper [`shape_line`](seldon::text::shape_line) that SVG
 //! `<text>` shapes with too. A canvas needs no
@@ -30,6 +42,7 @@
 )]
 
 mod context;
+mod css;
 mod image;
 mod path;
 mod pixels;

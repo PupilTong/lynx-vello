@@ -1270,7 +1270,32 @@ the element's.
   the module's value types. `OffscreenCanvas` is `Send`; there is no global state.
 - Colors are `peniko::Color`; fonts are `seldon`'s `ResolvedFont` (family names and generic
   families, size in px, weight, style with an oblique angle, stretch), which the state holds in an
-  `Arc` so `save()` copies no font. Parsing CSS strings is the caller's job.
+  `Arc` so `save()` copies no font. These typed setters take a parsed value; a `Style` carries a
+  gradient or a pattern.
+- The attributes that take a CSS string have HTML's setter steps in a string form:
+  `set_fill_style_css`, `set_stroke_style_css`, `set_shadow_color_css`, `set_font_css` and
+  `Gradient::add_color_stop_css`. `css.rs` parses the string with stylo, with an author-origin
+  context over `about:blank` (`style::engine::author_parser_context`, the one the style engine
+  parses with, over `tree::document::about_blank_url_data`) and no `Device` and no element, so it
+  runs on any thread. A string that does not parse leaves the attribute as it was and answers
+  `None`; one that parses sets it and answers the serialization the getter gives.
+  - A `<color>` is computed and resolved against opaque black, converted to sRGB by
+    `paint::convert::color`, and each channel clamped to 0..=1 (NaN as 0). The fork's `lynx`
+    grammar leaves out `currentcolor`, which `css.rs` matches first and answers as opaque black;
+    `color-mix()`, `light-dark()`, `contrast-color()` and system colors are refused. The
+    serialization is HTML's: `#rrggbb` when opaque, else `rgba(r, g, b, a)` with `a` in the fewest
+    decimals that keep its 8-bit value.
+  - `font` is the shorthand (`properties::shorthands::font::parse_value`); a CSS-wide keyword and
+    a system font are refused. Relative sizes resolve against the default font's 10px (HTML's base
+    for an `OffscreenCanvas`): percentages, `larger`/`smaller` by 1.2, `em`-class units at 1,
+    `ex`/`ch` at 0.5 and `lh` at 1.2; absolute-size keywords scale from 16px; viewport and
+    container units, `rpx` and a `calc()` that is not of absolute lengths are refused. `bolder`
+    and `lighter` are stylo's computed `FontWeight::bolder`/`lighter` of `normal`, a
+    `font-stretch` keyword is stylo's computed `FontWidth` as a ratio, and families convert with
+    `seldon`'s `ResolvedFamily: From<&SingleFontFamily>`. The serialization is the shorthand's own
+    (`LonghandsToSerialize`) with the size in px and no line height.
+  - `add_color_stop_css` answers `Type` for a non-finite offset and `IndexSize` for one outside
+    0..=1, both before it parses the color, then `Syntax` for a string that is not a color.
 - Text calls take the caller's `&mut TextContext`: the caller decides which fonts exist. Text is
   shaped by `seldon::text::shape_line`, the one-line shaper SVG `<text>` uses, in the context's
   locale and scratch layout, after `text.rs` replaces each ASCII whitespace character by a space,

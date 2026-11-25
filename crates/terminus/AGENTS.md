@@ -99,8 +99,16 @@ Subsystems:
   (`CompositeOp`, `LineCap`, … each with `from_name`/`name` for the IDL
   strings) or `Path` (`Path2D`), `Gradient`, `Pattern` (shared by
   reference, so a stop or transform set later shows in later draws), `Image`,
-  `Style`, `seldon`'s `ResolvedFont` (CSS strings are parsed by the
-  caller) and `peniko::Color`; text calls take the caller's
+  `Style`, `seldon`'s `ResolvedFont` and `peniko::Color`; the attributes
+  that take a CSS string also have a string form (`set_fill_style_css`,
+  `set_stroke_style_css`, `set_shadow_color_css`, `set_font_css`,
+  `Gradient::add_color_stop_css`), HTML's setter steps: `context2d/css.rs`
+  parses the string with stylo over `about:blank` with no device and no
+  element (`style::engine::author_parser_context`, `paint::convert::color`,
+  stylo's font-weight and font-width computations, `seldon`'s
+  `ResolvedFamily: From<&SingleFontFamily>`), a string that does not parse
+  leaves the attribute as it was and answers `None`, and one that does
+  answers the serialization the getter gives; text calls take the caller's
   `&mut TextContext` and shape through `seldon::text::shape_line`, the
   shaper SVG `<text>` uses; `CanvasError` names the exception. `OffscreenCanvas`
   is `Send` and there is no global state. Draws are recorded into the
