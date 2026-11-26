@@ -2,6 +2,9 @@
 //! every answer leaves through, and the worker route table.
 //! `crates/bobcat-core/docs/devtools.md` is the description.
 
+pub(crate) mod css;
+pub(crate) mod dom;
+pub(crate) mod overlay;
 pub(crate) mod protocol;
 pub(crate) mod runtime;
 pub(crate) mod target;

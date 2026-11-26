@@ -726,6 +726,10 @@ struct DocumentSlot {
     content_detection: bool,
     card_realms: FxHashMap<OpenerId, ChildKey>,
     outbox: ViewOutbox,
+    #[cfg(feature = "devtools")]
+    devtools: Option<Weak<devtools::PageSession>>,
+    #[cfg(feature = "devtools")]
+    devtools_routes: crate::devtools::overlay::Routes,
 }
 
 trait RouteName {
@@ -788,6 +792,10 @@ impl DocumentSlot {
             content_detection: false,
             card_realms: FxHashMap::default(),
             outbox,
+            #[cfg(feature = "devtools")]
+            devtools: None,
+            #[cfg(feature = "devtools")]
+            devtools_routes: crate::devtools::overlay::Routes::default(),
         }))
     }
 
@@ -1079,9 +1087,12 @@ impl DocumentSlot {
 
     fn routes_given(&self, name: &str, registered: &impl Fn(&str) -> bool) -> bool {
         let wants = |name: &str| registered(name) || self.observed.contains(name);
-        wants(name)
+        let routed = wants(name)
             || (name == CLICK_EVENT && wants(DOUBLE_CLICK_EVENT))
-            || self.editing_routes(name)
+            || self.editing_routes(name);
+        #[cfg(feature = "devtools")]
+        let routed = routed || self.devtools_routes.routes(name);
+        routed
     }
 
     fn editing_routes(&self, name: &str) -> bool {
@@ -1163,6 +1174,8 @@ impl DocumentSlot {
         self.sync_content_detection();
         self.sync_container_timing();
         let frame = self.document_mut().commit();
+        #[cfg(feature = "devtools")]
+        self.devtools_document_changed();
         let mut commit_id = frame.commit_id();
         if self.bound {
             self.held = None;
@@ -1230,6 +1243,8 @@ impl DocumentSlot {
             self.sync_content_detection();
             self.sync_container_timing();
             let frame = self.document_mut().commit();
+            #[cfg(feature = "devtools")]
+            self.devtools_document_changed();
             if self.bound {
                 self.held = None;
                 self.outbox.publish_frame(frame);

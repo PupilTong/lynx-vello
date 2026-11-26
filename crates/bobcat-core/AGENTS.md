@@ -89,9 +89,9 @@ the main-thread flush binding — and
   not.
 - [Devtools](docs/devtools.md) — the `devtools` cargo feature's CDP backend
   (`devtools/`, `main/runtime/devtools.rs`): the session and sink, message
-  routing to `bobcat-main` and to workers, the `Target` and `Runtime`
-  domains, the hook sites and their cost, the lifetime rules, and what is not
-  done.
+  routing to `bobcat-main` and to workers, the `Target`, `Runtime`, `DOM`,
+  `CSS` and `Overlay` domains, the hook sites and their cost, the lifetime
+  rules, and what is not done.
 - [The Canvas 2D API](docs/canvas.md) — the canvas members of
   `bobcat-internal:host` in every realm kind, called by the built-in
   modules and an embedder's native-module ES module (`lynx:<name>`); the

@@ -37,6 +37,15 @@ crate enables it.
     `Runtime.callFunctionOn`, `Runtime.getProperties`, `Runtime.releaseObject`,
     `Runtime.releaseObjectGroup`, and the events `Runtime.executionContextCreated`,
     `Runtime.consoleAPICalled` and `Runtime.exceptionThrown`.
+  - `DOM.enable`, `DOM.disable`, `DOM.getDocument`, `DOM.requestChildNodes`,
+    `DOM.pushNodesByBackendIdsToFrontend`, `DOM.getBoxModel`, `DOM.getNodeForLocation`, and the
+    events `DOM.setChildNodes`, `DOM.childNodeInserted`, `DOM.childNodeRemoved`,
+    `DOM.childNodeCountUpdated`, `DOM.attributeModified`, `DOM.attributeRemoved`,
+    `DOM.characterDataModified`, `DOM.shadowRootPushed` and `DOM.shadowRootPopped`.
+  - `CSS.enable`, `CSS.disable`, `CSS.getComputedStyleForNode`, `CSS.getMatchedStylesForNode`
+    and `CSS.getInlineStylesForNode`.
+  - `Overlay.enable`, `Overlay.disable`, `Overlay.highlightNode`, `Overlay.hideHighlight`,
+    `Overlay.setInspectMode`, and the event `Overlay.inspectNodeRequested {backendNodeId}`.
 
   A worker session answers the `Runtime` methods only. Every other method of every domain
   (`Console.*` included) answers `-32601 '<method>' wasn't found`.
@@ -50,13 +59,16 @@ crate enables it.
 | `devtools/target.rs` | `Target` domain, `AutoAttach`, `LiveWorker` |
 | `devtools/runtime.rs` | `Runtime` domain: `dispatch`, `detach`, `RuntimeState`, `ConsoleTap`, `ConsoleCall`, the console install and hook; tests in `devtools/runtime/tests.rs` |
 | `devtools/runtime/remote.rs` | RemoteObjects, previews, property descriptors, the object table (`Mirror`, `ObjectTable`, `RemoteObject`, `by_value`) |
+| `devtools/dom.rs` | `DOM` domain, `DomState` and its known-node table, `FRAME_ID`, the commit hook body (`document_changed`), `find` and `no_node` (also used by `css.rs`); tests in `devtools/dom/tests.rs` |
+| `devtools/css.rs` | `CSS` domain, `CssState`; tests in `devtools/css/tests.rs` |
+| `devtools/overlay.rs` | `Overlay` domain: `OverlayState`, `dispatch`, the input hook body `input_event`, `detach`, `Routes` and `INSPECT_NAMES`; tests in `devtools/overlay/tests.rs` |
 | `devtools/worker.rs` | `WorkerDevtools`/`WorkerOp` (the `WorkerMessage::Devtools` payload), `WorkerSession`, `handle` |
-| `main/runtime/devtools.rs` | `PageSession`, the page routing, the `MainThreadRuntime` methods |
+| `main/runtime/devtools.rs` | `PageSession`, `DevtoolsDocument`, the page routing, the `MainThreadRuntime` and `DocumentSlot` hook methods |
 | `devtools/test_support.rs` | `#[cfg(test)]` helpers every devtools test uses (below) |
 | `devtools/tests.rs` | the attachment over a real view: refusal, one frontend at a time, the envelope's errors, worker sessions, the end of a view |
 
 `main/runtime/devtools.rs` is a child module of the runtime because it reads
-private fields there (`core`, `workers`).
+private fields there (the document slot, `core`, `workers`).
 
 ## Message path
 
@@ -73,9 +85,12 @@ private fields there (`core`, `workers`).
   `owner::queue`, never awaiting it. When the channel closes (session dropped) it queues one more
   job, `devtools_end`.
 - **Page job** (`MainThreadRuntime::devtools_message`): drops the message unless the installed
-  session's outlet is the job's; parses the envelope; a `sessionId` here is `-32001`; then routes
-  by domain: `Target` → `target::dispatch`, `Runtime` and `Console` → `runtime::dispatch`,
-  anything else `-32601`.
+  session's outlet is the job's; runs the DOM hook; parses the envelope; a `sessionId` here is
+  `-32001`; then routes by domain: `Target` → `target::dispatch`, `Runtime` and `Console` →
+  `runtime::dispatch`, `DOM` → `dom::dispatch`, `CSS` → `css::dispatch`, `Overlay` →
+  `overlay::dispatch`, anything else `-32601`. A `DOM` or `CSS` request on a page that has no
+  document yet answers `-32000 the page has no document yet`. Last, a DOM report owed during the
+  dispatch is made.
 - **Worker.** `consume_messages` (`background/thread.rs`) holds `WorkerMessage::Devtools` in order
   until the worker's root module has finished, as it holds `Post`, then queues one
   `JobKind::Devtools` job per message calling `devtools::worker::handle` with
@@ -143,6 +158,60 @@ after the request's script left, which the caller reports under
 `Scene::Devtools`. `devtools::worker::handle` takes `console_ready` as well and
 returns that error; `MainThreadRuntime::devtools_message` returns it.
 
+`devtools/dom.rs`:
+
+```rust
+pub(crate) const FRAME_ID: &str = "page";
+#[derive(Default)]
+pub(crate) struct DomState(Option<Known>); // None while disabled
+pub(crate) fn dispatch(state: &mut DomState, document: &mut LynxDocument,
+                       frontend: &Frontend, request: &Request);
+pub(crate) fn document_changed(state: &mut DomState, document: &mut LynxDocument,
+                               frontend: &Frontend);
+pub(super) fn find(document: &LynxDocument, bits: u64) -> Option<&Node<()>>;
+pub(super) fn no_node() -> Error; // -32000 Could not find node with given id
+```
+
+`devtools/css.rs`:
+
+```rust
+#[derive(Default)]
+pub(crate) struct CssState {}
+pub(crate) fn dispatch(state: &mut CssState, document: &mut LynxDocument,
+                       frontend: &Frontend, request: &Request);
+```
+
+`devtools/overlay.rs`:
+
+```rust
+pub(crate) struct OverlayState { inspect: Option<HighlightConfig> /* Default */ }
+pub(crate) fn dispatch(state: &mut OverlayState, document: &mut DevtoolsDocument<'_>,
+                       frontend: &Frontend, request: &Request);
+pub(crate) fn input_event(state: &mut OverlayState, document: &mut DevtoolsDocument<'_>,
+                          frontend: &Frontend, target: NodeId, name: &str,
+                          payload: &InputEventPayload) -> bool;
+pub(crate) fn detach(state: &mut OverlayState, document: &mut DevtoolsDocument<'_>);
+pub(crate) struct Routes { inspecting: bool /* Default */ }
+impl Routes { pub(crate) fn routes(&self, name: &str) -> bool; } // #[inline]
+```
+
+`HighlightConfig` is private to the file: four `Option<Rgba>` fields read from
+`contentColor`, `paddingColor`, `borderColor` and `marginColor`. `Routes::routes`
+answers `self.inspecting && INSPECT_NAMES.contains(&name)`, where
+`INSPECT_NAMES` is `["pointerdown", "pointermove", "pointerup"]`, the one list
+of the names the mode routes.
+
+`DevtoolsDocument` (`main/runtime/devtools.rs`):
+`document(&mut self) -> Option<&mut LynxDocument>` and
+`route_names(&mut self, names: &[&str], change: impl FnOnce(&mut overlay::Routes))`, which
+applies the listener table's pending last removals and then goes through
+`DocumentSlot::change_names`, so the painter's name set moves only for a name no
+other side routes. `Routes` lives in the document slot, not in `OverlayState`,
+because `routes_given` reads it while the overlay state may be borrowed.
+
+DOM, CSS and Overlay dispatches run with the document slot mutably borrowed:
+they run no script.
+
 ## Test helpers (`devtools/test_support.rs`)
 
 - `booted(spec: TestViewSpec) -> TestEngine`: the spec with `with_devtools()`, booted.
@@ -165,6 +234,10 @@ returns that error; `MainThreadRuntime::devtools_message` returns it.
 
 | Site | Feature on, nothing attached | Attached |
 | --- | --- | --- |
+| `DocumentSlot::commit_flush`, right after its first `commit()`; `commit_if_dirty`, right after `commit()` in the `needs_render` branch → `devtools_document_changed` → `dom::document_changed` | one `Option` check (`DocumentSlot::devtools`) | the `Weak` upgrade, a `try_borrow_mut` of the DOM state, and the comparison of "Changes" below, which runs only while `DOM` is enabled and a document was sent |
+| start of every page message job → the same function | no job runs | the same |
+| `MainThreadRuntime::deliver_input_event` entry → `devtools_takes_input` → `overlay::input_event`; `true` returns with no delivery | one `Option` check (`MainThreadRuntime::devtools`) | inspect mode off: the `Option` check, `try_borrow_mut` of the overlay state and of the document slot, and one `Option` check of `OverlayState::inspect`, which answers `false` |
+| `DocumentSlot::routes_given` → `Routes::routes` | one inlined `bool` read (`Routes::inspecting`), which answers `false` | inspect mode off: the same; on: the name compared with the three entries of `INSPECT_NAMES` |
 | `logScriptMessage` / `reportScriptError` (`realm/mod.rs`, `install_diagnostics`) → `ConsoleTap::message` | one `Cell<bool>` read per call | the same until `Runtime.enable`; then `ConsoleTap::message` |
 | `policy::report` (`realm/policy.rs`), its first statement → `RealmOwner::console` → `ConsoleTap::exception` | per reported error: one `OnceCell` read (`Page::console`) or one field read (`Worker::console`), and one `Cell<bool>` read | the same until `Runtime.enable`; then `ConsoleTap::exception` |
 | the realm's `Rc<ConsoleTap>`, which exists from realm creation on: `Worker::console` (created in `Worker::new`, handed to `RealmNames::console` in `Worker::boot`) and `Page::console` (set from `MainThreadRuntime::core().console` when `Page` stores its opened realm) | one `Rc` per realm and one field on `Page` and on `Worker`; no function registered; nothing per call | the console replacements, installed at the realm's first `Runtime.enable` |
@@ -172,15 +245,18 @@ returns that error; `MainThreadRuntime::devtools_message` returns it.
 | `WorkerOwner::terminate`, `WorkerOwner::forget` → `AutoAttach::worker_ended` | one `RefCell` borrow and `Option` check | after `Target.setAutoAttach`: the announcement |
 | the paint walk (`walk_within`, `crates/terminus/src/paint/walker.rs`) | one `Option` check (`Document::node_highlight`) | with a highlight set: the scan for the node's `ElementBox` item and up to four fills |
 
+`commit_flush`'s second `commit()`, made at boot after the painter binding
+while the job is parked on it, is not followed by the DOM hook.
+
 Nothing is added to tree mutation, the Element PAPI, the realm epilogue,
 `LynxView::pump`, `ViewNotice`, `EngineEvent` or the `Painter`. Fields added:
-`ViewSources::devtools`, `LynxView::devtools`, `MainThreadRuntime::devtools`,
-`RealmCore::console`, `RealmNames::console`, `ShadowRealmHook::console`,
-`ViewWorkers::devtools`, `WorkerRealm::devtools`, `Page::console`,
-`Worker::console`, and in `terminus` `Document::node_highlight`. Trait method
-added: `RealmOwner::console`. Variants added: `Scene::Devtools`,
-`ToMain::Devtools`, `WorkerMessage::Devtools`, `JobKind::Devtools`
-(`"devtools"`, Lynx task type `native_func_task`),
+`ViewSources::devtools`, `LynxView::devtools`, `DocumentSlot::{devtools,
+devtools_routes}`, `MainThreadRuntime::devtools`, `RealmCore::console`,
+`RealmNames::console`, `ShadowRealmHook::console`, `ViewWorkers::devtools`,
+`WorkerRealm::devtools`, `Page::console`, `Worker::console`, and in `terminus`
+`Document::node_highlight`. Trait method added: `RealmOwner::console`.
+Variants added: `Scene::Devtools`, `ToMain::Devtools`, `WorkerMessage::Devtools`,
+`JobKind::Devtools` (`"devtools"`, Lynx task type `native_func_task`),
 `EngineError::{DevtoolsDisabled, DevtoolsAttached}`, and in the bridge
 `HostSlot::Values`, one more arm of the host-function dispatch `match`.
 `ToMain` is at most 96 bytes and `WorkerMessage` at most 56 on 64-bit targets,
@@ -319,6 +395,166 @@ of the message `"Name: message"` (`Error` when there is none) and whose `descrip
 message; the location comes from the `ScriptError`; the id comes from the session's exception
 counter. The embedder's event is unchanged.
 
+## DOM domain
+
+Files: `devtools/dom.rs`, `devtools/dom/tests.rs`.
+
+- `nodeId` and `backendNodeId` are both `NodeId::to_bits()`, written as a JSON integer; there is
+  no id table. A node is found (`find`) when its id decodes, `Document::get` answers it and
+  `Document::is_connected` answers `true`; a shadow root's parent is its host, so nodes in a
+  shadow tree are found too. Otherwise the answer is `-32000 Could not find node with given id`
+  (`no_node`).
+- `DomState` is `Option<Known>`: `None` while disabled. `Known` maps each node the frontend was
+  told about to what it was sent: a text node its data; every other node its attributes, its
+  shadow root, and either the list of child ids sent (`Children::Sent`) or, when the children
+  were not sent, their count (`Children::Count`). `DOM.enable` creates an empty `Known`;
+  `DOM.getDocument` replaces it with a new one, so it also enables; `DOM.disable` drops it.
+
+Methods:
+
+- `DOM.getDocument {depth = 1, pierce}`: the Document node, with `frameId` `FRAME_ID`, and its
+  subtree to `depth` (`-1` is the whole subtree). A depth of 0 or below -1 is `-32000 Please
+  provide a positive integer as a depth or -1 for entire subtree`, for this method and for
+  `requestChildNodes`.
+- `DOM.requestChildNodes {nodeId, depth = 1, pierce}`: only for a known node, else `-32000 Could
+  not find node with given id`. Answers `{}` after emitting `DOM.setChildNodes {parentId, nodes}`;
+  when the node's children were already sent, it recurses into them with `depth - 1`. A text node
+  answers `{}` and sends nothing.
+- `DOM.pushNodesByBackendIdsToFrontend {backendNodeIds}`: for each id, emits `setChildNodes`
+  top-down from the nearest known ancestor, and answers `nodeIds` (0 for an id not in the
+  document). With no document sent it answers `-32000 Document needs to be requested first`.
+- `DOM.getBoxModel {nodeId | backendNodeId}` and `DOM.getNodeForLocation {x, y}`: below.
+
+Node descriptions: `nodeId`, `backendNodeId`, `parentId` (every node but the Document; a shadow
+root's is its host), `nodeType` (1 element, 3 text, 9 document, 11 shadow root), `nodeName`
+(an element's Lynx tag through `lynx_tag`, `#text`, `#document`, `#document-fragment`),
+`localName` (the Lynx tag for an element, empty otherwise), `nodeValue` (a text node's data,
+otherwise empty), `childNodeCount`, `children` when within depth, `attributes` as the flat
+`[name, value, ...]` array, `shadowRoots`, `shadowRootType` (`open` or `closed`). An element
+whose only child is a text node is sent with that child. A shadow host is always sent with its
+light children (depth at least 1) and its shadow root; the shadow root is described at `depth`
+with `pierce` and at 0 without, so without `pierce` its children are not sent.
+
+Changes:
+
+- Found only in `document_changed`, which runs after the commit of `commit_flush` and of
+  `commit_if_dirty` and at the start of every page message job, only while enabled and after a
+  document was sent, by comparing `Known` with the document. Nothing is added to tree mutation,
+  the Element PAPI or the realm epilogue.
+- Pass 1, top-down over the known tree: `attributeRemoved` then `attributeModified` for an
+  element's attribute changes; `characterDataModified` for a text change; `shadowRootPopped
+  {hostId, rootId}` when a known host's shadow root is no longer the one sent;
+  `childNodeCountUpdated` for a parent whose children were not sent and whose count changed. For
+  a parent whose children were sent, `childNodeRemoved {parentNodeId, nodeId}` for each child
+  that left; the children that stayed are walked in their old order, a child is kept when its new
+  position is after the last kept child's, and every other one is also reported as removed. A
+  removed node and every known node under it are forgotten.
+- Pass 2, top-down: `shadowRootPushed {hostId, root}` for a host with a new shadow root, and
+  `childNodeInserted {parentNodeId, previousNodeId, node}` for each child of a sent parent that
+  is not known, in document order, the node described at depth 0 and `previousNodeId` the
+  preceding child (0 for the first). A moved node is therefore reported as removed and then
+  inserted, and each `previousNodeId` is known when it is named.
+- Nothing is reported for a node the frontend was never told about.
+- Cost per call: one map lookup per known node, an attribute comparison per known element, and,
+  for a sent parent whose child list changed, one hash map of the new child positions.
+
+Geometry (reads of the last layout; nothing flushes):
+
+- `DOM.getBoxModel`: the border quad is `Document::bounding_client_rect`, the border box in
+  viewport CSS px with ancestor scroll offsets applied and CSS transforms not applied. The padding
+  and content quads step inward, and the margin quad outward, by the `border`, `padding` and
+  `margin` edges of `Document::rounded_layout`, which are in CSS px rounded to device-pixel
+  boundaries (zero when the node has no layout record). Each quad is eight numbers clockwise
+  from the top-left. `width` and `height` are the border box's, rounded to the nearest integer.
+  A node without a rect answers `-32000 Could not compute box model.`; neither id is `-32000
+  Either nodeId or backendNodeId must be specified`; a `backendNodeId` not found is `-32000 No
+  node found for given backend id`. Any node in the document is accepted, known or not.
+- `DOM.getNodeForLocation`: `x` and `y` are viewport CSS px. Reads the first node of
+  `Document::elements_from_point` (the frame the last render retained), stepping from a text node
+  to its parent, and answers `{backendNodeId, frameId}`, with `nodeId` only when that node is
+  known. No node there is `-32000 No node found at given location`.
+
+## CSS domain
+
+Files: `devtools/css.rs`, `devtools/css/tests.rs`.
+
+- `CSS.enable`, `CSS.disable`: `{}`. No style sheet is announced; `CssState` holds nothing, and
+  the other methods answer without `CSS.enable`.
+- Each other method takes `{nodeId}`: a node found by `dom::find`, else `-32000 Could not find
+  node with given id`; a node that is not an element is `-32000 Node is not an Element`.
+- `CSS.getComputedStyleForNode`: `computedStyle: [{name, value}]` from
+  `Document::computed_style_entries(id, &[], true)`, every author-facing longhand and custom
+  property with resolved values.
+- `CSS.getInlineStylesForNode`: `inlineStyle` and `attributesStyle` from `Document::matched_styles`'
+  `inline` and `presentational`, each omitted when absent. A style is `{cssProperties: [{name,
+  value, important}], shorthandEntries: []}`.
+- `CSS.getMatchedStylesForNode`: those two styles; `matchedCSSRules` in `matched_styles` order
+  (lowest cascade priority first), each `{rule: {selectorList: {selectors: [{text}], text},
+  origin, style}, matchingSelectors}` with `text` the selectors joined by `", "` and
+  `matchingSelectors` the indices of the selectors that match; `pseudoElements: []`; `inherited`:
+  one `{inlineStyle?, matchedCSSRules}` per ancestor element from the parent up, reached through
+  `parent_id()` (a shadow root steps to its host). Origins: UserAgent `user-agent`, Author
+  `regular`, User `injected`. An element never styled has empty rule lists and no inline style.
+- Rules carry no `styleSheetId` and no `range`. Each request walks every rule again, as
+  `matched_styles` does; nothing is cached.
+
+## Overlay domain
+
+- `Overlay.enable` answers `{}` and does nothing else. `Overlay.disable` runs
+  `detach`: it switches inspect mode off and removes the highlight, then
+  answers `{}`. Every other `Overlay.*` method answers `-32601`.
+- `Overlay.highlightNode {highlightConfig, nodeId? | backendNodeId?}`:
+  - `nodeId` is read first, then `backendNodeId`. Both are `NodeId::to_bits()`.
+  - With neither, the answer is `-32602`. `objectId` and `selector` are not
+    read.
+  - An id `NodeId::from_bits` refuses, an id `Document::get` does not find, or a
+    page with no document yet answers `-32000 Could not find node with given
+    id`.
+  - Otherwise it calls `Document::set_node_highlight` with the config's
+    `contentColor`, `paddingColor`, `borderColor` and `marginColor`. Each is an
+    `RGBA {r, g, b, a?}`: `r`, `g` and `b` are read as `u8` (a value outside
+    0–255 is `-32602`), and `a` defaults to 1 and is clamped to [0, 1]. An absent
+    colour is `Color::TRANSPARENT`. Other config fields are ignored.
+  - The commit at the end of the devtools job draws the highlight. It is drawn
+    in the box's own compose space, so it moves with a painter-side scroll
+    without a new commit.
+- `Overlay.hideHighlight` sets the highlight to `None` and answers `{}`.
+- `Overlay.setInspectMode {mode, highlightConfig?}`:
+  - `searchForNode` and `searchForUAShadowDOM` switch the mode on with the
+    config's colours, or with every colour transparent when the config is
+    absent.
+  - `none` switches the mode off. If the mode was on, it also removes the
+    highlight.
+  - Any other mode answers `-32602` and changes nothing.
+  - Switching the mode on or off calls `set_inspect`. It writes
+    `OverlayState::inspect` and, through `DevtoolsDocument::route_names` with
+    `INSPECT_NAMES`, `Routes::inspecting`. Only `set_inspect` writes either
+    field. The painter's name set changes only for a name that no other side
+    routes. The editing route (`EditingRoute::Pointer`) routes `pointerdown`
+    whenever the page has a document (`sync_editing_routes`), so in practice
+    the mode adds only `pointermove` and `pointerup`.
+- **While the mode is on**, `input_event` answers `true` for every event that
+  reaches the main thread, whatever its name (`tap`, `click`, `longpress` and
+  key names included). None of these events reaches script or the editing press
+  path in `deliver_input_event`.
+  - `pointerdown` and `pointermove` set the highlight on the event's target
+    with the mode's colours. With no document they set nothing.
+  - `pointerup` emits `Overlay.inspectNodeRequested {backendNodeId:
+    target.to_bits()}`.
+  - The mode stays on until `setInspectMode none`, `Overlay.disable` or
+    detach.
+- **While the mode is off**, `input_event` answers `false` and the event is
+  delivered as usual.
+- **Detach** (`overlay::detach`, called from `devtools_detach`) does the same as
+  `Overlay.disable`. The mode is switched off, the names it routed are released
+  through `route_names`, and the highlight is removed. The next commit draws the
+  page without the highlight.
+- **Independent operations:**
+  - `highlightNode` and `setInspectMode` work without a prior `Overlay.enable`.
+  - A `highlightNode` while the mode is on leaves the mode on, and the next
+    `pointermove` or `pointerdown` replaces the highlight.
+  - Switching the mode on does not remove an existing highlight.
+
 ## Lifetime rules
 
 - **One frontend at a time.** `LynxView::devtools` holds a `Weak<Outlet>` of the last session.
@@ -339,14 +575,19 @@ counter. The embedder's event is unchanged.
   already gone). An attach whose command send fails drops the session before the command, so
   nothing is called on the embedder thread.
 - **No reference cycle.** `MainThreadRuntime::devtools` (declared first, so it drops before the
-  realm) is the only strong handle on `PageSession`. A worker session is owned by `WorkerRealm`
-  (declared before `core`). Host functions hold only the `ConsoleTap`, which holds no `quickjs`
-  value. The route table holds weak senders, so a session that outlives its view keeps no worker
-  channel open. Detach (`devtools_detach`): the runtime's `detach`, `target::detach` (auto-attach
-  off, routed workers told to detach), then the session drops.
+  realm) is the only strong handle on `PageSession`; `DocumentSlot` holds a `Weak`. A worker
+  session is owned by `WorkerRealm` (declared before `core`). Host functions hold only the
+  `ConsoleTap`, which holds no `quickjs` value. The route table holds weak senders, so a session
+  that outlives its view keeps no worker channel open. Detach (`devtools_detach`): the overlay's
+  `detach`, the runtime's `detach`, `target::detach` (auto-attach off, routed workers told to
+  detach), then the session drops.
 - **Re-entrancy.** Each domain's state on the page is its own `RefCell`. A `Runtime` request
-  holds only the runtime state while script runs. The console tap and `AutoAttach` take no domain
-  state.
+  holds only the runtime state while script runs, so a flush and commit inside it reach the DOM
+  hook. The DOM hook uses `try_borrow_mut`; if the DOM state is borrowed it sets
+  `PageSession::dom_pending`, and the message job reports once the dispatch returns, so no
+  document change stays unreported past the end of that job. The input hook uses `try_borrow_mut`
+  on the overlay state and the slot and leaves the event to script if either is busy. The console
+  tap and `AutoAttach` take no domain state.
 
 ## Not done
 
@@ -366,6 +607,27 @@ counter. The embedder's event is unchanged.
 - A Proxy's target and handler, and the entries of a Map or a Set, are not reported as
   structured data (no `entries` in a preview): without running script the bridge reads them only
   as `describe` text, and reading them as values needs a function in the QuickJS fork.
+- DOM: whitespace-only text nodes are sent and counted (Chromium skips them by default).
+- `DOM.getNodeForLocation` ignores `includeUserAgentShadowDOM` and `ignorePointerEventsNone`, and
+  does not push the path of the node it answers.
+- CSS rules and styles are not editable: no `styleSheetId`, no `range`, no `CSS.styleSheetAdded`.
+  No DOM editing method is answered either.
+- `CSS.getMatchedStylesForNode` has no pseudo-element entries (`pseudoElements` is always empty).
+- What `Document::matched_styles` leaves out (blocks from animations and transitions, which no
+  sheet holds) is described in `docs/terminus-architecture.md`.
+- `Overlay.highlightNode` reads no `objectId` and no `selector`.
+- `Overlay.setInspectMode` supports no `captureAreaScreenshot` (or any mode
+  other than `searchForNode`, `searchForUAShadowDOM` and `none`).
+- No `Overlay.nodeHighlightRequested` event is sent.
+- Only the four area colours of `HighlightConfig` are drawn. There are no
+  outlines, no info tooltip and no grid or flex overlays.
+- A target with no `ElementBox` paint item draws nothing. This covers a text
+  node, an undisplayed element, and a node that exists but is detached from the
+  tree, which `highlightNode` still accepts.
+- A touch pointer reports no move before a down, so touch input highlights
+  nothing until the pointer is down.
+- `setInspectMode` with a search mode and no `highlightConfig` turns the mode on
+  with every colour transparent. It does not answer an error.
 - No screenshot, screencast or input injection, and no transport: an embedder
   attaches through `LynxView::devtools_attach`, and none does yet.
 - wasm32: `cargo check -p bobcat-core --features devtools --target wasm32-unknown-unknown`
