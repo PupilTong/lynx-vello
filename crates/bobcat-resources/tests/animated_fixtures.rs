@@ -23,20 +23,11 @@ fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated")
 }
 
-/// The GIF: 8 × 8, a global table of red, green, blue and white, the
-/// NETSCAPE2.0 extension with `repeat` when given, and each frame as
-/// `(delay in hundredths of a second, left, width, colour index)` covering
-/// the full height from `left`, disposal "do not dispose".
-///
-/// The pixels are LZW-coded the simplest legal way: a clear code before
-/// every two literals, so the code table never grows past the three-bit
-/// codes a four-colour table starts with.
 fn gif(repeat: Option<u16>, frames: &[(u16, u16, u16, u8)]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"GIF89a");
     out.extend_from_slice(&8_u16.to_le_bytes());
     out.extend_from_slice(&8_u16.to_le_bytes());
-    // A global table of 2^(1+1) entries, colour resolution 2 bits.
     out.extend_from_slice(&[0b1001_0001, 0, 0]);
     for colour in [RED, GREEN, BLUE, WHITE] {
         out.extend_from_slice(&colour[..3]);
@@ -49,7 +40,6 @@ fn gif(repeat: Option<u16>, frames: &[(u16, u16, u16, u8)]) -> Vec<u8> {
         out.push(0);
     }
     for &(delay, left, width, index) in frames {
-        // Graphic control: disposal 1 (do not dispose), no transparency.
         out.extend_from_slice(&[0x21, 0xF9, 0x04, 0b0000_0100]);
         out.extend_from_slice(&delay.to_le_bytes());
         out.extend_from_slice(&[0, 0]);
@@ -70,8 +60,6 @@ fn gif(repeat: Option<u16>, frames: &[(u16, u16, u16, u8)]) -> Vec<u8> {
     out
 }
 
-/// `indices` LZW-coded at a minimum code size of 2: clear is 4, end is 5,
-/// every code three bits wide, packed least significant bit first.
 fn lzw(indices: &[u8]) -> Vec<u8> {
     let mut codes = Vec::new();
     for pair in indices.chunks(2) {
@@ -96,9 +84,6 @@ fn lzw(indices: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// The APNG, with the `png` crate: 8 × 8 RGBA, each frame the whole canvas
-/// in one colour, shown for `(numerator, denominator)` seconds, played
-/// `plays` times.
 fn apng(plays: u32, frames: &[([u8; 4], u16, u16)]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -122,7 +107,6 @@ fn apng(plays: u32, frames: &[([u8; 4], u16, u16)]) -> Vec<u8> {
     bytes
 }
 
-/// Bits packed least significant first, as VP8L reads them.
 #[derive(Default)]
 struct Bits {
     bytes: Vec<u8>,
@@ -143,11 +127,6 @@ impl Bits {
     }
 }
 
-/// One VP8L (lossless WebP) bitstream of an 8 × 8 image in `colour`.
-///
-/// No transform, no colour cache, no meta prefix codes, and five "simple"
-/// prefix codes of one symbol each (green, red, blue, alpha, distance): a
-/// one-symbol code is zero bits long, so the pixels take no bits at all.
 fn vp8l(colour: [u8; 4]) -> Vec<u8> {
     let mut bits = Bits::default();
     bits.put(0x2F, 8);
@@ -155,19 +134,16 @@ fn vp8l(colour: [u8; 4]) -> Vec<u8> {
     bits.put(7, 14);
     bits.put(1, 1);
     bits.put(0, 3);
-    // No transform, no colour cache, no meta prefix codes.
     bits.put(0, 1);
     bits.put(0, 1);
     bits.put(0, 1);
     let [red, green, blue, alpha] = colour;
     for symbol in [green, red, blue, alpha] {
-        // Simple, one symbol, eight bits wide.
         bits.put(1, 1);
         bits.put(0, 1);
         bits.put(1, 1);
         bits.put(u32::from(symbol), 8);
     }
-    // The distance code: simple, one symbol, one bit wide, symbol 0.
     bits.put(1, 1);
     bits.put(0, 1);
     bits.put(0, 1);
@@ -175,7 +151,6 @@ fn vp8l(colour: [u8; 4]) -> Vec<u8> {
     bits.bytes
 }
 
-/// A RIFF chunk, padded to an even length.
 fn chunk(name: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&name);
@@ -191,15 +166,11 @@ fn chunk(name: [u8; 4], payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Three little-endian bytes.
 fn u24(value: u32) -> [u8; 3] {
     let [a, b, c, _] = value.to_le_bytes();
     [a, b, c]
 }
 
-/// The animated WebP: an 8 × 8 canvas, each frame the whole canvas in one
-/// colour (a VP8L bitstream), shown for its milliseconds without blending,
-/// played `plays` times.
 fn webp(plays: u16, frames: &[([u8; 4], u32)]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(b"WEBP");
@@ -217,7 +188,6 @@ fn webp(plays: u16, frames: &[([u8; 4], u32)]) -> Vec<u8> {
         anmf.extend_from_slice(&u24(7));
         anmf.extend_from_slice(&u24(7));
         anmf.extend_from_slice(&u24(millis));
-        // Do not blend, do not dispose.
         anmf.push(0b0000_0010);
         anmf.extend(chunk(*b"VP8L", &vp8l(colour)));
         body.extend(chunk(*b"ANMF", &anmf));
@@ -233,33 +203,24 @@ fn webp(plays: u16, frames: &[([u8; 4], u32)]) -> Vec<u8> {
     out
 }
 
-/// Every fixture, by file name.
 fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
     vec![
-        // Red 100 ms, green 200 ms, then blue over the left half 300 ms;
-        // NETSCAPE repeat 1, which browsers play twice.
         (
             "rgb-twice.gif",
             gif(Some(1), &[(10, 0, 8, 0), (20, 0, 8, 1), (30, 0, 4, 2)]),
         ),
-        // White 10 ms (played as 100 ms), red 50 ms; NETSCAPE repeat 0,
-        // forever.
         (
             "fast-forever.gif",
             gif(Some(0), &[(1, 0, 8, 3), (5, 0, 8, 0)]),
         ),
-        // Red, green and blue, without the NETSCAPE extension: played once.
         (
             "rgb-once.gif",
             gif(None, &[(10, 0, 8, 0), (10, 0, 8, 1), (10, 0, 8, 2)]),
         ),
-        // Red 5 ms (played as 100 ms), green 200 ms, blue 300 ms; played
-        // twice.
         (
             "rgb-twice.png",
             apng(2, &[(RED, 5, 1000), (GREEN, 200, 1000), (BLUE, 300, 1000)]),
         ),
-        // Red 100 ms, green 200 ms, blue 300 ms; played three times.
         (
             "rgb-thrice.webp",
             webp(3, &[(RED, 100), (GREEN, 200), (BLUE, 300)]),

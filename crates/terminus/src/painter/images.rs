@@ -89,107 +89,51 @@ use crate::render::image::{FrameImage, FrameImages, ImageDescriptor, ImageSizeHi
 use crate::render::picture::{PictureFrame, PictureId, PictureKey};
 use crate::render::sparse::BitmapLeases;
 
-/// One distinct picture the current commit draws.
 #[derive(Debug)]
 struct Source {
     key: PictureKey,
     hint: ImageSizeHint,
-    /// The bitmap the frame draws, once the store answered one it can draw.
     descriptor: Option<ImageDescriptor>,
-    /// The pixels, while the rasterizer may still need them for an upload.
     pixels: Option<ImageData>,
-    /// Whether this painter's leases hold its upload, or for an `Id`
-    /// picture its texture.
     leased: bool,
-    /// A platform frame the store lent was uploaded, and the store has not
-    /// been told yet that it may drop it ([`FrameImages::release`]).
     owed: bool,
-    /// The store answered it without pixels and the rasterizer holds no
-    /// upload of it either: the frame draws nothing for it, and the store
-    /// was told it is wanted. Cleared by the describe that answers pixels,
-    /// an upload, or nothing to draw.
     wanted: bool,
-    /// The generation of what the frame draws for it.
     generation: u64,
-    /// When the store said it will next change by itself.
     next_change: Option<ClockInstant>,
 }
 
-/// The bitmaps the current commit draws.
-///
-/// The per-draw table is deliberately **not** a cache. It is one commit's
-/// bitmaps in draw order, rebuilt whenever the commit moves, applying no
-/// policy of its own beyond letting go of pixels the rasterizer holds.
-/// Every decision about what stays in memory belongs to the host.
-///
-/// It is indexed rather than keyed: composition replays the program on every
-/// frame that scrolls, and a slice index costs nothing where a URL hash would
-/// have cost a lookup per draw per frame.
 #[derive(Debug, Default)]
 pub(super) struct PainterImages {
-    /// The commit the table was built for.
     key: Option<u64>,
-    /// A render lost pixels it was lent: the next adoption describes the
-    /// commit again.
     stale: bool,
-    /// The store the table was described from has gone, so nothing it is
-    /// missing will arrive.
     orphaned: bool,
-    /// One entry per distinct picture of that commit, in first-draw order.
     sources: Vec<Source>,
-    /// Per image draw of that commit, in draw order, the index of its
-    /// picture in `sources`.
     draws: Vec<usize>,
-    /// One entry per image draw of that commit, in draw order, its pixels
-    /// lent.
     resolved: Vec<Option<ImageRef>>,
-    /// Scratch, reused across commits: the distinct pictures' keys, which
-    /// the store is told as the drawn set, and the pictures it may release.
     names: Vec<PictureKey>,
-    /// The leases on the output's uploads; `None` for an output with no
-    /// rasterizer.
     leases: Option<BitmapLeases>,
-    /// The upload count at the last lease attempt, or `None` once the
-    /// entries changed since: what lets [`Self::release_held`] skip the
-    /// attempt.
     checked: Option<u64>,
-    /// How many times what the draws resolve to has changed: the compose
-    /// key's picture term.
     revision: u64,
-    /// Whether some picture is described again every turn
-    /// ([`Source::watched`]).
     watching: bool,
 }
 
 impl PainterImages {
-    /// Whether the table already holds this commit's bitmaps.
     pub(super) fn holds(&self, commit: u64) -> bool {
         self.key == Some(commit) && !self.stale
     }
 
-    /// Whether a render lost pixels the table lent it since the last
-    /// resolve.
     pub(super) fn is_stale(&self) -> bool {
         self.stale
     }
 
-    /// Whether the frame lacks a picture that may still arrive: a picture is
-    /// wanted, or a render lost pixels and the commit has not been described
-    /// again. False once the store has gone, since then nothing will.
     pub(super) fn awaits(&self) -> bool {
         !self.orphaned && (self.stale || self.sources.iter().any(|source| source.wanted))
     }
 
-    /// How many times what the commit's draws resolve to has changed: a
-    /// term of the compose key, which moves exactly when a picture's draws
-    /// do.
     pub(super) const fn revision(&self) -> u64 {
         self.revision
     }
 
-    /// Takes leases on `gpu`'s uploads, the output's stack: leases on
-    /// another device's, or with `None` any, end. A table that had drawn
-    /// from the old uploads is stale.
     pub(super) fn bind(&mut self, gpu: Option<&Arc<SharedGpu>>) {
         if match (&self.leases, gpu) {
             (Some(leases), Some(gpu)) => leases.on(gpu),
@@ -208,15 +152,6 @@ impl PainterImages {
         }
     }
 
-    /// Describes every picture `frame` draws to `store`, once per commit,
-    /// and tells it which of them the frame has nothing to draw from.
-    ///
-    /// The commit is the key for what is drawn. A report that changes what a
-    /// frame draws dirties the document, and every rebuild takes a new commit
-    /// id. What changes within one commit — pixels that arrive for a wanted
-    /// picture, a picture's new frame — is taken by [`Self::refresh`].
-    ///
-    /// Never waits: every call it makes of `store` is non-blocking.
     pub(super) fn resolve<S: FrameImages + ?Sized>(
         &mut self,
         frame: &crate::visual::CommittedFrame,
@@ -224,9 +159,6 @@ impl PainterImages {
     ) {
         let mut hints = Vec::new();
         frame.image_sources(&mut self.names, &mut hints, &mut self.draws);
-        // The old entries stay until the new ones are built: their leases
-        // hold uploads the new commit may share, and are let go only once
-        // the new set is leased.
         let sources: Vec<Source> = self
             .names
             .iter()
@@ -264,16 +196,6 @@ impl PainterImages {
         self.revision += 1;
     }
 
-    /// Describes every picture that can change without a commit again and
-    /// takes what the store now answers; answers whether a draw changed,
-    /// which is when the frame has to be composed again.
-    ///
-    /// A wanted picture is described until a describe answers its pixels, an
-    /// upload the rasterizer holds, or nothing to draw, and is not wanted
-    /// again meanwhile: its restore is in the store's hands. An `Id`
-    /// picture, and one whose store named its next change, is described
-    /// every turn, and its newest frame taken when its generation moved.
-    /// A commit with neither asks nothing.
     pub(super) fn refresh<S: FrameImages + ?Sized>(&mut self, store: &S) -> bool {
         if !self.watching {
             return false;
@@ -287,18 +209,12 @@ impl PainterImages {
             let drawn = source.drawn();
             source.describe(store, self.leases.as_ref());
             changed |= source.drawn() != drawn;
-            // A picture that was drawn and now has nothing to draw from is
-            // wanted for the first time.
             if source.wanted && !was_wanted {
                 store.want(&source.key, source.hint);
             }
         }
         self.watching = self.sources.iter().any(Source::watched);
         if changed {
-            // A URL picture that moved to another bitmap, an animated
-            // image's next frame, lets go of the one it drew before, so a
-            // commit that stays adopted while its pictures change leases one
-            // bitmap per picture rather than every bitmap it ever drew.
             if let Some(leases) = &self.leases {
                 lease_exactly(leases, &self.sources);
             }
@@ -309,8 +225,6 @@ impl PainterImages {
         changed
     }
 
-    /// The store has gone: nothing a wanted picture waits for will arrive,
-    /// and nothing is waited for.
     pub(super) fn orphan(&mut self) {
         self.orphaned = true;
         for source in &mut self.sources {
@@ -318,13 +232,6 @@ impl PainterImages {
         }
     }
 
-    /// Lets go of the pixels of every picture whose upload the rasterizer
-    /// now holds: leases them, drops this table's reference, and tells
-    /// `store`, if there is one, that it may drop its own.
-    ///
-    /// Cheap enough for every turn: nothing is attempted unless a bitmap
-    /// was uploaded, or the table changed, since the last attempt. Without
-    /// leases — an output with no rasterizer — nothing is let go.
     pub(super) fn release_held<S: FrameImages + ?Sized>(&mut self, store: Option<&S>) {
         let Some(leases) = &self.leases else {
             return;
@@ -360,24 +267,14 @@ impl PainterImages {
         }
     }
 
-    /// A render lost pixels this table lent it: the next adoption describes
-    /// the commit again.
     pub(super) fn mark_stale(&mut self) {
         self.stale = true;
     }
 
-    /// This commit's bitmaps, in draw order.
     pub(super) fn resolved(&self) -> &[Option<ImageRef>] {
         &self.resolved
     }
 
-    /// Drops the table and its leases, so the next commit resolves from
-    /// scratch.
-    ///
-    /// What a painter does when it stops observing a view: the bitmaps came
-    /// out of that view's store, and commit ids restart at one per document,
-    /// so a table still keyed by the old page's commit would be handed to the
-    /// next one.
     pub(super) fn forget(&mut self) {
         self.key = None;
         self.stale = false;
@@ -394,8 +291,6 @@ impl PainterImages {
         }
     }
 
-    /// Rebuilds the per-draw table from the sources: each draw lent its
-    /// picture's pixels, or named by its upload or its texture, or nothing.
     fn fill_resolved(&mut self) {
         let Self {
             sources,
@@ -408,8 +303,6 @@ impl PainterImages {
     }
 }
 
-/// Makes `leases` exactly the uploads `sources` are drawn from: each URL
-/// picture's bitmap and each `Id` picture's texture its entry holds.
 fn lease_exactly(leases: &BitmapLeases, sources: &[Source]) {
     leases.replace(
         sources
@@ -424,20 +317,14 @@ fn lease_exactly(leases: &BitmapLeases, sources: &[Source]) {
 }
 
 impl Source {
-    /// Whether the picture is described again every turn: it is wanted, it
-    /// is one an element owns, or its store named when it next changes.
     fn watched(&self) -> bool {
         self.wanted || self.key.id().is_some() || self.next_change.is_some()
     }
 
-    /// What the frame draws for it, as identity: the bitmap and its
-    /// generation.
     fn drawn(&self) -> (Option<ImageDescriptor>, u64) {
         (self.descriptor, self.generation)
     }
 
-    /// The draw of this picture: its texture, its pixels lent, its upload,
-    /// or nothing.
     fn image_ref(&self) -> Option<ImageRef> {
         let descriptor = self.descriptor?;
         Some(match (&self.key, &self.pixels) {
@@ -447,8 +334,6 @@ impl Source {
         })
     }
 
-    /// Asks `store` what this picture draws as. See [`Self::describe_url`]
-    /// and [`Self::describe_picture`].
     fn describe<S: FrameImages + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
         self.wanted = false;
         match self.key.id() {
@@ -457,11 +342,6 @@ impl Source {
         }
     }
 
-    /// A URL picture: its pixels when the store holds them, its upload when
-    /// the store dropped the pixels and `leases` can hold it, and otherwise
-    /// nothing yet — the picture is wanted. A platform frame the store holds
-    /// is uploaded here and drawn from its upload. A picture the store
-    /// answers nothing for draws nothing and is not wanted.
     fn describe_url<S: FrameImages + ?Sized>(&mut self, store: &S, leases: Option<&BitmapLeases>) {
         let Some(FrameImage {
             descriptor,
@@ -470,7 +350,6 @@ impl Source {
             next_change,
         }) = store.describe(&self.key, self.hint)
         else {
-            // Nothing to draw it from any more.
             self.descriptor = None;
             self.pixels = None;
             self.next_change = None;
@@ -480,7 +359,6 @@ impl Source {
         match pixels {
             Some(PictureFrame::Pixels(pixels)) => {
                 let descriptor = ImageDescriptor::of(&pixels);
-                // The lease held is of the bitmap drawn before, if any other.
                 self.leased &= self.descriptor == Some(descriptor);
                 self.descriptor = Some(descriptor);
                 self.pixels = Some(pixels);
@@ -498,9 +376,6 @@ impl Source {
                     self.owed = true;
                     self.generation = generation;
                 } else {
-                    // No rasterizer to write it into, or a frame its writer
-                    // could not copy: nothing draws it, and asking again
-                    // brings back the same frame.
                     self.descriptor = None;
                     self.pixels = None;
                     self.leased = false;
@@ -522,13 +397,6 @@ impl Source {
         self.wanted = true;
     }
 
-    /// An `Id` picture: the frame its texture holds when that is the
-    /// generation the store answers, whoever wrote it there; otherwise its
-    /// newest frame, taken and
-    /// written into the texture; otherwise the older frame the texture still
-    /// holds; otherwise nothing yet — the picture is wanted. Without a
-    /// rasterizer the taken frame's pixels are held instead. A picture the
-    /// store answers nothing for draws nothing and is not wanted.
     fn describe_picture<S: FrameImages + ?Sized>(
         &mut self,
         id: PictureId,
@@ -545,8 +413,6 @@ impl Source {
         if self.descriptor.is_some() && self.generation == state.generation {
             return;
         }
-        // What the texture holds now: a frame this painter wrote, or one
-        // another writer copied in (a placeholder canvas's commit).
         if let Some((generation, descriptor)) = leases.and_then(|leases| leases.lease_picture(id)) {
             self.descriptor = Some(descriptor);
             self.generation = generation;
@@ -601,28 +467,17 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-    /// A store that drops a source's pixels when it is told it may, and
-    /// restores them into a new blob only when the test answers what was
-    /// wanted: a production host's policy, with the restore outside the
-    /// painter's calls. Every want and every release is logged.
     struct Releasing {
         entries: RefCell<HashMap<&'static str, Entry>>,
-        /// Every want, in order.
         wants: RefCell<Vec<String>>,
-        /// The wants not answered yet.
         unanswered: RefCell<Vec<String>>,
         released: RefCell<Vec<Vec<Arc<str>>>>,
     }
 
-    /// One source of a [`Releasing`] store.
     struct Entry {
-        /// The colour of its one texel, which a restore decodes again.
         texel: [u8; 4],
-        /// The pixels, while the store holds them.
         pixels: Option<ImageData>,
-        /// The bitmap it was last answered as.
         descriptor: ImageDescriptor,
-        /// Its restore failed: there is nothing to draw it from.
         lost: bool,
     }
 
@@ -662,8 +517,6 @@ mod tests {
             self.wants.borrow().len()
         }
 
-        /// Restores every source wanted so far into a new blob: what a
-        /// host's restore job does before it wakes the host.
         fn answer(&self) {
             let mut entries = self.entries.borrow_mut();
             for source in self.unanswered.borrow_mut().drain(..) {
@@ -674,8 +527,6 @@ mod tests {
             }
         }
 
-        /// Fails every restore wanted so far: those sources have nothing to
-        /// draw from any more.
         fn fail(&self) {
             let mut entries = self.entries.borrow_mut();
             for source in self.unanswered.borrow_mut().drain(..) {
@@ -730,8 +581,6 @@ mod tests {
         }
     }
 
-    /// A one-texel straight-alpha RGBA8 bitmap of `texel`, in a blob of its
-    /// own.
     fn texel_image(texel: [u8; 4]) -> ImageData {
         ImageData {
             data: Blob::new(Arc::new(texel.to_vec())),
@@ -751,8 +600,6 @@ mod tests {
         }
     }
 
-    /// Whether `gpu` holds an upload of `image`: a lease of it succeeds
-    /// only then, and ends as the leases are dropped here.
     fn uploaded(gpu: &Arc<SharedGpu>, image: &ImageDescriptor) -> bool {
         BitmapLeases::new(gpu).lease(image)
     }
@@ -764,9 +611,6 @@ mod tests {
             .expect("four channels")
     }
 
-    /// The texel at `x`, `y` of what the painter's offscreen target holds,
-    /// read without a capture, which would refuse a frame that lacks a
-    /// picture on its way.
     fn held_at(painter: &mut Painter, x: u32, y: u32) -> [u8; 4] {
         let width = painter.frame_size.width;
         let Output::Offscreen(gpu) = &mut painter.output else {
@@ -777,7 +621,6 @@ mod tests {
         pixels[at..at + 4].try_into().expect("four channels")
     }
 
-    /// A painter drawing offscreen on `gpu`, 16 × 16 px.
     fn painter_on(gpu: &Arc<SharedGpu>) -> Painter {
         let frame_size = FrameSize::for_viewport(16.0, 16.0, 1.0).expect("a valid size");
         Painter::with_output(
@@ -795,8 +638,6 @@ mod tests {
         )
     }
 
-    /// A page of one 8 × 8 `image` presenting `SRC`, loaded, styled by
-    /// `css` besides its size.
     fn page(css: &str) -> (Document<()>, crate::tree::document::NodeId) {
         let mut document = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -811,17 +652,11 @@ mod tests {
         (document, image)
     }
 
-    /// Presents `source` on `image` at the natural size the document knows
-    /// of it, as an embedder's element does.
     fn present(document: &mut Document<()>, image: crate::tree::document::NodeId, source: &str) {
         let natural = document.request_image(source).natural_size();
         document.set_picture(image, Some((PictureKey::Url(Arc::from(source)), natural)));
     }
 
-    /// Draws `SRC` from the store's pixels, lets the rasterizer upload them
-    /// and the store drop them, then commits a frame drawing `OTHER` and
-    /// renders until the rasterizer has let `SRC`'s upload go too: `SRC` is
-    /// then in neither place. Answers `SRC`'s descriptor as first drawn.
     fn evict_src(
         gpu: &Arc<SharedGpu>,
         painter: &mut Painter,
@@ -839,9 +674,6 @@ mod tests {
         assert_eq!(*store.released.borrow(), [vec![Arc::<str>::from(SRC)]]);
         assert!(!store.holds(SRC), "the store dropped its pixels");
 
-        // A commit that no longer draws it ends the lease, and renders of
-        // another bitmap, past the ones the target pins what it drew in,
-        // release the upload.
         document.apply_image_events(&[loaded(OTHER)]);
         present(document, image, OTHER);
         assert!(painter.adopt(Some(document.commit()), Some(store)));
@@ -854,25 +686,15 @@ mod tests {
         drawn
     }
 
-    /// A source with neither pixels in the store nor an upload in the
-    /// rasterizer draws nothing in the frame that draws it again, and the
-    /// store is told it is wanted — once, however many turns pass before it
-    /// answers; a capture is refused meanwhile. The turn after the store
-    /// holds the pixels again takes them with no commit and asks for a
-    /// frame, which draws them; and once their upload exists they are let
-    /// go again.
     #[test]
     fn a_source_with_neither_pixels_nor_an_upload_draws_nothing_until_the_store_restores_it() {
         let gpu = SharedGpu::private(SharedRaster::new);
-        // Every upload no lease and no recent render holds is released after
-        // each render. The stack is this test's alone.
         gpu.raster.set_bitmap_budget(0);
         let mut painter = painter_on(&gpu);
         let store = Releasing::new([(SRC, RED), (OTHER, BLUE)]);
         let (mut document, image) = page("");
         let drawn = evict_src(&gpu, &mut painter, &store, &mut document, image);
 
-        // 1. The commit that draws it again draws nothing for it, and wants it.
         present(&mut document, image, SRC);
         assert!(painter.adopt(Some(document.commit()), Some(&store)));
         assert_eq!(*store.wants.borrow(), [SRC.to_owned()]);
@@ -886,7 +708,6 @@ mod tests {
             "a capture of a frame lacking a picture on its way is refused"
         );
 
-        // 2. Turns before the store answers want nothing more and ask for no frame.
         for _ in 0..3 {
             let current = painter.frame().cloned();
             assert!(painter.adopt(current, Some(&store)));
@@ -899,8 +720,6 @@ mod tests {
         assert!(painter.awaits_pictures());
         assert!(!painter.take_redraw());
 
-        // 3. The store answers: the next turn takes the pixels, with no commit, and asks for a
-        //    frame, which draws them.
         store.answer();
         let commit = painter.frame().map(|frame| frame.commit_id());
         let current = painter.frame().cloned();
@@ -915,8 +734,6 @@ mod tests {
         assert_eq!(painter.output.lost_pixels(), 0, "no draw lost its pixels");
         assert!(uploaded(&gpu, &restored), "the render uploaded them");
 
-        // 4. The next turn leases the new upload and lets the pixels go again, with no further
-        //    want.
         let current = painter.frame().cloned();
         assert!(painter.adopt(current, Some(&store)));
         assert_eq!(store.released.borrow().len(), 2, "{:?}", store.released);
@@ -931,9 +748,6 @@ mod tests {
         assert_eq!(store.wants(), 1, "no further want");
     }
 
-    /// A wanted source the store can no longer restore is answered with
-    /// nothing to draw: nothing waits for it, and the frame is captured
-    /// without it.
     #[test]
     fn a_wanted_source_the_store_cannot_restore_draws_nothing_and_is_not_awaited() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -955,8 +769,6 @@ mod tests {
         assert_eq!(store.wants(), 1);
     }
 
-    /// A wanted source inside a `filter: blur()` group arrives within one
-    /// commit, so the bake, keyed by commit, is taken again with it.
     #[test]
     fn a_wanted_source_that_arrives_is_baked_into_its_filter_again() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -988,8 +800,6 @@ mod tests {
         );
     }
 
-    /// A store that has gone answers nothing any more: what the frame
-    /// wanted from it is no longer waited for.
     #[test]
     fn nothing_is_awaited_from_a_store_that_has_gone() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1008,10 +818,6 @@ mod tests {
         assert!(painter.capture(0.0).is_ok());
     }
 
-    /// A caller with no rasterizer resolves a frame's images itself: a
-    /// source the store answers without pixels draws nothing there, is
-    /// wanted, and is counted, so a capture can refuse the table; once the
-    /// store holds the pixels again, the same frame resolves them.
     #[test]
     fn resolving_without_a_rasterizer_wants_and_counts_a_source_with_no_pixels() {
         let store = Releasing::new([(SRC, RED), (OTHER, BLUE)]);
@@ -1030,9 +836,6 @@ mod tests {
         assert_eq!(store.wants(), 1);
     }
 
-    /// A URL store whose one source moves to a new bitmap each time the test
-    /// says so, as an animated image's next frame does, and drops the
-    /// pixels of the one shown once told the rasterizer holds its upload.
     struct Animated {
         frames: RefCell<Vec<ImageData>>,
         shown: std::cell::Cell<usize>,
@@ -1064,10 +867,6 @@ mod tests {
         }
     }
 
-    /// A URL picture that moves from bitmap to bitmap within one commit
-    /// keeps a lease on the one it draws only: the uploads of the bitmaps it
-    /// drew before are released under the rasterizer's budget, however long
-    /// the commit stays adopted.
     #[test]
     fn a_url_picture_that_changes_bitmap_leases_only_the_one_it_draws() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1088,13 +887,11 @@ mod tests {
             let current = painter.frame().cloned();
             assert!(painter.adopt(current, Some(&store)));
             assert_eq!(at(&painter.capture(0.0).expect("capture"), 4, 4), colour);
-            // The next turn leases the upload, and the store drops its pixels.
             let current = painter.frame().cloned();
             assert!(painter.adopt(current, Some(&store)));
             assert!(!store.held.get(), "released");
             drawn.push(ImageDescriptor::of(&store.frames.borrow()[index]));
         }
-        // Renders past the ones that pin what they drew.
         for _ in 0..8 {
             assert!(painter.draw_offscreen(0.0, true).expect("render"));
         }
@@ -1108,21 +905,16 @@ mod tests {
         }
     }
 
-    /// A store of pictures elements own: one slot per picture, which a test
-    /// publishes into as a producer on any thread would. Every describe,
-    /// take, want and drawn set is logged.
     #[derive(Default)]
     struct Live {
         slots: RefCell<HashMap<PictureId, PictureSlot>>,
         described: RefCell<Vec<PictureId>>,
-        /// Each frame taken, with its generation.
         taken: RefCell<Vec<(PictureId, u64)>>,
         wants: RefCell<Vec<PictureId>>,
         drawn: RefCell<Vec<Vec<PictureKey>>>,
     }
 
     impl Live {
-        /// `picture`'s slot, the producer's end.
         fn slot(&self, picture: PictureId) -> PictureSlot {
             self.slots.borrow_mut().entry(picture).or_default().clone()
         }
@@ -1165,8 +957,6 @@ mod tests {
         }
     }
 
-    /// A `width` × `height` straight-alpha RGBA8 bitmap whose texels are
-    /// `texels`, row-major, repeated to fill it.
     fn bitmap(width: u32, height: u32, texels: &[[u8; 4]]) -> ImageData {
         let data: Vec<u8> = texels
             .iter()
@@ -1184,9 +974,6 @@ mod tests {
         }
     }
 
-    /// A page of 8 × 8 elements, side by side from the left edge, each
-    /// presenting the picture at its index at a natural size of 1 × 1,
-    /// with the classes `classes` names for it and `css` besides.
     fn picture_page(
         css: &str,
         pictures: &[(PictureId, &str)],
@@ -1215,9 +1002,6 @@ mod tests {
         (document, nodes)
     }
 
-    /// A picture whose producer publishes a new frame with no commit is
-    /// taken at the next adoption, written into the same texture under the
-    /// same id, and composed again: the target shows the new pixels.
     #[test]
     fn a_picture_that_changes_with_no_commit_is_recomposed_and_shows_the_new_pixels() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1232,8 +1016,6 @@ mod tests {
         let texture = gpu.raster.picture_texture(picture).expect("written");
         assert!(painter.take_redraw());
 
-        // A producer on another thread publishes; the host's next turn
-        // adopts the same commit.
         let woken = std::thread::scope(|scope| {
             scope
                 .spawn(|| slot.publish_pixels(bitmap(1, 1, &[BLUE]), None))
@@ -1256,8 +1038,6 @@ mod tests {
         assert!(store.wants.borrow().is_empty());
     }
 
-    /// A picture inside a `filter: blur()` group that changes with no
-    /// commit is baked into the filter again.
     #[test]
     fn a_picture_that_changes_under_a_blur_is_baked_again() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1281,9 +1061,6 @@ mod tests {
         assert!(red < 16 && green < 16 && blue > 240, "baked again blue");
     }
 
-    /// A picture the commit does not draw is in no drawn set, and is
-    /// neither described, taken nor wanted, however many frames its
-    /// producer publishes; nor does a frame of it ask for a frame.
     #[test]
     fn a_picture_that_is_not_drawn_is_not_asked_for() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1314,9 +1091,6 @@ mod tests {
         assert!(store.wants.borrow().is_empty());
     }
 
-    /// Two draws of one picture are one picture to the store and one
-    /// texture to the rasterizer: one describe per adoption, one take per
-    /// frame, one upload, and both draws show it.
     #[test]
     fn two_draws_of_one_picture_share_one_upload() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1340,9 +1114,6 @@ mod tests {
         assert!(gpu.raster.picture_texture(picture).is_some());
     }
 
-    /// A frame of another size replaces the picture's texture with one of
-    /// that size under the same id; a frame of the size it has is written
-    /// into it.
     #[test]
     fn a_picture_that_changes_size_keeps_its_texture_id() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1374,9 +1145,6 @@ mod tests {
         assert_eq!(gpu.raster.picture_texture(picture), Some((id, 2, 1)));
     }
 
-    /// Frame demand: each new frame owes exactly one frame, turns between
-    /// changes owe none and render nothing, and a live picture never counts
-    /// as animating, one that names its next change included.
     #[test]
     fn frame_demand_fires_once_per_change_and_not_continuously() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1416,8 +1184,6 @@ mod tests {
         assert_eq!(store.generations_taken(picture), [1, 2, 3]);
     }
 
-    /// Captures taken between two frames of a live picture are of the same
-    /// pixels, however many turns pass between them, and take nothing.
     #[test]
     fn a_capture_between_changes_is_deterministic() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1438,10 +1204,6 @@ mod tests {
         assert_eq!(store.generations_taken(picture), [1]);
     }
 
-    /// A platform frame of the tests' own: one premultiplied colour, which
-    /// its writer fills the target with through the queue, as the browser's
-    /// writer fills it with `copyExternalImageToTexture`. Every write is
-    /// counted.
     #[derive(Clone, Debug)]
     struct Solid {
         texel: [u8; 4],
@@ -1502,9 +1264,6 @@ mod tests {
         }
     }
 
-    /// A store whose one URL picture, `SRC`, is a platform frame it holds
-    /// until it is told it may drop it, and whose `Id` pictures publish
-    /// platform frames or CPU pixels into slots.
     struct Platform {
         frame: RefCell<Option<Solid>>,
         descriptor: ImageDescriptor,
@@ -1565,11 +1324,6 @@ mod tests {
         }
     }
 
-    /// A platform frame a store lends for a URL picture is written by its
-    /// own writer once, in the adoption that describes it, drawn from that
-    /// upload, and released to the store in the same adoption; once the
-    /// store has dropped it, the upload goes on drawing it and nothing is
-    /// wanted.
     #[test]
     fn a_platform_frame_a_store_lends_is_uploaded_drawn_and_released() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1596,8 +1350,6 @@ mod tests {
         assert!(!painter.awaits_pictures());
     }
 
-    /// Without a rasterizer a platform frame cannot be written: it draws
-    /// nothing, is not held, and is not wanted.
     #[cfg(feature = "painter-test-utils")]
     #[test]
     fn a_platform_frame_draws_nothing_without_a_rasterizer() {
@@ -1624,10 +1376,6 @@ mod tests {
         assert!(!painter.awaits_pictures());
     }
 
-    /// An `Id` picture's platform frames are written into its one texture:
-    /// in place while the size holds, under the same id when it does not,
-    /// and under the same id when a CPU frame wrote a texture the platform
-    /// writer's copy cannot target.
     #[test]
     fn a_platform_frame_published_into_a_slot_is_written_into_the_picture_texture() {
         let gpu = SharedGpu::private(SharedRaster::new);

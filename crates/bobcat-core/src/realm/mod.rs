@@ -54,52 +54,21 @@ use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members};
 use crate::view::{EngineEvent, ScriptSource};
 
-/// What every realm holds, whatever else its owner keeps beside it: the realm
-/// itself and the tables its core members write to.
-///
-/// `engine` is declared first, so an owner that holds this as its first field
-/// frees the realm, and with it every host function that holds a clone of
-/// either table, before anything declared after it. `children` comes next:
-/// the realm's `ShadowRealm` objects and wrapped functions are freed with it,
-/// and then the children they named.
-///
-/// Every operation on it takes `&self`, down to the engines' own calls: a
-/// view's MTS realm shares its core with the synthetic dispatch member,
-/// which calls into these realms from inside a JavaScript call of one of
-/// them while an operation further up the stack is still calling it
-/// (`main/runtime/lib.rs`'s `run_dispatch`).
 pub(crate) struct RealmCore {
     pub(crate) engine: ScriptEngine,
-    /// The realm's `ShadowRealm` children, grandchildren included, which the
-    /// owner's epilogue services. Only this field holds the list strongly:
-    /// the hook that fills it holds it weakly, so it goes with the core.
     pub(crate) children: Rc<ChildRealms>,
-    /// What `setTimer` arms and the owner's epilogue fires.
     pub(crate) timers: Rc<TimerState>,
-    /// Every host-backed operation this realm holds a `Future` for, every
-    /// `fetchResource` included.
     pub(crate) futures: Rc<FutureTable>,
-    /// The canvas objects this realm's JavaScript names by id.
     pub(crate) canvases: Rc<CanvasTable>,
 }
 
-/// One JavaScript context of an owner's realm tree on this runtime: the
-/// owner's own realm, or one of its `ShadowRealm` children, grandchildren
-/// included, by the key [`ChildRealms`] keeps it under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RealmId {
-    /// The owner's own realm: a view's page realm, or a worker's.
     Page,
-    /// A `ShadowRealm` child.
     Child(ChildKey),
 }
 
 impl RealmId {
-    /// This id as one opaque number, for a table that files what a realm
-    /// reports under a [`terminus::link::event::ListenerKey`]: 0 for [`Self::Page`],
-    /// the child key's own number for a child. Child keys are handed out
-    /// from 1 and never reused, so no child is ever 0 and a released child's
-    /// number is never a newer child's.
     pub(crate) fn listener_key(self) -> terminus::link::event::ListenerKey {
         match self {
             Self::Page => terminus::link::event::ListenerKey(0),
@@ -110,7 +79,6 @@ impl RealmId {
         }
     }
 
-    /// The realm [`Self::listener_key`] answered `key` for.
     pub(crate) fn from_listener_key(key: terminus::link::event::ListenerKey) -> Self {
         match key.0 {
             0 => Self::Page,
@@ -120,24 +88,15 @@ impl RealmId {
 }
 
 impl RealmCore {
-    /// What follows every entry for the realm's canvases: the realm's own
-    /// [`CanvasTable::settle_drawn`], then each `ShadowRealm` child's.
     pub(crate) fn settle_drawn_canvases(&self) {
         self.canvases.settle_drawn();
         self.children.settle_drawn_canvases();
     }
 
-    /// Every realm of this core, the owner's own first, then its children in
-    /// construction order.
     pub(crate) fn realm_ids(&self) -> impl Iterator<Item = RealmId> + use<> {
         std::iter::once(RealmId::Page).chain(self.children.keys().into_iter().map(RealmId::Child))
     }
 
-    /// Calls an export of a module the realm `id` has loaded, through
-    /// [`ScriptEngine::call_module_export`] for the owner's own realm and
-    /// [`ChildRealms::call_module_export`] for a child, so the checkpoint
-    /// that ends the call is that realm's. `None` is a child that is gone,
-    /// which drops the call; the owner's own realm is always there.
     pub(crate) fn call_module_export(
         &self,
         js: &mut ScriptRuntime,
@@ -151,11 +110,6 @@ impl RealmCore {
         }
     }
 
-    /// [`Self::call_module_export`] without the checkpoint that ends the
-    /// call: [`ScriptEngine::call_module_export_before_operation`] for the
-    /// owner's own realm and [`ChildRealms::call_module_export_before_operation`]
-    /// for a child. The caller ends the run with
-    /// [`Self::checkpoint_after_calls`] for each realm it called.
     pub(crate) fn call_module_export_before_operation(
         &self,
         js: &mut ScriptRuntime,
@@ -174,15 +128,6 @@ impl RealmCore {
         }
     }
 
-    /// Calls an export of a module the realm `id` has loaded from inside a
-    /// JavaScript call of any realm of this core:
-    /// [`ScriptEngine::call_module_export_nested`] for the owner's own realm
-    /// and [`ChildRealms::call_module_export_nested`] for a child, with no
-    /// checkpoint. `None` is a child that is gone.
-    ///
-    /// Everything it reaches is borrowed shared, so the realm called may be
-    /// one whose own call is further up the stack — the one whose host
-    /// member made this call, say.
     pub(crate) fn call_module_export_nested(
         &self,
         id: RealmId,
@@ -197,9 +142,6 @@ impl RealmCore {
         }
     }
 
-    /// The checkpoint of the realm `id` that ends a run of
-    /// [`Self::call_module_export_before_operation`] calls. `None` is a
-    /// child that is gone.
     pub(crate) fn checkpoint_after_calls(
         &self,
         js: &mut ScriptRuntime,
@@ -212,20 +154,6 @@ impl RealmCore {
     }
 }
 
-/// Opens one realm on `js`: creates it, enables module loading, installs the
-/// core, then runs `host_modules`, and answers with the core and whatever
-/// `host_modules` returned.
-///
-/// `host` is what the core's members reach the view through. Its token is the
-/// end signal a `Future.wait` and a `require` park against: the view's for an
-/// MTS realm, the worker's own for a worker realm, so a wait ends with the
-/// realm that asked. `thread` is the engine thread whose jobs this realm's
-/// entries are. `names` is what this realm's console output and reports are
-/// named by when they reach the embedder, and the realm its fetches are
-/// timed as: the page realm's [`crate::performance::OpenerId::PAGE`], or the
-/// worker. `child_hosts` is what every `ShadowRealm` child of this realm, and
-/// of its children, gets beyond the core. `canvas_host` is what this
-/// realm's and its children's canvases have of a document.
 #[expect(clippy::too_many_arguments, reason = "what a realm is opened with")]
 pub(crate) fn open_realm<T>(
     js: &mut ScriptRuntime,
@@ -240,9 +168,6 @@ pub(crate) fn open_realm<T>(
     let mut engine = js
         .create_realm()
         .map_err(|error| context_of("creating the realm", error))?;
-    // Before any member: registering one does not read the normalizer, so the
-    // order is not observable, and it leaves no stretch in which the realm
-    // exists without module loading.
     engine.enable_module_loading();
     let children = Rc::new(ChildRealms::new());
     engine.set_children(Rc::downgrade(&children));
@@ -273,41 +198,23 @@ pub(crate) fn open_realm<T>(
     ))
 }
 
-/// What a realm's `requestScriptFrame` does with what it is told.
 #[derive(Clone, Copy)]
 pub(crate) enum FrameDemand {
-    /// Reports it to the view under this key: `None` for a view's MTS realm,
-    /// the worker's own key for a worker realm.
     Report(Option<WorkerKey>),
-    /// Nothing, in a `ShadowRealm` child. The demand is one flag per realm
-    /// key and a child has no key of its own, so a child that reported under
-    /// its parent's would cancel the parent's demand with its own `false`.
     Ignored,
 }
 
-/// What a realm is named by outside itself: the [`ScriptSource`] its
-/// diagnostics carry, and the [`Opener`] its fetches are timed as.
 pub(crate) struct RealmNames {
     pub(crate) source: ScriptSource,
     pub(crate) opener: Opener,
 }
 
-/// The tables the core members of one realm write to.
 pub(crate) struct CoreTables {
     pub(crate) timers: Rc<TimerState>,
     pub(crate) futures: Rc<FutureTable>,
     pub(crate) canvases: Rc<CanvasTable>,
 }
 
-/// Installs the members every realm has, the `ShadowRealm` constructor last,
-/// and answers with the tables they write to.
-///
-/// One function for an owner's realm and for each `ShadowRealm` child, which
-/// differ only in `frames` and in `names`' opener. A child is furnished from
-/// inside its parent's JavaScript, which is why nothing here takes the
-/// runtime. `children` is the list every `new ShadowRealm()` of this realm,
-/// and of its children, joins, `child_hosts` what each of them gets beyond
-/// the core, and `canvas_host` what their canvases have of a document.
 #[expect(clippy::too_many_arguments, reason = "what a realm's core is made of")]
 fn install_realm_core(
     engine: &mut ScriptEngine,
@@ -333,8 +240,6 @@ fn install_realm_core(
     let futures = Rc::new(FutureTable::new());
     crate::future::install(engine, &futures, host.token().clone(), thread.clone())
         .map_err(|error| context_of("installing Future", error))?;
-    // Over the table above rather than a wait of its own: what a fetch hands
-    // JavaScript is a future of this realm's. `resolveUrl` beside it.
     crate::fetch::install(engine, host, &futures, opener)
         .map_err(|error| context_of("installing fetchResource", error))?;
     crate::require::install(engine, host.clone(), thread.clone())
@@ -368,15 +273,6 @@ fn install_realm_core(
     })
 }
 
-/// Installs the two members this realm's console and `reportError` are written
-/// over, in `bobcat:diagnostics`: `reportScriptError(level, message)` and
-/// `logScriptMessage(level, message)`.
-///
-/// Each sends one engine event, named by `source`, through `host` to the
-/// view's host, from whichever thread the realm is on. No other realm relays
-/// it: a worker's report reaches the embedder while the main-thread realm is
-/// busy, and it is ordered only against the other diagnostics of the same
-/// realm.
 fn install_diagnostics(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
@@ -390,9 +286,6 @@ fn install_diagnostics(
         engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, 2, move |arguments| {
             let level = string_argument(name, arguments, 0)?.to_owned();
             let message = string_argument(name, arguments, 1)?.to_owned();
-            // The event owns its source and leaves this thread, so each
-            // takes a clone, which for a worker shares the URL rather
-            // than copying it.
             let source = source.clone();
             reporting.engine_event(if is_error {
                 EngineEvent::ScriptReported {
@@ -413,9 +306,6 @@ fn install_diagnostics(
     Ok(())
 }
 
-/// One argument of a host call as a string. A missing, `undefined` or `null`
-/// argument reads as the empty string; any other value that is not a string
-/// is refused with a message naming `function` and the argument's position.
 pub(crate) fn string_argument<'a>(
     function: &str,
     arguments: &[HostArgument<'a>],

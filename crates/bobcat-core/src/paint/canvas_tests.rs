@@ -23,7 +23,6 @@ const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 
-/// Counts the wakes a commit asks for.
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 
@@ -33,8 +32,6 @@ impl EventRequester for Wakes {
     }
 }
 
-/// A page of one `canvas` with `attributes` (`[name, value]` pairs) and
-/// inline `style`, on a 40 × 30 offscreen view.
 fn page(attributes: &str, style: &str) -> TestEngine {
     TestViewSpec::new(&format!(
         r"
@@ -51,7 +48,6 @@ fn page(attributes: &str, style: &str) -> TestEngine {
     .boot()
 }
 
-/// The page's canvas.
 fn canvas_of(engine: &mut TestEngine) -> NodeId {
     engine
         .probe_document(|document| {
@@ -65,7 +61,6 @@ fn canvas_of(engine: &mut TestEngine) -> NodeId {
         .expect("the page has a canvas")
 }
 
-/// The canvas's border box in the layout.
 fn rect(engine: &mut TestEngine, canvas: NodeId) -> (f32, f32) {
     let rect = engine
         .probe_document(move |document| {
@@ -77,8 +72,6 @@ fn rect(engine: &mut TestEngine, canvas: NodeId) -> (f32, f32) {
     (rect.size.width, rect.size.height)
 }
 
-/// Transfers the canvas's control on `bobcat-main` and registers its link
-/// for the view's painter, waking `wakes`.
 fn transfer(
     engine: &mut TestEngine,
     canvas: NodeId,
@@ -105,8 +98,6 @@ fn register(engine: &TestEngine, frames: CanvasFrames, wakes: Arc<Wakes>) -> Can
     )
 }
 
-/// A `width` × `height` canvas whose left half is `left` and right half
-/// `right`, drawn on the GPU.
 fn frame(width: u32, height: u32, left: [u8; 4], right: [u8; 4]) -> OffscreenCanvas {
     let mut canvas = OffscreenCanvas::new(width, height);
     let half = f64::from(width / 2);
@@ -149,8 +140,6 @@ fn commit_id(engine: &mut TestEngine) -> u64 {
         .commit_id()
 }
 
-/// HTML's defaults and the attributes give the canvas's natural size, and
-/// so its box when CSS names none.
 #[test]
 fn a_canvas_is_sized_by_its_attributes() {
     let mut engine = page("[]", "align-self:flex-start");
@@ -165,9 +154,6 @@ fn a_canvas_is_sized_by_its_attributes() {
     assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
 }
 
-/// Committed canvases reach the screen with no document commit, stretched
-/// to the CSS size: one colour, two colours, a canvas of another size, and
-/// one committed from another thread.
 #[test]
 fn committed_canvases_draw_stretched_and_without_a_document_commit() {
     let mut engine = page(
@@ -185,8 +171,6 @@ fn committed_canvases_draw_stretched_and_without_a_document_commit() {
     let shot = capture(&mut engine);
     assert_eq!(pixel(&shot, 20, 15), RED);
 
-    // One canvas drawn on after its commit: the placeholder shows the
-    // commit, and the next commit shows the rest.
     let mut drawn = frame(4, 2, RED, BLUE);
     presenter.commit(&mut drawn);
     drawn
@@ -224,8 +208,6 @@ fn committed_canvases_draw_stretched_and_without_a_document_commit() {
     assert_eq!(pixel(&shot, 20, 15), BLUE, "from another thread");
 }
 
-/// A commit of a new size becomes the placeholder's natural size once
-/// `bobcat-main` has applied it, with no other command asking.
 #[test]
 fn a_commit_of_a_new_size_resizes_the_placeholder() {
     let mut engine = page("[]", "align-self:flex-start");
@@ -233,8 +215,6 @@ fn a_commit_of_a_new_size_resizes_the_placeholder() {
     let (_, _, presenter) = transfer(&mut engine, canvas, Arc::default());
     let before = commit_id(&mut engine);
     presenter.commit(&mut solid(20, 10, RED));
-    // The probe lays the document out itself; the frame drawn is the one a
-    // document commit after the resize publishes.
     let deadline = Instant::now() + Duration::from_secs(20);
     while rect(&mut engine, canvas) != (20.0, 10.0) || commit_id(&mut engine) == before {
         assert!(Instant::now() < deadline, "the resize was not applied");
@@ -246,7 +226,6 @@ fn a_commit_of_a_new_size_resizes_the_placeholder() {
     assert_ne!(pixel(&shot, 30, 5), RED, "outside the resized box");
 }
 
-/// Under `filter: blur()` a new commit is baked again.
 #[test]
 fn a_new_commit_refreshes_a_filter_bake() {
     let mut engine = page(
@@ -261,8 +240,6 @@ fn a_new_commit_refreshes_a_filter_bake() {
     assert_eq!(pixel(&capture(&mut engine), 20, 15), BLUE);
 }
 
-/// A canvas nothing was committed to — placeholder or not — draws nothing
-/// and is not waited for.
 #[test]
 fn a_canvas_never_committed_draws_nothing() {
     let mut engine = page(
@@ -282,8 +259,6 @@ fn a_canvas_never_committed_draws_nothing() {
     assert_eq!(pixel(&shot, 20, 15), GREEN, "a placeholder with no commit");
 }
 
-/// The picture's texture is the link's: however many images other pictures
-/// upload past the bitmap budget, the placeholder keeps drawing its commit.
 #[test]
 fn a_committed_texture_outlives_the_bitmap_budget() {
     let mut engine = page("[]", "width:40px;height:30px;align-self:flex-start");
@@ -291,7 +266,6 @@ fn a_committed_texture_outlives_the_bitmap_budget() {
     let (_, _, presenter) = transfer(&mut engine, canvas, Arc::default());
     presenter.commit(&mut solid(4, 4, RED));
     assert_eq!(pixel(&capture(&mut engine), 20, 15), RED);
-    // 160 MiB of bitmaps drawn by canvases, past the 128 MiB kept.
     for _ in 0..10 {
         let pixels = vec![255; 2048 * 2048 * 4];
         let image = terminus::link::html::canvas::Image::from_premultiplied(2048, 2048, pixels)
@@ -306,7 +280,6 @@ fn a_committed_texture_outlives_the_bitmap_budget() {
     assert_eq!(pixel(&capture(&mut engine), 20, 15), RED);
 }
 
-/// Once the element is freed, a commit does nothing and wakes nobody.
 #[test]
 fn a_freed_canvas_takes_no_commits() {
     let mut engine = page("[]", "width:40px;height:30px;align-self:flex-start");
@@ -324,8 +297,6 @@ fn a_freed_canvas_takes_no_commits() {
     assert_ne!(pixel(&shot, 20, 15), RED);
 }
 
-/// What a test's view has said: its console messages, and whether boot
-/// finished.
 #[derive(Default)]
 struct Log {
     messages: Vec<String>,
@@ -337,8 +308,6 @@ impl Log {
         self.messages.iter().any(|seen| seen == message)
     }
 
-    /// Pumps `engine` until `done` holds of what it said; any script
-    /// failure fails the test.
     fn until(&mut self, engine: &mut TestEngine, done: impl Fn(&Self) -> bool) {
         use crate::view::EngineEvent;
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -366,16 +335,10 @@ impl Log {
     }
 }
 
-/// A page whose `renderPage` makes one `canvas` with inline `style`, and
-/// then runs `script` with `page`, `canvas` and the canvas members as `H`
-/// in scope, on a 40 × 30 offscreen view, booted. `transfer()` in `script`
-/// is `canvasTransferControl` on the canvas, answering the new canvas's
-/// `[id, width, height]` or the error name.
 fn scripted(style: &str, script: &str) -> (TestEngine, Log) {
     scripted_with(style, script, None)
 }
 
-/// [`scripted`], with a BTS entry when `background` names one.
 fn scripted_with(style: &str, script: &str, background: Option<&str>) -> (TestEngine, Log) {
     let mut spec = scripted_spec(style, script);
     if let Some(background) = background {
@@ -384,7 +347,6 @@ fn scripted_with(style: &str, script: &str, background: Option<&str>) -> (TestEn
     booted(spec)
 }
 
-/// The view [`scripted`] boots, before it is created.
 fn scripted_spec(style: &str, script: &str) -> TestViewSpec {
     TestViewSpec::new(&format!(
         r"
@@ -405,7 +367,6 @@ fn scripted_spec(style: &str, script: &str) -> TestViewSpec {
     .offscreen(40.0, 30.0)
 }
 
-/// Creates the view `spec` describes and pumps it until boot has finished.
 fn booted(spec: TestViewSpec) -> (TestEngine, Log) {
     let mut engine = spec.create(Arc::new(crate::view::NoWakeup));
     let mut log = Log::default();
@@ -413,7 +374,6 @@ fn booted(spec: TestViewSpec) -> (TestEngine, Log) {
     (engine, log)
 }
 
-/// Captures until `(x, y)` is `colour`.
 fn capture_until(engine: &mut TestEngine, x: u32, y: u32, colour: [u8; 4]) -> Screenshot {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -431,11 +391,6 @@ fn capture_until(engine: &mut TestEngine, x: u32, y: u32, colour: [u8; 4]) -> Sc
     }
 }
 
-/// `canvasTransferControl` binds a canvas entry of the placeholder's size,
-/// drawn in the MTS realm and committed at the end of the entry; a second
-/// transfer, and one of an element of another kind, answer
-/// `InvalidStateError`. A draw in a later timer entry reaches the screen
-/// with no document commit.
 #[test]
 fn an_mts_transfer_draws_into_the_canvas_box() {
     let (mut engine, mut log) = scripted(
@@ -487,11 +442,6 @@ fn an_mts_transfer_draws_into_the_canvas_box() {
     );
 }
 
-/// A card's `__InvokeUIMethod(canvas, 'transferControlToOffscreen', …)`
-/// binds the placeholder and answers `{token, width, height}`: the canvas
-/// is already out of the realm's table, and `canvasAttach` of the token in
-/// the same realm files it again. A draw on it reaches the placeholder. A
-/// second invoke answers 7.
 #[test]
 fn a_main_thread_invoke_of_transfer_control_to_offscreen_answers_a_token() {
     let (mut engine, log) = scripted(
@@ -525,10 +475,6 @@ fn a_main_thread_invoke_of_transfer_control_to_offscreen_answers_a_token() {
     capture_until(&mut engine, 20, 15, RED);
 }
 
-/// The background thread's `SelectorQuery.invoke` of
-/// `transferControlToOffscreen` answers the token in the BTS, which
-/// attaches the canvas and draws on it: the commit from `bobcat-workers`
-/// fills the placeholder.
 #[test]
 fn a_background_invoke_of_transfer_control_to_offscreen_hands_the_canvas_to_the_bts() {
     let (mut engine, mut log) = scripted_with(
@@ -563,13 +509,6 @@ lynx.createSelectorQuery().select('#c').invoke({
     capture_until(&mut engine, 20, 15, RED);
 }
 
-/// The ES module of an embedder's native module, `lynx:Canvas`, imported
-/// before the BTS entry, gives the card a canvas API of its own over the
-/// canvas members of `bobcat-internal:host`: `lynx.queryCanvas(selector)`
-/// invokes `transferControlToOffscreen` through a selector query, attaches
-/// the token and resolves to an object whose `getContext('2d')` has a
-/// `fillStyle` setter and `fillRect`. The BTS entry uses only that API, and
-/// its draw fills the placeholder.
 #[test]
 fn an_embedder_module_gives_the_card_a_canvas_api_over_the_host_members() {
     const MODULE: &str = r"
@@ -626,8 +565,6 @@ lynx.queryCanvas('#c').then((canvas) => {
     capture_until(&mut engine, 20, 15, RED);
 }
 
-/// Setting the canvas's size resizes its bitmap, and the commit carries the
-/// new size to the placeholder's natural size.
 #[test]
 fn resizing_the_offscreen_canvas_resizes_the_placeholder() {
     let (mut engine, _) = scripted(
@@ -651,9 +588,6 @@ fn resizing_the_offscreen_canvas_resizes_the_placeholder() {
     assert_ne!(pixel(&shot, 30, 5), RED, "outside the resized box");
 }
 
-/// Drawing on the canvas of a removed `canvas` element does nothing the
-/// page can see and throws nothing, in the entry that removed it and in a
-/// later one.
 #[test]
 fn drawing_after_the_element_is_removed_does_nothing() {
     let (mut engine, mut log) = scripted(
@@ -675,8 +609,6 @@ fn drawing_after_the_element_is_removed_does_nothing() {
     assert_ne!(pixel(&shot, 20, 15), RED);
 }
 
-/// A transferred canvas nothing drew on is never waited for: the page
-/// captures at once, showing what is under the canvas.
 #[test]
 fn a_transferred_canvas_never_drawn_captures_without_waiting() {
     let (mut engine, _) = scripted(
@@ -690,8 +622,6 @@ fn a_transferred_canvas_never_drawn_captures_without_waiting() {
     assert_eq!(pixel(&shot, 20, 15), GREEN);
 }
 
-/// Captures until `inside` is `colour` and `outside` is not: the frame in
-/// which a resized placeholder's box holds the new picture.
 fn capture_until_inside_only(
     engine: &mut TestEngine,
     inside: (u32, u32),
@@ -714,8 +644,6 @@ fn capture_until_inside_only(
     }
 }
 
-/// The BTS half of the hand-over tests: it attaches the canvas whose token
-/// the MTS realm posts, and runs what the MTS realm's later messages name.
 const BTS_ATTACH: &str = r"
 import { lynx } from 'bobcat:bts-runtime';
 import * as H from 'bobcat-internal:host';
@@ -738,11 +666,6 @@ lynx.getCoreContext().addEventListener('message', ({ data }) => {
 });
 ";
 
-/// The MTS realm binds the placeholder, detaches the canvas and posts its
-/// token to the BTS, which attaches it and draws: the commit comes from
-/// `bobcat-workers` and fills the canvas box with no document commit.
-/// Later the BTS sets a new size, and the commit's `CanvasResized` from that
-/// thread makes the placeholder's natural size follow.
 #[test]
 fn the_bts_draws_on_a_placeholder_canvas_the_mts_realm_detached() {
     let (mut engine, mut log) = scripted_with(
@@ -775,15 +698,10 @@ fn the_bts_draws_on_a_placeholder_canvas_the_mts_realm_detached() {
         terminus::link::input::PointerPhase::Down,
     ));
     log.until(&mut engine, |log| log.has("bts resized"));
-    // The frame that shows the resize: the new picture inside the 20 × 10
-    // box and nothing of it outside.
     capture_until_inside_only(&mut engine, (10, 5), (30, 20), BLUE);
     assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
 }
 
-/// A canvas resized and drawn on in the entry that detached it is listed
-/// as drawn by the realm that attaches it, whose epilogue commits it: the
-/// BTS only attaches, and the placeholder takes the new size and the draw.
 #[test]
 fn a_canvas_resized_as_it_is_detached_is_committed_by_the_realm_that_attaches_it() {
     let (mut engine, mut log) = scripted_with(
@@ -804,9 +722,6 @@ fn a_canvas_resized_as_it_is_detached_is_committed_by_the_realm_that_attaches_it
     assert_eq!(rect(&mut engine, canvas), (20.0, 10.0));
 }
 
-/// A worker realm's canvas text shapes with the view's host fonts
-/// (`ViewSources::fonts`), which on wasm32 are the only fonts there are:
-/// the BTS measures Ahem's em squares in a family no system has.
 #[test]
 fn bts_canvas_text_shapes_with_the_views_host_fonts() {
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");

@@ -13,21 +13,16 @@ use crate::paint::display_list::{self, DisplayList, draw_shaped_line};
 use crate::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler, StyleRef};
 use crate::render::canvas::{Init, MAX_SURFACE_SIDE, Surface, SurfaceImage};
 
-/// How many bytes of draws are recorded before they are replayed with no
-/// read asking: Chromium's bound on a canvas's recorded ops, 2 MiB.
 const MAX_RECORDED_BYTES: usize = 2 << 20;
 
-/// One clip path in canvas space, intersected with every clip before it.
 #[derive(Debug)]
 pub(super) struct ClipNode {
     pub(super) path: BezPath,
     pub(super) rule: Fill,
-    /// Number of nodes on the chain, this one included.
     pub(super) depth: usize,
     pub(super) parent: Option<Arc<ClipNode>>,
 }
 
-/// What a draw outlines: a fill, a stroke, or glyphs.
 pub(super) enum Outline<'a> {
     Fill(&'a BezPath, Fill),
     Stroke(&'a BezPath, &'a Stroke),
@@ -38,30 +33,14 @@ pub(super) enum Outline<'a> {
     },
 }
 
-/// The bitmap's texture and the draws recorded and not yet replayed onto
-/// it.
-///
-/// Draws are recorded into `list`; [`Raster::flush`] hands it to the
-/// surface, which replays it as `init` says. A batch of `source-over` draws
-/// is replayed onto the bitmap as it is. A draw composited by any other
-/// operation, or one that samples the canvas itself, needs the bitmap as
-/// its backdrop: `vello_gpu` composites such a layer at the root into a
-/// transparent intermediate and cannot sample the texture it renders into.
-/// That batch starts with the bitmap drawn as its first item and is
-/// rendered into the surface's second texture ([`Init::Backdrop`]). A batch
-/// that starts by clearing the canvas holds all of its content and needs
-/// neither.
 #[derive(Debug)]
 pub(in crate::html::canvas) struct Raster {
     pub(in crate::html::canvas) surface: Surface,
     pub(super) list: DisplayList,
     init: Init,
-    /// The images `list` draws, kept until it is replayed.
     keep: Vec<SurfaceImage>,
-    /// The clip paths open in `list`, outermost first.
     clips: Vec<Arc<ClipNode>>,
     clip_scratch: Vec<Arc<ClipNode>>,
-    /// The canvas rectangle.
     pub(super) size: Rect,
 }
 
@@ -82,7 +61,6 @@ impl Raster {
         self.init != Init::Load || !self.list.is_empty()
     }
 
-    /// Replays the recorded draws onto the bitmap.
     pub(in crate::html::canvas) fn flush(&mut self) {
         if !self.pending() {
             return;
@@ -94,15 +72,12 @@ impl Raster {
         self.init = Init::Load;
     }
 
-    /// Replays the recording when it has grown past [`MAX_RECORDED_BYTES`].
     pub(super) fn bound(&mut self) {
         if self.list.recorded_bytes() > MAX_RECORDED_BYTES {
             self.flush();
         }
     }
 
-    /// Drops the recording: the bitmap is cleared to transparent black first
-    /// at the next replay.
     pub(super) fn clear(&mut self) {
         self.list.reset();
         self.keep.clear();
@@ -110,9 +85,6 @@ impl Raster {
         self.init = Init::Clear;
     }
 
-    /// Makes the batch one that reads the bitmap: draws recorded so far are
-    /// replayed, and the next batch starts with the bitmap drawn under the
-    /// surface's own id.
     pub(super) fn ensure_backdrop(&mut self) {
         if self.init != Init::Load {
             return;
@@ -129,7 +101,6 @@ impl Raster {
             .fill_paint(Fill::NonZero, Affine::IDENTITY, own, None, &self.size);
     }
 
-    /// Makes the clips open in the recording the chain ending at `clip`.
     pub(super) fn sync_clips(&mut self, clip: Option<&Arc<ClipNode>>) {
         let depth = clip.map_or(0, |node| node.depth);
         if depth == self.clips.len()
@@ -137,7 +108,6 @@ impl Raster {
         {
             return;
         }
-        // Walk up from `clip` to the deepest node already open.
         self.clip_scratch.clear();
         let mut node = clip;
         let keep = loop {
@@ -161,11 +131,6 @@ impl Raster {
         }
     }
 
-    /// Records one draw (HTML "Drawing model"): the shadow, then the shape,
-    /// each composited with the state's operation inside the clip.
-    ///
-    /// `geometry` maps the shape's coordinates to canvas space. `paint` of
-    /// `None` paints transparent black, which still composites.
     pub(super) fn draw(
         &mut self,
         state: &State,
@@ -207,22 +172,12 @@ impl Raster {
             self.keep.push(keep);
         }
         if live.is_some() {
-            // The canvas it read may change before this one replays.
             self.flush();
         } else {
             self.bound();
         }
     }
 
-    /// Records the shadow of a draw: cast by the unclipped shape, composited
-    /// by `blend` inside the clip region.
-    ///
-    /// Clip paths applied to a layer's region cut what the layer composites
-    /// and not what is drawn in it, while an open clip cuts both. Under
-    /// `source-over` every clip path is a layer region of its own. Under
-    /// another operation the blend has to read the bitmap, so the innermost
-    /// path is the blend layer's region and the paths around it stay open
-    /// clips, which cut the shape casting the shadow too.
     fn shadow(
         &mut self,
         state: &State,
@@ -311,7 +266,6 @@ impl Raster {
     }
 }
 
-/// A drop shadow as the filter draws it, in canvas px.
 #[derive(Clone, Copy, Debug)]
 struct ShadowFilter {
     dx: f64,
@@ -319,27 +273,8 @@ struct ShadowFilter {
     std_dev: f64,
 }
 
-/// Px a shadow's filter layer leaves of the device's texture side
-/// ([`MAX_SURFACE_SIDE`]): 6 of atlas padding on each side (`vello_gpu`'s
-/// `FILTER_ATLAS_PADDING`, half its 13-tap kernel), 16 for rounding four
-/// lengths up to the 4 px tile, and 1 for the `f32` rounding of the
-/// filter's parameters.
 const SHADOW_LAYER_SLACK: f64 = 2.0 * 6.0 + 16.0 + 1.0;
 
-/// The shadow `state` casts on a canvas of `size`, its standard deviation
-/// (half `shadowBlur`) limited to what `vello_gpu` can filter; `None` when
-/// not even an unblurred shadow at its offsets can be.
-///
-/// `vello_gpu` renders a drop-shadow layer into an intermediate texture no
-/// longer than the device's texture side, and a render with a layer past
-/// it fails whole. Along each axis that layer (`vello_common`
-/// `FilterLayerPlacement::new`) is at most the canvas side, plus the
-/// source padding on both sides (`Filter::source_expansion`) and the
-/// filter padding on one (`Filter::filter_expansion`), each rounded up to
-/// the 4 px tile. For a reach R = 3σ and an offset of length a along the
-/// axis that is under side + 2(a + R) + max(0, R − a) + 16 px, whatever the
-/// shape, so σ is kept to the largest value for which that fits beside
-/// the atlas padding. Browsers bound the blur too (Skia limits its σ).
 fn shadow_filter(state: &State, size: Rect) -> Option<ShadowFilter> {
     let reach = |side: f64, offset: f64| {
         let budget = f64::from(MAX_SURFACE_SIDE) - SHADOW_LAYER_SLACK - side;

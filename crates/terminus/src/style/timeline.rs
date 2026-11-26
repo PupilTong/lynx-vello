@@ -52,8 +52,6 @@ use crate::scroll::snap::scroll_padding;
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId};
 use crate::visual::sticky::{self, StickyAxis};
 
-/// A physical scroll axis. The engine lays out `horizontal-tb` only, so
-/// `block` is `y` and `inline` is `x`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Axis {
     X,
@@ -83,28 +81,12 @@ impl Axis {
     }
 }
 
-/// One progress-driven animation's timing over its timeline, in scroll-offset
-/// px: web-animations-1's timing model with the animation's start time
-/// aligned to its range start (web-animations-2 §2.3.7.1) and a playback
-/// rate of 1. The phase boundaries are absolute offsets, so an offset at the
-/// range's end compares equal to it exactly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ProgressTiming {
-    /// The attachment range's start (`animation-range-start` resolved): local
-    /// time 0.
     pub start: f32,
-    /// Where the active time is 0: `start` plus the start delay, converted
-    /// proportionally into the range.
     pub origin: f64,
-    /// Where the active interval ends: the attachment range's end, or
-    /// `start` when the active duration is 0.
     pub end: f32,
-    /// The iteration duration: 0 when the duration or the count is 0, the
-    /// count is infinite, the duration and delay total nothing, or the range
-    /// is empty.
     pub iteration: f64,
-    /// The largest offset the source reaches, the timeline's maximum time
-    /// whatever its own 0% and 100% are.
     pub limit: f32,
     pub iterations: f64,
     pub direction: AnimationDirection,
@@ -112,18 +94,6 @@ pub(crate) struct ProgressTiming {
 }
 
 impl ProgressTiming {
-    /// The timing of an animation attached to `range` of a timeline whose
-    /// source scrolls to `limit`, with `duration` `None` for `auto`.
-    ///
-    /// Blink's proportional conversion (`AnimationEffect::NormalizedTiming`):
-    /// css-animations-2 treats a time duration as `auto` on a progress
-    /// timeline and web-animations-2 converts it into proportions, and the
-    /// two agree unless a delay is non-zero. `auto` fills the range and takes
-    /// no delay; a time duration and delay keep their proportions to each
-    /// other across the range. An infinite count or a duration and delay
-    /// totalling nothing leave a zero active duration at the range's start.
-    /// The end delay is always 0 in CSS, so a non-zero active duration always
-    /// ends at the range's end.
     pub(crate) fn normalized(
         limit: f32,
         range: [f32; 2],
@@ -135,7 +105,6 @@ impl ProgressTiming {
     ) -> Self {
         let length = f64::from(range[1]) - f64::from(range[0]);
         let counted = length > 0.0 && iterations.is_finite() && iterations > 0.0;
-        // The start delay and the iteration duration, for a non-zero end time.
         let proportions = match duration {
             _ if !counted => None,
             None => Some((0.0, length / iterations)),
@@ -160,16 +129,10 @@ impl ProgressTiming {
         }
     }
 
-    /// The active duration.
     fn active(&self) -> f64 {
         (f64::from(self.end) - self.origin).max(0.0)
     }
 
-    /// Whether [`iteration_progress`] has an effect at every offset of the
-    /// scroll range `[0, limit]`: offset 0 is not in a before phase without
-    /// a backwards fill, and the limit not in an after phase without a
-    /// forwards fill. The phases are monotone in the offset, so the ends
-    /// decide.
     pub(crate) fn contributes_throughout(&self) -> bool {
         let backwards = matches!(
             self.fill,
@@ -192,19 +155,6 @@ enum Phase {
     After,
 }
 
-/// Where the animation `timing` describes stands at scroll `offset`: its
-/// simple iteration progress and whether that iteration runs reversed, the
-/// only input `Animation::sample_at` takes; `None` when it has no effect
-/// (before or after its active interval without the matching fill).
-///
-/// web-animations-1 §4.5-4.8 verbatim for a playback rate of 1, with
-/// web-animations-2 §2.4.4's progress-timeline exception: at the timeline's
-/// maximum time — the source's scroll limit, whatever the timeline's own
-/// 100% is — an active interval ending there is still active, so it shows
-/// its last keyframe without a forwards fill. The direction is left to
-/// `sample_at`, which applies it itself; a backwards-filled before phase
-/// answers `AnimationProgress::before_phase`, which `sample_at` reads as the
-/// first keyframe without easing it, as stylo's time path does.
 #[expect(
     clippy::float_cmp,
     reason = "web-animations compares boundaries and progress exactly, and so does the painter"
@@ -236,8 +186,6 @@ pub(crate) fn iteration_progress(
     }
     let active_time = (f64::from(offset) - timing.origin).clamp(0.0, active);
     let iterations = timing.iterations;
-    // At the end of the active interval the overall progress is the count
-    // itself, which dividing by a rounded iteration duration can miss.
     let ended = phase != Phase::Before && active_time == active;
     let overall = if timing.iteration == 0.0 {
         if phase == Phase::Before {
@@ -284,31 +232,13 @@ pub(crate) fn iteration_progress(
     })
 }
 
-/// The kind of progress timeline a binding reads, for the one rule that
-/// tells the two apart: where an offset through the seam of an
-/// `overscroll-behavior: circular` axis samples. On every other axis they
-/// sample alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProgressKind {
-    /// A scroll progress timeline (`scroll()`, `scroll-timeline`): an offset
-    /// past the scroll range stands at its representative nearer the range
-    /// ([`ScrollBox::unwrapped_offset`], the painter's
-    /// [`ScrollSlot::unwrap`](crate::visual::ScrollSlot::unwrap)), so a
-    /// scrollport just before the start reads the start, not the end.
     Scroll,
-    /// A view progress timeline (`view()`, `view-timeline`): the offset as it
-    /// stands in the period, unclamped, since on a circular axis every
-    /// offset of the period is a position and the subject's ranges lie
-    /// anywhere in it. The painter samples the seam copy of the container's
-    /// content again one period back ([`SeamPass`]).
-    ///
-    /// [`SeamPass`]: crate::visual::space::SeamPass
     View,
 }
 
 impl ProgressKind {
-    /// `scroll_box`'s offset as a timeline of this kind reads it, before the
-    /// clamp to the scroll range.
     pub(crate) fn offset_of(self, scroll_box: &ScrollBox) -> Vector2D<f32> {
         match self {
             Self::Scroll => scroll_box.unwrapped_offset(),
@@ -317,19 +247,14 @@ impl ProgressKind {
     }
 }
 
-/// What one progress-driven animation is attached to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Binding {
-    /// An active timeline: `source`'s offset along `axis`, read as `kind`
-    /// reads it and through `timing`.
     Active {
         source: NodeId,
         axis: Axis,
         timing: ProgressTiming,
         kind: ProgressKind,
     },
-    /// No timeline, or an inactive one: no effect, and the animation is not
-    /// current (an animation on an inactive timeline is idle).
     Inactive,
 }
 
@@ -338,12 +263,6 @@ impl Binding {
         matches!(self, Self::Active { .. })
     }
 
-    /// The progress at the offset of the scroll box `scroll_box_of` answers
-    /// for the source — read as the binding's [`ProgressKind`] reads it,
-    /// then clamped to the scroll range `[0, limit]` as the painter's
-    /// exported curve clamps it, except a view progress timeline on a
-    /// circular axis, whose whole period is positions — or at offset 0 when
-    /// the source has no scroll box.
     fn sample(
         &self,
         scroll_box_of: impl Fn(NodeId) -> Option<ScrollBox>,
@@ -380,60 +299,36 @@ impl Binding {
     }
 }
 
-/// One entry of the binding table.
 #[derive(Debug)]
 struct Bound {
     binding: Binding,
-    /// Whether a sample was written, so a paused animation holds only once
-    /// it has one.
     sampled: bool,
 }
 
-/// The timelines side of the animation driver, sized by animations and
-/// timeline declarations, never by the page.
 #[derive(Default)]
 pub(crate) struct ScrollTimelines {
-    /// The elements whose set holds a progress-driven animation, rebuilt by
-    /// `Document::sync_animation_state`.
     pub(crate) progress_driven: FxHashSet<NodeId>,
-    /// Each progress-driven animation's binding, keyed by element and
-    /// animation name, from the last [`Document::resolve_timelines`]: a set
-    /// holds one live animation per name (stylo's `return;` deviation), and
-    /// its index moves when an earlier one leaves.
     bindings: FxHashMap<(NodeId, Atom), Bound>,
-    /// The table the next resolution builds into.
     spare: FxHashMap<(NodeId, Atom), Bound>,
-    /// Scroll container → the animations an active binding reads it for.
     dependents: FxHashMap<NodeId, SmallVec<[(NodeId, Atom); 2]>>,
-    /// Timeline name → the elements whose `scroll-timeline-name` or
-    /// `view-timeline-name` lists it, kept from the flush's restyles.
     definers: FxHashMap<Atom, SmallVec<[NodeId; 2]>>,
-    /// Element → the names it is listed under in [`Self::definers`].
     defined: FxHashMap<NodeId, SmallVec<[Atom; 2]>>,
-    /// The elements whose `timeline-scope` is not `none`.
     scopers: FxHashSet<NodeId>,
-    /// The elements whose curve in the last frame built samples a scroll
-    /// slot itself: the painter re-samples their animations from the live
-    /// offset, so a scroll the main thread adopts re-cascades none of them.
     pub(crate) painted: FxHashSet<NodeId>,
 }
 
 impl ScrollTimelines {
-    /// The binding `id`'s animation `name` resolved to at the last
-    /// resolution.
     pub(crate) fn binding_of(&self, id: NodeId, name: &Atom) -> Option<&Binding> {
         self.bindings
             .get(&(id, name.clone()))
             .map(|bound| &bound.binding)
     }
 
-    /// [`Self::binding_of`] by name.
     #[cfg(test)]
     pub(crate) fn binding(&self, id: NodeId, name: &str) -> Option<&Binding> {
         self.binding_of(id, &Atom::from(name))
     }
 
-    /// Whether `id` is in the definer table.
     #[cfg(test)]
     pub(crate) fn defines(&self, id: NodeId) -> bool {
         self.defined.contains_key(&id) || self.scopers.contains(&id)
@@ -443,19 +338,12 @@ impl ScrollTimelines {
         !self.defined.is_empty() || !self.scopers.is_empty()
     }
 
-    /// web-animations-1's *current* for `id`'s animation `name`, as far as
-    /// its timeline decides it: a binding not resolved yet counts as active
-    /// until the resolution the same `layout()` call runs.
     pub(crate) fn is_current(&self, id: NodeId, name: &Atom) -> bool {
         self.bindings
             .get(&(id, name.clone()))
             .is_none_or(|bound| bound.binding.is_active())
     }
 
-    /// Re-reads which timeline names `id` defines and whether it scopes any,
-    /// from its restyled `style` (`None` when it has none). An element that
-    /// neither defined nor defines one costs three style reads and two
-    /// probes.
     pub(crate) fn restyled(&mut self, id: NodeId, style: Option<&ComputedValues>) {
         let defines = style.is_some_and(|style| {
             let ui = style.get_ui();
@@ -519,7 +407,6 @@ impl ScrollTimelines {
     }
 }
 
-/// A timeline a name or a function resolved to, before its geometry.
 enum Timeline {
     Scroll {
         source: NodeId,
@@ -532,27 +419,16 @@ enum Timeline {
     },
 }
 
-/// The timeline an element's own style defines under a name.
 enum Declared {
     Scroll(ScrollAxis),
     View(ScrollAxis, ViewTimelineInset),
 }
 
-/// A timeline name as one element references it, resolved to the tree it
-/// is scoped to.
 struct Reference<'a> {
     atom: &'a Atom,
-    /// The shadow root, or `None` for the document tree.
     tree: Option<NodeId>,
 }
 
-/// A timeline's named ranges (scroll-animations-1 §3.1, and Appendix A
-/// "Named Timeline Ranges"), in scroll-offset px: what `animation-range`
-/// resolves against and what places range keyframes. `cover` is the
-/// timeline's own extent, its 0% and 100%, and `scroll` ends at the largest
-/// offset the timeline's source reaches. A view progress timeline's are what
-/// `Document::view_ranges` answers, a scroll progress timeline's are
-/// [`NamedRanges::scroll`].
 struct NamedRanges {
     cover: [f32; 2],
     contain: [f32; 2],
@@ -564,15 +440,6 @@ struct NamedRanges {
 }
 
 impl NamedRanges {
-    /// A scroll progress timeline's over its source's scroll range
-    /// `[0, max]`: every range name stands for the whole scroll range, in
-    /// `animation-range` and in a range keyframe (`entry 0% { }`) alike, as
-    /// Blink resolves them and WPT
-    /// `timeline-offset-keyframes-with-scroll-timeline.html` asserts.
-    /// scroll-animations-1 defines named ranges for view progress timelines
-    /// only (§3.1), and its Appendix A ("Named Timeline Range Keyframe
-    /// Selectors") ignores keyframes on a range the timeline does not have;
-    /// `docs/tracking/css-animation.md` records the deviation.
     const fn scroll(max: f32) -> Self {
         let range = [0.0, max];
         Self {
@@ -586,7 +453,6 @@ impl NamedRanges {
         }
     }
 
-    /// The range `name` names; `None` for `normal` and for no name.
     const fn named(&self, name: TimelineRangeName) -> Option<[f32; 2]> {
         Some(match name {
             TimelineRangeName::Normal | TimelineRangeName::None => return None,
@@ -601,9 +467,6 @@ impl NamedRanges {
     }
 }
 
-/// `ranges` as fractions of the attachment range `[start, end]`, which place
-/// an animation's range keyframes; `None` when the attachment range is
-/// empty, where they are ignored.
 fn keyframe_ranges(attachment: [f32; 2], ranges: &NamedRanges) -> Option<TimelineRanges> {
     let [start, end] = attachment.map(f64::from);
     let length = end - start;
@@ -619,10 +482,6 @@ fn keyframe_ranges(attachment: [f32; 2], ranges: &NamedRanges) -> Option<Timelin
     })
 }
 
-/// One end of the attachment range over a timeline with `ranges`: `normal`
-/// is the end of the timeline's cover range, a bare `<length-percentage>`
-/// measures from the cover range's start against its length, and a named
-/// range measures from that range's start against its length.
 fn range_point(
     value: &AnimationRangeValue<LengthPercentage>,
     end: bool,
@@ -635,8 +494,6 @@ fn range_point(
     from + value.lp.resolve(Length::new(to - from)).px()
 }
 
-/// Animation `index` of `ui`'s attachment range over a timeline with
-/// `ranges`: `animation-range-start` and `-end` resolved.
 fn attachment(ui: &UI, index: usize, ranges: &NamedRanges) -> [f32; 2] {
     [
         range_point(&ui.animation_range_start_mod(index).0, false, ranges),
@@ -644,8 +501,6 @@ fn attachment(ui: &UI, index: usize, ranges: &NamedRanges) -> [f32; 2] {
     ]
 }
 
-/// Animation `index` of `ui`'s timing over `attachment`, on a timeline whose
-/// source scrolls to `limit`.
 fn timing(ui: &UI, index: usize, attachment: [f32; 2], limit: f32) -> ProgressTiming {
     let duration = ui.animation_duration_mod(index);
     ProgressTiming::normalized(
@@ -659,9 +514,6 @@ fn timing(ui: &UI, index: usize, attachment: [f32; 2], limit: f32) -> ProgressTi
     )
 }
 
-/// A continuous piecewise-linear function of the scroll offset, linear
-/// between its knots and constant outside them: the summed sticky shift of
-/// a view-timeline subject along the timeline's axis. No knots is 0.
 #[derive(Default)]
 struct Knots(SmallVec<[(f32, f32); 8]>);
 
@@ -683,9 +535,6 @@ impl Knots {
         knots[knots.len() - 1].1
     }
 
-    /// The offsets `o` with `o - self.at(o) == target`, as `(earliest,
-    /// latest)`. `o - self.at(o)` never decreases, with slope 1 outside the
-    /// knots, so they form one closed interval.
     #[expect(clippy::float_cmp, reason = "a flat segment is exactly flat")]
     fn preimage(&self, target: f32) -> (f32, f32) {
         let knots = &self.0;
@@ -720,9 +569,6 @@ impl Knots {
         (earliest, latest)
     }
 
-    /// This shift plus that of a sticky box inside every box it sums, which
-    /// slides by `sticky.offset(o, self.at(o))`: evaluated on every knot of
-    /// both, which is exact because the sum is linear between them.
     fn nest(&self, sticky: StickyAxis) -> Self {
         let mut offsets: SmallVec<[f32; 16]> = self.0.iter().map(|&(offset, _)| offset).collect();
         for kink in sticky.kinks() {
@@ -744,19 +590,6 @@ impl Knots {
 }
 
 impl<T: Sync> Document<T> {
-    /// Binds every progress-driven animation to its timeline against the
-    /// layout just committed, writes its sample, places its range keyframes,
-    /// and re-cascades the elements whose sample, binding or keyframes
-    /// changed. Answers whether that left layout work, which `layout()` takes
-    /// as one more pass.
-    ///
-    /// The timeline kind and the timeline come from `Animation::timeline`,
-    /// what stylo captured when it started or updated the animation; the
-    /// style is read by the animation's name only for its range, duration,
-    /// delay, fill, count and direction. A paused animation holds its sample
-    /// once it has one, while its range keyframes still follow the layout;
-    /// an element in a skipped subtree holds whatever it had (css-contain-2
-    /// §4).
     pub(crate) fn resolve_timelines(&mut self) -> bool {
         let timelines = &mut self.animations_mut().timelines;
         if timelines.progress_driven.is_empty() && timelines.bindings.is_empty() {
@@ -790,12 +623,9 @@ impl<T: Sync> Document<T> {
                     let key = (id, animation.name.clone());
                     let old = previous.remove(&key);
                     let mut sampled = old.as_ref().is_some_and(|bound| bound.sampled);
-                    // An unresolved binding counted as active.
                     let was_active = old.as_ref().is_none_or(|bound| bound.binding.is_active());
                     flipped |= was_active != binding.is_active();
                     changed |= old.is_none_or(|bound| bound.binding != binding);
-                    // Range keyframes follow the layout whether or not the
-                    // animation is paused.
                     changed |= !skipped && animation.set_timeline_ranges(ranges);
                     let paused = matches!(animation.state, AnimationState::Paused(_));
                     if !skipped && (!paused || !sampled) {
@@ -826,21 +656,9 @@ impl<T: Sync> Document<T> {
             return false;
         }
         let relayout = self.recascade_timeline_dependents(&hinted);
-        // The re-cascade and an activity flip both move what the map
-        // settles to: the `animates` bits read each binding's activity.
         relayout | self.sync_animation_state()
     }
 
-    /// Re-samples the animations whose timeline reads one of `sources`, after
-    /// their offsets moved without a commit — the painter's scroll adopted by
-    /// the main thread — and re-cascades the elements whose sample changed.
-    /// A paused animation holds, and so does one in a skipped subtree.
-    ///
-    /// An element whose committed curve samples a scroll slot is left alone:
-    /// the painter samples it from the live offset, and its cascade value is
-    /// stale between commits as an exported curve's is
-    /// (`docs/style-assumptions.md` §12); the next commit's resolution
-    /// re-samples it.
     pub fn advance_scroll_timelines(&mut self, sources: &[NodeId]) {
         if self.animations().timelines.dependents.is_empty() {
             return;
@@ -890,8 +708,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Re-cascades `hinted` for their new samples, answering whether that
-    /// left layout work.
     fn recascade_timeline_dependents(&mut self, hinted: &[NodeId]) -> bool {
         if hinted.is_empty() {
             return false;
@@ -904,10 +720,6 @@ impl<T: Sync> Document<T> {
         tick.relayout
     }
 
-    /// What `animation` of `id` is attached to, against the current layout,
-    /// and the ranges that place its range keyframes: `None`, ignoring them,
-    /// on an inactive timeline, the document timeline, or an empty attachment
-    /// range.
     fn bind(&self, id: NodeId, animation: &Animation) -> (Binding, Option<TimelineRanges>) {
         let Some(ui) = self.paint_style(id).map(|style| style.get_ui()) else {
             return (Binding::Inactive, None);
@@ -943,20 +755,10 @@ impl<T: Sync> Document<T> {
             .unwrap_or((Binding::Inactive, None))
     }
 
-    /// `scroll(root)`, and `scroll(nearest)` with no scroll container above:
-    /// the document element stands in for the viewport, and is inactive
-    /// unless it is a scroll container (the engine has no viewport
-    /// scrolling area).
     fn root_scroller(&self) -> Option<NodeId> {
         Some(DOCUMENT_ELEMENT_NODE_ID).filter(|&root| self.is_scroll_container(root))
     }
 
-    /// `timeline` with animation `index` of `ui`'s timing, and the ranges
-    /// that place its range keyframes (`None` for an empty attachment
-    /// range); `None` when the timeline is inactive: its source cannot
-    /// scroll along its axis, its view subject has no box, or its cover
-    /// range is empty. An animation without range keyframes ignores the
-    /// ranges (`Animation::set_timeline_ranges`).
     fn bind_to(
         &self,
         timeline: &Timeline,
@@ -990,15 +792,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// The named ranges of `subject`'s view progress timeline over `source`
-    /// (scroll-animations-1 §3.1): where its border box, unscrolled and
-    /// untransformed, meets the scrollport inset by `inset`, whose `auto`
-    /// sides are the source's `scroll-padding`.
-    ///
-    /// A sticky box between the subject and its source moves the subject
-    /// with the offset, so each edge alignment can hold over an interval of
-    /// offsets; each range takes the earliest or latest end the spec names.
-    /// Blink handles only the first sticky container; this solves the chain.
     fn view_ranges(
         &self,
         subject: NodeId,
@@ -1006,8 +799,6 @@ impl<T: Sync> Document<T> {
         axis: Axis,
         inset: &ViewTimelineInset,
     ) -> Option<NamedRanges> {
-        // No box: `display: none` or `contents`, or skipped contents, whose
-        // layout is zeroed.
         let node = self.get(subject)?;
         let style = node.layout_computed_style()?;
         if matches!(
@@ -1050,8 +841,6 @@ impl<T: Sync> Document<T> {
             resolve(&inset.end, padding_end),
         );
         let shift = self.sticky_shift(subject, source, axis);
-        // The start edge at the visibility range's end, the end edge there,
-        // the start edge at its start, the end edge there.
         let a = shift.preimage(position - (port - inset_end));
         let b = shift.preimage(position + length - (port - inset_end));
         let c = shift.preimage(position - inset_start);
@@ -1068,10 +857,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// The summed shift of the sticky boxes from `subject` up to `source` on
-    /// its containing-block chain, as a function of `source`'s offset.
-    /// `source` is the chain's nearest scroll container, and every scroll
-    /// container scrolls both axes, so it is every such box's scroller.
     fn sticky_shift(&self, subject: NodeId, source: NodeId, axis: Axis) -> Knots {
         let mut chain: SmallVec<[NodeId; 2]> = SmallVec::new();
         let mut current = Some(subject);
@@ -1095,11 +880,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// scroll-animations-1 §4.2's lookup of `name` for `id`, over the flat
-    /// tree: the nearest inclusive ancestor defining it; else, at the
-    /// nearest one whose `timeline-scope` limits it or at the document
-    /// element, the last of its descendants in flat tree order that defines
-    /// it, skipping those a nested `timeline-scope` limits already.
     fn named_timeline(&self, id: NodeId, name: &TimelineName) -> Option<Timeline> {
         let reference = Reference {
             atom: name.value.as_atom()?,
@@ -1124,21 +904,15 @@ impl<T: Sync> Document<T> {
         None
     }
 
-    /// The tree a tree-scoped name cascaded for `element` at `scope` belongs
-    /// to; see [`crate::tree::node::Node::scoped_name_tree`].
     fn name_tree(&self, element: NodeId, scope: CascadeLevel) -> Option<NodeId> {
         self.get(element)?.scoped_name_tree(scope)
     }
 
-    /// Whether `name`, cascaded for `element`, is `reference`.
     fn names(&self, element: NodeId, name: &TimelineName, reference: &Reference<'_>) -> bool {
         name.value.as_atom() == Some(reference.atom)
             && self.name_tree(element, name.scope) == reference.tree
     }
 
-    /// The timeline `element`'s `ui` defines under `reference`: later entries
-    /// of a list win, and a scroll timeline beats a view timeline
-    /// (scroll-animations-1 §4.2).
     fn declared(&self, element: NodeId, ui: &UI, reference: &Reference<'_>) -> Option<Declared> {
         let last = |names: &mut dyn Iterator<Item = TimelineName>| {
             names
@@ -1157,15 +931,12 @@ impl<T: Sync> Document<T> {
         ))
     }
 
-    /// Whether `element`'s `timeline-scope` limits `reference` to its subtree.
     fn limits(&self, element: NodeId, style: &ComputedValues, reference: &Reference<'_>) -> bool {
         let scope = style.get_timeline_scope();
         (scope.value.is_all() || scope.value.iter().any(|atom| atom == reference.atom))
             && self.name_tree(element, scope.scope) == reference.tree
     }
 
-    /// The timeline `definer` declares: a named scroll timeline on a box
-    /// that is not a scroll container exists and is inactive (§2.3.2).
     fn defined_timeline(&self, definer: NodeId, declared: Declared) -> Option<Timeline> {
         match declared {
             Declared::Scroll(axis) => {
@@ -1183,18 +954,8 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// The last of `scope`'s flat-tree descendants in flat tree order that
-    /// defines `reference`, outside every nested `timeline-scope` limiting
-    /// it.
-    ///
-    /// Each candidate's flat-tree path is walked once; the order is then
-    /// settled level by level from `scope` down, scanning a node's children
-    /// only where the surviving candidates branch, so the cost is the
-    /// candidates times their depth plus the children of those branch
-    /// points, never a sibling scan per pair.
     fn last_definer_under(&self, scope: NodeId, reference: &Reference<'_>) -> Option<NodeId> {
         let timelines = &self.animations().timelines;
-        // Each surviving candidate's path from `scope`'s child down to it.
         let mut paths: SmallVec<[SmallVec<[NodeId; 16]>; 4]> = SmallVec::new();
         for &candidate in timelines.definers.get(reference.atom)? {
             if candidate == scope
@@ -1237,7 +998,6 @@ impl<T: Sync> Document<T> {
             if paths.len() <= 1 {
                 return paths.first().and_then(|path| path.last().copied());
             }
-            // `parent`, if a candidate, precedes the rest: its descendants.
             paths.retain(|path| path.len() > depth);
             let first = paths[0][depth];
             let last = if paths.iter().all(|path| path[depth] == first) {

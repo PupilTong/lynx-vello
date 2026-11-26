@@ -32,26 +32,17 @@ use std::ops::Range;
 use bobcat_core::editing::Command;
 use winit::event::Ime;
 
-/// The input-method state the host keeps between winit's events.
 #[derive(Debug, Default)]
 pub(crate) struct ImeBridge {
-    /// A non-empty composition was sent to the view and nothing has ended
-    /// it since.
     composing: bool,
-    /// winit's empty `Preedit` arrived while composing, and has not been
-    /// sent: the next event decides whether it was a cancellation.
     held_clear: bool,
 }
 
 impl ImeBridge {
-    /// The commands one input-method event asks for, in order.
     pub(crate) fn ime(&mut self, event: Ime) -> Vec<Command> {
         let mut commands = Vec::new();
         match event {
             Ime::Preedit(text, _) if text.is_empty() => {
-                // Nothing composed here, nothing to cancel: an empty
-                // `SetComposition` with no composition would delete a
-                // selected range instead.
                 if self.composing {
                     self.held_clear = true;
                 }
@@ -63,7 +54,6 @@ impl ImeBridge {
                 commands.push(Command::SetComposition { text, selection });
             }
             Ime::Commit(text) => {
-                // The empty `Preedit` before a commit is part of it.
                 self.held_clear = false;
                 self.composing = false;
                 commands.push(Command::CommitText {
@@ -85,8 +75,6 @@ impl ImeBridge {
         commands
     }
 
-    /// The cancellation an empty `Preedit` held back, now that an event
-    /// other than a `Commit` followed it (or the turn ended).
     pub(crate) fn flush(&mut self) -> Option<Command> {
         if !std::mem::take(&mut self.held_clear) {
             return None;
@@ -98,16 +86,11 @@ impl ImeBridge {
         })
     }
 
-    /// Forgets the composition: the focus moved to another editing host or
-    /// to none, and whatever was composed belongs to the one it left.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
 }
 
-/// winit's preedit cursor — a byte range into `text`, or `None` for a
-/// hidden cursor — as the UTF-16 range `SetComposition` takes, relative to
-/// the start of `text`. A hidden cursor is a caret at the end.
 fn composition_selection(text: &str, cursor: Option<(usize, usize)>) -> Range<usize> {
     let units = |byte: usize| {
         let mut byte = byte.min(text.len());
@@ -151,10 +134,6 @@ mod tests {
         }
     }
 
-    /// The dead-key sequence winit documents: Option-e composes `´`, then
-    /// `e` commits `é` through an empty `Preedit` and the `Commit`. The
-    /// empty `Preedit` before the commit sends nothing, so the composition
-    /// is replaced once and never cancelled first.
     #[test]
     fn the_empty_preedit_before_a_commit_is_not_a_cancellation() {
         let mut bridge = ImeBridge::default();
@@ -171,8 +150,6 @@ mod tests {
         assert_eq!(bridge.flush(), None, "the turn ends with nothing held");
     }
 
-    /// Pinyin, as winit documents it: preedits with a byte cursor, then a
-    /// commit of different text.
     #[test]
     fn preedit_cursors_become_utf16_ranges() {
         let mut bridge = ImeBridge::default();
@@ -201,9 +178,6 @@ mod tests {
         );
     }
 
-    /// A composition the user emptied (Backspace over its last character)
-    /// is an empty `Preedit` with no `Commit` after it: it is sent once the
-    /// turn ends, or before whatever event comes next.
     #[test]
     fn an_empty_preedit_alone_cancels_the_composition() {
         let mut bridge = ImeBridge::default();
@@ -218,7 +192,6 @@ mod tests {
         assert_eq!(bridge.flush(), Some(composition("", 0..0)));
         assert_eq!(bridge.flush(), None);
 
-        // Held, then a new composition: the cancellation goes first.
         let commands = feed(
             &mut bridge,
             vec![
@@ -237,8 +210,6 @@ mod tests {
         );
     }
 
-    /// With nothing composed, an empty `Preedit` is never sent: the
-    /// engine's empty `SetComposition` would delete a selected range.
     #[test]
     fn an_empty_preedit_with_nothing_composed_sends_nothing() {
         let mut bridge = ImeBridge::default();
@@ -251,7 +222,6 @@ mod tests {
         );
     }
 
-    /// The input method going away mid-composition keeps what was composed.
     #[test]
     fn disabling_the_input_method_finishes_the_composition() {
         let mut bridge = ImeBridge::default();

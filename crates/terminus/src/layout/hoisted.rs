@@ -42,10 +42,6 @@ use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_pos
 use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
-/// The element whose absolute pass lays `node` out, when `node` is a box
-/// lowered to `fixed` whose containing block is an element's and every box
-/// between them lays its children out; `None` otherwise — not hoisted, or
-/// hoisted to the initial containing block.
 pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
     let style = node.layout_computed_style()?;
     let display = *style.get_display();
@@ -67,13 +63,6 @@ pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
         match style.display_mode() {
             DisplayMode::None => return None,
             DisplayMode::Contents => {}
-            // A paragraph whose generated content replaces its children hides
-            // every one of them. Otherwise a block container records the
-            // static position of each out-of-flow box of its content — one
-            // inside an inline box included, which lays nothing out itself —
-            // and lays out only the ones whose containing block it or such an
-            // inline box is (`paragraph::place_and_hide`); an escaping one
-            // passes through it, as through any box.
             DisplayMode::Text | DisplayMode::BlockFlow
                 if super::paragraph::replaces_children(ancestor) =>
             {
@@ -87,9 +76,6 @@ pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
     None
 }
 
-/// What `hoisted_children` answers for `block`: the listed boxes that still
-/// escape to it, in flat tree order, with the index of the flattened child
-/// of `block` each sits under.
 pub(super) fn children_of<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -100,7 +86,6 @@ pub(super) fn children_of<T>(
     };
     let mut found: SmallVec<[(NodeSlot, NodeSlot, super::anchors::Chain); 2]> = SmallVec::new();
     for &node in listed {
-        // A free unlists the box (`DocumentLayoutState::remove`).
         let hoisted = tree.at(node);
         if hoisting_block(hoisted) != Some(block) {
             continue;
@@ -108,11 +93,6 @@ pub(super) fn children_of<T>(
         let Some(chain) = connected_chain(hoisted) else {
             continue;
         };
-        // The child of `block` the box sits under, as the flattened child
-        // list names it: the first box below `block` on the chain, a
-        // `display: contents` level being spliced into its parent's list.
-        // `hoisting_block` found `block` on the chain, and the box itself
-        // is not `display: contents`.
         let at = chain
             .iter()
             .position(|&id| id == block)
@@ -136,8 +116,6 @@ pub(super) fn children_of<T>(
             std::cmp::Ordering::Greater
         }
     });
-    // Tree order is the order of the vias' subtrees, so one walk over the
-    // flattened children numbers them all.
     let mut children = SmallVec::with_capacity(found.len());
     let mut pending = found.iter().peekable();
     for (index, (child, ..)) in tree.flattened_children(block).enumerate() {
@@ -155,9 +133,6 @@ pub(super) fn children_of<T>(
     children
 }
 
-/// `node`'s box parent's border-box origin in `block`'s border-box
-/// coordinates, from this run's boxes. A `display: contents` level has no
-/// box and offsets nothing.
 pub(super) fn parent_offset<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -177,9 +152,6 @@ pub(super) fn parent_offset<T>(
     offset
 }
 
-/// Stores a hoisted box's layout with its paint order among its parent's
-/// children, and marks the boxes between it and `block` so the rounding
-/// tail, which descends only through boxes something wrote, reaches it.
 pub(super) fn commit<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -207,9 +179,6 @@ pub(super) fn commit<T>(
     }
 }
 
-/// Whether the rounding tail must place `node`, a box hoisted to the element
-/// `block`, itself: a subtree between them was relaid in place, so `block`'s
-/// absolute pass did not run for it this run.
 pub(super) fn places_late<T>(
     tree: &TreeArenas<T>,
     node: NodeSlot,
@@ -232,26 +201,6 @@ pub(super) fn places_late<T>(
     false
 }
 
-/// Whether a box hoisted out of the subtree at `root`, which was just relaid
-/// in place, escapes to a containing block above `root` whose own absolute
-/// pass places it against something the rounding tail's late placement
-/// ([`places_late`], the padding box) does not know, so the caller runs that
-/// pass instead:
-///
-/// - a scroll container, for a box that can have a default anchor: css-position-4's scrollable
-///   containing block is the container's in-flow overflow, which that pass alone computes;
-/// - a grid container, for a box whose grid-placement properties name a line: css-grid-2 §10.1's
-///   grid area comes from the tracks, which only the grid's pass has.
-///
-/// Answered from [`DocumentLayoutState::hoisted_to`], which is keyed by
-/// containing block: a page with no hoisted box pays one `is_empty` test;
-/// otherwise each listed block costs one computed-style read, each box
-/// listed under a scroll container one `position-anchor` test over its style
-/// and position options, each box listed under a grid four placement tests,
-/// and each box that passes a walk up its flat ancestors to the first of
-/// `block` and `root`. A stale listing (a box that no longer escapes to its
-/// block) can only make the answer `true` where `false` was enough, which
-/// costs a whole-tree pass, never a misplaced box.
 pub(super) fn escapes_past_late_placement<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -283,7 +232,6 @@ pub(super) fn escapes_past_late_placement<T>(
     })
 }
 
-/// Whether any of `node`'s grid-placement properties is other than `auto`.
 fn names_a_grid_line<T>(node: &Node<T>) -> bool {
     node.layout_computed_style().is_some_and(|style| {
         let position = style.get_position();
@@ -294,8 +242,6 @@ fn names_a_grid_line<T>(node: &Node<T>) -> bool {
     })
 }
 
-/// Whether `root` lies strictly between `node` and its ancestor `block`:
-/// walking up from `node`, `root` comes before `block`.
 fn below_root_under_block<T>(node: &Node<T>, block: NodeSlot, root: NodeSlot) -> bool {
     let mut current = node.flat_parent();
     while let Some(ancestor) = current {
@@ -311,10 +257,6 @@ fn below_root_under_block<T>(node: &Node<T>, block: NodeSlot, root: NodeSlot) ->
 }
 
 impl<T> Document<T> {
-    /// Lays every listed hoisted box inside the subtree at `root` out again:
-    /// the subtree moved — inserted elsewhere, or reslotted — with its
-    /// caches, so the parents inside it will not record again, and its
-    /// boxes may escape to another containing block now.
     pub(crate) fn invalidate_hoisted_under(&mut self, root: NodeId) {
         let inside: SmallVec<[NodeId; 4]> = {
             let tree = self.arenas();

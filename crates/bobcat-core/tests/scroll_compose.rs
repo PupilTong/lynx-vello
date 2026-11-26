@@ -21,16 +21,11 @@ use support::{FetcherDouble, solo_view, tick, wait_for_script};
 use terminus::link::Point2D;
 use terminus::link::input::InputEvent;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 const SCRIPT_URL: &str = "app:///main.js";
 
-/// A scroller filling the 100x100 viewport over two 100px rows: red, then
-/// blue. `max_offset` is 100, so the encode window is the whole range and a
-/// 30px scroll stays inside half its headroom while a 70px one does not.
 const TWO_ROW_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -65,13 +60,9 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
     .await
     .expect("view construction fetches and boots the entry script");
     wait_for_script(&mut view).expect("script execution");
-    // The page needs no further sources, so the rest of this test is the
-    // painter's alone — but the view is what keeps its task alive, so it is
-    // handed back rather than dropped.
     (view, painter)
 }
 
-/// The captured pixel at `(x, y)`, as RGBA.
 fn pixel_at(painter: &mut Painter, x: usize, y: usize) -> [u8; 4] {
     let shot = painter.capture().expect("capture the frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
@@ -102,8 +93,6 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     );
     assert_eq!(pixel_at(&mut painter, 50, 85), RED, "still the red row");
 
-    // 30px: inside half the window's headroom, so this frame is the boot
-    // commit recomposed at the intent offset — nothing recommitted.
     wheel(&mut painter, 30.0);
     assert!(
         tick(&mut painter, false).expect("the scrolled frame renders"),
@@ -120,10 +109,6 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
         "content y=115 is the blue row: composition applied the offset"
     );
 
-    // 40px more reaches 70: past half the headroom, so main recenters as it
-    // adopts the offset, and the synchronizing tick waits for the round that
-    // commits it — this capture is the recommitted frame at its published
-    // offsets.
     wheel(&mut painter, 40.0);
     assert!(tick(&mut painter, false).expect("the recentered frame renders"));
     assert_eq!(

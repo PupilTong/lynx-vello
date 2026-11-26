@@ -51,18 +51,10 @@ pub(crate) mod popover;
 
 use crate::tree::document::Document;
 
-/// HTML's `InvalidStateError`, which a method of an element here throws.
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidState;
 
 impl<T> Document<T> {
-    /// Defines HTML's built-in elements this crate implements
-    /// ([`link::html`](crate::link::html)): today `dialog` ([`dialog`](crate::link::html::dialog))
-    /// and `canvas` ([`canvas`](crate::link::html::canvas)).
-    ///
-    /// Like [`Document::define`], it must run before any element carries one
-    /// of their tags, and the tags must have no definition yet. Their UA
-    /// rules are the embedder's to add ([`link::html`](crate::link::html), "The UA rules").
     pub fn define_html_elements(&mut self) {
         dialog::define(self);
         canvas::define(self);

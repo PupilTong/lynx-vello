@@ -54,24 +54,17 @@ use stylo_dom::ElementState;
 
 use crate::tree::document::{Document, NodeId};
 
-/// The `popover` attribute's name.
 const POPOVER_ATTRIBUTE: &str = "popover";
 
-/// The state of an element's `popover` attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopoverState {
-    /// No `popover` attribute: the element is not a popover.
     NoPopover,
-    /// `auto`, or the empty string.
     Auto,
-    /// `manual`, or any value no keyword names.
     Manual,
-    /// `hint`.
     Hint,
 }
 
 impl PopoverState {
-    /// The state an attribute value is in, `None` being no attribute.
     #[must_use]
     pub fn from_attribute(value: Option<&str>) -> Self {
         let Some(value) = value else {
@@ -87,25 +80,14 @@ impl PopoverState {
     }
 }
 
-/// Why [`Document::show_popover`] or [`Document::hide_popover`] refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopoverError {
-    /// HTML's `NotSupportedError`: the element is in the No Popover state.
     NotSupported,
-    /// HTML's `InvalidStateError`: showing a disconnected element, or acting
-    /// on a dialog that is modal.
     InvalidState,
-    /// Showing an Auto or Hint popover, whose behavior is not implemented
-    /// (see the module documentation).
     AutoOrHintNotImplemented,
 }
 
 impl<T> Document<T> {
-    /// The state of `element`'s `popover` attribute.
-    ///
-    /// # Panics
-    ///
-    /// If `element` is not a live element.
     #[must_use]
     pub fn popover_state(&self, element: NodeId) -> PopoverState {
         PopoverState::from_attribute(
@@ -115,27 +97,12 @@ impl<T> Document<T> {
         )
     }
 
-    /// Whether `element`'s popover visibility state is *showing*.
     #[must_use]
     pub fn popover_showing(&self, element: NodeId) -> bool {
         self.get(element)
             .is_some_and(|node| node.element_state().contains(ElementState::POPOVER_OPEN))
     }
 
-    /// HTML's *show popover* for `element`, throwing, with a null source:
-    /// a hidden Manual popover enters the top layer without blocking the
-    /// document and becomes *showing*. One already showing is left as it is.
-    ///
-    /// # Errors
-    ///
-    /// [`PopoverError::NotSupported`] in the No Popover state,
-    /// [`PopoverError::InvalidState`] for a disconnected element or a modal
-    /// dialog, and [`PopoverError::AutoOrHintNotImplemented`] for a valid
-    /// Auto or Hint popover.
-    ///
-    /// # Panics
-    ///
-    /// If `element` is not a live element.
     pub fn show_popover(&mut self, element: NodeId) -> Result<(), PopoverError> {
         if !self.check_popover_validity(element, false)? {
             return Ok(());
@@ -152,18 +119,6 @@ impl<T> Document<T> {
         Ok(())
     }
 
-    /// HTML's *hide popover* for `element`, throwing, with a null source: a
-    /// showing popover leaves the top layer and becomes *hidden*. One already
-    /// hidden is left as it is.
-    ///
-    /// # Errors
-    ///
-    /// [`PopoverError::NotSupported`] in the No Popover state, and
-    /// [`PopoverError::InvalidState`] for a modal dialog.
-    ///
-    /// # Panics
-    ///
-    /// If `element` is not a live element.
     pub fn hide_popover(&mut self, element: NodeId) -> Result<(), PopoverError> {
         if self.check_popover_validity(element, true)? {
             self.hide_showing_popover(element);
@@ -171,8 +126,6 @@ impl<T> Document<T> {
         Ok(())
     }
 
-    /// HTML's *check popover validity*, with a null expected document: an
-    /// error the algorithm throws, `Ok(false)` where it returns false.
     fn check_popover_validity(
         &self,
         element: NodeId,
@@ -184,9 +137,6 @@ impl<T> Document<T> {
         if self.popover_showing(element) != expected_to_be_showing {
             return Ok(false);
         }
-        // "A dialog element whose is modal is true": a modal dialog is the
-        // one kind of entry that blocks the document. Fullscreen and
-        // documents that are not fully active do not exist here.
         let modal_dialog = self.live_element(element).tag_name() == Some("dialog")
             && self.blocks_document(element);
         if (!expected_to_be_showing && !self.is_connected(element)) || modal_dialog {
@@ -195,26 +145,17 @@ impl<T> Document<T> {
         Ok(true)
     }
 
-    /// The state changes of *hide popover* once it has decided to hide:
-    /// out of the top layer at once, and *hidden*.
     fn hide_showing_popover(&mut self, element: NodeId) {
         self.remove_from_top_layer(element);
         self.update_element_state(element, ElementState::POPOVER_OPEN, false);
     }
 
-    /// HTML's popover attribute change steps, run by the attribute setters
-    /// with the value the attribute had before: a showing popover whose
-    /// attribute moved to another state is hidden, as Chromium and Gecko do
-    /// (see the module documentation).
     pub(crate) fn note_popover_attribute_change(&mut self, element: NodeId, old: PopoverState) {
         if self.popover_showing(element) && self.popover_state(element) != old {
             self.hide_showing_popover(element);
         }
     }
 
-    /// HTML's removing steps for a popover: a showing popover that left the
-    /// document is hidden, with no events. The unlink path calls it for each
-    /// top-layer entry it drops, after the entry is gone.
     pub(crate) fn note_popover_disconnected(&mut self, element: NodeId) {
         if self.popover_showing(element) {
             self.update_element_state(element, ElementState::POPOVER_OPEN, false);
@@ -222,7 +163,6 @@ impl<T> Document<T> {
     }
 }
 
-/// Whether an attribute name is `popover`, for the attribute setters.
 pub(crate) fn is_popover_attribute(name: &str) -> bool {
     name == POPOVER_ATTRIBUTE
 }
@@ -234,7 +174,6 @@ mod tests {
     use crate::test_common::Doc;
     use crate::tree::document::NodeId;
 
-    /// The parts of a browser's popover UA sheet these tests read.
     const UA: &str = "
         [popover]:not(:popover-open):not(dialog[open]) { display: none; }
         [popover] { position: fixed; }
@@ -339,8 +278,6 @@ mod tests {
         }
     }
 
-    /// A value in the same state keeps a showing popover showing; a value in
-    /// another state, or removing the attribute, hides it.
     #[test]
     fn an_attribute_change_to_another_state_hides_a_showing_popover() {
         for (value, hides) in [
@@ -370,8 +307,6 @@ mod tests {
         }
     }
 
-    /// HTML's removing steps hide a showing popover, its own removal or an
-    /// ancestor's, so it comes back hidden.
     #[test]
     fn leaving_the_document_hides_a_showing_popover() {
         let mut doc = page();

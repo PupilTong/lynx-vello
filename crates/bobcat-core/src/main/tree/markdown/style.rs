@@ -25,62 +25,31 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
-/// What `markdown-style` sets: the stylesheet text and the two keys web-core
-/// reads as configuration rather than CSS (`#applyMarkdownStyle`,
-/// `XMarkdownAttributes.ts:1123-1130`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct MarkdownStyle {
-    /// One rule per selector, joined by `\n`; empty when the attribute is
-    /// absent, is not JSON, or is not a JSON object.
     pub(super) css: String,
-    /// The `truncation` key: the marker web-core appends when `text-maxline`
-    /// clips the content (`#ensureTruncationMarker`, `:1306-1331`).
     pub(super) truncation: Option<Truncation>,
-    /// The `typewriterCursor` key: the typewriter animation's cursor
-    /// (`#appendTypewriterCursor`, `:1340-1407`).
     pub(super) typewriter_cursor: Option<TypewriterCursor>,
 }
 
-/// `markdown-style`'s `truncation` object. web-core reads both fields by
-/// truthiness (`:1315-1330`): a falsy `content` is `None` here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Truncation {
-    /// The marker text (`truncationType: "text"` or absent), or the id of a
-    /// light-DOM child moved into the marker (`truncationType: "view"`).
-    /// web-core takes `String(content)`, so a number or a boolean is its
-    /// JavaScript string; an object or array value is dropped.
     pub(super) content: Option<String>,
-    /// `"text"` or `"view"`; any other value is `None`, which web-core treats
-    /// as `"text"` (it only compares against `"view"`).
     pub(super) truncation_type: Option<TruncationType>,
 }
 
-/// `truncation.truncationType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TruncationType {
     Text,
     View,
 }
 
-/// `markdown-style`'s `typewriterCursor` object (`:1349-1372`). Only string
-/// values are kept, and an empty string is `None`: web-core tests both
-/// fields by truthiness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TypewriterCursor {
-    /// `"none"` hides the cursor; another value is the id of a child moved
-    /// into it.
     pub(super) custom_cursor: Option<String>,
-    /// The cursor's `vertical-align`.
     pub(super) vertical_align: Option<String>,
 }
 
-/// Reads the `markdown-style` attribute text (`parseMarkdownStyle`,
-/// `XMarkdownAttributes.ts:454-466`, then `#applyMarkdownStyle`,
-/// `:1123-1130`).
-///
-/// Text that is not JSON, or is JSON but not an object, is the empty style.
-/// web-core also accepts a JSON array there, whose index keys then name no
-/// selector and no configuration, so it is the empty style too.
 pub(super) fn parse_markdown_style(value: &str) -> MarkdownStyle {
     let Ok(Json::Object(entries)) = serde_json::from_str::<Json>(value) else {
         return MarkdownStyle::default();
@@ -98,13 +67,9 @@ pub(super) fn parse_markdown_style(value: &str) -> MarkdownStyle {
     style
 }
 
-/// `buildMarkdownStyleCss` (`XMarkdownAttributes.ts:474-505`): one rule per
-/// selector a key maps to, declarations in the value's key order.
 fn build_markdown_style_css(style: &[(&str, &Json)]) -> String {
     let mut rules: Vec<String> = Vec::new();
     for &(key, properties) in style {
-        // `!properties || typeof properties !== 'object'`: an array is an
-        // object too, and `Object.entries` of one is its index entries.
         let declarations: Vec<(Cow<'_, str>, &Json)> = match properties {
             Json::Object(entries) => js_entries(entries)
                 .into_iter()
@@ -127,7 +92,6 @@ fn build_markdown_style_css(style: &[(&str, &Json)]) -> String {
         let mut text = String::new();
         for (property, value) in declarations {
             let property = camel_to_kebab(&property);
-            // `cssValue ? ... : null`: an empty string declares nothing.
             if let Some(value) = to_css_value(&property, value).filter(|value| !value.is_empty()) {
                 text.push_str(&property);
                 text.push_str(": ");
@@ -145,18 +109,6 @@ fn build_markdown_style_css(style: &[(&str, &Json)]) -> String {
     rules.join("\n")
 }
 
-/// `selectorMap` (`XMarkdownAttributes.ts:395-421`). The selectors match the
-/// element names the component's shadow tree uses, which are the HTML names
-/// markdown-it renders (`h1`, `p`, `a`, `code`, `pre`, `ul`, `ol`, `li`,
-/// `blockquote`, `table`, `thead`, `tbody`, `tr`, `th`, `td`, `span`).
-///
-/// The one difference is `image`: web-core writes `.markdown-body img`, but
-/// an image in the shadow tree is the engine's own `image` element, so the
-/// selector names `image`. web-core's `selectorMap[key]` also answers for
-/// keys inherited from `Object.prototype` (`constructor`, `toString`, ...),
-/// writing a rule whose selector is a function's source text or
-/// `[object Object]`; no such rule is valid CSS, so those keys are skipped
-/// here like any other unknown key.
 fn selector_map(key: &str) -> Option<&'static [&'static str]> {
     Some(match key {
         "normalText" => &[".markdown-body"],
@@ -187,8 +139,6 @@ fn selector_map(key: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// `unitlessCssProperties` (`XMarkdownAttributes.ts:385-393`): the
-/// properties a bare number is written into without `px`.
 const UNITLESS_PROPERTIES: [&str; 7] = [
     "font-weight",
     "opacity",
@@ -199,10 +149,6 @@ const UNITLESS_PROPERTIES: [&str; 7] = [
     "order",
 ];
 
-/// `toCssValue` (`XMarkdownAttributes.ts:434-445`): a number gets `px`
-/// unless the property is unitless, a string is verbatim except that a
-/// property whose name contains `color` gets [`normalize_color`], and every
-/// other value (null, boolean, object, array) declares nothing.
 fn to_css_value(property: &str, value: &Json) -> Option<String> {
     match value {
         Json::Number(number) => {
@@ -219,9 +165,6 @@ fn to_css_value(property: &str, value: &Json) -> Option<String> {
     }
 }
 
-/// `normalizeColor` (`XMarkdownAttributes.ts:423-429`): six to eight hex
-/// digits, after trimming, get a `#`. The regex is `{6,8}`, so seven digits
-/// count too.
 fn normalize_color(value: &str) -> String {
     let hex = value.trim_matches(is_js_space);
     if (6..=8).contains(&hex.len()) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -231,8 +174,6 @@ fn normalize_color(value: &str) -> String {
     }
 }
 
-/// `camelToKebab` (`XMarkdownAttributes.ts:431-432`): every ASCII capital
-/// becomes `-` and its lowercase.
 fn camel_to_kebab(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 4);
     for character in value.chars() {
@@ -286,7 +227,6 @@ fn typewriter_cursor(value: &Json) -> Option<TypewriterCursor> {
     Some(cursor)
 }
 
-/// `String(value)` of a truthy primitive, `None` for a falsy one.
 fn js_truthy_string(value: &Json) -> Option<String> {
     match value {
         Json::String(text) if !text.is_empty() => Some(text.clone()),
@@ -298,9 +238,6 @@ fn js_truthy_string(value: &Json) -> Option<String> {
     }
 }
 
-/// A JSON value as `JSON.parse` builds it: objects keep their key order, and
-/// a repeated key keeps the place of its first occurrence with the value of
-/// its last.
 #[derive(Debug, Clone, PartialEq)]
 enum Json {
     Null,
@@ -389,8 +326,6 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 }
 
-/// `Object.entries` order (ECMA-262 `OrdinaryOwnPropertyKeys`): the keys
-/// that are array indices, ascending, then the others in insertion order.
 fn js_entries(entries: &[(String, Json)]) -> Vec<(&str, &Json)> {
     let mut indices: Vec<(u32, &str, &Json)> = Vec::new();
     let mut others: Vec<(&str, &Json)> = Vec::new();
@@ -408,7 +343,6 @@ fn js_entries(entries: &[(String, Json)]) -> Vec<(&str, &Json)> {
         .collect()
 }
 
-/// `Object.entries` of an array: its index keys, as text, in order.
 fn array_entries(items: &[Json]) -> Vec<(Cow<'_, str>, &Json)> {
     items
         .iter()
@@ -417,8 +351,6 @@ fn array_entries(items: &[Json]) -> Vec<(Cow<'_, str>, &Json)> {
         .collect()
 }
 
-/// A canonical array index: decimal digits without a leading zero (except
-/// `"0"` itself), below 2³² − 1.
 fn array_index(key: &str) -> Option<u32> {
     if key.is_empty()
         || !key.bytes().all(|byte| byte.is_ascii_digit())
@@ -429,8 +361,6 @@ fn array_index(key: &str) -> Option<u32> {
     key.parse::<u32>().ok().filter(|&index| index != u32::MAX)
 }
 
-/// ECMAScript `Number::toString`: the shortest digits that round-trip,
-/// exponential below 10⁻⁶ and from 10²¹ on, and `0` for both zeros.
 pub(super) fn js_number_to_string(number: f64) -> String {
     if number == 0.0 {
         return "0".to_owned();
@@ -450,8 +380,6 @@ pub(super) fn js_number_to_string(number: f64) -> String {
     if (1e-6..1e21).contains(&magnitude) {
         return format!("{number}");
     }
-    // Rust writes `1e21` and `1.5e-7`; JavaScript writes the exponent's
-    // sign either way.
     let text = format!("{number:e}");
     match text.split_once('e') {
         Some((mantissa, exponent)) if !exponent.starts_with('-') => {
@@ -461,8 +389,6 @@ pub(super) fn js_number_to_string(number: f64) -> String {
     }
 }
 
-/// ECMAScript's `WhiteSpace` and `LineTerminator`, the set `String.prototype.trim`
-/// and the regex `\s` use: Unicode `White_Space` without U+0085, plus U+FEFF.
 pub(super) fn is_js_space(character: char) -> bool {
     (character.is_whitespace() && character != '\u{85}') || character == '\u{feff}'
 }
@@ -475,11 +401,6 @@ mod tests {
         parse_markdown_style(value).css
     }
 
-    /// The `style.html` fixture's attribute
-    /// (`web-elements/tests/fixtures/x-markdown/style.html`), whose spec
-    /// checks the link's `color: rgb(255, 0, 0)` and `line-height: 24px`
-    /// and the inline code's color and background
-    /// (`tests/x-markdown.spec.ts`, "should apply markdown-style updates").
     #[test]
     fn style_fixture() {
         let value = r#"{"normalText":{"fontSize":20},"link":{"color":"ff0000","lineHeight":24},"inlineCode":{"color":"0000ff","backgroundColor":"eeeeee"}}"#;
@@ -491,7 +412,6 @@ mod tests {
         );
     }
 
-    /// The same spec's update to `{ link: { color: '0000ff' } }`.
     #[test]
     fn style_update() {
         assert_eq!(
@@ -500,7 +420,6 @@ mod tests {
         );
     }
 
-    /// `html-tags.html`'s class keys.
     #[test]
     fn class_and_id_keys() {
         assert_eq!(
@@ -509,8 +428,6 @@ mod tests {
         );
     }
 
-    /// Every expected string below is what web-core's own functions print
-    /// for the same input, run under Node.
     #[test]
     fn values_and_selectors() {
         assert_eq!(
@@ -523,8 +440,6 @@ mod tests {
         );
     }
 
-    /// Key order is `Object.entries`': array indices first, then insertion
-    /// order; numbers are JavaScript's; `image` names the engine's element.
     #[test]
     fn key_order_and_numbers() {
         assert_eq!(
@@ -534,7 +449,6 @@ mod tests {
             ".markdown-body p {2: 2px;10: 1px;margin-top: 4px;margin: 0px;}\n\
              .markdown-body image {width: 1e+21px;height: 1.5e-7px;top: 0.000001px;}"
         );
-        // A repeated key keeps its first place and its last value.
         assert_eq!(
             css(r#"{"a":1,"a":2,"span":{"x":1,"y":2,"x":3}}"#),
             ".markdown-body span {x: 3px;y: 2px;}"
@@ -546,8 +460,6 @@ mod tests {
         let style = parse_markdown_style(
             r#"{"truncation":{"content":"Read more","truncationType":"view"},"typewriterCursor":{"customCursor":"none","verticalAlign":""},"h2":[1,2],"h3":"x","h4":{}}"#,
         );
-        // An array's index entries are declarations; a string and an empty
-        // object declare nothing.
         assert_eq!(style.css, ".markdown-body h2 {0: 1px;1: 2px;}");
         assert_eq!(
             style.truncation,

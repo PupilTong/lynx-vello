@@ -34,9 +34,6 @@ const CSS: &str = r#"
     .row:nth-child(2n) { background-color: rgb(245, 245, 245); }
 "#;
 
-/// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
-/// element ([`terminus::link::CustomElement::is_lynx_text`]), so each label lays out as
-/// a Lynx paragraph.
 struct TextKind;
 
 impl terminus::link::CustomElement<()> for TextKind {
@@ -66,7 +63,6 @@ fn commit(doc: &mut Document<()>) {
 fn main() {
     let mode = std::env::args().nth(2).unwrap_or_default();
     if mode == "create" {
-        // Loop: build a fresh document and create/append elements, no layout.
         let n: usize = std::env::args()
             .nth(1)
             .and_then(|s| s.parse().ok())
@@ -103,7 +99,6 @@ fn main() {
         return;
     }
     if mode == "single" {
-        // Loop: flip one row's height, commit. For profiler attribution.
         let device = Device::new(390.0, 844.0, 3.0);
         let mut doc = Document::new(device, "page", ());
         doc.define("text", Box::new(TextKind));
@@ -143,9 +138,6 @@ fn main() {
         return;
     }
     if mode == "tail" {
-        // Loop: flip the LAST row's height, commit. Nothing above or beside it
-        // moves, so this is what the positioning-and-rounding tail costs when
-        // a mutation changes one subtree out of a thousand.
         let device = Device::new(390.0, 844.0, 3.0);
         let mut doc = Document::new(device, "page", ());
         doc.define("text", Box::new(TextKind));

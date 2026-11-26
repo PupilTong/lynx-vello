@@ -74,8 +74,6 @@ const K_CF_NUMBER_SINT32_TYPE: CFIndex = 3;
 const K_CF_NUMBER_SINT64_TYPE: CFIndex = 4;
 const K_CF_NUMBER_FLOAT64_TYPE: CFIndex = 6;
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-/// `kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big`: bytes in
-/// memory order R, G, B, A with premultiplied alpha.
 const RGBA_PREMULTIPLIED: u32 = 1 | (4 << 12);
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -150,7 +148,6 @@ unsafe extern "C" {
     ) -> CFTypeRef;
 }
 
-/// A `CoreFoundation` object released on drop.
 struct Owned(CFTypeRef);
 
 impl Drop for Owned {
@@ -163,7 +160,6 @@ impl Drop for Owned {
     }
 }
 
-/// Reads a `CFNumber` property out of an `ImageIO` property dictionary.
 fn number_property(properties: CFTypeRef, key: CFTypeRef) -> Option<i64> {
     // SAFETY: `properties` is a live dictionary; the value under an ImageIO
     // pixel-size or orientation key is a CFNumber, which
@@ -183,8 +179,6 @@ fn number_property(properties: CFTypeRef, key: CFTypeRef) -> Option<i64> {
     }
 }
 
-/// Reads a `CFNumber` property out of an `ImageIO` property dictionary as a
-/// double.
 fn float_property(properties: CFTypeRef, key: CFTypeRef) -> Option<f64> {
     // SAFETY: `properties` is a live dictionary; a delay is a CFNumber,
     // which `CFNumberGetValue` converts to a double.
@@ -203,7 +197,6 @@ fn float_property(properties: CFTypeRef, key: CFTypeRef) -> Option<f64> {
     }
 }
 
-/// A `CFString` of `text`, released on drop.
 fn cf_string(text: &std::ffi::CStr) -> Owned {
     // SAFETY: `text` is NUL-terminated UTF-8, which the call copies.
     Owned(unsafe {
@@ -211,15 +204,8 @@ fn cf_string(text: &std::ffi::CStr) -> Owned {
     })
 }
 
-/// The per-format dictionaries an animated container's properties are
-/// under: the values of `kCGImagePropertyGIFDictionary`,
-/// `kCGImagePropertyPNGDictionary` and `kCGImagePropertyWebPDictionary`. Named
-/// by value rather than linked, because the WebP constants exist only from
-/// macOS 11 and an x86-64 build may run on an older one.
 const FORMAT_DICTIONARIES: [&std::ffi::CStr; 3] = [c"{GIF}", c"{PNG}", c"{WebP}"];
 
-/// Decodes the first frame: the image itself, or an animated one's first
-/// frame.
 pub(crate) fn decode(
     bytes: &[u8],
     header: Option<ImageHeader>,
@@ -228,9 +214,6 @@ pub(crate) fn decode(
     decode_from(&ImageSource::open(bytes)?, header, 0, max)
 }
 
-/// What an animated image's frames are, from its properties alone: one
-/// frame unless `ImageIO` counts more, then each frame's stated delay and
-/// the container's loop count.
 pub(crate) fn frames(bytes: &[u8]) -> Result<ImageFrames, DecodeError> {
     let source = ImageSource::open(bytes)?;
     // SAFETY: the source is live.
@@ -256,7 +239,6 @@ pub(crate) fn frames(bytes: &[u8]) -> Result<ImageFrames, DecodeError> {
             "CFStringCreateWithCString failed".to_owned(),
         ));
     }
-    // The dictionary of whichever container this is, out of `properties`.
     let format = |properties: CFTypeRef| {
         keys.iter().find_map(|key| {
             // SAFETY: a live dictionary and a live key; the value is
@@ -300,8 +282,6 @@ pub(crate) fn frames(bytes: &[u8]) -> Result<ImageFrames, DecodeError> {
     Ok(ImageFrames::new(delays, loops))
 }
 
-/// Decodes frame `index` of an animation: the whole canvas as it is shown
-/// at that frame, from the source kept open for `bytes` ([`Opened`]).
 pub(crate) fn decode_frame(
     bytes: &Bytes,
     header: Option<ImageHeader>,
@@ -313,43 +293,25 @@ pub(crate) fn decode_frame(
     decode_from(&source, header, index, max)
 }
 
-/// No more frames of `bytes` are asked for: their source is closed.
 pub(crate) fn forget_frames(bytes: &Bytes) {
     Opened::forget(bytes);
 }
 
-/// How many animations' sources stay open at once; past it, the least
-/// recently decoded is closed, and opened again by its next frame.
 const OPEN_ANIMATIONS: usize = 16;
 
-/// Every animation's source kept open between its frame decodes, keyed by
-/// the allocation of the encoded bytes it was opened over.
-///
-/// `ImageIO` composites a GIF frame from the frames before it, and a source
-/// decoding its frames in order carries that work from one to the next: on
-/// macOS 26 frame 299 of a 320 × 240, 300-frame GIF costs about 180 ms from
-/// a fresh source and under 1 ms from one that decoded frame 298. A source
-/// is used by one decode at a time, behind its mutex.
 static OPENED: Mutex<Vec<Opened>> = Mutex::new(Vec::new());
 
-/// One animation's open source.
 struct Opened {
-    /// The bytes the source was opened over, kept so the allocation the
-    /// entry is keyed on cannot be freed and reused by another image while
-    /// the entry exists.
     bytes: Bytes,
     source: Arc<Mutex<ImageSource>>,
-    /// When a frame of it was last asked for, in lookups.
     used: u64,
 }
 
 impl Opened {
-    /// Whether this entry was opened over `bytes`' allocation.
     fn is(&self, bytes: &Bytes) -> bool {
         self.bytes.as_ptr() == bytes.as_ptr() && self.bytes.len() == bytes.len()
     }
 
-    /// The source open for `bytes`, opened now if it is not.
     fn source(bytes: &Bytes) -> Result<Arc<Mutex<ImageSource>>, DecodeError> {
         static LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let used = LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -360,7 +322,6 @@ impl Opened {
                 return Ok(Arc::clone(&entry.source));
             }
         }
-        // Opened outside the table's lock, since it copies the bytes.
         let source = Arc::new(Mutex::new(ImageSource::open(bytes)?));
         let mut opened = OPENED.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = opened.iter().find(|entry| entry.is(bytes)) {
@@ -390,7 +351,6 @@ impl Opened {
             .retain(|entry| !entry.is(bytes));
     }
 
-    /// Whether a source is open for `bytes`, for tests.
     #[cfg(test)]
     fn is_open(bytes: &Bytes) -> bool {
         OPENED
@@ -401,7 +361,6 @@ impl Opened {
     }
 }
 
-/// Decodes frame `index` of `source`, at most `max` large.
 fn decode_from(
     source: &ImageSource,
     header: Option<ImageHeader>,
@@ -436,9 +395,6 @@ fn decode_from(
     })
 }
 
-/// The `kCGImageSourceThumbnailMaxPixelSize` that fits a `source`-sized
-/// image inside `max`: the longer side of the target, since the thumbnail
-/// keeps the ratio. Without a known source size the bound itself stands.
 fn max_pixel_for(source: (u32, u32), max: (u32, u32)) -> i32 {
     let longest = if source.0 == 0 || source.1 == 0 {
         max.0.max(max.1)
@@ -449,7 +405,6 @@ fn max_pixel_for(source: (u32, u32), max: (u32, u32)) -> i32 {
     i32::try_from(longest).unwrap_or(i32::MAX)
 }
 
-/// An `ImageIO` source over a copy of the encoded bytes.
 struct ImageSource {
     source: Owned,
     _data: Owned,
@@ -489,8 +444,6 @@ impl ImageSource {
         })
     }
 
-    /// The image's own size, oriented upright, read from its properties
-    /// without decoding; the header's size when the properties say nothing.
     fn intrinsic_size(&self, header: Option<ImageHeader>) -> (u32, u32) {
         let fallback = header.map_or((0, 0), |header| (header.width, header.height));
         // SAFETY: the source is live; a null dictionary is handled.
@@ -516,7 +469,6 @@ impl ImageSource {
         if width == 0 || height == 0 {
             return fallback;
         }
-        // Orientations 5 to 8 are the transposing ones.
         if (5..=8).contains(&orientation) {
             (height, width)
         } else {
@@ -524,8 +476,6 @@ impl ImageSource {
         }
     }
 
-    /// Decodes frame `index`, downsampled so its longer side is at most
-    /// `max_pixel`, with any EXIF orientation applied.
     fn thumbnail(&self, index: usize, max_pixel: i32) -> Result<CgImage, DecodeError> {
         // SAFETY: `CFNumberCreate` copies the 32-bit integer at the pointer.
         let max_pixel_number = Owned(unsafe {
@@ -571,7 +521,6 @@ impl ImageSource {
     }
 }
 
-/// Draws `image` into a `width` x `height` premultiplied RGBA8 buffer.
 fn render_rgba(image: &CgImage, width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
     let too_large = || DecodeError::Malformed("the image is too large".to_owned());
     let columns = usize::try_from(width).map_err(|_| too_large())?;
@@ -615,11 +564,9 @@ fn render_rgba(image: &CgImage, width: u32, height: u32) -> Result<Vec<u8>, Deco
     Ok(rgba)
 }
 
-/// A `CGImage` released on drop.
 struct CgImage(CFTypeRef);
 
 impl CgImage {
-    /// The bitmap's size, refused when either axis is empty.
     fn size(&self) -> Result<(u32, u32), DecodeError> {
         // SAFETY: accessors on a live image.
         let (width, height) = unsafe { (CGImageGetWidth(self.0), CGImageGetHeight(self.0)) };
@@ -649,8 +596,6 @@ mod tests {
 
     use super::{Opened, decode_frame, forget_frames};
 
-    /// An animation's source stays open between its frames, keyed by its
-    /// bytes' allocation, and closes when its frames are forgotten.
     #[test]
     fn an_animation_s_source_stays_open_until_its_frames_are_forgotten() {
         let bytes = Bytes::from(

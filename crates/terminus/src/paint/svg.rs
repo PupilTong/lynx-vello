@@ -25,7 +25,6 @@ use crate::svg::text::{TextItem, TextPaint};
 use crate::svg::{ink_extent, paint_server};
 use crate::tree::document::{Document, NodeId};
 
-/// Item `index` of `root`'s recording, if it is still recorded.
 fn recorded<T>(document: &Document<T>, root: NodeId, index: u32) -> Option<&Item> {
     document
         .svg_recording(root)?
@@ -33,9 +32,6 @@ fn recorded<T>(document: &Document<T>, root: NodeId, index: u32) -> Option<&Item
         .get(usize::try_from(index).ok()?)
 }
 
-/// Draws path or text item `index` of `root`'s recording into `scene`,
-/// `transform` mapping its paint item's box to device px, and answers
-/// whether it drew.
 pub(super) fn paint_item<T>(
     scene: &mut DisplayList,
     document: &Document<T>,
@@ -56,8 +52,6 @@ pub(super) fn paint_item<T>(
     true
 }
 
-/// The layer push `index` of `root`'s recording and the transform it is
-/// pushed under, `transform` mapping its group layer's box to device px.
 pub(super) fn layer_push<T>(
     document: &Document<T>,
     (root, index): (NodeId, u32),
@@ -68,17 +62,10 @@ pub(super) fn layer_push<T>(
     Some((pushed, transform * Affine::translate(-origin.to_vec2())))
 }
 
-/// Whether item `index` of `root`'s recording is text, whose glyph outlines
-/// can leave the item's box.
 pub(super) fn is_text<T>(document: &Document<T>, (root, index): (NodeId, u32)) -> bool {
     matches!(recorded(document, root, index), Some(Item::Text(_)))
 }
 
-/// Draws one path or text item under `transform`, which stands for the
-/// item's own absolute transform: the paint walk passes the item's place
-/// on the page or in the image. A layer push or a pop draws nothing here.
-/// Its text is drawn as [`shape`](crate::svg::text::shape) left it: a text
-/// item that was never shaped draws nothing.
 fn draw(scene: &mut DisplayList, item: &Item, transform: Affine) {
     match item {
         Item::Path {
@@ -139,20 +126,15 @@ fn draw_path(
     }
 }
 
-/// One layer push of a recording: a `Normal` compositing layer at `alpha`,
-/// or a clip, shaped by a rectangle or a path under a fill rule.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layer<'a> {
     pub(crate) clip_only: bool,
     pub(crate) alpha: f32,
     pub(crate) rule: Fill,
-    /// The layer's absolute transform, in viewport units.
     pub(crate) transform: Affine,
     pub(crate) shape: LayerShape<'a>,
 }
 
-/// What a [`Layer`] is shaped by, in the coordinates its transform maps
-/// from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LayerShape<'a> {
     Rect(Rect),
@@ -160,7 +142,6 @@ pub(crate) enum LayerShape<'a> {
 }
 
 impl LayerShape<'_> {
-    /// The shape's bounding box in its own coordinates.
     pub(crate) fn bounds(self) -> Rect {
         match self {
             Self::Rect(rect) => rect,
@@ -170,8 +151,6 @@ impl LayerShape<'_> {
 }
 
 impl Layer<'_> {
-    /// Pushes this layer under `transform`, which stands for its own
-    /// transform as in [`draw`].
     pub(crate) fn push(&self, scene: &mut DisplayList, transform: Affine) {
         match (self.clip_only, self.shape) {
             (true, LayerShape::Rect(rect)) => scene.push_clip_layer(self.rule, transform, &rect),
@@ -188,8 +167,6 @@ impl Layer<'_> {
     }
 }
 
-/// The layer `item` pushes, if it is a layer push. A bounds layer is shaped
-/// by its bounds under `nonzero`.
 pub(crate) fn layer(item: &Item) -> Option<Layer<'_>> {
     match item {
         Item::PushLayer {
@@ -226,15 +203,10 @@ pub(crate) fn layer(item: &Item) -> Option<Layer<'_>> {
     }
 }
 
-/// Draws one text item's shaped chunks under `transform`, each span's line
-/// through [`draw_shaped_line`] with its fill and stroke brushes and their
-/// transforms.
 fn draw_text(scene: &mut DisplayList, text: &TextItem, transform: Affine) {
     for (chunk, placed) in text.chunks.iter().zip(&text.shaped) {
         for (span, (pen, line)) in chunk.spans.iter().zip(&placed.spans) {
             let run_transform = transform * Affine::translate(pen.to_vec2());
-            // A gradient is defined in the item's user space; the run's
-            // paint transform is relative to the run, so the pen is undone.
             let resolve = |paint: &TextPaint| -> Option<(Brush, Option<Affine>)> {
                 match paint {
                     TextPaint::Solid(color) => Some((Brush::Solid(*color), None)),

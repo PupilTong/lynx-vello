@@ -86,61 +86,36 @@ use super::{ScrollBox, is_scroll_container};
 use crate::layout::{DisplayMode, StyleView, box_parent};
 use crate::tree::document::{Document, NodeId};
 
-/// One scroll container's anchoring: the side table entry
-/// `scroll_anchors` keeps for every container a layout has anchored.
 #[derive(Debug, Default)]
 pub(crate) struct ScrollAnchor {
-    /// The anchor node, while one is selected.
     node: Option<NodeId>,
-    /// The sum of every adjustment made to the container's offset, in CSS
-    /// px: anchoring's, on the block axis, and the clamps of layouts that
-    /// shrank the scrolling area past the offset, on either axis
-    /// ([`Document::clamp_scroll_offsets_after_layout`]).
     pub(super) shift: Vector2D<f32>,
 }
 
 impl ScrollAnchor {
-    /// The sum of the container's adjustments, as a scroll slot carries it.
     pub(crate) fn shift(&self) -> Vector2D<f32> {
         self.shift
     }
 }
 
-/// The computed styles from an anchor up to its container inclusive.
 type AnchorPath = SmallVec<[(NodeId, Arc<ComputedValues>); 4]>;
 
-/// What a layout reads of one anchor before it runs.
 pub(crate) struct AnchorBefore {
     scroller: NodeId,
     anchor: NodeId,
-    /// The container's admitted block offset.
     offset: f32,
-    /// The anchor's border box in the container's scrolled content.
     rect: Rect<f32>,
-    /// The computed styles from the anchor up to the container inclusive,
-    /// for the suppression triggers.
     path: AnchorPath,
 }
 
-/// What [`Document::examine_anchor_candidate`] says of one box.
 enum Candidate {
-    /// Neither the box nor anything under it can be the anchor.
     Skip,
-    /// The box cannot be the anchor, but a box under it may be.
     Descend,
-    /// The scrollport shows the whole box: it is the anchor.
     Select,
-    /// The scrollport shows part of the box: it is the anchor unless a box
-    /// under it qualifies.
     Constrain,
 }
 
 impl<T: Sync> Document<T> {
-    /// §2.1 before a layout: selects an anchor for every scrolled container
-    /// that has none and reads where each anchor stands, for
-    /// [`Self::adjust_scroll_anchors`] to compare against after the layout.
-    /// Empty when no container is scrolled, or when the layout about to run
-    /// has nothing to lay out.
     pub(crate) fn select_scroll_anchors(&mut self) -> SmallVec<[AnchorBefore; 1]> {
         let mut before = SmallVec::new();
         if self.layout_state().scroll_offsets.is_empty()
@@ -165,8 +140,6 @@ impl<T: Sync> Document<T> {
         before
     }
 
-    /// Selects `scroller`'s anchor if it has none and reads it, or `None`
-    /// when the container is not to be anchored or shows nothing to anchor.
     fn read_scroll_anchor(&mut self, scroller: NodeId) -> Option<AnchorBefore> {
         let style = self.paint_style(scroller)?;
         if style.get_box().overflow_anchor == OverflowAnchor::None {
@@ -208,9 +181,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// §2.2 after a layout: moves each container read by
-    /// [`Self::select_scroll_anchors`] by the distance its anchor moved,
-    /// unless a suppression trigger fired.
     pub(crate) fn adjust_scroll_anchors(&mut self, before: SmallVec<[AnchorBefore; 1]>) {
         for read in before {
             let AnchorBefore {
@@ -240,9 +210,6 @@ impl<T: Sync> Document<T> {
             let mut target = offset + (after.min_y() - rect.min_y());
             let resized = after.height().to_bits() != rect.height().to_bits();
             if resized && self.is_auto_content_visibility(anchor) {
-                // Blink's `ComputeAdjustment` for an anchor that stood at its
-                // placeholder size: it may not end wholly above the
-                // scrollport.
                 target = target.min(after.max_y());
                 self.clear_scroll_anchor(scroller);
             }
@@ -255,15 +222,11 @@ impl<T: Sync> Document<T> {
             let state = self.layout_state_mut();
             state.scroll_offsets.insert(slot, target);
             state.scroll_anchors.entry(scroller).or_default().shift.y += moved;
-            // The frame carries the offset and the shift; the observers
-            // read the offset.
             self.note_visual_mutation();
             self.note_intersections_stale();
         }
     }
 
-    /// §2.1's anchor selection algorithm over `scroller`'s flat tree, at
-    /// its current offset.
     fn find_scroll_anchor(
         &self,
         scroller: NodeId,
@@ -297,8 +260,6 @@ impl<T: Sync> Document<T> {
                 Candidate::Select => return Some(id),
                 Candidate::Constrain if self.closes_anchor_walk(id) => return Some(id),
                 Candidate::Constrain => {
-                    // Nothing outside a partly shown box can be chosen once
-                    // it has been reached: it or a box under it is.
                     candidate = Some(id);
                     pending.clear();
                     pending.extend(self.get(id)?.flat_children().iter().rev());
@@ -311,7 +272,6 @@ impl<T: Sync> Document<T> {
         candidate
     }
 
-    /// §2.1's examination of one box against the visible rect.
     fn examine_anchor_candidate(
         &self,
         id: NodeId,
@@ -359,9 +319,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Whether the walk stops at `id` rather than entering it: a nested
-    /// scroll container, whose contents move with its own offset, or a Lynx
-    /// paragraph, whose contents are its line boxes.
     fn closes_anchor_walk(&self, id: NodeId) -> bool {
         self.get(id).is_some_and(|node| {
             node.is_lynx_text()
@@ -371,8 +328,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// Whether `anchor` can still anchor `scroller`: live, with a box, and
-    /// still in the container's own scrolled content.
     fn anchors_within(&self, anchor: NodeId, scroller: NodeId) -> bool {
         self.get(anchor).is_some()
             && self.nearest_scroll_container(anchor) == Some(scroller)
@@ -381,7 +336,6 @@ impl<T: Sync> Document<T> {
                 .is_some_and(|rect| !rect.is_empty())
     }
 
-    /// The computed styles from `anchor` up to `scroller` inclusive.
     fn anchor_path(&self, anchor: NodeId, scroller: NodeId) -> Option<AnchorPath> {
         let mut path = SmallVec::new();
         let mut node = self.get(anchor)?;
@@ -394,8 +348,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// §2.2.2: whether a suppression trigger fired on the path since it was
-    /// read.
     fn anchor_path_changed(&self, path: &[(NodeId, Arc<ComputedValues>)]) -> bool {
         path.iter().any(|(id, old)| {
             let Some(new) = self
@@ -408,10 +360,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// Whether `id` is a `content-visibility: auto` box that skips its
-    /// contents: undetermined, or determined not relevant. Its size is then
-    /// its `contain-intrinsic-size` or last remembered size, never a layout
-    /// of what it holds.
     fn skips_auto_contents(&self, id: NodeId) -> bool {
         self.get(id).is_some_and(|node| {
             node.layout_computed_style().is_some_and(|style| {
@@ -421,7 +369,6 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// Whether `id` computes `content-visibility: auto`.
     fn is_auto_content_visibility(&self, id: NodeId) -> bool {
         self.paint_style(id)
             .is_some_and(|style| *style.get_content_visibility() == ContentVisibility::Auto)
@@ -429,9 +376,6 @@ impl<T: Sync> Document<T> {
 }
 
 impl<T> Document<T> {
-    /// The sum of every block-axis adjustment scroll anchoring has made to
-    /// `id`'s offset, as the committed frame carries it to the painter; see
-    /// the module documentation. Zero for a container never adjusted.
     #[must_use]
     pub fn scroll_anchor_shift(&self, id: NodeId) -> Vector2D<f32> {
         self.slot(id)
@@ -439,9 +383,6 @@ impl<T> Document<T> {
             .map_or_else(Vector2D::zero, ScrollAnchor::shift)
     }
 
-    /// Forgets `id`'s anchor: a scroll anchoring did not make moved the
-    /// container, so the next layout selects one at the new offset. The sum
-    /// of its adjustments stays.
     pub(crate) fn clear_scroll_anchor(&mut self, id: NodeId) {
         if let Some(entry) = self.layout_state_mut().scroll_anchors.get_mut(&id) {
             entry.node = None;
@@ -449,9 +390,6 @@ impl<T> Document<T> {
     }
 }
 
-/// Whether `style` snaps its container on the block axis: css-scroll-snap-1
-/// §4.1.3 re-snapping then keeps it on the area it stood on, which is
-/// anchoring's job done by the area the author chose.
 fn snaps_on_block_axis(style: &ComputedValues) -> bool {
     let snap_type = style.get_scroll_snap_type();
     snap_type.strictness() != ScrollSnapStrictness::None
@@ -461,7 +399,6 @@ fn snaps_on_block_axis(style: &ComputedValues) -> bool {
         )
 }
 
-/// §2.2.2's computed-value triggers between two styles of one element.
 fn triggers_suppression(old: &ComputedValues, new: &ComputedValues) -> bool {
     let (old_box, new_box) = (old.get_box(), new.get_box());
     let (old_position, new_position) = (old.get_position(), new.get_position());

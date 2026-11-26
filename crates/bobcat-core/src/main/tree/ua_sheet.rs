@@ -78,25 +78,16 @@ use super::{
     scroll_coordinator, swiper, text, text_field, video, viewpager,
 };
 
-/// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent Lynx page configuration switches"
 )]
 pub struct PageConfig {
-    /// Whether elements default to `display: linear`.
     pub default_display_linear: bool,
-    /// Whether elements default to visible overflow.
     pub default_overflow_visible: bool,
-    /// Whether author CSS selector matching is enabled.
     pub enable_css_selector: bool,
-    /// Pass data and its processor name to BTS without running the MTS processor.
     pub enable_js_data_processor: bool,
-    /// Whether a `text` directly inside a `view`, or inside a `wrapper`
-    /// directly inside one, takes the view's `color` and `text-decoration`
-    /// ([`super::text::CSS_INHERITANCE_RULES`]). Off unless the page says
-    /// `enableCSSInheritance: true`, as under web-core.
     pub enable_css_inheritance: bool,
 }
 
@@ -112,132 +103,6 @@ impl Default for PageConfig {
     }
 }
 
-/// The Lynx UA stylesheet: embedder cascade policy `terminus` must not know.
-///
-/// The container tags — `page`, `view`, `scroll-view`, `list`, `list-item`,
-/// `viewpager`, `x-viewpager-ng`, `viewpager-item`, `x-viewpager-item-ng`,
-/// `x-swiper`, `x-swiper-item`, `x-refresh-header`, `x-refresh-footer`, the five
-/// `scroll-coordinator` roles under both spellings
-/// (`scroll-coordinator`, `-header`, `-toolbar`, `-slot`, `-slot-drag`, and
-/// web-core's `x-foldview-ng`, `x-foldview-header-ng`, …),
-/// `blur-view` and `x-blur-view` — share
-/// `web-elements`' common block: a border box, and the display mode
-/// `defaultDisplayLinear` picks — a per-tag exception to that switch would
-/// have to be `!important`, so it is a recorded deviation instead
-/// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
-/// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
-/// where the linear toggle covers container tags only.
-/// The page's flex direction defaults to column independently of that
-/// switch, as native sets it in `Element::MarkAsLayoutRoot` and
-/// `LayoutContext::SetRootInner`. It is an author-overridable UA default;
-/// ordinary views keep the initial row direction.
-/// `dialog` follows the switch's display too — HTML's `block` has no box in
-/// this engine, and the switch is what picks a page's block-like container —
-/// and nothing else of the common block: a browser gives it HTML's defaults
-/// ([`terminus::link::html::dialog`]). That display is HTML's, so it is written
-/// with HTML's other rules, at zero specificity, for `dialog` and for
-/// `dialog:popover-open` ([`terminus::link::html::popover`]), rather than in the
-/// Lynx display line.
-/// `overlay` and `x-overlay-ng` are in neither: their host is `display:
-/// contents`, as web-core's, and what renders is the `dialog` in their shadow
-/// tree, which takes the switch's display as `dialog` ([`super::overlay`]).
-/// `frame` is in neither the display line nor the overflow switch: it is
-/// always a flex box with strict containment, web-core's `lynx-view`
-/// ([`super::frame`]).
-/// Every tag that generates a box of its own — the containers, the two
-/// markdown tags ([`super::markdown`], which keep the column display of
-/// `x-markdown.css` rather than the switch's), `text`, `image`, `lynx-svg` and
-/// `frame` — also gets the rest of that common block: `border-width: 0` with
-/// `border-style: solid`, `position: relative` (which is what makes a
-/// coordinator the containing block of its header and slot,
-/// [`super::scroll_coordinator`]), `min-width: 0` and
-/// `min-height: 0`, and `overflow: clip`. `clip` is not a scroll container,
-/// so a clipped box neither scrolls nor gets its automatic minimum size
-/// zeroed by the overflow — the explicit `min-width`/`min-height` are what do
-/// that. `defaultOverflowVisible` releases `view` and the two blur-view tags
-/// back to `visible`, the way web-core's
-/// `[lynx-default-overflow-visible=true] x-view` releases `x-view` alone; a
-/// scroller carries its own axes regardless, and a `list-item`, a pager's
-/// page, a swiper's item or a refresh view's header or footer stays clipped —
-/// by this `clip`, and the first two also by the paint containment
-/// [`super::list`] and [`super::viewpager`] give them.
-///
-/// **`page` is not among them.** Native reads the switch in `ViewElement`
-/// alone (`SetDefaultOverflow(element_manager_->GetDefaultOverflowVisible())`,
-/// `core/renderer/dom/fiber/view_element.cc`) and pins the page unconditionally
-/// in `PageElement` — `SetDefaultOverflow(false)` under the comment "make sure
-/// page's default overflow is hidden" (`.../page_element.cc`). web-core names
-/// only `x-view` in its release selector, so its page clips too. A card that
-/// asks for visible overflow is asking it of its views, not of the window it
-/// is drawn in.
-///
-/// `enableCSSInheritance` adds one rule and removes none: with it on,
-/// [`super::text::CSS_INHERITANCE_RULES`] follows the text block, so a `text`
-/// directly inside a `view` — or inside a `wrapper` directly inside one —
-/// takes the view's `color` and `text-decoration` in place of the text
-/// block's reset. It is web-core's
-/// `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, …)` rule
-/// (lynx-stack #3907), which is keyed on a page attribute there and on the
-/// sheet's own text here, like the two switches above. Off or absent, the
-/// sheet is identical to the one built before the switch existed.
-///
-/// The blur-view tags are here because native's `LynxUIBlurView` extends
-/// `LynxUIView`: a blur view is a view in everything layout can see, and its
-/// `blur-radius` is the only thing that makes it different
-/// ([`super::blur_view`]). web-core is narrower — `x-blur-view` is in
-/// `linear.css`'s common block but in neither the `--lynx-display-toggle` list
-/// nor the `[lynx-default-overflow-visible=true] x-view` escape, so a browser
-/// gives it a row flex box that always clips — which is the divergence
-/// `scroll-view` and `list` already record.
-///
-/// Almost nothing here is `!important`. web-elements' defaults are author
-/// origin in the browser and several of them lean on `!important`; ours are
-/// user-agent origin, where an important declaration outranks author
-/// `!important` — and inline style — instead of losing to them, so what
-/// web-elements merely forces is written here as a plain declaration a page's
-/// own CSS can still override (`docs/style-assumptions.md` §D.15).
-///
-/// The exceptions are all of the same shape: a fact the cascade is merely
-/// *reporting* rather than a default it is *choosing*.
-/// A `text`'s text layout is such a fact, but it is not one of them, nor a
-/// declaration at all: Lynx fixes it structurally (`ConvertToInlineElement`)
-/// and still lets `display: none` hide the text, so the engine makes the
-/// three text tags Lynx text elements by their kind, and the sheet gives them
-/// no `display` for an important declaration to swallow a `none` with
-/// ([`super::text`] carries the argument).
-/// `padding: 0` on an `image` that is inline content of a paragraph is the
-/// first: web-core gives
-/// the authored element no box at all and rebuilds one in its shadow tree
-/// without inheriting `padding`, so there is no box for an author's padding to
-/// reach, and a declaration a page could override would misdescribe both
-/// references. [`super::text`] carries the citation. The pager's
-/// row is the second and third: its pages form one row in both references
-/// whatever main axis an author writes on it, so its `flex-direction`,
-/// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
-/// ([`super::viewpager`] carries the argument). The swiper's items are six
-/// more, after the pager's: their main-axis size in each of its layouts,
-/// which web-core itself pins (the swiper's own main axis is on its shadow
-/// `#content`, out of every author rule's reach; [`super::swiper`] carries
-/// the argument). The refresh view's are three more, after the swiper's:
-/// its header's and its footer's `position: relative`, which web-core itself
-/// pins, and `overscroll-behavior-y: auto` on its content children, without
-/// which a content child that contains its chain would keep every pull from
-/// the shadow scroller ([`super::refresh_view`] carries the argument). The
-/// coordinator's structure
-/// is six more, between the refresh view's and the text block's in the sheet: its
-/// `overflow-y: scroll` and its column, the `overflow-y: hidden` that
-/// `enable-scroll="false"` needs to beat that scroll, and the header's, the
-/// toolbar's and the slot's positions, which its geometry is built from
-/// ([`super::scroll_coordinator`] carries the argument). HTML's own is one
-/// more, after the coordinator's, among HTML's rules: a popover's
-/// `::backdrop` is `pointer-events: none !important`, as in a browser
-/// ([`terminus::link::html::popover`]). The overlay's is one more, after it: only an
-/// overlay's first child renders, which web-core itself pins and native's
-/// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
-/// pins the set to exactly those twenty rules. An editing host's
-/// [`EDITING_HOST_RULE`] is not one of them: it only defaults the host's
-/// `white-space`.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -253,7 +118,6 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     } else {
         String::new()
     };
-    // HTML's `display: block`, which no box here lowers to.
     let block = if config.default_display_linear {
         "linear"
     } else {
@@ -324,20 +188,6 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     )
 }
 
-/// HTML's `contenteditable` editing host (`docs/editable-text-design.md`,
-/// "Editing host"): its white space defaults to `pre-wrap`, so the spaces
-/// and line breaks typed into it show, as a browser's plain-text editing
-/// relies on. That is all the rule does. A host keeps the layout its element
-/// kind and `display` give it — a `<text>` its Lynx paragraph, which keeps
-/// its text verbatim whatever `white-space` says, any other element the
-/// standard inline formatting context of the anonymous block box around its
-/// text — and `terminus` addresses whichever paragraph that is through its source
-/// map, so neither declaration is pinned: an author `display: none` hides
-/// the host (which then cannot be focused), and an author `white-space:
-/// normal` collapses what it shows while the value keeps every character.
-/// The rule applies to every value but an ASCII case-insensitive `"false"`,
-/// which is HTML's reading of the attribute and
-/// `terminus::link::Document::is_editing_host`'s.
 pub(super) const EDITING_HOST_RULE: &str =
     "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }";
 
@@ -366,10 +216,6 @@ mod tests {
         X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
-    /// The tags that get `web-elements`' common container block and keep
-    /// its `position: relative`. The coordinator's header, toolbar and slot
-    /// get the block too, but their positions are pinned
-    /// ([`super::super::scroll_coordinator`] tests them).
     const CONTAINER_TAGS: [&str; 17] = [
         "page",
         "view",
@@ -390,8 +236,6 @@ mod tests {
         X_BLUR_VIEW_TAG,
     ];
 
-    /// Attaches one of each container tag, answering with the page itself for
-    /// `page` — it is minted with the document and cannot be created again.
     fn containers(document: &mut LynxDocument) -> Vec<terminus::link::NodeId> {
         CONTAINER_TAGS
             .iter()
@@ -418,7 +262,6 @@ mod tests {
         }
     }
 
-    /// A definite `min-width`/`min-height` in pixels, `None` for anything else.
     fn px(size: &Size) -> Option<f32> {
         match size {
             Size::LengthPercentage(length) => length.0.to_length().map(CSSPixelLength::px),
@@ -426,8 +269,6 @@ mod tests {
         }
     }
 
-    /// `web-elements`' common block beyond `display`, on every tag that
-    /// generates a box of its own (`common-css/linear.css`).
     #[test]
     fn every_box_tag_gets_the_web_elements_common_block() {
         let mut document = with_config(PageConfig {
@@ -480,8 +321,6 @@ mod tests {
         }
     }
 
-    /// `solid` is only the style a page's `border-width` reaches; the page can
-    /// still restyle, reposition and re-floor every box.
     #[test]
     fn the_common_block_is_author_overridable() {
         let mut document = document();
@@ -583,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)] // Pixel-rounded sizes are exact integers.
+    #[allow(clippy::float_cmp)]
     fn gradient_showcase_rectangles_resolve_against_the_page_width() {
         let mut document = with_config(PageConfig {
             default_display_linear: false,
@@ -647,12 +486,6 @@ mod tests {
         }
     }
 
-    /// The top-layer component tags take nothing of the common container
-    /// block: no border box, no `position: relative`, no `overflow: clip`.
-    /// `dialog` takes the display `defaultDisplayLinear` picks once it
-    /// shows; the overlay's two hosts are `display: contents` under either
-    /// switch, since their shadow `dialog` is what renders
-    /// ([`super::super::overlay`]).
     #[test]
     fn the_display_page_config_switch_reaches_the_top_layer_tags() {
         for (linear, expected) in [(true, Display::Linear), (false, Display::Flex)] {
@@ -691,16 +524,6 @@ mod tests {
         }
     }
 
-    /// Every box clips by default (`overflow: clip`, not a scroll container);
-    /// the switch releases the containers that are not scrollers — `view` and
-    /// the two blur-view tags, which native treats as views (`LynxUIBlurView`
-    /// extends `LynxUIView`) — and nothing else.
-    ///
-    /// `page` is deliberately not among them: native pins it in
-    /// `PageElement::PageElement` with `SetDefaultOverflow(false)` and reads
-    /// the switch in `ViewElement` alone, and web-core's release selector
-    /// names only `x-view`. A card asking for visible overflow asks it of its
-    /// views, not of the window it is drawn in.
     #[test]
     fn the_overflow_page_config_switch_skips_the_scrollers_and_the_page() {
         for (visible, expected) in [(true, Overflow::Visible), (false, Overflow::Clip)] {
@@ -715,8 +538,6 @@ mod tests {
             let pagers = [VIEWPAGER_TAG, X_VIEWPAGER_TAG].map(|tag| child(&mut document, tag, ""));
             let coordinators =
                 [SCROLL_COORDINATOR_TAG, X_FOLDVIEW_TAG].map(|tag| child(&mut document, tag, ""));
-            // A swiper scrolls its shadow `#content`, so the host itself is
-            // a box that clips (`super::super::swiper`).
             let leaves = [
                 "text",
                 "image",
@@ -782,10 +603,8 @@ mod tests {
         }
     }
 
-    /// The whole rule `defaultOverflowVisible` gates, spelled out once.
     const OVERFLOW_RULE: &str = "view, blur-view, x-blur-view { overflow: visible; }";
 
-    /// The whole rule `enableCSSInheritance` gates, spelled out once.
     const INHERITANCE_RULE: &str = "view > text, view > wrapper, view > wrapper > text \
                                     { color: inherit; text-decoration: inherit; }";
 
@@ -817,10 +636,6 @@ mod tests {
         assert!(!sheet.contains(INHERITANCE_RULE));
     }
 
-    /// A `contenteditable` element keeps its white space by default, for
-    /// every value but HTML's `"false"`, which the selector's `i` flag
-    /// matches in any case; its `display` is its own, and an author's
-    /// `white-space` and `display: none` win over the default.
     #[test]
     fn an_editing_host_preserves_white_space_by_default_only() {
         use terminus::link::stylo::computed_values::white_space_collapse::T as Collapse;
@@ -860,10 +675,6 @@ mod tests {
         assert_eq!(display(hidden), Display::None);
     }
 
-    /// `enableCSSInheritance` adds its one rule and changes nothing else:
-    /// taking that line back out leaves the sheet the switch-off config
-    /// builds. The rule follows the text block, whose `color: initial` it
-    /// outranks on specificity, not on that position.
     #[test]
     fn the_css_inheritance_switch_adds_one_rule_and_nothing_else() {
         let off = ua_stylesheet(PageConfig::default());
@@ -879,75 +690,6 @@ mod tests {
         assert_eq!(on.replacen(&format!("{INHERITANCE_RULE}\n"), "", 1), off);
     }
 
-    /// The sheet's important declarations are exactly the recorded exceptions.
-    ///
-    /// A UA-origin `!important` outranks author `!important` *and* inline
-    /// style, so every one of them removes a knob a page would otherwise
-    /// have (`docs/style-assumptions.md` §D.15). This pins the exceptions
-    /// rather than dropping the invariant: a new important declaration fails
-    /// here until someone decides it deserves the same argument.
-    ///
-    /// A `text`'s `display` is not among them. In Lynx a `<text>`'s
-    /// inline-ness is established structurally, at tree-mutation time, and no
-    /// author CSS can undo it — but an author `display: none` still hides it,
-    /// which an important `display` would swallow. The engine makes the three
-    /// text tags Lynx text elements by their kind instead, and the sheet
-    /// declares no `display` for them; [`super::super::text`] carries the
-    /// argument.
-    ///
-    /// `padding: 0` on an inline `image` is the text block's only one.
-    /// web-core gives the authored host element no box at all (`x-text > x-image { display:
-    /// contents !important }`) and rebuilds one in the shadow tree out of an inherited property
-    /// list `padding` is not on, so no author CSS there can make an inline image's padding
-    /// matter. Here the authored element *is* the box, and a normal
-    /// declaration would lose to the author's own `padding` — which would
-    /// describe an engine neither reference has. [`super::text`] carries the
-    /// full citation.
-    ///
-    /// The pager's row is two more, ahead of the text block in the
-    /// sheet. In both references a
-    /// `viewpager`'s pages form one row whatever the author writes on the
-    /// pager — web-core lays them out in a shadow box no author rule reaches,
-    /// native places them itself — and authors do write `display: flex;
-    /// flex-direction: column` on it. Here the authored pager is the box that
-    /// lays the pages out, so the row is either pinned in the cascade or
-    /// lost; the same for a page's `position: relative`, which web-core
-    /// itself pins with `!important`. [`super::viewpager`] carries the full
-    /// argument.
-    ///
-    /// The swiper's eight follow the pager's, on the same argument: web-core
-    /// lays its items out in a shadow box, pins `flex-wrap`, the column and
-    /// each item's main-axis size itself, and here the authored swiper is the
-    /// box. [`super::super::swiper`] carries the argument.
-    ///
-    /// The refresh view's three follow the swiper's. Its header's and its
-    /// footer's `position: relative` are web-core's own `!important`, and
-    /// authors write `position: absolute` on the header (web-core's demo
-    /// card does): the header has to stay in the column above the content.
-    /// `overscroll-behavior-y: auto` on its content children keeps a child
-    /// that contains its chain from stopping the pull before the shadow
-    /// scroller. [`super::super::refresh_view`] carries the argument.
-    ///
-    /// The coordinator's six follow the refresh view's. In every reference its
-    /// header, toolbar and slot are placed by something no author rule
-    /// reaches — web-core's `!important` scroll axis, header position and
-    /// component code, native's own layout — and here the authored boxes
-    /// are the layout: the coordinator must scroll on y in a column, the
-    /// header and the slot must be absolutely positioned (the slot's
-    /// `anchor-size()` resolves only there) and the toolbar sticky. The
-    /// `enable-scroll="false"` line is important only to beat the pinned
-    /// scroll. [`super::super::scroll_coordinator`] carries the argument.
-    ///
-    /// HTML's own follows the coordinator's: a popover's `::backdrop` is
-    /// `pointer-events: none !important` in HTML's UA sheet, so it takes no
-    /// touch whatever an author writes. [`terminus::link::html::popover`] carries
-    /// it.
-    ///
-    /// The overlay's one follows HTML's. Only an overlay's first
-    /// child renders: web-core pins every other child `display: none
-    /// !important`, and native measures child 0 alone, so an author
-    /// `display` on a second child must not bring it back.
-    /// [`super::super::overlay`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions() {
         const ALLOWED: [&str; 20] = [

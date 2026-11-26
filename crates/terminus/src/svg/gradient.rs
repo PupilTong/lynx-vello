@@ -26,14 +26,10 @@ use crate::paint::convert::resolve_color;
 use crate::peniko::{Color, Extend};
 use crate::tree::document::{Document, NodeId};
 
-/// Whether `name` is a gradient element's local name.
 pub(super) fn is_gradient(name: &str) -> bool {
     matches!(name, "linearGradient" | "radialGradient")
 }
 
-/// The specification of the gradient element `id`, its `href` chain folded
-/// in, resolved against `viewport`. `None` when a coordinate does not
-/// parse. `ids` names the subtree's elements by id.
 pub(super) fn gradient<T>(
     document: &Document<T>,
     ids: &FxHashMap<&str, NodeId>,
@@ -42,8 +38,6 @@ pub(super) fn gradient<T>(
 ) -> Option<GradientSpec> {
     let node = document.get(id)?;
     let linear = node.tag_name() == Some("linearGradient");
-    // The chain, this element first; a hop to something that is not a
-    // gradient, or back to a visited one, ends it.
     let mut chain: SmallVec<[NodeId; 4]> = SmallVec::new();
     chain.push(id);
     while chain.len() < MAX_CHAIN {
@@ -83,9 +77,6 @@ pub(super) fn gradient<T>(
     spec(linear, attribute, viewport, font_size, stops)
 }
 
-/// `node`'s attribute `name` as stored. Every attribute but `style` and
-/// `class` is stored as written (`Node::attribute` derives only those two),
-/// and none of the attributes read here is either.
 pub(super) fn plain<'a, T>(node: &'a crate::tree::node::Node<T>, name: &str) -> Option<&'a str> {
     match node.attribute(name)? {
         std::borrow::Cow::Borrowed(value) => Some(value),
@@ -93,10 +84,6 @@ pub(super) fn plain<'a, T>(node: &'a crate::tree::node::Node<T>, name: &str) -> 
     }
 }
 
-/// The `stop` children of the gradient `id`: offsets clamped and made
-/// non-decreasing, colours from each stop's own computed style. A stop with
-/// no computed style (inside a `display: none` subtree, which the cascade
-/// does not style) is the initial black at full opacity.
 fn stops<T>(document: &Document<T>, id: NodeId) -> Vec<(f32, Color)> {
     let Some(node) = document.get(id) else {
         return Vec::new();
@@ -121,12 +108,6 @@ fn stops<T>(document: &Document<T>, id: NodeId) -> Vec<(f32, Color)> {
     stops
 }
 
-/// A gradient's specification from its attributes, each read through
-/// `attribute` (the first value along the `href` chain), and its stops.
-/// `linear` tells a `linearGradient`
-/// from a `radialGradient`; `viewport` and `font_size` resolve
-/// `userSpaceOnUse` percentages and `em` units. `None` for a coordinate
-/// that does not parse.
 pub(super) fn spec<'v>(
     linear: bool,
     attribute: impl Fn(&str) -> Option<&'v str>,
@@ -142,9 +123,6 @@ pub(super) fn spec<'v>(
         let value = attribute(name).unwrap_or(default);
         let length = Length::from_str(value.trim()).ok()?;
         let resolved = match units {
-            // A percentage is a fraction of the box; a number is one
-            // already, and an absolute unit makes no sense in bounding-box
-            // space, so its number is read as a fraction too, as browsers do.
             Units::ObjectBoundingBox => match length.unit {
                 LengthUnit::Percent => length.number / 100.0,
                 _ => length.number,
@@ -187,20 +165,12 @@ pub(super) fn spec<'v>(
     })
 }
 
-/// How many `href` hops a gradient chain is followed for before it is
-/// taken as a cycle.
 pub(super) const MAX_CHAIN: usize = 16;
 
-/// The id an `href` names when it is a fragment reference to an element
-/// of the same document (`#id`), `None` for any other URL. Also what an
-/// SVG `use` element's reference resolves with (`crate::svg::use_element`).
 pub(super) fn fragment_id(href: &str) -> Option<&str> {
     href.trim().strip_prefix('#')
 }
 
-/// A stop's `offset` attribute clamped to the unit interval and to at
-/// least the `previous` stop's, as gradient stops are made
-/// non-decreasing; absent or unparsable, zero before that clamp.
 pub(super) fn stop_offset(value: Option<&str>, previous: f32) -> f32 {
     value.and_then(parse_opacity).unwrap_or(0.0).max(previous)
 }

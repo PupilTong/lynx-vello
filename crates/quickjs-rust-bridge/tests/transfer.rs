@@ -15,9 +15,6 @@ use quickjs_rust_bridge::{
 
 const HOST: &str = "test:host";
 
-/// A realm whose global object has `post(message, transfer, ...ids)`, which
-/// keeps its arguments, `mark` and `setReviver` (the two transfer members),
-/// and `host`, whose `take(value)` keeps a delivered value as `host.seen`.
 struct Party {
     runtime: Runtime,
     realm: Context,
@@ -95,8 +92,6 @@ impl Party {
         posted.pop().unwrap()
     }
 
-    /// Calls `host.take` with `argument`, then answers whatever the realm
-    /// says about `host.seen`.
     fn deliver(&self, argument: HostArgument<'_>) -> Result<(), quickjs_rust_bridge::Error> {
         let take = self.realm.member("take").unwrap();
         let outcome = self.realm.call_member(&self.host, &take, &[argument])?;
@@ -105,7 +100,6 @@ impl Party {
     }
 }
 
-/// The message a test posted, with its slot count.
 fn transferred(posted: &[HostValue]) -> &TransferredClone {
     match &posted[0] {
         HostValue::Transferred(clone) => clone,
@@ -138,7 +132,6 @@ fn a_listed_object_reads_as_one_replacement_at_every_position() {
         "the ids follow as primitives"
     );
 
-    // Another runtime: another heap and atom table.
     let receiver = realm();
     receiver.text(
         "globalThis.revived = [];
@@ -232,7 +225,6 @@ fn an_empty_or_absent_list_describes_the_message_as_any_argument() {
     assert!(matches!(&posted[2][0], HostValue::Bytes(bytes) if bytes.len() == 2));
     assert_eq!(posted[3][0], HostValue::String("text".to_owned()));
 
-    // And it reads back as any structured clone does, with no reviver.
     let receiver = realm();
     receiver.deliver(posted[0][0].as_argument()).unwrap();
     assert_eq!(receiver.text("String(host.seen.a)"), "1");
@@ -281,7 +273,6 @@ fn a_marked_object_that_is_not_listed_throws_and_nothing_is_sent() {
     );
     assert!(sender.posted.borrow().is_empty());
     assert_eq!(echoed.get(), 0);
-    // The realm is unharmed.
     sender.text("post({ fine: true }); ''");
     assert_eq!(sender.posted.borrow().len(), 1);
 }
@@ -351,8 +342,6 @@ fn a_stream_with_slots_does_not_read_without_its_replacements() {
     .expect_err("a transferred descriptor");
     assert_eq!(nested.kind, ErrorKind::InvalidInput);
 
-    // Lent as it is, the reader has no replacements and fails at the first
-    // slot, leaving the realm usable.
     let receiver = realm();
     receiver.text("setReviver(() => ({})); ''");
     let error = receiver
@@ -438,9 +427,6 @@ fn a_transferred_clone_reads_in_a_realm_on_another_thread() {
     assert_eq!(reader.join().unwrap(), "from A:110:true:7,8:true");
 }
 
-/// Writing, refusing and reviving, each tens of thousands of times inside a
-/// realm capped at 2 MB: a reference the shim keeps by mistake (a listed
-/// object, a replacement, a stream) shows up as an out-of-memory failure.
 #[test]
 fn transfer_paths_do_not_leak() {
     let tight = || RuntimeOptions {

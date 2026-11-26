@@ -9,8 +9,6 @@ use bobcat_source::{ZipSource, ZipSourceError};
 use url::Url;
 use zip::write::SimpleFileOptions;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -43,9 +41,6 @@ fn resources() -> Resources {
     Resources::new(config(), || {})
 }
 
-/// In Wasm `bobcat-resources` has no platform of its own (the browser's is
-/// `bobcat-wasm`'s), so these tests name one that neither fetches nor
-/// decodes: they only register and unregister.
 #[cfg(target_arch = "wasm32")]
 fn resources() -> Resources<offline::Offline> {
     Resources::with_platform(config(), offline::Offline, Vec::new(), || {})

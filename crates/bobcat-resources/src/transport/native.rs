@@ -13,13 +13,6 @@ use vant::{Fetch, Request, Response};
 use super::{curl, file};
 use crate::file_body::Body;
 
-/// The native transport. It holds nothing: libcurl is loaded once per
-/// process, on the first `http(s)` request, and a host without it gets a
-/// precise `Unavailable` for every such request.
-///
-/// It applies no HTTP cache semantics of its own, so the resource system
-/// puts the byte tier in front of it when the platform has a
-/// [`Store`](vant::Store).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeFetch;
 
@@ -50,7 +43,6 @@ impl Fetch for NativeFetch {
     }
 }
 
-/// One `http(s)` request through libcurl.
 fn http(request: &Request) -> Result<Response, Failure> {
     let mut curl_request = curl::HttpRequest::new(request.url.as_str());
     curl_request.timeout = request.timeout;

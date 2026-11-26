@@ -61,40 +61,18 @@ use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
 use crate::text::TextContext;
 
-/// Paint identity of one parley style index or placed box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceItem {
-    /// The root inline box's strut ([`BlockStyle::strut`]): parley's style 0,
-    /// which no text is shaped in, so no glyph run carries it — and the
-    /// styles the atomic boxes' objects are shaped in, copies of it
-    /// (`crate::text::paragraph::shape`).
     Strut,
-    /// Index into the `items` slice the block was built from.
     Content(u32),
-    /// Index into the `truncation` slice.
     Truncation(u32),
-    /// The synthesized dots run, carrying the content run item it was shaped
-    /// in — the run holding the last visible byte, which is also whose colour
-    /// the marker takes unless `tail-color-convert` overrides it.
     Ellipsis { item: u32 },
 }
 
-/// One reported line, in source UTF-16 units (an atomic box counts one).
-///
-/// Source ranges come from the natural (pre-truncation) line layout — the
-/// layout event's contract — while the geometry is the rendered line's.
-/// A range covers the line's visible content only: the collapsed whitespace
-/// a soft wrap consumed belongs to no line, so consecutive ranges can have a
-/// gap, matching the web reference's rect-derived ranges.
-///
-/// A verbatim paragraph whose text ends with a newline reports one more
-/// line, empty, as Android's `StaticLayout` does: `source_start ==
-/// source_end ==` the source length, with the height of the line before it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineInfo {
     pub source_start: u32,
     pub source_end: u32,
-    /// `source_end − cut` when the cut falls in this line, else zero.
     pub ellipsis_count: u32,
     pub top: f32,
     pub baseline: f32,
@@ -102,9 +80,6 @@ pub struct LineInfo {
     pub advance: f32,
 }
 
-/// A reported line's box is its own: [`assemble`] read it from whichever
-/// layout holds the line ([`reported_line`]), the display's or, where the
-/// display has none there, the natural one's.
 impl ReportedLine for LineInfo {
     fn source_range(&self) -> core::ops::Range<u32> {
         self.source_start..self.source_end
@@ -119,41 +94,30 @@ impl ReportedLine for LineInfo {
     }
 }
 
-/// Where one atomic box ended up.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlacedBox {
     Visible {
-        /// The host identity from [`InlineBoxSpec::id`].
         id: u64,
         line: u32,
-        /// Top-left corner; vertical alignment applied.
         origin: Point<f32>,
         size: Size<f32>,
     },
-    /// Truncated away — the Lynx `HideView` surface. No position exists.
-    Hidden { id: u64 },
+    Hidden {
+        id: u64,
+    },
 }
 
-/// The tail slot of the display slot table.
 #[derive(Debug, Clone, Copy)]
 enum SlotSource {
     Content(u32),
     Truncation(u32),
 }
 
-/// The dots-form ellipsis marker, as text.
 const DOTS: &str = "...";
 
-/// The output of one `layout_at` call.
 struct LayoutResult {
     constraint: BlockConstraint,
-    /// The truncated display layout and its style/slot tables; absent when
-    /// the natural layout is the display, which is the untruncated case.
-    /// Boxed like [`TruncationFlow`], so that a block that does not truncate
-    /// does not carry a display layout's worth of empty storage inline.
     display: Option<Box<DisplayPart>>,
-    /// The one per-line record: each line's source range, ellipsis and line
-    /// box.
     lines: Vec<LineInfo>,
     boxes: Vec<PlacedBox>,
     size: Size<f32>,
@@ -164,40 +128,22 @@ struct LayoutResult {
 struct DisplayPart {
     layout: Layout<TextBrush>,
     sources: Vec<SourceItem>,
-    /// Where the source content ends in this layout's text: the bytes before
-    /// it are the content's own normalized text, the bytes from it on the
-    /// tail (the dots or the truncation content), which is no source text.
     cut_byte: u32,
-    /// How many of this layout's box slots are content boxes. They come
-    /// first, in the content's own order; the truncation content's follow.
     content_slots: usize,
 }
 
-/// A shaped, breakable, truncatable Lynx text block. One per text element.
 pub struct TextBlock {
     style: BlockStyle,
-    /// The content flow and its natural layout.
     paragraph: Paragraph<SourceItem>,
-    /// `Some` only for a block with inline-truncation content. Boxed so that
-    /// every other block does not carry a second [`Flow`] inline.
     truncation: Option<Box<TruncationFlow>>,
     result: Option<LayoutResult>,
-    /// The answered constraints, the committed one, and the counters
-    /// [`Self::break_count`] and [`Self::min_content_width`] read.
     memo: BreakMemo,
-    /// The dots' advance in one content run's style, for the clip-edge cut.
-    ///
-    /// Constraint-independent, like the truncation content's own width: the
-    /// run styles a block was built from never change without a rebuild, so
-    /// one entry serves every `layout_at` that asks about the same run.
     dots_width: Option<(u32, f32)>,
 }
 
 #[derive(Debug)]
 struct TruncationFlow {
     flow: Flow,
-    /// Cached unconstrained width of the truncation content — constraint-
-    /// independent, so it is measured at most once per block.
     natural_width: Option<f32>,
 }
 
@@ -208,17 +154,6 @@ impl fmt::Debug for TextBlock {
 }
 
 impl TextBlock {
-    /// Builds and shapes one block from flattened content.
-    ///
-    /// Host contract (the Lynx flattening semantics): walk the `<text>`
-    /// subtree iteratively — nesting depth is unbounded — emitting the
-    /// establishing element's own text first, then children in document
-    /// order; a nested text contributes runs carrying its own resolved
-    /// [`RunStyle`]; a wrapper is iterated in place; an inline image or view
-    /// contributes exactly one [`InlineItem::Box`] measured independently
-    /// (its inner content never joins this paragraph); any other element is
-    /// skipped; only the first `inline-truncation` subtree becomes
-    /// `truncation`. Box ids are unique across both slices.
     #[must_use]
     pub fn new(
         context: &mut TextContext,
@@ -226,16 +161,11 @@ impl TextBlock {
         items: &[InlineItem<'_>],
         truncation: Option<&[InlineItem<'_>]>,
     ) -> Self {
-        // A block that keeps a line for empty content has a strut to make
-        // that line of, its own or the initial font. The root inline box is
-        // where the block keeps it: nothing reads the style's copy after this.
         let mut block_style = block_style;
         let strut = block_style
             .strut
             .take()
             .or_else(|| block_style.strut_line_when_empty.then(RunStyle::default));
-        // Native Lynx keeps a `<text>`'s bidi paragraph level first-strong
-        // (its platform engines detect it), and so does this.
         let root = ParagraphRoot {
             strut: strut.map(|strut| (strut, SourceItem::Strut)),
             direction: parley::BaseDirection::Auto,
@@ -286,26 +216,11 @@ impl TextBlock {
         }
     }
 
-    /// Replaces the paragraph parameters without re-shaping.
-    ///
-    /// Sound only for values parley does not shape from: alignment and
-    /// direction are applied after breaking, and truncation is decided from a
-    /// finished layout. A font, a letter-spacing, a word-break, a
-    /// `text_wrap`, a `verbatim` or a `strut_line_when_empty` change is a
-    /// different paragraph and needs a new block — `text_wrap` and
-    /// `verbatim` choose the white-space processing the text was normalized
-    /// with, and `strut_line_when_empty` whether empty content is shaped at
-    /// all. The host asks [`Self::shaped_with`] which it has.
-    ///
-    /// Invalidates the break memo, since `text-align` moves line offsets and
-    /// `max_lines` moves the reported size.
     pub fn set_style(&mut self, mut style: BlockStyle) {
         debug_assert!(
             self.shaped_as(&style),
             "a shaping input change needs a new block"
         );
-        // The strut is the root inline box's since `new`; the block keeps no
-        // second copy.
         style.strut = None;
         if self.style == style {
             return;
@@ -315,17 +230,6 @@ impl TextBlock {
         self.result = None;
     }
 
-    /// Whether this block is the one [`Self::new`] would build from `style`
-    /// and content runs whose styles are `runs` — the content's, then the
-    /// truncation content's, in item order — so that a host holding the
-    /// same text and boxes needs no new block, at most [`Self::set_style`].
-    ///
-    /// Compared against what the block itself retains, by the derived
-    /// equality of [`RunStyle`] and [`BlockStyle::shapes_as`]: the run
-    /// styles its flows were shaped with and its root inline box's strut.
-    /// Both run sequences must end together. The text, the white space
-    /// processing and the boxes are the host's to compare: the block keeps
-    /// only their normalized form.
     #[must_use]
     pub fn shaped_with<'a>(
         &self,
@@ -349,21 +253,11 @@ impl TextBlock {
         self.shaped_as(style) && built.eq(runs)
     }
 
-    /// Whether `style`'s shaping inputs are the ones this block was built
-    /// with.
     fn shaped_as(&self, style: &BlockStyle) -> bool {
         let strut = self.paragraph.root.strut.as_ref().map(|(strut, _)| strut);
         style.shapes_as(&self.style, strut)
     }
 
-    /// Reports `constraint` without disturbing the committed line breaks when
-    /// the same constraint has already been answered.
-    ///
-    /// A probe is what a container issues while sizing — max-content,
-    /// min-content, a trial width — and none of those answers is what paint
-    /// reads. A memo hit therefore returns without re-entering parley *and*
-    /// without moving the retained layout, which is the whole reason the memo
-    /// exists rather than a single-entry cache.
     pub fn probe(
         &mut self,
         context: &mut TextContext,
@@ -372,8 +266,6 @@ impl TextBlock {
         Retained::probe(self, context, constraint)
     }
 
-    /// Lays the block out for real. A commit's line breaks are the ones paint
-    /// reads, so this can never be answered from the memo.
     pub fn commit(
         &mut self,
         context: &mut TextContext,
@@ -382,47 +274,20 @@ impl TextBlock {
         Retained::commit(self, context, constraint)
     }
 
-    /// Whether a commit has ever produced this block's retained result.
-    ///
-    /// Every reader below panics if it has not; this is the question a host
-    /// asks first, so a paragraph no commit produced is a paragraph that does
-    /// not paint rather than one that panics.
     #[must_use]
     pub const fn has_committed(&self) -> bool {
         self.memo.committed().is_some()
     }
 
-    /// Whether a probe left the retained result somewhere the committed
-    /// constraint did not put it.
-    ///
-    /// Tolerates a missing result on purpose: the host's measure closure is
-    /// not guaranteed to have run, and this is the one reader that must answer
-    /// before that is known.
     #[must_use]
     pub fn is_probe_dirty(&self) -> bool {
         Retained::is_probe_dirty(self)
     }
 
-    /// Puts the retained layout back where the last commit left it, so what
-    /// paint reads is never a probe's line breaks.
-    ///
-    /// Unlike the measurement path's namesake this needs a context: a
-    /// truncating block rebuilds its display layout, which re-shapes.
-    /// Answers whether parley was re-entered.
     pub fn restore_committed(&mut self, context: &mut TextContext) -> bool {
         Retained::restore_committed(self, context)
     }
 
-    /// The narrowest this block's content can be, in px, at the resolved
-    /// `text-indent` `indent`, which counts on the lines it applies to — the
-    /// first, and in a verbatim block every line after a newline
-    /// ([`BlockStyle`]'s indent rule).
-    ///
-    /// Read off a laid-out result rather than recomputed, because parley's
-    /// `calculate_content_widths` reflects the box sizes and the indent
-    /// currently written into the layout — and at `new` no atom has a size
-    /// yet. Forces one unconstrained layout at `indent` when no result was
-    /// laid out at it. The answer is remembered per indent.
     pub fn min_content_width(&mut self, context: &mut TextContext, indent: f32) -> f32 {
         if let Some(width) = self.memo.min_content(indent) {
             return width;
@@ -441,18 +306,11 @@ impl TextBlock {
         width
     }
 
-    /// How many times parley has broken these lines. Tests and benchmarks
-    /// assert on it; nothing else should.
     #[must_use]
     pub const fn break_count(&self) -> u32 {
         self.memo.breaks()
     }
 
-    /// Updates one atomic box's measured size — the Lynx measure/align round
-    /// trip. The next [`Self::probe`] or [`Self::commit`] re-breaks without
-    /// re-shaping.
-    ///
-    /// Panics on an unknown id: a correct host cannot produce one.
     pub fn set_box_size(&mut self, id: u64, size: Size<f32>, baseline: Option<f32>) {
         let spec = self
             .paragraph
@@ -470,21 +328,12 @@ impl TextBlock {
             })
             .expect("set_box_size addresses a box this block was built with");
         if spec.size == size && spec.baseline == baseline {
-            // A host re-asserting the size it already gave must not invalidate
-            // anything: the measure/align round trip repeats every pass, and
-            // treating a repeat as a change would defeat the memo outright.
             return;
         }
         spec.size = size;
         spec.baseline = baseline;
         self.memo.mark_boxes_dirty();
-        // A resized atom changes both the break and the intrinsic widths, so
-        // every remembered answer is stale. `committed` deliberately survives:
-        // it names where the retained layout must be put back, and clearing it
-        // would make `has_committed` false and drop the paragraph from paint.
         self.memo.forget();
-        // Only a resized truncation box invalidates the cached truncation
-        // content width; a main-flow resize leaves it valid.
         if let Some(part) = &mut self.truncation
             && part
                 .flow
@@ -496,15 +345,6 @@ impl TextBlock {
         }
     }
 
-    /// The alignment the natural layout is broken with: the block's own,
-    /// unless that is `justify` and a cut may read the natural lines'
-    /// advances. Parley 0.13 justifies as a break ends, which widens a
-    /// line's spaces, and the cut that lays the inline-truncation content in
-    /// at a `text-maxline` clamp frees width measured off the natural line
-    /// (`truncate::retreat_for_width`), which the block always measured
-    /// unjustified. Such a block breaks at the start alignment, which moves
-    /// no advance, and justifies the natural lines only where they are the
-    /// display ([`Self::finish_untruncated`]).
     fn natural_alignment(&self) -> Alignment {
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         if alignment == Alignment::Justify
@@ -522,9 +362,6 @@ impl TextBlock {
         natural_lines: &[NaturalLine],
         constraint: BlockConstraint,
     ) -> LayoutResult {
-        // The natural layout is the display: its lines take the block's
-        // alignment, which the break gave them unless it was deferred
-        // (`Self::natural_alignment`).
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         self.paragraph.realign(
             alignment,
@@ -539,10 +376,6 @@ impl TextBlock {
             .iter()
             .map(|entry| *self.paragraph.content.box_spec(entry.item))
             .collect();
-        // Truncation content is not shown when nothing truncates; its boxes
-        // still report an outcome so a host can drive their visibility, as do
-        // the boxes a `nowrap` verbatim paragraph dropped after its first
-        // newline.
         let hidden = self
             .dropped_boxes()
             .chain(
@@ -625,9 +458,6 @@ impl TextBlock {
             cut_byte: plan.cut_byte,
             content_slots,
         };
-        // The previous truncated result's box, emptied by `layout_at`, takes
-        // the new part: a re-break of a block that stays truncated allocates
-        // no box.
         let display = match recycled {
             Some(mut held) => {
                 *held = part;
@@ -646,20 +476,6 @@ impl TextBlock {
         }
     }
 
-    /// The clip-edge cut a `white-space: nowrap` line wider than its measure
-    /// takes — css-ui `text-overflow` in its own right, with neither
-    /// `text-maxline` nor `text-maxlength` taking part.
-    ///
-    /// The clamp path cannot see this case: the one line consumed all of its
-    /// source, so nothing "remains past the committed lines". What overflows
-    /// is the line box, and the decision is therefore an advance against the
-    /// constraint.
-    ///
-    /// Restricted to a paragraph whose nowrap breaking left exactly one line.
-    /// A cut drops every line past the one it falls in, which is right for the
-    /// single unbroken line `nowrap` normally produces and wrong for the
-    /// several a preserved newline can still leave, so that shape is left
-    /// uncut rather than half-served.
     fn overflow_cut(
         &mut self,
         context: &mut TextContext,
@@ -683,8 +499,6 @@ impl TextBlock {
 
         let text = &self.paragraph.content.block.text;
         let map = &self.paragraph.content.block.map;
-        // The widest prefix that fits the measure with nothing appended. Both
-        // branches below start from it.
         let fit = truncate::clip_boundary(
             &self.paragraph.natural,
             0,
@@ -698,8 +512,6 @@ impl TextBlock {
         if self.truncation.is_some() {
             let marker = self.measure_truncation(context);
             if marker >= width {
-                // Too wide for the container, exactly as on the clamp path:
-                // the content is hidden and the line keeps nothing.
                 return Some(OverflowCut {
                     unit: line.start_unit,
                     truncation_visible: false,
@@ -724,19 +536,12 @@ impl TextBlock {
         }
 
         if self.style.overflow != TextOverflow::Ellipsis {
-            // `text-overflow: clip` appends nothing and cuts nothing: the line
-            // overflows and the element's own `overflow` clips the ink.
             return None;
         }
         let cut_byte = map
             .unit_to_byte(text, fit)
             .unwrap_or_else(|| u32::try_from(text.len()).expect("text fits u32"));
         let item = truncate::dots_item(&self.paragraph.content.block.ranges, cut_byte)?;
-        // The dots are shaped in the run at the fit boundary and measured
-        // once. Backing off could in principle land the cut in an earlier run
-        // with a different advance; re-measuring per candidate would cost a
-        // shaping each, and the boundary run is the one the marker is drawn in
-        // for every case a single-run or uniformly-sized paragraph produces.
         let dots = self.measure_dots(context, item);
         let unit = truncate::clip_boundary(
             &self.paragraph.natural,
@@ -753,7 +558,6 @@ impl TextBlock {
         })
     }
 
-    /// Shapes the three-dot marker in one run's style and caches its advance.
     fn measure_dots(&mut self, context: &mut TextContext, item: u32) -> f32 {
         if let Some((cached, width)) = self.dots_width
             && cached == item
@@ -775,7 +579,6 @@ impl TextBlock {
         width
     }
 
-    /// Shapes the truncation content unconstrained and caches its width.
     fn measure_truncation(&mut self, context: &mut TextContext) -> f32 {
         let breaking = self.style.breaking();
         let part = self
@@ -795,9 +598,6 @@ impl TextBlock {
         width
     }
 
-    /// Builds the truncated display layout: the visible prefix plus the tail,
-    /// broken to at most the visible line count so a wrapped tail is clamped
-    /// away rather than adding a line, and aligned by `alignment`.
     fn rebuild(
         &self,
         context: &mut TextContext,
@@ -811,8 +611,6 @@ impl TextBlock {
         let mut text = String::with_capacity(cut + 16);
         text.push_str(&self.paragraph.content.block.text[..cut]);
 
-        // The content's own spans, tab spacing included, clipped at the cut:
-        // the visible prefix breaks exactly as it did in the natural layout.
         let breaking = self.style.breaking();
         let mut spans: Vec<ShapeSpan<'_, SourceItem>> =
             self.paragraph
@@ -825,9 +623,6 @@ impl TextBlock {
         let mut slots = Vec::new();
         let mut boxes = Vec::new();
         for entry in &self.paragraph.content.block.boxes {
-            // The cut is a unit-space decision: a box shares its byte with
-            // the character after it, so byte comparison cannot tell a cut
-            // on the box from a cut after it.
             if entry.unit >= plan.cut_unit {
                 break;
             }
@@ -882,10 +677,6 @@ impl TextBlock {
         }
 
         let mut sources = Vec::new();
-        // The same root inline box as the natural layout, so the visible
-        // lines keep their line boxes; but a display that a cut left empty
-        // is no empty content, and lays out no line of its own: the natural
-        // layout supplies the line it reports (`assemble`).
         let mut display = shape::shape(
             context,
             &text,
@@ -898,8 +689,6 @@ impl TextBlock {
             },
         );
         drop(spans);
-        // The natural layout's indent rule, so every visible line keeps the
-        // indent it was broken with.
         display.set_text_indent(indent, BlockStyle::INDENT_KEYWORDS.options());
         display.set_alignment(alignment, AlignmentOptions::default());
         let limit = u32::try_from(visible).expect("line count fits u32");
@@ -907,8 +696,6 @@ impl TextBlock {
         (display, sources, slots)
     }
 
-    /// The boxes a `nowrap` verbatim paragraph dropped after its first
-    /// newline: content with a source unit and no place in the text.
     fn dropped_boxes(&self) -> impl Iterator<Item = PlacedBox> + '_ {
         let content = &self.paragraph.content;
         content
@@ -920,9 +707,6 @@ impl TextBlock {
             })
     }
 
-    /// The `Hidden` entries: main boxes at or past the cut, the boxes a
-    /// `nowrap` verbatim paragraph dropped, plus the whole truncation content
-    /// when it is not shown.
     fn hidden_boxes(&self, plan: &CutPlan) -> Vec<PlacedBox> {
         let mut hidden = Vec::new();
         for entry in &self.paragraph.content.block.boxes {
@@ -945,10 +729,6 @@ impl TextBlock {
         hidden
     }
 
-    /// The rendered layout — glyph geometry, decoration metrics,
-    /// justification. Box positions in here are parley's, which
-    /// [`Self::boxes`] reports with each box's host identity; read boxes
-    /// there. Valid after [`Self::commit`].
     #[must_use]
     pub fn display(&self) -> &Layout<TextBrush> {
         let result = self.expect_result();
@@ -958,11 +738,6 @@ impl TextBlock {
             .map_or(&self.paragraph.natural, |part| &part.layout)
     }
 
-    /// The offset bridge between [`Self::display`]'s bytes and the source
-    /// units the block was built from ([`OffsetMap`]): the content's
-    /// normalized text, its source map, and the truncation cut's byte, past
-    /// which the display layout shows the tail rather than source text.
-    /// Valid after [`Self::commit`].
     #[must_use]
     pub fn offset_map(&self) -> OffsetMap<'_> {
         let block = &self.paragraph.content.block;
@@ -976,10 +751,6 @@ impl TextBlock {
         OffsetMap::new(&block.text, &block.map, cut_byte, &block.boxes, shown_boxes)
     }
 
-    /// How many parley style indices this block's display layout has.
-    ///
-    /// The range [`Self::source_of`] is defined over, so a painter can build
-    /// its per-run table without probing for the end.
     #[must_use]
     pub fn style_count(&self) -> usize {
         let result = self.expect_result();
@@ -990,7 +761,6 @@ impl TextBlock {
             .len()
     }
 
-    /// Paint identity of one parley `style_index` from [`Self::display`].
     #[must_use]
     pub fn source_of(&self, style_index: u16) -> SourceItem {
         let result = self.expect_result();
@@ -1001,57 +771,41 @@ impl TextBlock {
         sources[usize::from(style_index)]
     }
 
-    /// The layout-event data and where each line sits: one entry per
-    /// visible line, its line box parley's own placement.
     #[must_use]
     pub fn lines(&self) -> &[LineInfo] {
         &self.expect_result().lines
     }
 
-    /// Every atomic box's outcome, visible boxes with vertical alignment
-    /// applied.
     #[must_use]
     pub fn boxes(&self) -> &[PlacedBox] {
         &self.expect_result().boxes
     }
 
-    /// The rendered size: widest line (trailing whitespace excluded) by
-    /// stacked line height.
     #[must_use]
     pub fn size(&self) -> Size<f32> {
         self.expect_result().size
     }
 
-    /// The first rendered line's baseline.
     #[must_use]
     pub fn first_baseline(&self) -> Option<f32> {
         self.expect_result().first_baseline
     }
 
-    /// The last reported line's baseline, from the block's top; `None` when
-    /// no line is reported. A line a clamp or a cut removed is not reported,
-    /// so a clamped block's last baseline is its last visible line's.
     #[must_use]
     pub fn last_baseline(&self) -> Option<f32> {
         self.expect_result().lines.last().map(|line| line.baseline)
     }
 
-    /// Whether a cut was applied: a cut is what builds a display layout of
-    /// its own.
     #[must_use]
     pub fn truncated(&self) -> bool {
         self.expect_result().display.is_some()
     }
 
-    /// Whether the inline-truncation content is shown — the web
-    /// `x-show-inline-truncation` surface.
     #[must_use]
     pub fn truncation_visible(&self) -> bool {
         self.expect_result().truncation_visible
     }
 
-    /// Min- and max-content widths of the full (untruncated) content, with
-    /// the box sizes the last layout used. Valid after [`Self::commit`].
     #[must_use]
     pub fn content_widths(&self) -> ContentWidths {
         self.expect_result();
@@ -1078,16 +832,7 @@ impl Retained for TextBlock {
         self.result.as_ref().map(|result| result.constraint)
     }
 
-    /// Lays the block out at `constraint`, re-entering parley only when the
-    /// retained result is not already the answer.
-    ///
-    /// Callers reach it through [`Self::probe`] or [`Self::commit`], which
-    /// differ in what they are allowed to do with the memo.
     fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) {
-        // Under left alignment a max-content result's lines sit where a
-        // break at a width they fit puts them, so it is that width's result
-        // too: only the constraint it answers is recorded anew, and no
-        // restore follows a commit there.
         let left =
             resolve_alignment(self.style.text_align, self.style.direction) == Alignment::Left;
         if self.memo.holds(
@@ -1101,10 +846,6 @@ impl Retained for TextBlock {
             return;
         }
         self.memo.begin_break();
-        // The retained result is replaced below: release it before the new
-        // one is shaped, so two display layouts never coexist. A truncated
-        // result's display box is emptied here and refilled by
-        // `finish_truncated` rather than freed and allocated again.
         let recycled = self
             .result
             .take()
@@ -1126,9 +867,6 @@ impl Retained for TextBlock {
         );
 
         if self.paragraph.is_empty_strut_line() {
-            // The one empty line a block with no content keeps: nothing to
-            // cut, and nothing shown, so it is zero wide whatever parley
-            // measured it at — its indent, if any.
             let mut result = self.finish_untruncated(&natural_lines, constraint);
             result.size.width = 0.0;
             for line in &mut result.lines {
@@ -1138,11 +876,6 @@ impl Retained for TextBlock {
             return;
         }
 
-        // Whether content remains past the committed lines is a unit-space
-        // fact, never the breaker's: parley reports itself unfinished while
-        // only a renderless final line is pending. What a `nowrap` verbatim
-        // paragraph dropped after its first newline is not content that
-        // remains: native removes it before laying the text out.
         let more_content = natural_lines
             .last()
             .is_some_and(|line| line.consumed_end < self.paragraph.content.block.map.shown_len());
@@ -1188,8 +921,6 @@ impl Retained for TextBlock {
         }
     }
 
-    /// The natural layout is the retained result's own: only `layout_at`
-    /// breaks it.
     fn fits_from(&self) -> Option<f32> {
         let result = self.result.as_ref()?;
         (result.constraint.max_advance().is_none() && result.display.is_none())
@@ -1197,14 +928,6 @@ impl Retained for TextBlock {
     }
 }
 
-/// The laid-out line reported line `index` is read from, and whether it is
-/// the natural layout's.
-///
-/// The display layout's line, unless it has none at `index` or a blank one
-/// where the natural line is not the empty last line a verbatim paragraph
-/// keeps: a cut at a line start can leave the display layout one line short
-/// of the visible count, or blank there. Then the natural layout — still
-/// broken at the same widths — supplies the line.
 fn reported_line<'a>(
     final_layout: &'a Layout<TextBrush>,
     natural_fallback: Option<&'a Layout<TextBrush>>,
@@ -1221,11 +944,6 @@ fn reported_line<'a>(
     (line, fallback)
 }
 
-/// Walks the final layout once, assembling line reports and box placements.
-///
-/// A cut at a line start can leave the display layout one line short of the
-/// visible count; the natural layout — still committed at the same widths —
-/// supplies that line's geometry ([`reported_line`]).
 fn assemble(
     final_layout: &Layout<TextBrush>,
     natural_fallback: Option<&Layout<TextBrush>>,
@@ -1243,8 +961,6 @@ fn assemble(
     for (index, &natural_line) in natural_lines.iter().enumerate().take(visible) {
         let (line, fallback) = reported_line(final_layout, natural_fallback, natural_line, index);
         used_fallback |= fallback;
-        // The one line-box definition every reader goes through, the inline
-        // formatting context's included.
         let geometry = LineGeometry::of(&line);
         bottom = bottom.max(geometry.top + geometry.height);
         let ellipsis_count = plan
@@ -1263,8 +979,6 @@ fn assemble(
         });
     }
 
-    // Parley places every box by its `vertical-align` (`position`). Only a
-    // line holding boxes is walked for their positions, up to its last box.
     let mut line_boxes = shape::line_boxes(final_layout);
     for (index, line) in final_layout.lines().enumerate() {
         let count = line_boxes.on(&line).len();
@@ -1288,17 +1002,12 @@ fn assemble(
     }
     boxes.extend(hidden);
 
-    // Blank or clamped-away trailing lines still count toward parley's own
-    // height, so the reported height comes from the last reported line's
-    // bottom edge whenever the two disagree.
     let height = if used_fallback || lines.len() < final_layout.len() {
         bottom.max(0.0)
     } else {
         final_layout.height()
     };
     let size = Size::new(final_layout.width(), height);
-    // The first reported line's baseline, whichever layout supplied it — so
-    // this can never disagree with `lines()`.
     let first_baseline = lines.first().map(|line| line.baseline);
     (lines, boxes, size, first_baseline)
 }
@@ -1447,16 +1156,12 @@ mod tests {
         assert_eq!(block.break_count(), 1);
         assert!((max_content.size.width - 90.0).abs() < f32::EPSILON);
 
-        // A probe at a width the max-content lines fit is answered by the
-        // max-content entry.
         assert_eq!(
             block.probe(&mut context, BlockConstraint::new(Some(120.0), 0.0)),
             max_content
         );
         assert_eq!(block.break_count(), 1);
 
-        // A commit at one keeps the retained max-content lines and records
-        // its own constraint, so there is nothing to restore.
         assert_eq!(
             block.commit(&mut context, BlockConstraint::new(Some(90.0), 0.0)),
             max_content
@@ -1466,7 +1171,6 @@ mod tests {
         assert!(!block.restore_committed(&mut context));
         assert_eq!(block.lines().len(), 1);
 
-        // Narrower than the natural width, or at another indent, re-breaks.
         let wrapped = block.probe(&mut context, BlockConstraint::new(Some(89.0), 0.0));
         assert_eq!(block.break_count(), 2);
         assert!(wrapped.size.height > max_content.size.height);
@@ -1486,14 +1190,11 @@ mod tests {
         let mut block = TextBlock::new(&mut context, centered, &items, None);
 
         let max_content = block.probe(&mut context, BlockConstraint::new(None, 0.0));
-        // The probe answers from the max-content entry: no metric depends
-        // on the alignment.
         assert_eq!(
             block.probe(&mut context, BlockConstraint::new(Some(120.0), 0.0)),
             max_content
         );
         assert_eq!(block.break_count(), 1);
-        // A centred line moves with the width, so the commit re-breaks.
         block.commit(&mut context, BlockConstraint::new(Some(120.0), 0.0));
         assert_eq!(block.break_count(), 2);
     }
@@ -1504,9 +1205,6 @@ mod tests {
         let style = ahem_style();
         let items = [ahem_run("aaaa aaaa", &style)];
 
-        // `text-maxlength`: the cut does not depend on the width, but the
-        // display it leaves is narrower than the natural line, which a width
-        // that only fits the display re-breaks.
         let maxlength = BlockStyle {
             max_chars: Some(4),
             overflow: TextOverflow::Ellipsis,
@@ -1524,9 +1222,6 @@ mod tests {
         block.commit(&mut context, BlockConstraint::new(Some(200.0), 0.0));
         assert_eq!(block.break_count(), 3);
 
-        // `text-maxline` with inline-truncation content: at max-content the
-        // content shows, but at a width no wider than the content it is
-        // hidden and the cut moves to the line start.
         let first_line = [ahem_run("Hi\nthere", &style)];
         let tail = [ahem_run("XXXX", &style)];
         let maxline = BlockStyle {
@@ -1548,8 +1243,6 @@ mod tests {
     fn tabs_reshape_only_when_a_break_moves_their_stop() {
         let mut context = text_context();
         let style = ahem_style();
-        // Unbroken, the tab starts at 40 and is 20 wide; wrapped at 25, `c`
-        // starts the second line and the tab at 10 is 10 wide.
         let items = [InlineItem::Run(TextRunItem {
             text: "ab c\td",
             style: &style,

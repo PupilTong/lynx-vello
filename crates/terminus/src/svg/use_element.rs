@@ -41,19 +41,14 @@ use crate::tree::document::{Document, NodeId};
 use crate::tree::shadow::ShadowRootMode;
 use crate::tree::xml::MAX_NESTING;
 
-/// How many nodes the `use` instances of one build may clone in all.
 pub(crate) const MAX_INSTANCE_NODES: usize = 1 << 16;
 
-/// Resolves a `use` element's `href` against the built elements.
 struct References<'a> {
     ids: &'a FxHashMap<&'a str, NodeId>,
-    /// Targets whose whole expansion is known to reach no cycle.
     acyclic: FxHashSet<NodeId>,
 }
 
 impl<T> Document<T> {
-    /// Instantiates every `use` the build made, each with its depth (the
-    /// root `svg` is one deep), in document order.
     pub(crate) fn instantiate_uses(
         &mut self,
         uses: &[(NodeId, u32)],
@@ -73,15 +68,11 @@ impl<T> Document<T> {
         }
     }
 
-    /// The element `element`'s `href` names, if it names one.
     fn use_target(&self, element: NodeId, references: &References<'_>) -> Option<NodeId> {
         let href = href(self.live(element))?;
         references.ids.get(fragment_id(href)?).copied()
     }
 
-    /// Whether expanding the `use` `element` (a built element, not a clone)
-    /// reaches a reference cycle. `expanding` holds the targets being
-    /// expanded around it.
     fn reaches_cycle(
         &self,
         element: NodeId,
@@ -110,8 +101,6 @@ impl<T> Document<T> {
         cycle
     }
 
-    /// The SVG `use` elements of `root`'s light subtree, `root` included,
-    /// in tree order.
     fn collect_uses(&self, root: NodeId, out: &mut Vec<NodeId>) {
         let node = self.live(root);
         if is_use(node) {
@@ -122,8 +111,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Gives the `use` `element`, `depth` deep, its instance, and the `use`s
-    /// inside the instance theirs. The expansion was checked for cycles.
     fn instantiate(
         &mut self,
         element: NodeId,
@@ -146,8 +133,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Appends a deep clone of `source` (`depth` deep once placed) to
-    /// `parent`, recording the clones of `use` elements with their depth.
     fn clone_into(
         &mut self,
         source: NodeId,

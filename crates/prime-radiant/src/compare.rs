@@ -16,18 +16,12 @@
 
 use crate::image::Image;
 
-/// Tolerances for one comparison.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompareOptions {
-    /// Per-pixel YIQ sensitivity in `0.0..=1.0`; smaller is stricter.
     pub threshold: f64,
-    /// Count anti-aliased pixels as differences instead of ignoring them.
     pub include_anti_aliasing: bool,
-    /// Absolute budget of differing pixels.
     pub max_diff_pixels: Option<usize>,
-    /// Budget as a fraction of the image, in `0.0..=1.0`.
     pub max_diff_pixel_ratio: Option<f64>,
-    /// Visibility of unchanged source pixels in the diff, in `0.0..=1.0`.
     pub diff_background_alpha: f64,
 }
 
@@ -62,8 +56,6 @@ impl CompareOptions {
         self
     }
 
-    /// The number of differing pixels this comparison tolerates over an image
-    /// of `pixel_count` pixels.
     #[must_use]
     pub fn budget(self, pixel_count: usize) -> usize {
         #[allow(
@@ -83,28 +75,20 @@ impl CompareOptions {
     }
 }
 
-/// What a comparison found.
 #[derive(Debug)]
 pub struct Comparison {
-    /// Pixels that differ beyond `threshold` and are not anti-aliasing.
     pub diff_pixels: usize,
-    /// Pixels excluded as anti-aliasing artifacts.
     pub anti_aliased_pixels: usize,
-    /// The tolerated budget this comparison was measured against.
     pub budget: usize,
-    /// A visualization: unchanged content dimmed to gray, real differences in
-    /// red, anti-aliasing in yellow.
     pub diff: Image,
 }
 
 impl Comparison {
-    /// Whether the two images matched within the budget.
     #[must_use]
     pub const fn is_match(&self) -> bool {
         self.diff_pixels <= self.budget
     }
 
-    /// `diff_pixels` as a fraction of the compared area.
     #[must_use]
     pub fn diff_ratio(&self) -> f64 {
         let total = self.diff.pixel_count();
@@ -127,8 +111,6 @@ const MAX_YIQ_DELTA: f64 = 35215.0;
 const DIFF_COLOR: [u8; 3] = [255, 0, 0];
 const ANTI_ALIAS_COLOR: [u8; 3] = [255, 255, 0];
 
-/// Compares two same-sized images.
-/// Panics if the image sizes differ.
 #[must_use]
 pub fn compare(expected: &Image, actual: &Image, options: CompareOptions) -> Comparison {
     assert!(
@@ -435,17 +417,14 @@ mod tests {
 
         let result = compare(&expected, &actual, CompareOptions::default());
         assert_eq!(result.diff_pixels, 1);
-        // Pixel 0 matched: dimmed gray with equal channels.
         let diff = result.diff.pixels();
         assert_eq!(diff[0], diff[1]);
         assert_eq!(diff[1], diff[2]);
-        // Pixel 1 differed: solid red.
         assert_eq!(&diff[4..8], &[255, 0, 0, 255]);
     }
 
     #[test]
     fn anti_aliasing_on_an_edge_is_excluded_from_the_count() {
-        // Models two rasterizers disagreeing on one anti-aliased edge column.
         const WIDTH: u32 = 5;
         const HEIGHT: u32 = 5;
         let build = |edge: u8| {
@@ -468,7 +447,6 @@ mod tests {
         assert!(result.anti_aliased_pixels > 0);
         assert!(result.is_match());
 
-        // With detection off, the same change is a plain difference.
         let strict = CompareOptions {
             include_anti_aliasing: true,
             ..CompareOptions::default()
@@ -478,7 +456,6 @@ mod tests {
         assert_eq!(result.anti_aliased_pixels, 0);
     }
 
-    /// Verifies the neighbour-order tie break against Playwright.
     #[test]
     fn tie_breaking_matches_playwright_neighbour_order() {
         let build = |top_left: u8| {
@@ -503,7 +480,6 @@ mod tests {
                 "threshold {threshold}: pixelmatch reports no differences here"
             );
             assert_eq!(result.anti_aliased_pixels, 1, "threshold {threshold}");
-            // Playwright paints that pixel yellow, not red.
             assert_eq!(&result.diff.pixels()[0..4], &[255, 255, 0, 255]);
         }
     }

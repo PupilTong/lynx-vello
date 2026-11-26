@@ -73,25 +73,16 @@ use crate::main::workers::WorkerFactory;
 use crate::resource::{LoadedSource, StyleSheetSource};
 use crate::view::NoWakeup;
 
-/// Solid em squares, so a run's advance is its glyph count times its font
-/// size and every metric below is an exact number rather than a tolerance.
 const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// A same-thread window onto the realm-owned document, so a replica can read
-/// back what script built without going through the runtime's own methods —
-/// the stand-in for the `rootDom.querySelector` the ported tests use.
 struct DocumentProbe {
     slot: Rc<RefCell<DocumentSlot>>,
-    // These replicas exercise only MTS. Keep the worker boundary's far ends
-    // open so the realm's own boot succeeds.
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
-    /// The engine thread the realm was opened with, held for its life.
     _thread: Rc<JsThread>,
 }
 
 impl DocumentProbe {
-    /// The document the realm's boot module created.
     fn tree(&self) -> RefMut<'_, LynxDocument> {
         RefMut::filter_map(self.slot.borrow_mut(), |slot| slot.document.as_mut())
             .ok()
@@ -99,7 +90,6 @@ impl DocumentProbe {
     }
 }
 
-/// A runtime over a document that can shape text.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let mut text = terminus::link::TextContext::new();
     assert_eq!(
@@ -113,10 +103,6 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     runtime_over(ingredients)
 }
 
-/// The same, booted over `card` with the card's own stylesheet — the
-/// `styleInfo` half of a bundle, which the Element PAPI never carries. It is
-/// mounted the way a view's fetched sheets are, on the document boot created,
-/// and here before the entry runs.
 fn text_card_with_author_css(
     css: &str,
     card: &str,
@@ -163,9 +149,6 @@ fn runtime_over(
     (js_runtime, runtime, probe)
 }
 
-/// Every descendant of `root` in document order — the sequence
-/// `querySelectorAll` walks, which is what the ported counting assertions
-/// depend on.
 fn descendants(
     tree: &LynxDocument,
     root: terminus::link::NodeId,
@@ -181,9 +164,6 @@ fn descendants(
     }
 }
 
-/// What every `raw-text` under `root` currently carries, in document order.
-/// The ported tests read content off the carrier's `text` attribute rather
-/// than off `textContent`, so this is the same query they make.
 fn carrier_contents(tree: &LynxDocument, root: terminus::link::NodeId) -> Vec<String> {
     let mut ids = Vec::new();
     descendants(tree, root, &mut ids);
@@ -198,8 +178,6 @@ fn carrier_contents(tree: &LynxDocument, root: terminus::link::NodeId) -> Vec<St
         .collect()
 }
 
-/// The element script gave `id`, found without the test having to know which
-/// packed handle the PAPI minted for it.
 fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::link::NodeId {
     let page = tree.document_element().id();
     let mut ids = vec![page];
@@ -214,12 +192,10 @@ fn element_with_id(tree: &LynxDocument, id: &str) -> terminus::link::NodeId {
         .unwrap_or_else(|| panic!("no element carries the id {id:?}"))
 }
 
-/// The computed colour of a live element.
 fn color(tree: &LynxDocument, element: terminus::link::NodeId) -> AbsoluteColor {
     computed(tree, element).get_color().solid_color()
 }
 
-/// The computed font size, in CSS pixels.
 fn font_size(tree: &LynxDocument, element: terminus::link::NodeId) -> f32 {
     computed(tree, element)
         .slow_clone_font_size()
@@ -245,13 +221,6 @@ fn rgb(red: u8, green: u8, blue: u8) -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(red, green, blue, 1.0)
 }
 
-/// Replicates `web-core/element-apis/__CreateText`
-/// (`web-platform/web-core/tests/element-apis.spec.ts:529`): the node
-/// `__CreateText` mints answers `__GetTag` with the Lynx tag `text`.
-///
-/// The source test leaves the node detached; this boot flushes an element
-/// tree, so the replica hangs it under the page. That is the only change —
-/// the assertion is still `__GetTag` on what `__CreateText(0)` returned.
 #[test]
 fn create_text_mints_an_element_tagged_text() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -289,10 +258,6 @@ fn create_text_mints_an_element_tagged_text() {
     );
 }
 
-/// Replicates `web-core/element-apis/__CreateRawText`
-/// (`web-platform/web-core/tests/element-apis.spec.ts:539`): a carrier's tag
-/// is `raw-text` and its constructor argument lands on the `text` attribute
-/// — Lynx writes a run as an attribute, not as character data.
 #[test]
 fn create_raw_text_carries_its_content_as_the_text_attribute() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -329,12 +294,6 @@ fn create_raw_text_carries_its_content_as_the_text_attribute() {
     assert_eq!(carrier_contents(&tree, page), vec!["content".to_owned()]);
 }
 
-/// Replicates `web-core/testing-library-port/should create and append text
-/// with raw text`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:94`): the
-/// canonical construction path — `__CreateText` + `__CreateRawText` +
-/// `__AppendElement`, flushed — produces one text element holding one
-/// carrier, and the carrier's string is what the paragraph measures.
 #[test]
 fn a_text_and_its_carrier_survive_a_flush_as_one_measured_paragraph() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -390,8 +349,6 @@ fn a_text_and_its_carrier_survive_a_flush_as_one_measured_paragraph() {
         vec!["Text Element".to_owned()],
         "one carrier, holding the whole string"
     );
-    // Twelve Ahem em squares at 20px. The carrier reflects into a run the
-    // text element's paragraph owns, so the measurement lives on the element.
     let measured = tree.text_block_size(text).expect("a committed paragraph");
     assert!(
         (measured.width - 240.0).abs() < f32::EPSILON,
@@ -399,12 +356,6 @@ fn a_text_and_its_carrier_survive_a_flush_as_one_measured_paragraph() {
     );
 }
 
-/// Replicates `web-core/testing-library-port/text should work with
-/// SetAttribute`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:151`):
-/// `__SetAttribute(carrier, 'text', ...)` — the call `ReactLynx`'s compiled
-/// update slots emit — fully replaces the constructor-supplied content
-/// rather than appending to it.
 #[test]
 fn setting_the_text_attribute_replaces_the_constructor_supplied_content() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -455,10 +406,6 @@ fn setting_the_text_attribute_replaces_the_constructor_supplied_content() {
          — crates/bobcat-core/src/main/tree/raw_text.rs:1-11 — so the write \
          above is the whole of the content, with nothing left behind it"
     );
-    // Eleven em squares: the shorter 'raw-text' is gone from the paragraph.
-    // With no DOM text child to read, this measurement is where the new value
-    // is observed reaching the run: the replaced 'raw-text' is eight units and
-    // would measure 160.
     let measured = tree.text_block_size(text).expect("a committed paragraph");
     assert!(
         (measured.width - 220.0).abs() < f32::EPSILON,
@@ -466,11 +413,6 @@ fn setting_the_text_attribute_replaces_the_constructor_supplied_content() {
     );
 }
 
-/// Replicates `web-core/testing-library-port/should handle empty text
-/// content`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:169`): a
-/// childless `text` still materialises as an element, reports zero children,
-/// and contributes no content — nothing synthesises a placeholder run.
 #[test]
 fn a_childless_text_exists_and_carries_no_content() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -521,9 +463,6 @@ fn a_childless_text_exists_and_carries_no_content() {
     );
 }
 
-/// Replicates `web-core/testing-library-port/should be case sensitive`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:181`): nothing
-/// on the carrier path case-folds a run.
 #[test]
 fn raw_text_content_round_trips_with_its_case_intact() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -568,20 +507,6 @@ fn raw_text_content_round_trips_with_its_case_intact() {
     );
 }
 
-/// Replicates `web-core/testing-library-port/to-have-text-content: handles
-/// positive test cases`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:229`): a
-/// tagged `text` is findable, and its content is read back off the carrier's
-/// `text` attribute — the source test's `textContent` assertion is commented
-/// out precisely because content lives on the attribute.
-///
-/// The source tags the element with `__AddDataset(text0, 'testid', ...)` and
-/// then finds it with a `[data-testid=…]` selector, and so does the replica:
-/// `__AddDataset` files the typed value in the realm and reflects it as the
-/// node's `data-testid` attribute (`setDatasetValue` in
-/// `packages/bobcat-element/src/element-papi.ts`), which is what the
-/// document's selector engine matches. `Document::query_selector` from the
-/// page root is the stand-in for the source's `rootDom.querySelector`.
 #[test]
 fn a_tagged_text_is_found_and_reads_its_content_back() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -615,14 +540,6 @@ fn a_tagged_text_is_found_and_reads_its_content_back() {
     assert_eq!(carrier_contents(&tree, text), vec!["2".to_owned()]);
 }
 
-/// Replicates `web-core/testing-library-port/to-have-text-content: can
-/// handle multiple levels`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:259`): the
-/// carrier is reachable as a *descendant* of the id'd `text`, not only by a
-/// direct-child lookup.
-///
-/// The run itself is a text node rather than an element child, which is why
-/// the descendant walk stops at the carrier and the run is read through it.
 #[test]
 fn a_carrier_is_reachable_as_a_descendant_of_the_id_d_text() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -651,11 +568,6 @@ fn a_carrier_is_reachable_as_a_descendant_of_the_id_d_text() {
     );
 }
 
-/// Replicates `web-core/testing-library-port/to-have-text-content: can
-/// handle multiple levels with content spread across descendants`
-/// (`web-platform/web-core/tests/testing-library-port.spec.ts:273`): two
-/// sibling `text` elements under one `view` yield exactly two carriers, in
-/// document order, with nothing merged or reordered.
 #[test]
 fn content_spread_across_sibling_texts_keeps_its_count_and_order() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -691,25 +603,6 @@ fn content_spread_across_sibling_texts_keeps_its_count_and_order() {
     );
 }
 
-/// Replicates `web-core/server-ssr-bulk/__SetInlineStyles object form`
-/// (`web-platform/web-core/tests/server-ssr-bulk.spec.ts:10`): the record
-/// form of `__SetInlineStyles` takes kebab-case keys and passes the text
-/// declarations through with no unit transform and no property rename.
-///
-/// The source asserts the SSR-emitted HTML string (`color:red;`,
-/// `font-size:16px;`, `margin-top:10px;`). There is no SSR serializer here,
-/// so the replica asserts the same declarations where they end up instead:
-/// the computed colour and font size, and the 10px the margin pushes the box
-/// down by.
-///
-/// 16px is also stylo's own default font size
-/// (`vendor/stylo/style/values/specified/font.rs`, `FONT_MEDIUM_PX`), so
-/// asserting it against a bare document would pass just as well if the record
-/// form silently dropped the key. The card therefore declares
-/// `page { font-size: 32px }`: 32px is what the element inherits when the
-/// declaration does not arrive, and the run under the element re-states the
-/// same fact in layout — four Ahem em squares are 64px wide at 16px and
-/// 128px wide at 32px.
 #[test]
 fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
     let (_js_runtime, _runtime, elements) = text_card_with_author_css(
@@ -740,9 +633,6 @@ fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
 
     let tree = elements.tree();
     let element = element_with_id(&tree, "test-bulk");
-    // The contrast itself has to be live, or the 16px below would pass on
-    // stylo's default just as it did before: the page really does hand 32px
-    // down, so 16px on the element can only have come from the record.
     assert!(
         (font_size(&tree, tree.document_element().id()) - 32.0).abs() < f32::EPSILON,
         "the card's own sheet reached the tree, got {}px on the page",
@@ -774,11 +664,6 @@ fn the_record_form_of_set_inline_styles_keeps_kebab_case_declarations() {
     );
 }
 
-/// The `text/dynamic-text-style-update` card, built once and parameterised
-/// by the one thing the two replicas below differ in: how a node is given
-/// its string. `write_content` is the body of a `setContent(node, string)`
-/// arrow function, so everything else — the five nodes, the two classes, the
-/// two inline blocks, the flush and the swap — is shared verbatim.
 fn dynamic_text_style_update_card(
     write_content: &str,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
@@ -827,9 +712,6 @@ fn dynamic_text_style_update_card(
     )
 }
 
-/// The six cascade facts the swap must produce: each class swap and each
-/// inline-style swap *replaces* the block it stands for rather than merging
-/// into it, so the declaration the old value carried is gone.
 fn assert_dynamic_style_swap_replaced_the_declarations(document: &LynxDocument) {
     let control = element_with_id(document, "control");
     let one = element_with_id(document, "one");
@@ -867,8 +749,6 @@ fn assert_dynamic_style_swap_replaced_the_declarations(document: &LynxDocument) 
     );
 }
 
-/// Every node carries a ten-character string, so the paragraph each one
-/// measures is ten Ahem em squares wide at whatever font size survived.
 fn assert_each_node_measures_ten_em_squares(tree: &LynxDocument) {
     for name in ["control", "one", "two", "three", "four"] {
         let element = element_with_id(tree, name);
@@ -884,27 +764,6 @@ fn assert_each_node_measures_ten_em_squares(tree: &LynxDocument) {
     }
 }
 
-/// Replicates `text/dynamic-text-style-update`
-/// (`web-platform/web-tests/dist/basic-element-text-dynamic-text-style-update`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2749`): re-styling live `text`
-/// nodes — a class swap through `__SetClasses` and an inline-style swap
-/// through `__SetInlineStyles` — fully *replaces* the previous declarations
-/// instead of merging with them, and the paragraphs re-measure.
-///
-/// This is the fixture-faithful half: the card writes each node's content the
-/// way the `ReactLynx` compiler collapses a static text child —
-/// `__SetAttribute(textElement, 'text', ...)` on the `text` element itself,
-/// with no carrier. web-core implements that as a real custom-element
-/// behaviour (the `RawTextAttributes` mixin), and this engine reaches the same
-/// rendering through `text[text] { content: attr(text); }`
-/// (`crates/bobcat-core/src/main/tree/text.rs:126`), so all four nodes render
-/// their string and the paragraphs measure.
-///
-/// Its twin
-/// `swapping_a_text_s_class_and_inline_style_replaces_its_declarations_with_carriers`
-/// runs the identical card over the other construction — a `raw-text` carrier
-/// per node — and makes the same assertions, so the case is pinned on both
-/// paths.
 #[test]
 fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations() {
     let (_js_runtime, _runtime, elements) =
@@ -914,14 +773,6 @@ fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations() {
     assert_each_node_measures_ten_em_squares(&tree);
 }
 
-/// The twin of the case above: the same card, the same swap, the same
-/// assertions, with each node's string delivered through a `raw-text`
-/// carrier instead of through the element's own `text` attribute.
-///
-/// The two constructions are separate UA rules — `text[text]` at
-/// `crates/bobcat-core/src/main/tree/text.rs:126` and `raw-text` at
-/// `crates/bobcat-core/src/main/tree/raw_text.rs:10` — so the pair states
-/// that the cascade swap is observed through either one.
 #[test]
 fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations_with_carriers() {
     let (_js_runtime, _runtime, elements) =
@@ -931,12 +782,6 @@ fn swapping_a_text_s_class_and_inline_style_replaces_its_declarations_with_carri
     assert_each_node_measures_ten_em_squares(&tree);
 }
 
-/// The `text/maxline-with-setData` card: a `text` carrying
-/// `text-maxlength="5"` is flushed while its dynamic child slot is still
-/// empty, and the content arrives afterwards, the way a `setData` a second
-/// later delivers it. `overflow`, when not empty, is the `text-overflow` the
-/// card declares — the fixture itself declares none, and this engine's
-/// truncation marker is gated on it.
 fn maxlength_with_set_data_card(
     overflow: &str,
 ) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
@@ -970,8 +815,6 @@ fn maxlength_with_set_data_card(
     (js_runtime, runtime, elements)
 }
 
-/// The width of the paragraph the card's single `text` establishes.
-/// The card's paragraph as `(width, height)`, so a caller can pin both.
 fn card_paragraph_size(elements: &DocumentProbe) -> (f32, f32) {
     let tree = elements.tree();
     let text = tree
@@ -987,29 +830,6 @@ fn card_paragraph_width(elements: &DocumentProbe) -> f32 {
     card_paragraph_size(elements).0
 }
 
-/// Replicates `text/maxline-with-setData`
-/// (`web-platform/web-tests/dist/basic-element-text-maxline-with-setData`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2783`), the truncation-marker half:
-/// what `123456` under `text-maxlength="5"` ends with once the late content
-/// has been clamped.
-///
-/// web-core renders `12345...`: its marker is unconditional, served by
-/// `::after { content: "..." }` (`x-text.css:191-194`), with `text-overflow`
-/// never consulted for either truncation attribute — so the reference width is
-/// eight em squares on a card that declares no `text-overflow` at all. Native
-/// Lynx appends it unconditionally too ("Ellipsis will be appended
-/// disregarding the overflowing mode.", Android `TextRenderer.java:126-135`).
-/// This engine deliberately renders `12345` instead: the marker is gated on
-/// `text-overflow: ellipsis` (`crates/seldon/src/text/block/truncate.rs:135`),
-/// which this card leaves at its initial `clip`. On `text-maxlength` that
-/// gating matches *neither* reference; it is the intended behavior under the
-/// 2026-09-14 ruling and is recorded here rather than normalised away.
-///
-/// The gate's other side is
-/// `a_late_maxlength_clamp_ends_in_the_three_dot_tail_under_text_overflow_ellipsis`,
-/// which runs the same card with the declaration web-core does not need and
-/// does reach eight em squares. The re-clamp itself is a third half of this
-/// case: `a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush`.
 #[test]
 fn a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail() {
     let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("");
@@ -1021,16 +841,6 @@ fn a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail() {
     );
 }
 
-/// The gated-open counterpart of
-/// `a_late_maxlength_clamp_ends_bare_where_web_core_ends_in_a_tail`: the same
-/// card with `text-overflow: ellipsis` declared, which is the one state in
-/// which this engine emits the marker
-/// (`crates/seldon/src/text/block/truncate.rs:135`).
-///
-/// This reproduces what web-core renders for the fixture unconditionally, and
-/// keeps the marker machinery covered from the PAPI side: without it a
-/// regression that stopped emitting markers at all would read as the ruled
-/// behavior everywhere and go unnoticed.
 #[test]
 fn a_late_maxlength_clamp_ends_in_the_three_dot_tail_under_text_overflow_ellipsis() {
     let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("ellipsis");
@@ -1041,22 +851,12 @@ fn a_late_maxlength_clamp_ends_in_the_three_dot_tail_under_text_overflow_ellipsi
          each — the maxlength candidate is never backed off, so the dots are \
          added to the five rather than taken out of them — got {width}"
     );
-    // The height the pre-ruling test asserted, kept here: the tail rides the
-    // cut line rather than opening a second one.
     assert!(
         (height - 21.0).abs() < f32::EPSILON,
         "one line of the card's 21px line-height — got {height}"
     );
 }
 
-/// The same case's re-clamp half: the clamp established at the first flush,
-/// when the child slot was empty, still applies to content appended after
-/// it.
-///
-/// Width is the discriminator, not line count — an unclamped `123456` is
-/// 120px wide and would still sit on one line. Five kept em squares at 20px
-/// is 100px. The clamp is a layout cut rather than an edit, so the carrier
-/// still holds the whole string.
 #[test]
 fn a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush() {
     let (_js_runtime, _runtime, elements) = maxlength_with_set_data_card("");
@@ -1082,22 +882,6 @@ fn a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush() {
     );
 }
 
-/// Replicates `x-text/event-layoutchange`
-/// (`web-elements/tests/fixtures/x-text/event-layoutchange.html`,
-/// `web-elements/tests/web-elements.spec.ts:420`): widening a `text` from
-/// 100px to 200px dispatches one `layoutchange` whose detail carries the
-/// border-box geometry as numbers, plus the element's id.
-///
-/// The x-view case at `web-elements.spec.ts:105` makes the identical
-/// assertion, so a `text` has to take part in the same layout-observation
-/// path as every other Lynx box.
-///
-/// Boot's own flush commits the widened box, so the first observation after
-/// the registration is already the 200px one: the resize delivery
-/// (`MainThreadRuntime::notify_resize_observers`), run here as the page's
-/// posted entry runs it, dispatches one `layoutchange` carrying it. The
-/// detail also carries `dataset`, which web-core's does not
-/// (`docs/tracking/deviations.md`); the element has none, so it is `{}`.
 #[test]
 fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -1163,7 +947,6 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
         )
         .expect("verification");
 
-    // The detail described the box's own geometry.
     let tree = elements.tree();
     let target = element_with_id(&tree, "target");
     let box_ = tree.rounded_layout(target).expect("a committed box");
@@ -1175,22 +958,6 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
     );
 }
 
-/// Replicates `text/bindlayout`
-/// (`web-platform/web-tests/dist/basic-element-text-bindlayout`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2775`): a `text` that wraps reports
-/// its line count and, per line, the source range it covers and how many
-/// ellipsis units it ends with.
-///
-/// The source test is permanently skipped upstream (`test.skip(true, 'the
-/// text layout event should be improved')`) and has no golden, so the
-/// expectation here is stated from the payload the handler destructures:
-/// `detail.lineCount` and `detail.lines[i].{start, end, ellipsisCount}`. The
-/// card registers through `__AddEvent(el, 'bindEvent', 'layout', ...)`; the
-/// replica registers the same name through `__AddEventListener`, which needs
-/// no worklet runtime to deliver to. The listener is filed before boot's
-/// flush lays the paragraph out, so that first committing run reports it;
-/// the epilogue's drain (`MainThreadRuntime::queue_text_layout_events`) and
-/// the component-event delivery are run here as the page runs them.
 #[test]
 fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -1250,7 +1017,6 @@ fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
         )
         .expect("verification");
 
-    // The wrap the payload describes is real: two 21px lines.
     let tree = elements.tree();
     let text = tree
         .document_element()

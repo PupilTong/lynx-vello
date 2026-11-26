@@ -11,36 +11,22 @@ use super::CanvasError;
 use crate::kurbo::{self, Affine, BezPath, PathEl, PathSeg, Point, Vec2};
 use crate::svg::shapes::{arc_tolerance, path_data};
 
-/// A `Path2D`: subpaths of lines and curves in its own coordinates.
 #[derive(Clone, Debug, Default)]
 pub struct Path {
     pub(crate) elements: BezPath,
-    /// The last point.
     current: Point,
-    /// The first point of the last subpath.
     start: Point,
-    /// The last subpath holds only `current`, which no element records yet:
-    /// the next segment starts with a move to it.
     pending: bool,
 }
 
-/// Arc flattening tolerance, in user units at scale 1, for an arc whose
-/// radius is under 1e6 units at that scale; a larger arc is flattened at a
-/// fixed fraction of its radius ([`arc_tolerance`]), which bounds its
-/// cubics.
 const ARC_TOLERANCE: f64 = 1e-3;
 
 impl Path {
-    /// An empty path.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `new Path2D(d)`: the SVG path data `d`. Data with an error keeps
-    /// the segments before the first one in error, as SVG's path data
-    /// error handling asks; data that does not start with a move is an
-    /// empty path.
     #[must_use]
     pub fn from_svg(data: &str) -> Self {
         let mut path = Self::new();
@@ -56,8 +42,6 @@ impl Path {
         path
     }
 
-    /// `addPath(path, transform)`, the transform as `[a, b, c, d, e, f]`.
-    /// A non-finite transform adds nothing.
     pub fn add_path(&mut self, path: &Self, transform: [f64; 6]) {
         if !transform.iter().all(|value| value.is_finite()) || !path.has_subpaths() {
             return;
@@ -75,8 +59,6 @@ impl Path {
             }
             self.pending = false;
         }
-        // "Create a new subpath in a with (x, y) as the only point", where
-        // (x, y) is the last point of the added path's last subpath.
         let last = transform * path.current;
         self.current = last;
         self.start = last;
@@ -92,7 +74,6 @@ impl Path {
         self.pending = false;
     }
 
-    /// The path with every subpath closed, for a point-in-fill test.
     pub(crate) fn closed(&self) -> BezPath {
         let mut closed = BezPath::new();
         let mut open = false;
@@ -117,7 +98,6 @@ impl Path {
         }
     }
 
-    /// HTML "ensure there is a subpath" for `p`.
     fn ensure_subpath(&mut self, p: Point) {
         if !self.has_subpaths() {
             self.move_to_point(p);
@@ -154,7 +134,6 @@ impl Path {
         self.current = p;
     }
 
-    /// `closePath`.
     pub fn close_path(&mut self) {
         if !self.has_subpaths() {
             return;
@@ -208,7 +187,6 @@ impl Path {
         self.close_path();
     }
 
-    /// `ellipse`, which `arc` is with equal radii.
     #[expect(clippy::too_many_arguments, reason = "the IDL method's arguments")]
     pub(crate) fn ellipse_with(
         &mut self,
@@ -231,9 +209,6 @@ impl Path {
         if rx < 0.0 || ry < 0.0 {
             return Err(CanvasError::IndexSize);
         }
-        // HTML "ellipse": a sweep of 2π or more the given way is the whole
-        // ellipse; otherwise the arc runs from start to end the given way,
-        // never more than one turn.
         let sweep = if anticlockwise {
             if start - end >= TAU {
                 -TAU
@@ -250,8 +225,6 @@ impl Path {
         Ok(())
     }
 
-    /// Adds a line from the last point to `arc`'s start (or starts a
-    /// subpath there), then the arc.
     fn append_arc(&mut self, t: Affine, arc: &kurbo::Arc) {
         let start = t * arc_point(arc, arc.start_angle);
         if self.has_subpaths() {
@@ -266,8 +239,6 @@ impl Path {
         }
     }
 
-    /// `arcTo`. `t` maps user space to storage space; the last point is
-    /// taken back to user space through its inverse.
     pub(crate) fn arc_to_with(
         &mut self,
         t: Affine,
@@ -293,8 +264,6 @@ impl Path {
             self.line_to_point(t * p1);
             return Ok(());
         }
-        // The circle of `radius` tangent to both rays from p1 has its center
-        // on their bisector.
         let (u0, u2) = (d0.normalize(), d2.normalize());
         let half = u0.dot(u2).clamp(-1.0, 1.0).acos() / 2.0;
         let along = radius / half.tan();
@@ -303,14 +272,12 @@ impl Path {
         let t2 = p1 + u2 * along;
         let a0 = (t0 - center).atan2();
         let a2 = (t2 - center).atan2();
-        // The shorter way round.
         let sweep = (a2 - a0 + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
         let arc = kurbo::Arc::new(center, (radius, radius), a0, sweep, 0.0);
         self.append_arc(t, &arc);
         Ok(())
     }
 
-    /// `roundRect`, each radius as `[x, y]` (a number `r` is `[r, r]`).
     pub(crate) fn round_rect_with(
         &mut self,
         t: Affine,
@@ -333,15 +300,12 @@ impl Path {
             return Err(CanvasError::Range);
         }
         let r = |i: usize| Vec2::new(radii[i][0], radii[i][1]);
-        // CSS border-radius order.
         let [mut ul, mut ur, mut lr, mut ll] = match radii.len() {
             4 => [r(0), r(1), r(2), r(3)],
             3 => [r(0), r(1), r(2), r(1)],
             2 => [r(0), r(1), r(0), r(1)],
             _ => [r(0); 4],
         };
-        // Scale every radius down by one factor so no two corner curves on
-        // an edge overlap.
         let (aw, ah) = (w.abs(), h.abs());
         let scale = [
             aw / (ul.x + ur.x),
@@ -356,8 +320,6 @@ impl Path {
                 *corner *= scale;
             }
         }
-        // A negative width or height mirrors the rectangle: build it with
-        // positive extents and reflect it across its center.
         let mut flip = Affine::IDENTITY;
         let (mut x0, mut y0) = (x, y);
         if w < 0.0 {
@@ -394,14 +356,10 @@ impl Path {
     }
 }
 
-/// The tolerance `arc` is turned into cubics at under `t`: [`ARC_TOLERANCE`]
-/// in canvas units, never under the fraction of the radius that bounds the
-/// cubics ([`arc_tolerance`]).
 fn tolerance(t: Affine, arc: &kurbo::Arc) -> f64 {
     arc_tolerance(arc, ARC_TOLERANCE / scale_of(t).max(f64::MIN_POSITIVE))
 }
 
-/// The point at `angle` on `arc`'s ellipse.
 fn arc_point(arc: &kurbo::Arc, angle: f64) -> Point {
     let (sin, cos) = angle.sin_cos();
     let local = Vec2::new(arc.radii.x * cos, arc.radii.y * sin);
@@ -412,7 +370,6 @@ fn pt(p: [f64; 2]) -> Point {
     Point::new(p[0], p[1])
 }
 
-/// The larger factor `t` stretches a unit vector by, roughly.
 pub(super) fn scale_of(t: Affine) -> f64 {
     let [a, b, c, d, _, _] = t.as_coeffs();
     (a * a + b * b).max(c * c + d * d).sqrt()
@@ -421,25 +378,21 @@ pub(super) fn scale_of(t: Affine) -> f64 {
 macro_rules! builder_methods {
     ($ty:ty, $transform:expr, $path:ident) => {
         impl $ty {
-            /// `moveTo`.
             pub fn move_to(&mut self, x: f64, y: f64) {
                 let t = ($transform)(&*self);
                 self.$path().move_to_with(t, x, y);
             }
 
-            /// `lineTo`.
             pub fn line_to(&mut self, x: f64, y: f64) {
                 let t = ($transform)(&*self);
                 self.$path().line_to_with(t, x, y);
             }
 
-            /// `quadraticCurveTo`.
             pub fn quadratic_curve_to(&mut self, cpx: f64, cpy: f64, x: f64, y: f64) {
                 let t = ($transform)(&*self);
                 self.$path().quadratic_curve_to_with(t, [cpx, cpy], [x, y]);
             }
 
-            /// `bezierCurveTo`.
             pub fn bezier_curve_to(
                 &mut self,
                 cp1x: f64,
@@ -454,7 +407,6 @@ macro_rules! builder_methods {
                     .bezier_curve_to_with(t, [cp1x, cp1y], [cp2x, cp2y], [x, y]);
             }
 
-            /// `arc`. `IndexSize` for a negative radius.
             pub fn arc(
                 &mut self,
                 x: f64,
@@ -478,7 +430,6 @@ macro_rules! builder_methods {
                 )
             }
 
-            /// `arcTo`. `IndexSize` for a negative radius.
             pub fn arc_to(
                 &mut self,
                 x1: f64,
@@ -491,7 +442,6 @@ macro_rules! builder_methods {
                 self.$path().arc_to_with(t, [x1, y1], [x2, y2], radius)
             }
 
-            /// `ellipse`. `IndexSize` for a negative radius.
             #[expect(clippy::too_many_arguments, reason = "the IDL method's arguments")]
             pub fn ellipse(
                 &mut self,
@@ -518,15 +468,11 @@ macro_rules! builder_methods {
                 )
             }
 
-            /// `rect`.
             pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
                 let t = ($transform)(&*self);
                 self.$path().rect_with(t, x, y, w, h);
             }
 
-            /// `roundRect`, each radius as `[x, y]`: a number `r` is
-            /// `[r, r]`, a `DOMPointInit` is `[x, y]`. `Range` for a list
-            /// of other than one to four radii or a negative radius.
             pub fn round_rect(
                 &mut self,
                 x: f64,
@@ -552,9 +498,6 @@ impl Path {
 
 builder_methods!(Path, |_: &Path| Affine::IDENTITY, own);
 
-/// The length of `path`, for counting dashes: exact for lines, and for a
-/// curve the mean of its chord and its control polygon, which is never
-/// under half its arc length (the polygon is never shorter than the arc).
 pub(super) fn length(path: impl IntoIterator<Item = PathEl>) -> f64 {
     kurbo::segments(path)
         .map(|segment| match segment {
@@ -588,8 +531,6 @@ mod tests {
             .count()
     }
 
-    /// Every arc, whatever its radius or the transform's scale, is a
-    /// bounded number of cubics: a full turn at most 33.
     #[test]
     fn an_arc_is_a_bounded_number_of_cubics() {
         let mut path = Path::new();
@@ -620,8 +561,6 @@ mod tests {
         assert!(cubics(&svg) <= 33, "{}", cubics(&svg));
     }
 
-    /// An ordinary radius flattens as before: at scale 1, a radius of 10
-    /// is the cubics a tolerance of 1e-3 gives.
     #[test]
     fn an_ordinary_arc_keeps_its_tolerance() {
         let mut path = Path::new();

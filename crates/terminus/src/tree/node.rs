@@ -29,8 +29,6 @@ use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
-/// [`StylingData::animates`] bits: a current or in-effect animation or
-/// transition on the element names `opacity`, or `transform`.
 pub(crate) const ANIMATES_OPACITY: u8 = 1 << 0;
 pub(crate) const ANIMATES_TRANSFORM: u8 = 1 << 1;
 
@@ -47,24 +45,11 @@ enum NodeData {
     ShadowRoot(Box<ShadowRootData>),
 }
 
-/// Inline Stylo traversal and invalidation state.
 pub(crate) struct StylingData {
     pub(crate) selector_flags: AtomicUsize,
     pub(crate) dirty_descendants: AtomicBool,
-    /// The animation-only counterpart of `dirty_descendants`. Stylo keeps the
-    /// two apart so an animation tick can descend to the animating elements
-    /// without consuming the dirty bits a pending normal restyle depends on.
     pub(crate) animation_dirty_descendants: AtomicBool,
-    /// Whether this element owns any animation or transition state. Stylo
-    /// consults it before every `animation_declarations` call during selector
-    /// matching, so it has to answer without touching the document's animation
-    /// map.
     pub(crate) may_have_animations: AtomicBool,
-    /// [`ANIMATES_OPACITY`] and [`ANIMATES_TRANSFORM`]. Web Animations makes
-    /// such an element behave as if `will-change` named the property, so the
-    /// stacking, group, Backdrop Root and containing-block rules read these
-    /// rather than the document's animation map. The animation driver owns
-    /// them.
     pub(crate) animates: AtomicU8,
     pub(crate) snapshot_flags: AtomicU8,
 }
@@ -82,13 +67,6 @@ impl Default for StylingData {
     }
 }
 
-/// What a node holds besides its tree links, boxed on the node because most
-/// nodes hold nothing.
-///
-/// Every variant is one pointer wide or narrower, so the box a text node
-/// allocates is the 16 B of its text's fat pointer: the replaced and test
-/// variants box their wider payloads a second time rather than widen every
-/// text node's allocation to theirs.
 enum NodeContent {
     Text(Box<str>),
     Replaced(Box<Replaced>),
@@ -96,31 +74,11 @@ enum NodeContent {
     Test(Box<LeafMetrics>),
 }
 
-/// A replaced element's content: the picture it presents and the natural
-/// size of that picture.
 struct Replaced {
-    /// The dimensions of the picture this element presents, as whoever put
-    /// the picture on it gave them (`Document::set_picture`), or set on
-    /// their own (`Document::set_natural_size`).
     natural_size: NaturalSize,
-    /// The picture the paint walk draws into the content box. A URL is the
-    /// image registry's own key for it, shared rather than copied, so every
-    /// element presenting one URL holds one allocation; the walk resolves it
-    /// against the registry. `None` for an element made replaced by a
-    /// natural size alone, which draws nothing.
     picture: Option<PictureKey>,
 }
 
-/// Per-node bits that each cost a padded byte of the node stride as a `bool`,
-/// and the element's custom element state.
-///
-/// Two bytes: the first eight bits filled the first, and the Container
-/// Timing bits joined the custom element state, which had a byte of its own
-/// for three values, in the second. The node has no padding to spare, so
-/// that is what keeps the stride where it was
-/// (`document_only_state_stays_out_of_the_primary_node_stride`). Held as
-/// two bytes rather than a `u16` so the pair is byte-aligned, as the two
-/// `u8` fields it replaces were.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NodeFlags([u8; 2]);
 
@@ -130,30 +88,13 @@ impl NodeFlags {
     const LYNX_TEXT: u16 = 1 << 2;
     const PLACEHOLDER_PSEUDO: u16 = 1 << 3;
     const LINE_IF_EMPTY: u16 = 1 << 4;
-    /// A `::backdrop` box's node ([`crate::tree::top_layer`]).
     pub(crate) const BACKDROP: u16 = 1 << 5;
-    /// An anonymous block box's node ([`crate::tree::anonymous`]).
     pub(crate) const ANONYMOUS: u16 = 1 << 6;
-    /// The element's layout reads no percentage basis; see
-    /// [`Node::layout_reads_percentage_basis`].
     const BASIS_FREE: u16 = 1 << 7;
-    /// The element is a Container Timing root
-    /// ([`crate::visual::container_timing`]).
     const CONTAINER_TIMING_ROOT: u16 = 1 << 8;
-    /// The element cuts its subtree out of every Container Timing root above
-    /// it (`containertimingignore`).
     const CONTAINER_TIMING_IGNORE: u16 = 1 << 9;
-    /// Blink's `SelfOrAncestorHasContainerTiming`: the node or one of its
-    /// shadow-including ancestors may be a Container Timing root. Never
-    /// stale `false`; it may stay `true` after the root above it is
-    /// unmarked or after the node moves out from under it, which costs only
-    /// an ancestor walk that finds nothing.
     const SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING: u16 = 1 << 10;
-    /// The element is in the SVG namespace rather than the HTML one
-    /// ([`crate::svg`]). Set at creation and never changed.
     const SVG_NAMESPACE: u16 = 1 << 13;
-    /// The element's [`CustomElementState`], two bits from
-    /// [`Self::CUSTOM_STATE_SHIFT`].
     const CUSTOM_STATE: u16 = 0b11 << Self::CUSTOM_STATE_SHIFT;
     const CUSTOM_STATE_SHIFT: u16 = 11;
 
@@ -161,7 +102,6 @@ impl NodeFlags {
         u16::from_le_bytes(self.0) & bit != 0
     }
 
-    /// Sets `bit` to `on`, answering what it was.
     fn set(&mut self, bit: u16, on: bool) -> bool {
         let bits = u16::from_le_bytes(self.0);
         self.0 = if on { bits | bit } else { bits & !bit }.to_le_bytes();
@@ -187,37 +127,15 @@ impl NodeFlags {
     }
 }
 
-/// A single node in a [`Document`](crate::tree::document::Document) tree.
 pub struct Node<T> {
     owner: *mut TreeArenas<T>,
-    /// This node's handle: both its identity and the arena position it
-    /// occupies, because those are now one thing. A walk that follows
-    /// `parent`/`children` indexes the arena directly — there is no id table
-    /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
     data: NodeData,
-    /// What the embedder filed this node with: `Some` for every element and
-    /// text node it created, `None` for the nodes nobody hands out — the
-    /// document node, a shadow root, a `::backdrop` box's node, an anonymous
-    /// box's. A unit payload sits in the stride's padding.
     payload: Option<T>,
 
     pub(crate) parent: Option<NodeSlot>,
     pub(crate) children: Vec<NodeSlot>,
-    /// This node's position in `parent`'s `children`, stored relative to that
-    /// parent's `child_index_base`: the position is
-    /// `child_index - parent.child_index_base`, wrapping. A sibling step reads
-    /// it instead of scanning the parent's list. Only
-    /// [`TreeArenas::insert_child`] and [`TreeArenas::remove_child`] write it.
-    /// Meaningless while `parent` is `None`, and for the two nodes `parent`
-    /// names without appearing in its `children`: a shadow root and an
-    /// anonymous box.
     pub(crate) child_index: u32,
-    /// The value every child's `child_index` is relative to. An insertion or
-    /// a removal moves either the children before it or the children after
-    /// it; moving the earlier ones changes this value and rewrites only the
-    /// children that keep their position, so a change at either end of the
-    /// list writes no sibling at all.
     pub(crate) child_index_base: u32,
     pub(crate) local_name: Option<LocalName>,
     pub(crate) classes: SmallVec<[Atom; 2]>,
@@ -226,7 +144,6 @@ pub struct Node<T> {
     pub(crate) element_state: ElementState,
 
     pub(crate) custom_definition: Option<DefinitionId>,
-    /// Its bits and the custom element state ([`Self::custom_state`]).
     flags: NodeFlags,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -242,30 +159,16 @@ pub struct Node<T> {
     content: Option<Box<NodeContent>>,
 }
 
-/// What a post-flush style swap moved on one element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent verdicts the harvest reads one by one, not a state machine"
 )]
 pub(crate) struct StyleRefresh {
-    /// Whether the element's computed style is a different `Arc` than before.
     pub(crate) changed: bool,
-    /// Whether the paragraph's effective custom-property limits changed.
-    /// These layout inputs are outside Stylo's longhand damage comparison.
     pub(crate) paragraph_limits_changed: bool,
-    /// Whether the element started or stopped establishing the containing
-    /// block of its absolute or fixed descendants. Its own relayout damage
-    /// does not reach a positioned box deeper than a child, so the harvest
-    /// hands this to [`crate::tree::document::Document::invalidate_containing_block`].
     pub(crate) containing_block_changed: bool,
-    /// Whether the boxes the element generates may have changed shape: a
-    /// first or last style, or a different `display` or `content`. Either
-    /// decides whether the element is loose text of its parent's items, a
-    /// transparent box, or a box of its own, so the anonymous boxes on both
-    /// sides of it are re-derived ([`crate::tree::anonymous`]).
     pub(crate) box_tree_changed: bool,
-    /// Whether the element had no computed style before this one.
     pub(crate) first: bool,
 }
 
@@ -314,10 +217,6 @@ impl<T> Node<T> {
         Self::new(owner, id, NodeData::Text, None, Some(text))
     }
 
-    /// An element node the tree generates rather than an embedder creates —
-    /// a `::backdrop` box's or an anonymous box's — marked by `marker`
-    /// ([`NodeFlags::BACKDROP`] or [`NodeFlags::ANONYMOUS`]). It carries no
-    /// payload.
     pub(crate) fn new_generated_element(
         owner: *mut TreeArenas<T>,
         id: NodeId,
@@ -333,8 +232,6 @@ impl<T> Node<T> {
         node
     }
 
-    /// An element in the SVG namespace ([`crate::svg`]): `local_name` keeps
-    /// its case (`linearGradient`, `clipPath`).
     pub(crate) fn new_svg_element(
         owner: *mut TreeArenas<T>,
         id: NodeId,
@@ -345,14 +242,12 @@ impl<T> Node<T> {
         node
     }
 
-    /// Files the embedder's payload on a node it creates.
     #[must_use]
     pub(crate) fn with_payload(mut self, payload: T) -> Self {
         self.payload = Some(payload);
         self
     }
 
-    /// Takes the embedder's payload off a node the arenas have freed.
     pub(crate) fn into_payload(self) -> Option<T> {
         self.payload
     }
@@ -432,16 +327,10 @@ impl<T> Node<T> {
         self.flags.get(NodeFlags::CUSTOM_SUBTREE_MAY_CONTAIN)
     }
 
-    /// Marks this node's shadow-including subtree as possibly containing a
-    /// custom element, returning whether it was already marked.
     pub(crate) fn mark_custom_subtree_may_contain(&mut self) -> bool {
         self.flags.set(NodeFlags::CUSTOM_SUBTREE_MAY_CONTAIN, true)
     }
 
-    /// Whether `tree::anonymous` may hold an override of this node's layout
-    /// children — the one test `LayoutTree::children` makes before it looks
-    /// one up. Set with the override; a stale `true` costs a lookup that
-    /// finds nothing, so only clearing it is best effort.
     #[must_use]
     pub(crate) fn may_override_children(&self) -> bool {
         self.flags.get(NodeFlags::MAY_OVERRIDE_CHILDREN)
@@ -451,58 +340,40 @@ impl<T> Node<T> {
         self.flags.set(NodeFlags::MAY_OVERRIDE_CHILDREN, may);
     }
 
-    /// Records that this element is a Lynx text element, from its custom
-    /// element definition ([`crate::tree::custom::CustomElement::is_lynx_text`]):
-    /// called once, where the element is given its definition.
     pub(crate) fn mark_lynx_text(&mut self) {
         self.flags.set(NodeFlags::LYNX_TEXT, true);
-        // A Lynx text element establishes a paragraph whatever its display
-        // is, and an element may be given its definition after its first
-        // style: the basis bit reads the kind as well as the style.
         self.refresh_basis_free();
     }
 
-    /// Whether this element's own paragraph keeps one empty line when it
-    /// has no content, whether or not it is an editing host
-    /// ([`crate::tree::document::Document::set_has_line_if_empty`]).
     pub(crate) fn has_line_if_empty(&self) -> bool {
         self.flags.get(NodeFlags::LINE_IF_EMPTY)
     }
 
-    /// Records [`Self::has_line_if_empty`], answering what it was.
     pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
     }
 
-    /// Whether this element is in the SVG namespace ([`crate::svg`]); every
-    /// other element is in the HTML namespace.
     #[must_use]
     #[inline]
     pub(crate) const fn in_svg_namespace(&self) -> bool {
         self.flags.get(NodeFlags::SVG_NAMESPACE)
     }
 
-    /// Whether this element is in the SVG namespace (the DOM's
-    /// `namespaceURI` test); every other element is in the HTML namespace.
     #[must_use]
     pub fn is_svg_element(&self) -> bool {
         self.in_svg_namespace()
     }
 
-    /// Whether this is a `::backdrop` box's node ([`crate::tree::top_layer`]).
     #[must_use]
     pub(crate) fn is_backdrop_node(&self) -> bool {
         self.flags.get(NodeFlags::BACKDROP)
     }
 
-    /// Whether this is an anonymous block box's node
-    /// ([`crate::tree::anonymous`]).
     #[must_use]
     pub(crate) fn is_anonymous_box(&self) -> bool {
         self.flags.get(NodeFlags::ANONYMOUS)
     }
 
-    /// Where the element is in the custom element lifecycle.
     #[must_use]
     pub(crate) const fn custom_state(&self) -> CustomElementState {
         self.flags.custom_state()
@@ -512,21 +383,15 @@ impl<T> Node<T> {
         self.flags.set_custom_state(state);
     }
 
-    /// Whether this element is a Container Timing root
-    /// ([`crate::visual::container_timing`]).
     #[must_use]
     pub(crate) const fn is_container_timing_root(&self) -> bool {
         self.flags.get(NodeFlags::CONTAINER_TIMING_ROOT)
     }
 
-    /// Marks or unmarks this element as a Container Timing root, answering
-    /// whether it was one.
     pub(crate) fn set_container_timing_root(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::CONTAINER_TIMING_ROOT, on)
     }
 
-    /// Whether this element cuts its subtree out of the Container Timing
-    /// roots above it (`containertimingignore`).
     #[must_use]
     pub(crate) const fn is_container_timing_ignored(&self) -> bool {
         self.flags.get(NodeFlags::CONTAINER_TIMING_IGNORE)
@@ -536,18 +401,12 @@ impl<T> Node<T> {
         self.flags.set(NodeFlags::CONTAINER_TIMING_IGNORE, on);
     }
 
-    /// Blink's `SelfOrAncestorHasContainerTiming`: this node or one of its
-    /// shadow-including ancestors may be a Container Timing root. A
-    /// conservative bit: never `false` under a root, possibly `true` where
-    /// no root is left.
     #[must_use]
     pub(crate) const fn self_or_ancestor_has_container_timing(&self) -> bool {
         self.flags
             .get(NodeFlags::SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING)
     }
 
-    /// Sets [`Self::self_or_ancestor_has_container_timing`], answering
-    /// whether it was already set.
     pub(crate) fn note_container_timing_ancestor(&mut self) -> bool {
         self.flags
             .set(NodeFlags::SELF_OR_ANCESTOR_HAS_CONTAINER_TIMING, true)
@@ -607,7 +466,6 @@ impl<T> Node<T> {
         matches!(&self.data, NodeData::Text)
     }
 
-    /// Whether this node is a shadow root.
     #[must_use]
     pub fn is_shadow_root(&self) -> bool {
         matches!(&self.data, NodeData::ShadowRoot(_))
@@ -649,8 +507,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// This node's own storage position, for a walk that is already in slot
-    /// space.
     #[must_use]
     #[inline]
     pub(crate) const fn slot(&self) -> NodeSlot {
@@ -705,14 +561,6 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// One attribute's value, as `getAttribute` reads it.
-    ///
-    /// Borrowed as stored, but for a `style` or `class` value that a write
-    /// through the parsed form left to be serialized on read
-    /// (`attribute_text`).
-    ///
-    /// The name is compared as text against each stored name, so a read mints
-    /// no atom: an atom's text is its identity within one atom set.
     #[must_use]
     pub fn attribute(&self, name: &str) -> Option<Cow<'_, str>> {
         self.attrs
@@ -728,8 +576,6 @@ impl<T> Node<T> {
             .map(|(name, stored)| self.attribute_text(name, stored))
     }
 
-    /// The value of an attribute whose text is always stored as written:
-    /// any attribute but `style` and `class` ([`Self::attribute_text`]).
     pub(crate) fn plain_attr(&self, name: &LocalName) -> Option<&str> {
         debug_assert!(
             !matches!(name.0.as_ref(), "style" | "class"),
@@ -741,17 +587,6 @@ impl<T> Node<T> {
             .find_map(|(candidate, value)| (candidate == name).then_some(value.as_str()))
     }
 
-    /// An attribute's value, from what is stored for it.
-    ///
-    /// `style` and `class` each have a parsed form — the inline declaration
-    /// block, the class list — and their text is stored only while it is not
-    /// what that form serializes to: the text a `setAttribute` wrote, kept as
-    /// written. A write through the parsed form (one inline property, an
-    /// inline-style record, a single class) and a class list written in its
-    /// canonical form store an empty value instead, and the text is then the
-    /// block's CSSOM serialization or the class list joined by single spaces —
-    /// the text that write would otherwise have stored. An empty value with
-    /// nothing parsed behind it is the empty attribute.
     pub(crate) fn attribute_text<'a>(&'a self, name: &LocalName, stored: &'a str) -> Cow<'a, str> {
         if !stored.is_empty() {
             return Cow::Borrowed(stored);
@@ -805,15 +640,12 @@ impl<T> Node<T> {
         }
     }
 
-    /// Every attribute with its value ([`Self::attribute`]), in the order
-    /// the element acquired them.
     pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, Cow<'_, str>)> {
         self.attrs
             .iter()
             .map(|(name, stored)| (name.0.as_ref(), self.attribute_text(name, stored)))
     }
 
-    /// Every attribute's name, in the order the element acquired them.
     pub fn attribute_names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.attrs.iter().map(|(name, _)| name.0.as_ref())
     }
@@ -823,16 +655,6 @@ impl<T> Node<T> {
         self.element_state
     }
 
-    /// Every field of a node, its size in bytes, and whether only an element
-    /// can ever use it.
-    ///
-    /// One node type is stored for all four kinds, so a text node carries an
-    /// element's fields without a use for any of them. Nothing in this crate
-    /// reads this; it exists so `examples/mem_harness.rs` can price that
-    /// without a mirror of the struct that would silently go stale. Read-only,
-    /// and the sizes differ between profiles — `ElementDataWrapper` carries a
-    /// debug-only borrow flag — so a census has to report which profile it ran
-    /// under.
     #[doc(hidden)]
     #[must_use]
     pub fn census_field_sizes() -> &'static [(&'static str, usize, bool)] {
@@ -852,7 +674,6 @@ impl<T> Node<T> {
             ("attrs", size_of::<Vec<(LocalName, String)>>(), true),
             ("element_state", size_of::<ElementState>(), true),
             ("custom_definition", size_of::<Option<DefinitionId>>(), true),
-            // The custom element state is two bits of `flags`.
             ("flags", size_of::<NodeFlags>(), false),
             (
                 "parsed_inline_style",
@@ -933,21 +754,6 @@ impl<T> Node<T> {
         self.has_style_data().then_some(&self.style_data)
     }
 
-    /// Swaps in the post-flush computed style, reporting what moved.
-    ///
-    /// The shaping verdict has to be taken here, while both the old and the
-    /// new style are alive: the caller only sees the new one, and the old
-    /// style structs can be freed — and their addresses reused — the moment
-    /// this returns.
-    ///
-    /// Stylo's style is read here rather than passed in, so the two `Arc`s can
-    /// be compared before either is cloned. A harvest visits every element
-    /// under a dirty ancestor, but only the ones the flush actually restyled
-    /// hold a different `Arc` than they did before, so cloning first would pay
-    /// an atomic increment and a decrement per visited element for a value
-    /// immediately dropped. Reading it here is also what makes that possible:
-    /// the comparison needs Stylo's data and the snapshot at once, and only
-    /// disjoint field borrows can hold both.
     pub(crate) fn refresh_layout_style(&mut self) -> StyleRefresh {
         let data = self
             .stylo_data_present
@@ -974,8 +780,6 @@ impl<T> Node<T> {
                     }
                 }
             }
-            // A first style has no old role to flip from: the element's
-            // descendants have never been laid out under it.
             (old, _) => StyleRefresh {
                 changed: true,
                 paragraph_limits_changed: false,
@@ -989,10 +793,6 @@ impl<T> Node<T> {
         }
         let old = std::mem::replace(snapshot, live.cloned());
         drop(data);
-        // Both roles read the element too (its root-ness, its transform
-        // animation bit, its content-visibility relevance), none of which a
-        // restyle moves, so evaluating each style against the same node
-        // isolates what the style change did.
         if let (Some(old), NodeData::Element(Some(new))) = (old, &self.data) {
             let role = |style: &ComputedValues| {
                 (
@@ -1006,32 +806,11 @@ impl<T> Node<T> {
         refresh
     }
 
-    /// Whether this element's own layout reads the percentage basis its
-    /// parent hands it ([`seldon::style::CoreStyle::reads_percentage_basis`]),
-    /// as [`crate::layout::reads_percentage_basis`] answered it for the
-    /// element's layout style.
-    ///
-    /// A bit rather than an evaluation because `seldon` asks on every cache
-    /// lookup, and the answer reads the size, min-size, max-size, margin and
-    /// padding structs. Its only inputs are the element's own layout style
-    /// and its kind (whether it is a Lynx text element), and both writers of
-    /// those re-evaluate it: the style's — the damage harvest
-    /// ([`Self::refresh_layout_style`]) and a generated box's
-    /// [`Self::replace_pseudo_style`] — and the kind's, [`Self::mark_lynx_text`].
-    /// Nothing else can move it between them. A node with no layout style —
-    /// a text node, an element never styled — answers `true`, the
-    /// conservative answer: it is laid out against its basis.
     #[inline]
     pub(crate) fn layout_reads_percentage_basis(&self) -> bool {
         !self.flags.get(NodeFlags::BASIS_FREE)
     }
 
-    /// Whether a style view over this node reading `style` reads the
-    /// element's own layout style — the one
-    /// [`Self::layout_reads_percentage_basis`] was evaluated against — rather
-    /// than a position option's. A node holding none answers `true`: its view
-    /// reads the stand-in style, and the bit's conservative answer stands for
-    /// it.
     #[inline]
     pub(crate) fn views_own_layout_style(&self, style: &ComputedValues) -> bool {
         match &self.data {
@@ -1040,8 +819,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// Re-evaluates [`Self::layout_reads_percentage_basis`] against the
-    /// layout style the element holds now.
     fn refresh_basis_free(&mut self) {
         let free = match &self.data {
             NodeData::Element(Some(style)) => !crate::layout::reads_percentage_basis(self, style),
@@ -1050,10 +827,7 @@ impl<T> Node<T> {
         self.flags.set(NodeFlags::BASIS_FREE, free);
     }
 
-    /// [`Self::layout_computed_style`] as the `Arc` the snapshot holds, for a
-    /// reader that keeps it or compares it by pointer.
     pub(crate) fn layout_computed_style_arc(&self) -> Option<&Arc<ComputedValues>> {
-        // Its divergence check.
         self.layout_computed_style()?;
         let NodeData::Element(snapshot) = &self.data else {
             return None;
@@ -1083,16 +857,6 @@ impl<T> Node<T> {
         snapshot.as_deref()
     }
 
-    /// Stores a style the cascade did not produce for this node — a lazily
-    /// cascaded pseudo-element style, or an anonymous box's inherited one —
-    /// as its computed style: Stylo's primary style and the layout snapshot
-    /// together, so the snapshot's divergence check above holds. Returns the
-    /// old one.
-    ///
-    /// Only for a `::backdrop` node ([`crate::tree::top_layer`]) or an
-    /// anonymous box's ([`crate::tree::anonymous`]): neither is ever in a
-    /// parent's child list, so no traversal reaches it and no harvest swaps
-    /// its style; this is the one writer.
     pub(crate) fn replace_pseudo_style(
         &mut self,
         style: Arc<ComputedValues>,
@@ -1115,32 +879,14 @@ impl<T> Node<T> {
         }
     }
 
-    /// Whether this element is a Lynx text element: one that lays out as a
-    /// Lynx paragraph whatever its computed `display` is, other than `none`
-    /// and `contents` ([`crate::layout::display_mode`]).
     pub(crate) fn is_lynx_text(&self) -> bool {
         self.flags.get(NodeFlags::LYNX_TEXT)
     }
 
-    /// Records whether this element's `pseudo` attribute is
-    /// [`PLACEHOLDER_PSEUDO_ID`](crate::tree::shadow::PLACEHOLDER_PSEUDO_ID), answering
-    /// what it was. Only `Document::set_attribute` and
-    /// `Document::remove_attribute` write it, with the attribute.
     pub(crate) fn set_placeholder_pseudo(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::PLACEHOLDER_PSEUDO, on)
     }
 
-    /// The pseudo-element this element implements for its shadow host: an
-    /// element of a shadow tree whose `pseudo` attribute is
-    /// [`PLACEHOLDER_PSEUDO_ID`](crate::tree::shadow::PLACEHOLDER_PSEUDO_ID) is the host's
-    /// `::placeholder` (`docs/terminus-architecture.md`, "Shadow DOM and custom elements"). The
-    /// attribute is read through a node bit, so an element without it answers in one load; the
-    /// walk to the containing shadow root is paid by the elements that carry it.
-    ///
-    /// A light-tree element with the attribute implements nothing: a
-    /// pseudo-element has an originating element, and here that is the
-    /// host, as it is in Blink, whose UA shadow trees name their placeholder
-    /// with this attribute.
     pub(crate) fn implemented_pseudo_element(&self) -> Option<PseudoElement> {
         if !self.flags.get(NodeFlags::PLACEHOLDER_PSEUDO) {
             return None;
@@ -1154,9 +900,6 @@ impl<T> Node<T> {
         matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
-    /// Puts `natural_size` on this element, making it replaced content if it
-    /// is not; written in place when it already is. Answers whether anything
-    /// changed.
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
         if let Some(NodeContent::Replaced(replaced)) = self.content.as_deref_mut() {
             if replaced.natural_size == natural_size {
@@ -1172,8 +915,6 @@ impl<T> Node<T> {
         true
     }
 
-    /// The picture this element presents, if it is replaced content
-    /// presenting one.
     #[must_use]
     pub(crate) fn picture(&self) -> Option<&PictureKey> {
         match self.content.as_deref() {
@@ -1182,17 +923,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// Puts `value` on this element — the picture it presents and that
-    /// picture's natural size — making it replaced content if it is not;
-    /// `None` makes it ordinary content again, natural size and all. Answers
-    /// the picture it displaced.
-    ///
-    /// Being replaced is a layout input — it forces `DisplayMode::Leaf` and
-    /// hides every child — so a box with no picture to draw must not keep
-    /// it. The caller has checked that `value` changes something
-    /// (`Document::set_picture`), which is what makes taking a picture off
-    /// an element that never had one a no-op rather than a conversion: an
-    /// element made replaced by a natural size alone keeps that.
     pub(crate) fn set_picture(
         &mut self,
         value: Option<(PictureKey, NaturalSize)>,
@@ -1274,20 +1004,14 @@ impl<T> Node<T> {
             .store(may, Ordering::Relaxed);
     }
 
-    /// Whether a current or in-effect animation or transition names
-    /// `opacity` (see [`StylingData::animates`]).
     pub(crate) fn animates_opacity(&self) -> bool {
         self.styling_data().animates.load(Ordering::Relaxed) & ANIMATES_OPACITY != 0
     }
 
-    /// Whether a current or in-effect animation or transition names
-    /// `transform` (see [`StylingData::animates`]).
     pub(crate) fn animates_transform(&self) -> bool {
         self.styling_data().animates.load(Ordering::Relaxed) & ANIMATES_TRANSFORM != 0
     }
 
-    /// Replaces the [`StylingData::animates`] bits, answering the previous
-    /// ones.
     pub(crate) fn replace_animates(&self, bits: u8) -> u8 {
         self.styling_data().animates.swap(bits, Ordering::Relaxed)
     }
@@ -1367,9 +1091,6 @@ impl<T> Node<T> {
         self.children.last().map(|&slot| self.arenas().at(slot))
     }
 
-    /// This node's position in its parent's child list, nodes of every kind
-    /// counted; `None` for a node with no parent and for a shadow root. One
-    /// subtraction: the position is kept on the node.
     #[must_use]
     pub fn index_in_parent(&self) -> Option<usize> {
         if self.is_shadow_root() {
@@ -1404,9 +1125,6 @@ impl<T> Node<T> {
         Some(tree.at(sibling))
     }
 
-    /// This node's position in `parent`'s child list, when `parent` lists it.
-    /// For any other `parent` the answer is some number; a caller that does
-    /// not know the node is listed checks the slot it names.
     #[inline]
     pub(crate) fn index_in(&self, parent: &Self) -> usize {
         self.child_index.wrapping_sub(parent.child_index_base) as usize
@@ -1482,8 +1200,6 @@ impl<T> std::hash::Hash for Node<T> {
     }
 }
 
-/// The children iterator ([`Node::children`]); also what stylo's restyle
-/// traversal walks.
 #[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
     tree: &'a TreeArenas<T>,
@@ -1536,13 +1252,6 @@ mod tests {
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
-        // A handle is identity and storage position in one 8-byte value, and
-        // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
-        // parent link costs 8 bytes rather than 16. Presentational hints add
-        // one optional Arc; the declaration block allocates only when used.
-        // No node keeps Stylo's postorder child counter (`StylingData`).
-        // The two `u32` child-list positions add 8 bytes: they make a sibling
-        // step one index instead of a scan of the parent's child list.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
             if cfg!(debug_assertions) { 232 } else { 224 }
@@ -1575,8 +1284,6 @@ mod tests {
 
         assert_eq!(std::mem::size_of::<PreviousStylingData>(), 32);
         assert_eq!(std::mem::size_of::<StylingData>(), 16);
-        // The snapshot pointer, and the postorder child counter no traversal
-        // here uses (`RecalcStyle::needs_postorder_traversal` is false).
         assert_eq!(
             std::mem::size_of::<usize>() + std::mem::size_of::<AtomicIsize>(),
             32 - 16
@@ -1634,7 +1341,6 @@ mod tests {
         );
     }
 
-    /// A detached element reports a diverged harvested style in debug builds.
     #[cfg(debug_assertions)]
     #[test]
     fn diverged_snapshot_on_unvisited_element_is_reported_in_debug() {
@@ -1686,16 +1392,10 @@ mod tests {
                 .is_none_or(|state| state.text.is_none())
         );
 
-        // A text node never gains a paragraph slot: it is content of the
-        // block above it, and the block lives on the element that
-        // establishes it.
         let (_, slot) = document.layout_state_mut().text_store_parts(text_slot);
         assert!(slot.is_none());
     }
 
-    /// The basis bit follows the element's style through the harvest: a
-    /// width that turns from a percentage into a length makes the element
-    /// basis-free, and back.
     #[test]
     fn the_harvest_reevaluates_whether_layout_reads_the_basis() {
         let mut document = Document::new(crate::tree::document::tests::device(), "page", ());

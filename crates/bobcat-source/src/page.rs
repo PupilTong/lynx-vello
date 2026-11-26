@@ -68,8 +68,6 @@ use vant::registry::{Register, RegisterInBackground};
 use crate::ContainerSources;
 use crate::container::Registrar;
 
-/// A decoded page and the in-memory resources it contributes to a Bobcat
-/// view.
 #[derive(Clone, Debug)]
 pub struct PageSource {
     input_url: Url,
@@ -78,28 +76,17 @@ pub struct PageSource {
 
 #[derive(Clone, Debug)]
 enum Page {
-    /// A native or web container with an entry, registered under its input
-    /// URL by the one container rule.
     Container(ContainerSources),
-    /// A raw Lynx XML page, at private memory URLs.
     Xml(XmlPage),
 }
 
-/// A raw Lynx XML page's sections, each as the text registered for it.
 #[derive(Clone, Debug)]
 struct XmlPage {
-    /// The main-thread script, as the module [`mts_entry_source`] writes.
     entry: (Url, Arc<str>),
-    /// The background-thread script, as a [`BundleTarget::Web`] body.
     background: Option<(Url, Arc<str>)>,
-    /// The `<style>` section's CSS, verbatim.
     style: Option<(Url, Arc<str>)>,
 }
 
-/// The view-facing result of registering one browser-loaded Lynx XML response.
-///
-/// Both script bodies and author CSS have already been copied into the supplied
-/// resource registry. Their URLs are passed to the view for execution.
 #[derive(Debug)]
 pub struct LynxXmlResponseRegistration {
     entry_url: Url,
@@ -109,32 +96,27 @@ pub struct LynxXmlResponseRegistration {
 }
 
 impl LynxXmlResponseRegistration {
-    /// The registered main-thread module URL.
     #[must_use]
     pub const fn entry_url(&self) -> &Url {
         &self.entry_url
     }
 
-    /// The registered author stylesheet URL, when the section was present.
     #[must_use]
     pub const fn style_sheet_url(&self) -> Option<&Url> {
         self.style_sheet_url.as_ref()
     }
 
-    /// The registered background-thread module URL, when the section was present.
     #[must_use]
     pub const fn background_thread_url(&self) -> Option<&Url> {
         self.background_thread_url.as_ref()
     }
 
-    /// Input features handled only approximately or not executed.
     #[must_use]
     pub fn compatibility_warnings(&self) -> &[String] {
         &self.compatibility_warnings
     }
 }
 
-/// Failure to classify or decode a page container.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SourceError {
@@ -170,16 +152,12 @@ pub enum SourceError {
     MissingNativeEntry { input: String, entry: String },
     #[error("`{0}` is a Lynx page rather than a container of sections")]
     NotAContainer(String),
-    /// Two of a container's names reach one URL with different texts, or a
-    /// stylesheet's URL is also a script's.
     #[error("container `{input}` names `{url}` twice, with different contents")]
     ConflictingSection { input: String, url: String },
-    /// A container URL that cannot be a base, so no section hangs under it.
     #[error("container URL `{0}` cannot be a base for its sections")]
     OpaqueContainerUrl(String),
 }
 
-/// Explicit name for [`SourceError`] at APIs that carry several error types.
 pub type PageSourceError = SourceError;
 
 #[derive(Debug)]
@@ -197,10 +175,8 @@ enum LynxXmlUrlPolicy {
 
 #[derive(Debug)]
 struct MappedLynxXml<'source> {
-    /// The main-thread script, as the module registered for it.
     main_thread: (Url, String),
     style: Option<(Url, &'source str)>,
-    /// The background-thread script, as the BTS entry registered for it.
     background_thread: Option<(Url, String)>,
 }
 
@@ -226,14 +202,6 @@ impl LynxXmlSectionUrls {
 }
 
 impl PageSource {
-    /// Decodes a page the caller has already loaded: a container with a
-    /// `root`, or Lynx XML.
-    ///
-    /// # Errors
-    ///
-    /// [`SourceError::MissingRoot`] for a web container with no `root`, and
-    /// [`SourceError::MissingNativeEntry`] for a native one; every error
-    /// [`ContainerSources::from_bytes`] or the XML parser has.
     pub fn from_bytes(input: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
         if looks_like_native_bundle(bytes) {
             Self::from_native_bundle(input, bytes, "root")
@@ -250,13 +218,6 @@ impl PageSource {
         }
     }
 
-    /// Decode a source-based native external bundle and select its named main module.
-    /// The ordinary byte-sniffing path requires `root`; external libraries normally
-    /// need an explicit name such as `library__main-thread` instead.
-    ///
-    /// # Errors
-    ///
-    /// As [`ContainerSources::from_native_bundle`].
     pub fn from_native_bundle(input: &Url, bytes: &[u8], entry: &str) -> Result<Self, SourceError> {
         Self::from_container(
             input,
@@ -264,7 +225,6 @@ impl PageSource {
         )
     }
 
-    /// A container page, which a container is only with an entry.
     fn from_container(input: &Url, container: ContainerSources) -> Result<Self, SourceError> {
         if container.entry().is_none() {
             return Err(SourceError::MissingRoot(diagnostic_url(input)));
@@ -275,8 +235,6 @@ impl PageSource {
         })
     }
 
-    /// A page from an already-decoded template, as either compiler's
-    /// container: the tests' way to give one body every shape.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     #[expect(
         clippy::needless_pass_by_value,
@@ -308,13 +266,11 @@ impl PageSource {
         })
     }
 
-    /// The URL that identifies the decoded input.
     #[must_use]
     pub const fn input_url(&self) -> &Url {
         &self.input_url
     }
 
-    /// Page policy decoded from this input's configuration.
     #[must_use]
     pub const fn config(&self) -> PageConfig {
         match &self.page {
@@ -323,8 +279,6 @@ impl PageSource {
         }
     }
 
-    /// The container a container page registers, for the tests that hold it
-    /// up against what a fetch of the same bytes registers.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) const fn container(&self) -> Option<&ContainerSources> {
         match &self.page {
@@ -333,16 +287,6 @@ impl PageSource {
         }
     }
 
-    /// Registers the decoded scripts and stylesheets with an embedder-owned
-    /// resource system: a container's through
-    /// [`ContainerSources::register_with`], an XML page's two scripts and its
-    /// CSS as they are.
-    ///
-    /// Every registration URL was derived from an already-parsed [`Url`], so
-    /// registration cannot fail URL validation. [`Register::register`]
-    /// replaces an earlier registration of the same URL, so two pages
-    /// registering one input URL leave the later one's bodies — and whatever
-    /// URL only the earlier one had.
     pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
         match &self.page {
             Page::Container(container) => container.register_with(resources),
@@ -359,22 +303,6 @@ impl PageSource {
         }
     }
 
-    /// The sources a view for this input is built from: its entry MTS module,
-    /// its BTS entry if any, the author CSS this input carried, if any, and —
-    /// for a container — the container URL as the card, reporting `screen` as
-    /// its `SystemInfo`.
-    ///
-    /// The view's base URL is the input URL, the base an embedder gives its
-    /// fetcher for this input, so the view and the fetcher resolve a
-    /// container's URL alike. The entries are already absolute URLs, which
-    /// resolve to themselves. A container's named stylesheets are not listed:
-    /// a card adopts them through `__LoadStyleSheet`.
-    ///
-    /// The screen is the host's to name, since no input carries one: the
-    /// monitor or browser screen it measured, or
-    /// [`ScreenMetrics::for_viewport`] of its capture size where it has none.
-    /// So is the locale ([`ViewSources::locale`]): no input carries one
-    /// either.
     #[must_use]
     pub fn view_sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
         let input = self.input_url.to_string();
@@ -410,23 +338,6 @@ impl PageSource {
     }
 }
 
-/// A page whose view can start before its container is decoded: what
-/// [`PageSource::defer`] returns.
-///
-/// For a `.web.bundle` it holds the bytes and only what a view is created
-/// from — the page flags and which of the entry, the boot script and the
-/// `StyleInfo` it names — read by scanning the section table. The decode
-/// itself, the `StyleInfo` lowering and the registration run off the
-/// embedder's thread, through
-/// [`RegisterInBackground::register_in_background`] (the reference
-/// fetcher's `Resources` implements it), while the view boots; its first
-/// loads of the container's URLs wait for them there. Every other input is
-/// decoded when it is deferred, and registered when asked.
-///
-/// The page is the one [`PageSource::from_bytes`] decodes, with one
-/// difference: a `StyleInfo` section is listed as the view's author sheet
-/// whether or not it holds a rule, since that is not known until it is
-/// decoded, and one that holds none is registered as an empty sheet.
 #[derive(Clone, Debug)]
 pub struct DeferredPage {
     input_url: Url,
@@ -435,9 +346,7 @@ pub struct DeferredPage {
 
 #[derive(Clone, Debug)]
 enum Deferred {
-    /// Decoded already: Lynx XML, or a native bundle.
     Decoded(Box<PageSource>),
-    /// A `.web.bundle`, scanned and not yet decoded.
     Web {
         bytes: Bytes,
         config: PageConfig,
@@ -446,18 +355,6 @@ enum Deferred {
 }
 
 impl PageSource {
-    /// Prepares a page to boot while its container is decoded: a
-    /// `.web.bundle`'s section table is scanned here and the rest is left to
-    /// [`DeferredPage::register_in_background`]; any other input is decoded
-    /// here.
-    ///
-    /// # Errors
-    ///
-    /// For a `.web.bundle`, a header, section table or `Configurations`
-    /// section that would not decode, [`SourceError::MissingRoot`] and
-    /// [`SourceError::OpaqueContainerUrl`]; every other decode error is the
-    /// failure of the loads the view makes. For any other input, every error
-    /// [`Self::from_bytes`] has.
     pub fn defer(input: &Url, bytes: impl Into<Bytes>) -> Result<DeferredPage, SourceError> {
         let bytes = bytes.into();
         let page = if looks_like_native_bundle(&bytes) || looks_like_lynx_xml(&bytes) {
@@ -486,7 +383,6 @@ impl PageSource {
     }
 }
 
-/// A page decoded already, which defers nothing.
 impl From<PageSource> for DeferredPage {
     fn from(page: PageSource) -> Self {
         Self {
@@ -497,13 +393,11 @@ impl From<PageSource> for DeferredPage {
 }
 
 impl DeferredPage {
-    /// The URL that identifies the input.
     #[must_use]
     pub const fn input_url(&self) -> &Url {
         &self.input_url
     }
 
-    /// Page policy decoded from this input's configuration.
     #[must_use]
     pub const fn config(&self) -> PageConfig {
         match &self.page {
@@ -512,8 +406,6 @@ impl DeferredPage {
         }
     }
 
-    /// The sources a view for this input is built from, as
-    /// [`PageSource::view_sources`] names them.
     #[must_use]
     pub fn view_sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
         match &self.page {
@@ -546,11 +438,6 @@ impl DeferredPage {
         }
     }
 
-    /// Registers the page's scripts and stylesheets with `resources`: a
-    /// `.web.bundle`'s decoded, lowered and registered off this thread, with
-    /// every load of its URLs held until they are; any other page's at once,
-    /// as [`PageSource::register_with`] does. A container that fails to
-    /// decode fails those loads with its decode error.
     pub fn register_in_background(
         &self,
         resources: &impl RegisterInBackground<PreparsedStyleSheet>,
@@ -573,9 +460,6 @@ impl DeferredPage {
     }
 }
 
-/// A deferred `.web.bundle`'s whole decode and registration, as one
-/// background install. The `StyleInfo` URL the view was given always
-/// answers: with an empty sheet when the section held no rule.
 fn register_web_page(
     input: &Url,
     bytes: &[u8],
@@ -612,43 +496,12 @@ fn register_web_page(
     Ok(())
 }
 
-/// Which compiler built one container, and so what shape its bodies arrive in.
-///
-/// A `.web.bundle`'s are `CommonJS` files. A source-based `.lynx.bundle`'s are
-/// *expression statements* — the Lynx compiler's own `(function(){…})()`, or a
-/// `RuntimeWrapperWebpackPlugin` banner — whose value native's host keeps as
-/// the completion value of the script it evaluated them as, and hands
-/// lynx-core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BundleTarget {
     Lynx,
     Web,
 }
 
-/// One bundle body as the ES module a realm `require`s it as.
-///
-/// Both shapes answer through the module's **default export**, which is the
-/// one thing `bobcat:lynx-modules` reads, and both keep the body starting on
-/// the line it started on: every prefix is one physical line, and only the
-/// `CommonJS` suffix adds one, after the body. So an error reports the line
-/// it had in the container, and on any line after the first the column too.
-/// On the body's first line the column is offset by the prefix's length —
-/// [`bobcat_core::BTS_CHUNK_PREAMBLE`] and then `export default ` or the
-/// `CommonJS` declarations — which for a minified body written on one line
-/// is every column it has.
-///
-/// - [`BundleTarget::Lynx`]: `export default <body>`. The body is one expression, so what native
-///   would have kept as its script's completion value — normally the `{init}` object the compiler's
-///   IIFE returns — becomes the module's default export instead.
-/// - [`BundleTarget::Web`]: a `module` object and an `exports` alias of its own, the body, then
-///   `export default module.exports`.
-///
-/// A `.json` body is neither: it is a value, and its own URL is what tells
-/// the loader to parse it, so `crate::container` registers it verbatim.
-///
-/// A raw body's leading `"use strict"` stops being a directive prologue under
-/// either, because something precedes it. Nothing is lost: a module is strict
-/// already.
 #[must_use]
 pub fn bts_module_source(target: BundleTarget, body: &str) -> String {
     const COMMONJS: &str = "const module = {exports: {}}; const exports = module.exports;";
@@ -672,24 +525,6 @@ pub fn bts_module_source(target: BundleTarget, body: &str) -> String {
     source
 }
 
-/// A card's MTS body as the module registered for it:
-/// [`bobcat_core::MTS_CHUNK_PREAMBLE`], then the body.
-///
-/// This is where a card's main-thread script gets the bindings it expects to
-/// find in scope — the runtime names and the Element PAPI — because the engine
-/// adds nothing to an entry: it completes the entry with what the fetcher
-/// answered. Every MTS body this crate registers as a module is written by
-/// this, or, for a container's `main-thread` section, by the same preamble in
-/// front of an `export default`.
-///
-/// The preamble is one physical line and the body starts on it, as in
-/// [`bts_module_source`], so every line of the body keeps the number it had
-/// in the container, and an error on any line after the first reports the
-/// column it had there too. An error on the body's first line reports a
-/// column offset by the preamble's length, which for a minified body written
-/// on one line is every column it has. A body's leading `"use strict"` stops
-/// being a directive prologue, because something precedes it. Nothing is
-/// lost: a module is strict already.
 #[must_use]
 pub fn mts_entry_source(body: &str) -> String {
     let mut source = String::with_capacity(bobcat_core::MTS_CHUNK_PREAMBLE.len() + body.len());
@@ -698,27 +533,10 @@ pub fn mts_entry_source(body: &str) -> String {
     source
 }
 
-/// An XML page's background-thread script as the BTS entry registered for it:
-/// a [`BundleTarget::Web`] body, through [`bts_module_source`].
-///
-/// web-core's `xmlToTasmJSON` puts the script, verbatim, at its bundle's
-/// `/app-service.js`, and its `createChunkLoading` runs every BTS chunk inside
-/// its chunk wrapper, so the script sees the names that wrapper passes, a
-/// `module` object among them. This is that wrapper here. The script is the
-/// view's BTS entry rather than a manifest path, so nothing reads the
-/// `module.exports` it leaves.
 fn xml_background_source(body: &str) -> String {
     bts_module_source(BundleTarget::Web, body)
 }
 
-/// The BTS boot script: the container's own URL, then the card.
-///
-/// Nothing of the container is in it — no body's name, no body's URL and no
-/// body's text. The template URL is the container's own URL, which every
-/// manifest path hangs under, and `requireModule` is what loads and
-/// evaluates `/app-service.js` under it, synchronously, from inside this
-/// module's own evaluation. No entry is named: this bundle registers under the
-/// default entry either way.
 pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> String {
     let template_url = serde_json::to_string(input.as_str()).expect("a URL is a JavaScript string");
     let mut source = format!(
@@ -731,17 +549,6 @@ pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> Stri
     source
 }
 
-/// Parses and registers one already-decoded browser Lynx XML response.
-///
-/// Section identities are fragments of `input`, which must be the final
-/// response URL so relative imports and CSS URLs retain the browser-observed
-/// redirect base. `source` is already Unicode: replacement characters emitted
-/// by the browser's UTF-8 decoder are ordinary contents here. Both script bodies
-/// and author CSS are copied into `resources` for the view to load: each script
-/// as the module a card body becomes here — the main-thread script through
-/// [`mts_entry_source`], the background-thread script as a
-/// [`BundleTarget::Web`] body — and the CSS as it is, exactly as
-/// [`PageSource::register_with`] registers an XML page's.
 pub fn register_lynx_xml_response(
     input: &Url,
     source: &str,
@@ -782,8 +589,6 @@ fn map_lynx_xml<'source>(
         input: diagnostic_url(input),
         source,
     })?;
-    // Parse first: a malformed response, especially a large `data:` URL, must
-    // not pay to clone three section identities that will never be used.
     let section_urls = match url_policy {
         LynxXmlUrlPolicy::InMemory => LynxXmlSectionUrls::in_memory(),
         LynxXmlUrlPolicy::ResponseFragments => LynxXmlSectionUrls::response_fragments(input),
@@ -793,7 +598,6 @@ fn map_lynx_xml<'source>(
         style,
         background_thread,
     } = section_urls;
-    // Both scripts are card bodies, wrapped here for both URL policies.
     Ok(MappedLynxXml {
         main_thread: (main_thread, mts_entry_source(xml.main_thread_script)),
         style: xml.style.map(|source| (style, source)),
@@ -860,8 +664,6 @@ pub(crate) fn bounded_diagnostic(mut value: String) -> String {
     value
 }
 
-/// Recognizes native magics before the input can fall through to web decoding.
-/// The native decoder validates the leading total size and section structure.
 pub(crate) fn looks_like_native_bundle(bytes: &[u8]) -> bool {
     let Some(header) = bytes.get(..8) else {
         return false;
@@ -870,12 +672,6 @@ pub(crate) fn looks_like_native_bundle(bytes: &[u8]) -> bool {
     matches!(magic, 0x0024_1922 | 0xdd73_7199)
 }
 
-/// Whether these bytes open with the `SDRA WROF` pair [`crate::web::decode`]
-/// checks — the two little-endian magics a `.web.bundle` starts with.
-///
-/// Sniffing, not validation: a file that starts this way is a web container
-/// as far as anything here can tell, and the decoder is what says whether it
-/// really is one.
 pub(crate) fn looks_like_web_bundle(bytes: &[u8]) -> bool {
     let Some(header) = bytes.get(..8) else {
         return false;
@@ -885,9 +681,6 @@ pub(crate) fn looks_like_web_bundle(bytes: &[u8]) -> bool {
     magic0 == crate::web::MAGIC_0 && magic1 == crate::web::MAGIC_1
 }
 
-/// Mirrors web-core's raw-input classification: any run of ASCII whitespace
-/// and UTF-8 BOMs is ignored for sniffing, while the XML parser itself remains
-/// responsible for enforcing its stricter single-leading-BOM grammar.
 pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
     const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 
@@ -904,8 +697,6 @@ pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
     bytes.first() == Some(&b'<')
 }
 
-// Native only: these register into the native resource system, which wasm32
-// has no default platform for.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::BTreeMap;
@@ -918,13 +709,10 @@ mod tests {
         Url::parse("file:///tmp/card.lynx.xml").expect("test URL")
     }
 
-    /// The input a container page is decoded from in these tests: a
-    /// container is named by what it is.
     fn bundle_url() -> Url {
         Url::parse("file:///tmp/card.web.bundle").expect("test URL")
     }
 
-    /// The text a page registers at `url`.
     fn script_at<'a>(page: &'a PageSource, url: &str) -> &'a str {
         match &page.page {
             Page::Container(container) => container
@@ -940,19 +728,16 @@ mod tests {
         }
     }
 
-    /// The text a page registers for its view's entry.
     fn entry_script(page: &PageSource) -> &str {
         script_at(page, &page.view_sources(SCREEN, "en-US").entry)
     }
 
-    /// The text a page registers for its view's BTS entry, if it has one.
     fn background_script(page: &PageSource) -> Option<&str> {
         page.view_sources(SCREEN, "en-US")
             .background_entry
             .map(|url| script_at(page, &url))
     }
 
-    /// An XML page's parts.
     fn xml(page: &PageSource) -> &XmlPage {
         match &page.page {
             Page::Xml(xml) => xml,
@@ -960,8 +745,6 @@ mod tests {
         }
     }
 
-    /// The screen these tests' views report: their own 32×24 viewport, as a
-    /// host with no screen to measure names it.
     const SCREEN: ScreenMetrics = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
     fn resources() -> Resources {
@@ -1069,8 +852,6 @@ mod tests {
             Some("https://example.test/card.web.bundle"),
             "`__Card__` is the container, not its entry"
         );
-        // A card with no manifest still names a BTS boot, which registers
-        // the container and loads nothing.
         assert_eq!(
             sources.background_entry.as_deref(),
             Some("https://example.test/card.web.bundle#background-thread")
@@ -1159,8 +940,6 @@ mod tests {
         assert!(resources.unregister("https://cdn.example/app/card.web.bundle/answer.js"));
     }
 
-    /// A `CommonJS` body's module: a `module` object of its own on the body's
-    /// own first line, and the export of what it left there afterwards.
     #[test]
     fn a_web_body_becomes_a_commonjs_module_around_its_own_line_one() {
         let module = bts_module_source(BundleTarget::Web, "module.exports = 21 * 2;");
@@ -1179,9 +958,6 @@ mod tests {
         );
     }
 
-    /// A `.lynx.bundle` body's module: the expression exported as it stands,
-    /// its own trailing `;` and source map comment tolerated by `export
-    /// default <expr>;`.
     #[test]
     fn a_lynx_body_becomes_the_default_export_of_its_own_expression() {
         assert_eq!(
@@ -1207,8 +983,6 @@ mod tests {
         );
     }
 
-    /// The preamble is one physical line under either shape, so a body's own
-    /// line numbers survive registration.
     #[test]
     fn a_bodys_first_line_stays_its_first_line() {
         for target in [BundleTarget::Web, BundleTarget::Lynx] {
@@ -1220,10 +994,6 @@ mod tests {
         }
     }
 
-    /// A JSON body is a value rather than a file, and is registered as the
-    /// text it is whatever the container was built by: the loader reads a
-    /// `.json` response as JSON, so there is nothing for a module wrapper to
-    /// be compiled as.
     #[test]
     fn a_json_body_is_registered_as_the_json_it_is() {
         for target in [BundleTarget::Web, BundleTarget::Lynx] {
@@ -1241,9 +1011,6 @@ mod tests {
         }
     }
 
-    /// A native container addresses its main-thread sources twice: as Lepus
-    /// chunks, and as custom sections of the same name. Either way it is an
-    /// MTS section, not a BTS body, and the boot script names none of them.
     #[test]
     fn a_main_thread_section_is_no_bts_body() {
         let mut template = crate::web::decode(&web_bundle(Some("export {};"))).unwrap();
@@ -1272,11 +1039,8 @@ mod tests {
         );
     }
 
-    /// A body of three lines, to read line numbers off.
     const THREE_LINES: &str = "first();\nsecond();\nthird();";
 
-    /// `source` is `MTS_CHUNK_PREAMBLE` and then [`THREE_LINES`], with the
-    /// body's first line on the preamble's own: line 1 of the module.
     fn assert_mts_entry_of_three_lines(source: &str, what: &str) {
         assert_eq!(
             source,
@@ -1295,11 +1059,6 @@ mod tests {
         );
     }
 
-    /// The engine adds nothing to an entry, so a container's root Lepus
-    /// script is registered with the imports a card's MTS body is given in
-    /// front of it, on its own first line — whichever compiler built the
-    /// container. A `.lynx.bundle` reaches this through
-    /// `from_native_bundle`, which names its entry `root` first.
     #[test]
     fn a_bundle_root_is_the_mts_preamble_and_its_body_from_line_one() {
         let web = PageSource::from_bytes(&bundle_url(), &web_bundle(Some(THREE_LINES)))
@@ -1313,9 +1072,6 @@ mod tests {
         assert_mts_entry_of_three_lines(entry_script(&native), "native bundle");
     }
 
-    /// Both XML paths register the main-thread script the way a container's
-    /// root is registered, and the background-thread script as the `Web`
-    /// body web-core's chunk wrapper would have run it as.
     #[test]
     fn both_xml_paths_wrap_both_scripts() {
         let xml = format!(
@@ -1329,7 +1085,6 @@ mod tests {
             Some(bts_module_source(BundleTarget::Web, "lynx.getCoreContext();").as_str())
         );
 
-        // `register_lynx_xml_response` registers what this maps, unchanged.
         let mapped = map_lynx_xml(&input_url(), &xml, LynxXmlUrlPolicy::ResponseFragments)
             .expect("an XML response");
         assert_eq!(
@@ -1364,9 +1119,6 @@ mod tests {
             "globalThis.chunkRan = true;",
             "a chunk is registered verbatim: no preamble, nothing to import"
         );
-        // The root is the container's own text after `MTS_CHUNK_PREAMBLE`.
-        // Nothing else is prefixed to it: not an import of a chunk, not a call
-        // registering one.
         assert_eq!(entry_script(&page), mts_entry_source("export {};"));
 
         let resources = resources();
@@ -1376,10 +1128,6 @@ mod tests {
         );
     }
 
-    /// An offscreen painter at the size the boot tests here use.
-    ///
-    /// Nothing draws through it: boot's first `__FlushElementTree` waits for a
-    /// painter to bind the view, and binding it is all this is for.
     async fn binding_painter() -> bobcat_core::Painter {
         bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
             .await
@@ -1392,11 +1140,6 @@ mod tests {
 
         use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads};
 
-        // What the card does once something calls its `init`: define a module
-        // through the factory ABI, require it, and reach the rest of its
-        // container on the way. Shared by both containers, because the factory
-        // ABI is the same either way — what differs is only how the body hands
-        // its `{init}` over.
         const CARD: &str = r#"
             app.define('entry.js', function(require,module,exports,Card,setTimeout,setInterval,clearInterval,clearTimeout,NativeModules,api,console,Component,ReactLynx,nativeAppId,Behavior,LynxJSBI,lynx) {
                 if (api !== app._apiList) throw Error('factory ABI');
@@ -1410,21 +1153,11 @@ mod tests {
             if (app.require('entry.js').value !== 42) throw Error('module exports');
         "#;
 
-        // Each of the three `.lynx.bundle` body shapes below, answered by its
-        // own name: they are imported by the boot script whatever happens, so
-        // a shape that did not compile as a module would fail the boot — this
-        // also reads the `{init}` each of them evaluated to.
         const SHAPES: &str = r"
             for (const shape of ['compact', 'minified', 'pretty'])
                 if (lynx.loadScript(shape, {}) !== shape) throw Error('banner ' + shape);
         ";
 
-        // The two containers. A `.lynx.bundle`'s bodies are expression
-        // statements — the three shapes the Lynx compiler writes are all
-        // exercised below — and a `.web.bundle`'s are `CommonJS` files. Both
-        // hand an `{init}` over, which is what a compiled card is: the body's
-        // own evaluation defines nothing, and `requireModule` is what starts
-        // the card.
         for target in [BundleTarget::Web, BundleTarget::Lynx] {
             let mut template = crate::web::decode(&web_bundle(Some("export {};"))).unwrap();
             template.manifest.insert(
@@ -1435,8 +1168,6 @@ mod tests {
                          module.exports = {{init({{tt}}) {{\
                          if (tt !== app) throw Error('injection');{CARD}}}}};"
                     ),
-                    // `LynxEncodePlugin`'s shape, down to the banner's
-                    // trailing `;` and source map comment.
                     BundleTarget::Lynx => format!(
                         "(function(){{'use strict';return {{init({{tt}}){{\
                          const app = tt;{CARD}{SHAPES}}}}};}})();\n\
@@ -1448,11 +1179,6 @@ mod tests {
                 "/data.json".into(),
                 serde_json::json!({"message": "quotes ' and \" "}).to_string(),
             );
-            // A section is a body of its container like any other: an
-            // expression under Lynx, a `CommonJS` file under Web. Its value is
-            // no `{init}`, so it is what `loadScript` answers as it stands —
-            // web-core's `createBundleInitReturnObj` result rather than
-            // native's Script completion value.
             let mut sections = serde_json::json!({
                 "answer": {"content": match target {
                     BundleTarget::Web => "module.exports = 21 * 2",
@@ -1460,11 +1186,6 @@ mod tests {
                 }},
             });
             if matches!(target, BundleTarget::Lynx) {
-                // The three shapes a `.lynx.bundle` carries, each of which has
-                // to compile as a module: the compact `LynxEncodePlugin` IIFE
-                // with no trailing `;`, a minified `RuntimeWrapperWebpackPlugin`
-                // banner ending `})();` and a source map comment, and the same
-                // banner unminified, with whitespace around its tail.
                 let shapes = serde_json::json!({
                     "compact": {"content":
                         "(function(){'use strict';return{init:function(){return 'compact'}}})()"},
@@ -1501,7 +1222,6 @@ mod tests {
                     page.view_sources(SCREEN, "en-US"),
                 )
                 .unwrap();
-            // Boot's first flush waits for a painter to bind the view.
             let mut painter = binding_painter().await;
             painter.attach(&view).unwrap();
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -1523,9 +1243,6 @@ mod tests {
         }
     }
 
-    /// One path, proven: a page's container is exactly what a fetch of the
-    /// same bytes from the same URL registers — every script at the same URL
-    /// with the same text, the same stylesheets, the same entry and boot.
     #[test]
     fn a_page_registers_what_a_fetch_of_its_bytes_registers() {
         for name in [
@@ -1543,9 +1260,6 @@ mod tests {
         }
     }
 
-    /// A native page names its entry explicitly, which a fetch cannot: the
-    /// page is the fetch plus exactly that entry at `root.js` and the boot
-    /// script that starts its card — nothing else differs.
     #[test]
     fn a_native_page_is_its_fetch_plus_the_named_entry_and_its_boot() {
         let input = Url::parse("https://cdn.test/app/react-native.lynx.bundle").unwrap();
@@ -1588,9 +1302,6 @@ mod tests {
         );
     }
 
-    /// A container page boots with the container as its card: `__Card__` is
-    /// the input URL rather than the entry's, and a named chunk and a named
-    /// stylesheet are found under it by the URLs MTS builds from it.
     #[tokio::test]
     async fn a_container_page_boots_with_the_container_as_its_card() {
         use std::time::{Duration, Instant};
@@ -1658,12 +1369,6 @@ mod tests {
         }
     }
 
-    /// `enableCSSInheritance` is read the way web-core reads it
-    /// (`config['enableCSSInheritance'] === 'true'`, lynx-stack #3907): the
-    /// string `"true"` turns it on, and `"false"`, an absent key and any other
-    /// value leave it off. The web encoder writes every page config value
-    /// through `String(value)`, so `"true"` is the only spelling a
-    /// `.web.bundle` has for an enabled switch.
     #[test]
     fn web_bundle_css_inheritance_follows_the_page_config_string() {
         for (config, expected) in [
@@ -1720,7 +1425,6 @@ mod tests {
             xml(&page).style.as_ref(),
             Some((_, source)) if source.is_empty()
         ));
-        // Present and empty: a `Web` body with nothing in it.
         assert_eq!(
             background_script(&page),
             Some(bts_module_source(BundleTarget::Web, "").as_str())
@@ -1909,9 +1613,6 @@ mod tests {
         ));
     }
 
-    /// A deferred page names the view the sources the decoded page names,
-    /// for every bundle the fixtures compile — except a `StyleInfo` section
-    /// with no rule, which only the decode can tell is empty.
     #[test]
     fn a_deferred_page_names_the_sources_its_decode_names() {
         let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
@@ -1920,7 +1621,6 @@ mod tests {
         assert!(bundles.len() > 300, "build the fixture packages first");
         for (path, bytes) in bundles {
             let Ok(page) = PageSource::from_bytes(&input, &bytes) else {
-                // A lazy bundle has no root, and is no page either way.
                 assert!(
                     matches!(
                         PageSource::defer(&input, bytes),
@@ -1951,7 +1651,6 @@ mod tests {
         }
     }
 
-    /// What the scan alone can refuse is refused when the page is deferred.
     #[test]
     fn a_deferred_page_refuses_what_its_scan_can_tell() {
         let input = input_url();
@@ -1984,8 +1683,6 @@ mod tests {
         ));
     }
 
-    /// Waits for what a background install leaves: `done` is polled until it
-    /// holds.
     fn eventually(mut done: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !done() {
@@ -2007,8 +1704,6 @@ mod tests {
         )
     }
 
-    /// The background install registers what the decoded page registers,
-    /// and an empty sheet at a listed `StyleInfo` that held no rule.
     #[test]
     fn a_deferred_page_registers_its_container_in_the_background() {
         let input = Url::parse("https://cdn.test/app/basic-bindtap.web.bundle").unwrap();
@@ -2033,8 +1728,6 @@ mod tests {
         assert_eq!(resources.take_notes(), [] as [String; 0]);
     }
 
-    /// A bundle whose sections fail to decode is deferred all the same; its
-    /// install fails, registers nothing, and says why.
     #[test]
     fn a_deferred_page_that_fails_to_decode_registers_nothing() {
         let input = input_url();

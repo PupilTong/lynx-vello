@@ -131,19 +131,12 @@ use pulldown_cmark::{
 
 use super::style::is_js_space;
 
-/// A node's place in the `content` attribute: UTF-16 code units, start
-/// inclusive, end exclusive, counted from the start of the whole attribute.
 pub(super) type SourceRange = Range<usize>;
 
-/// How many containers deep the tree may go; deeper ones are dropped.
 pub(super) const MAX_NESTING: usize = 100;
 
-/// The image source that names a light-DOM child instead of an image
-/// (`preprocessInlineView`, `XMarkdownAttributes.ts:379-383`).
 const INLINE_VIEW_SCHEME: &str = "inlineview://";
 
-/// One parse of the `content` attribute: the blocks the component builds
-/// its shadow tree from. Not a DOM document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct MarkdownTree {
     pub(super) blocks: Vec<Block>,
@@ -157,7 +150,6 @@ pub(super) struct MarkdownTree {
     )
 )]
 impl MarkdownTree {
-    /// The text the whole tree renders, in tree order.
     pub(super) fn text_content(&self) -> String {
         let mut text = String::new();
         for block in &self.blocks {
@@ -167,101 +159,73 @@ impl MarkdownTree {
     }
 }
 
-/// A block-level node. Each variant names the element markdown-it renders
-/// for it, which is the element the component creates.
-///
-/// Equality compares the whole subtree, ranges included: the component
-/// keeps the elements of every leading block equal to the previous parse's,
-/// which is how a streaming append leaves the earlier elements in place
-/// (web-core's `#appendIncrementally`, `XMarkdownAttributes.ts:759-782`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Block {
-    /// `<p>`.
     Paragraph {
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<h1>` to `<h6>`; `level` is 1 to 6.
     Heading {
         level: u8,
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<blockquote>`.
     Quote {
         children: Vec<Block>,
         range: SourceRange,
     },
-    /// `<ol>` when `start` is `Some`, `<ul>` otherwise. markdown-it writes
-    /// `start="n"` on an `<ol>` whose first number is not 1.
     List {
         start: Option<u64>,
         items: Vec<ListItem>,
         range: SourceRange,
     },
-    /// `<pre><code>`, with `class="language-<language>"` on the `<code>`
-    /// when the fence's info string has a first word. `text` ends with the
-    /// last line's line break.
     Code {
         language: Option<String>,
         text: String,
         range: SourceRange,
     },
-    /// A `<p>` written as raw HTML, with the classes it kept.
     HtmlParagraph {
         classes: Vec<String>,
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// Inline content placed straight in its container with no element of
-    /// its own: a tight list item's text (markdown-it hides a tight item's
-    /// paragraph), or the content of an HTML block outside any `<p>` — the
-    /// whole text of a refused block, or a `<span>`.
     Inlines {
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// White space an HTML block holds in its container outside every
-    /// element and every run of content — the line break its last line ends
-    /// with, the line breaks between two of its `<p>`s: a text node of the
-    /// container, which renders nothing and is part of its `textContent`.
-    HtmlSpace { text: String, range: SourceRange },
-    /// `<table>` with a `<thead>` holding `head` in one `<tr>` of `<th>`,
-    /// and a `<tbody>` of `<tr>`s of `<td>` only when `body` is not empty.
-    /// Every cell of column `i` carries `style="text-align:<a>"` when
-    /// `alignments[i]` is not [`Alignment::None`].
+    HtmlSpace {
+        text: String,
+        range: SourceRange,
+    },
     Table {
         alignments: Vec<Alignment>,
         head: TableRow,
         body: Vec<TableRow>,
         range: SourceRange,
     },
-    /// `<hr>`.
-    ThematicBreak { range: SourceRange },
+    ThematicBreak {
+        range: SourceRange,
+    },
 }
 
-/// An `<li>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ListItem {
     pub(super) children: Vec<Block>,
     pub(super) range: SourceRange,
 }
 
-/// A `<tr>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TableRow {
     pub(super) cells: Vec<TableCell>,
     pub(super) range: SourceRange,
 }
 
-/// A `<th>` in the head row, a `<td>` in a body row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TableCell {
     pub(super) children: Vec<Inline>,
     pub(super) range: SourceRange,
 }
 
-/// A table column's alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Alignment {
     None,
@@ -270,57 +234,54 @@ pub(super) enum Alignment {
     Right,
 }
 
-/// An inline node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::enum_variant_names,
     reason = "`InlineView` is the Lynx name of the construct"
 )]
 pub(super) enum Inline {
-    /// A text node.
-    Text { text: String, range: SourceRange },
-    /// `<em>`.
+    Text {
+        text: String,
+        range: SourceRange,
+    },
     Emphasis {
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<strong>`.
     Strong {
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<s>`, the element markdown-it's strikethrough renders.
     Strikethrough {
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<code>`.
-    Code { text: String, range: SourceRange },
-    /// `<a href title>`; `href` is normalized and validated.
+    Code {
+        text: String,
+        range: SourceRange,
+    },
     Link {
         href: String,
         title: Option<String>,
         children: Vec<Inline>,
         range: SourceRange,
     },
-    /// `<img src alt title>` in web-core, the engine's `image` here. `alt`
-    /// is markdown-it's `renderInlineAsText` of the description.
     Image {
         src: String,
         alt: String,
         title: Option<String>,
         range: SourceRange,
     },
-    /// `![...](inlineview://<id>)`: web-core's
-    /// `<span class="md-inline-view"><slot name="<id>"></slot></span>`, the
-    /// light-DOM child with `slot="<id>"` shown in the text.
-    InlineView { id: String, range: SourceRange },
-    /// A soft line break: a `"\n"` text node, which white space collapsing
-    /// shows as a space.
-    SoftBreak { range: SourceRange },
-    /// `<br>` followed by a `"\n"` text node.
-    HardBreak { range: SourceRange },
-    /// A `<span>` or `<p>` written as raw HTML, with the classes it kept.
+    InlineView {
+        id: String,
+        range: SourceRange,
+    },
+    SoftBreak {
+        range: SourceRange,
+    },
+    HardBreak {
+        range: SourceRange,
+    },
     Html {
         element: HtmlElement,
         classes: Vec<String>,
@@ -329,7 +290,6 @@ pub(super) enum Inline {
     },
 }
 
-/// The two raw HTML elements content may keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HtmlElement {
     Span,
@@ -359,14 +319,12 @@ impl Block {
         }
     }
 
-    /// The text this block renders.
     pub(super) fn text_content(&self) -> String {
         let mut text = String::new();
         self.append_text_content(&mut text);
         text
     }
 
-    /// Appends the text this block renders to `text`.
     pub(super) fn append_text_content(&self, text: &mut String) {
         match self {
             Block::Paragraph { children, .. }
@@ -437,15 +395,12 @@ impl Inline {
         }
     }
 
-    /// The text this node renders: an image's and an inline view's is
-    /// empty, as an `<img>`'s and a slot's `textContent` is.
     pub(super) fn text_content(&self) -> String {
         let mut text = String::new();
         self.append_text_content(&mut text);
         text
     }
 
-    /// Appends the text this node renders to `text`.
     pub(super) fn append_text_content(&self, text: &mut String) {
         match self {
             Inline::Text { text: own, .. } | Inline::Code { text: own, .. } => text.push_str(own),
@@ -466,9 +421,6 @@ fn append_inlines(inlines: &[Inline], text: &mut String) {
     }
 }
 
-/// Parses `content`, or the part of it `range` names in UTF-16 code units
-/// (`content-range`, sliced as [`slice_utf16`] slices). Ranges in the result
-/// count from the start of the whole `content` either way.
 pub(super) fn parse(content: &str, range: Option<(usize, usize)>) -> MarkdownTree {
     let (source, base) = match range {
         Some((start, end)) => slice_utf16(content, start, end),
@@ -482,25 +434,13 @@ pub(super) fn parse(content: &str, range: Option<(usize, usize)>) -> MarkdownTre
     builder.finish()
 }
 
-/// What a `content-range` attribute value asks of the component
-/// (`_handleContentRange`, `XMarkdownAttributes.ts:1255-1282`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContentRangeUpdate {
-    /// The attribute is absent or empty: render all of `content`.
     Clear,
-    /// Render `content[start..end)` in UTF-16 code units.
     Set(usize, usize),
-    /// The value is not a range: web-core keeps the range it had.
     Keep,
 }
 
-/// Reads a `content-range` value: a JSON array of two numbers, or, when the
-/// text is not JSON at all, `"start,end"`. Each bound is JavaScript's
-/// `Number()` of the item, the end must not be below the start, and both
-/// are clamped to zero. A fractional bound is truncated, as `String.slice`
-/// truncates it. JSON that is not a two-item array keeps the old range,
-/// without trying the comma form. `Number()` of an array or object item is
-/// taken as `NaN`, which refuses the value.
 pub(super) fn parse_content_range(value: Option<&str>) -> ContentRangeUpdate {
     let Some(value) = value.filter(|value| !value.is_empty()) else {
         return ContentRangeUpdate::Clear;
@@ -521,8 +461,6 @@ pub(super) fn parse_content_range(value: Option<&str>) -> ContentRangeUpdate {
     ContentRangeUpdate::Set(to_index(start), to_index(end))
 }
 
-/// `Math.max(0, n)` truncated toward zero, saturating at `usize::MAX` for
-/// `Infinity`.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -532,7 +470,6 @@ fn to_index(number: f64) -> usize {
     number.max(0.0).trunc() as usize
 }
 
-/// ECMAScript `ToNumber` of a JSON value.
 fn json_to_number(value: &serde_json::Value) -> f64 {
     match value {
         serde_json::Value::Number(number) => number.as_f64().unwrap_or(f64::NAN),
@@ -543,9 +480,6 @@ fn json_to_number(value: &serde_json::Value) -> f64 {
     }
 }
 
-/// ECMAScript `StringToNumber`: trimmed, empty is 0, `Infinity` with an
-/// optional sign, `0x`/`0o`/`0b` integers without one, otherwise a decimal
-/// literal that must cover the whole text.
 fn string_to_number(text: &str) -> f64 {
     let text = text.trim_matches(is_js_space);
     if text.is_empty() {
@@ -568,8 +502,6 @@ fn string_to_number(text: &str) -> f64 {
             if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(radix)) {
                 return f64::NAN;
             }
-            // Digit by digit, so a literal past `u128` rounds as ToNumber
-            // rounds it rather than failing.
             return digits
                 .chars()
                 .filter_map(|digit| digit.to_digit(radix))
@@ -578,7 +510,6 @@ fn string_to_number(text: &str) -> f64 {
                 });
         }
     }
-    // Rust's float parser also takes `inf` and `nan`, which `Number()` does not.
     if !text
         .bytes()
         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
@@ -588,26 +519,16 @@ fn string_to_number(text: &str) -> f64 {
     text.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// The number of UTF-16 code units in `text`, its JavaScript `length`.
 pub(super) fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
 }
 
-/// `content.slice(start, end)` by UTF-16 code units, with the slice's start
-/// as a UTF-16 offset into `content`. Both bounds are clamped to the string
-/// and an end before the start is the empty slice at the start, as
-/// `String.prototype.slice` clamps. A bound inside a surrogate pair cannot
-/// cut a Rust string: the start moves past the pair and the end before it,
-/// so a half character is left out where JavaScript would keep a lone
-/// surrogate.
 pub(super) fn slice_utf16(content: &str, start: usize, end: usize) -> (&str, usize) {
     let (start_byte, start_unit) = utf16_to_byte(content, start, true);
     let (end_byte, _) = utf16_to_byte(content, end, false);
     (&content[start_byte..end_byte.max(start_byte)], start_unit)
 }
 
-/// The byte offset of UTF-16 offset `unit` in `text`, rounded to a
-/// character boundary up or down, and the UTF-16 offset of that boundary.
 fn utf16_to_byte(text: &str, unit: usize, round_up: bool) -> (usize, usize) {
     let mut units = 0;
     for (byte, character) in text.char_indices() {
@@ -627,12 +548,8 @@ fn utf16_to_byte(text: &str, unit: usize, round_up: bool) -> (usize, usize) {
     (text.len(), units)
 }
 
-/// Byte offsets into the parsed text to UTF-16 offsets into `content`.
 struct Utf16Map {
-    /// The UTF-16 offset of the parsed text in `content`.
     base: usize,
-    /// For each non-ASCII character, the byte offset just past it and how
-    /// many more bytes than UTF-16 units the text holds up to there.
     excess: Vec<(usize, usize)>,
 }
 
@@ -660,22 +577,14 @@ impl Utf16Map {
     }
 }
 
-/// Offsets into a piece of text assembled from source spans — a run of text
-/// events, or an HTML fragment — to byte offsets into the parsed text.
 struct SegmentMap {
     segments: Vec<Segment>,
 }
 
 struct Segment {
-    /// Where this segment starts in the assembled text.
     at: usize,
-    /// Its length in the assembled text.
     len: usize,
-    /// The source bytes it came from.
     source: Range<usize>,
-    /// Whether it is those bytes verbatim; otherwise (an entity, an escape,
-    /// a line with a container's prefix removed) an offset inside it maps to
-    /// one of its ends.
     verbatim: bool,
 }
 
@@ -700,9 +609,6 @@ impl SegmentMap {
         });
     }
 
-    /// The source byte for offset `at`: the start of the segment it opens
-    /// when `at` is a boundary and `prefer_end` is false, the end of the one
-    /// it closes when true.
     fn byte(&self, at: usize, prefer_end: bool) -> usize {
         let index = if prefer_end {
             self.segments
@@ -730,30 +636,18 @@ impl SegmentMap {
     }
 }
 
-/// The tree under construction: one frame per open container.
 struct Builder<'s> {
-    /// The parsed text: `content`, or its `content-range` slice.
     source: &'s str,
     units: Utf16Map,
-    /// The open containers, the root first; never empty.
     stack: Vec<Frame>,
-    /// Consecutive text events not yet placed, so autolinking sees a run of
-    /// text as markdown-it's text token does.
     pending: Vec<(String, Range<usize>)>,
-    /// While positive, the events of a container dropped for depth, counted
-    /// by nesting.
     skip: usize,
-    /// Open [`InlineKind::Link`] frames: no autolinking inside one.
     link_depth: usize,
-    /// Raw `<a ...>` tags opened and not closed in this paragraph, heading
-    /// or cell: no autolinking inside one.
     html_link_level: usize,
     finder: LinkFinder,
 }
 
 enum Frame {
-    /// The root, a block quote or a list item: holds blocks, and inline
-    /// content that has no paragraph of its own.
     Container {
         kind: ContainerKind,
         range: Range<usize>,
@@ -791,8 +685,6 @@ enum Frame {
         range: Range<usize>,
         children: Vec<Inline>,
     },
-    /// An image: its description only contributes to `alt`, so the events
-    /// inside it build no frames, and `depth` counts their nesting.
     Image {
         target: ImageTarget,
         range: Range<usize>,
@@ -815,21 +707,14 @@ enum InlineKind {
     Emphasis,
     Strong,
     Strikethrough,
-    /// `text` replaces the children of an autolink, whose shown text is
-    /// `normalizeLinkText` of its destination.
     Link {
         href: String,
         title: Option<String>,
         text: Option<String>,
     },
-    /// A construct markdown-it would not have parsed — a link or image
-    /// whose destination `validateLink` refuses, a single-tilde
-    /// strikethrough: its own source text around its children. `children`
-    /// is the source span the children cover.
     Refused {
         children: Option<Range<usize>>,
     },
-    /// A raw HTML `<span>` or `<p>` written inside inline content.
     Html {
         element: HtmlElement,
         classes: Vec<String>,
@@ -966,7 +851,6 @@ impl<'s> Builder<'s> {
                     Event::Rule => self.push_block(Block::ThematicBreak {
                         range: self.units.range(&range),
                     }),
-                    // Footnotes, task lists and math are not enabled.
                     _ => {}
                 }
             }
@@ -989,8 +873,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// Records that an event of the source span `range` is a child of the
-    /// refused construct on top, if one is.
     fn note_child(&mut self, range: &Range<usize>) {
         if let Some(Frame::Inline {
             kind: InlineKind::Refused { children },
@@ -1086,7 +968,6 @@ impl<'s> Builder<'s> {
             Tag::Image {
                 dest_url, title, ..
             } => image_frame(&dest_url, &title, range),
-            // Not enabled.
             _ => {
                 self.skip = 1;
                 return;
@@ -1104,10 +985,6 @@ impl<'s> Builder<'s> {
         self.stack.push(frame);
     }
 
-    /// An event inside an image's description, which only adds to `alt`:
-    /// markdown-it's `renderInlineAsText` (`src/renderer.ts`) keeps text,
-    /// code span text, raw HTML as its sanitized markup and a line break as
-    /// `"\n"`, and leaves out everything else.
     fn image_event(&mut self, event: Event<'_>) {
         let Some(Frame::Image { alt, depth, .. }) = self.stack.last_mut() else {
             return;
@@ -1123,7 +1000,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// Pops the top frame and places what it built in its parent.
     fn close_top(&mut self) {
         if self.stack.len() <= 1 {
             return;
@@ -1345,7 +1221,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// Places the pending text run, autolinked unless inside a link.
     fn flush_text(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -1390,10 +1265,6 @@ impl<'s> Builder<'s> {
         });
     }
 
-    /// markdown-it's linkify over one text run (see the module comment): the
-    /// URLs the [`linkify`] crate finds whose scheme is `http`, `https` or
-    /// `ftp`, and its email addresses, each normalized, validated and given
-    /// the text `normalizeLinkText` shows (`src/rules_core/linkify.ts`).
     fn find_links(&self, text: &str) -> Vec<FoundLink> {
         let mut links: Vec<FoundLink> = Vec::new();
         for link in self.finder.links(text) {
@@ -1441,7 +1312,6 @@ impl<'s> Builder<'s> {
         links
     }
 
-    /// One inline raw HTML construct.
     fn inline_html(&mut self, fragment: &str, range: Range<usize>) {
         if is_link_open(fragment) {
             self.html_link_level += 1;
@@ -1497,9 +1367,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// An inline end tag: closes the nearest open element of its name among
-    /// the raw HTML frames on top, unless a `p` stands between (see the
-    /// module comment); a tag naming nothing open there is ignored.
     fn close_html(&mut self, element: HtmlElement, end: usize) {
         let mut index = self.stack.len();
         loop {
@@ -1527,8 +1394,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// Closes the raw HTML frames on top where the Markdown construct under
-    /// them ends.
     fn close_html_frames(&mut self) {
         let end = self
             .stack
@@ -1544,12 +1409,7 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// One HTML block: its blocks, built by [`HtmlTree`].
     fn html_block(&mut self, fragment: &str, segments: &SegmentMap, range: &Range<usize>) {
-        // markdown-it's block keeps its last line break (`getLines(..., true)`,
-        // with line endings normalized to `\n`), and the browser keeps it as
-        // text after the block's elements, or inside a `<p>` left open: it
-        // renders as nothing, but it is part of `textContent`.
         let whole = fragment.len();
         let fragment = fragment.trim_end_matches(['\n', '\r']);
         let line_break = (fragment.len() < whole).then_some(fragment.len()..whole);
@@ -1610,9 +1470,6 @@ struct FoundLink {
 }
 
 fn link_frame(link_type: LinkType, dest: &str, title: &str, range: Range<usize>) -> Frame {
-    // markdown-it's `autolink` rule (`src/rules_inline/autolink.ts`): an
-    // email autolink's `href` gets `mailto:`, and both kinds show
-    // `normalizeLinkText` of what was written.
     let (url, text) = match link_type {
         LinkType::Email => (format!("mailto:{dest}"), Some(normalize_link_text(dest))),
         LinkType::Autolink => (dest.to_owned(), Some(normalize_link_text(dest))),
@@ -1631,8 +1488,6 @@ fn image_frame(dest: &str, title: &str, range: Range<usize>) -> Frame {
     if !validate_link(&src) {
         return Frame::inline(InlineKind::Refused { children: None }, range);
     }
-    // `preprocessInlineView` matches `src="inlineview://([^"]+)"` in the
-    // rendered HTML: a non-empty rest of the normalized source.
     let target = match src.strip_prefix(INLINE_VIEW_SCHEME) {
         Some(id) if !id.is_empty() => ImageTarget::InlineView { id: id.to_owned() },
         _ => ImageTarget::Image {
@@ -1648,8 +1503,6 @@ fn image_frame(dest: &str, title: &str, range: Range<usize>) -> Frame {
     }
 }
 
-/// The fence info string's first word (markdown-it's `fence` renderer:
-/// `info.split(/(\s+)/g)[0]` of the trimmed info).
 fn fence_language(info: &str) -> Option<String> {
     info.trim_matches(is_js_space)
         .split(is_js_space)
@@ -1669,8 +1522,6 @@ impl From<CmarkAlignment> for Alignment {
     }
 }
 
-/// Appends `inline`, joining it to a text node it directly follows in the
-/// source, as the HTML parser joins adjacent character data.
 fn push_merged(inlines: &mut Vec<Inline>, inline: Inline) {
     if let (
         Some(Inline::Text { text, range }),
@@ -1688,7 +1539,6 @@ fn push_merged(inlines: &mut Vec<Inline>, inline: Inline) {
     inlines.push(inline);
 }
 
-/// Moves a container's loose inline content into an [`Block::Inlines`].
 fn push_loose(
     blocks: &mut Vec<Block>,
     loose: Vec<Inline>,
@@ -1710,14 +1560,11 @@ fn push_loose(
     });
 }
 
-/// An HTML block's tags paired by the tree builder's rules for `p` and
-/// `span` (see the module comment).
 struct HtmlTree<'a> {
     fragment: &'a str,
     map: &'a SegmentMap,
     units: &'a Utf16Map,
     open: Vec<OpenElement>,
-    /// Inline content outside every `p`, not yet placed in a block.
     loose: Vec<Inline>,
     blocks: Vec<Block>,
 }
@@ -1725,7 +1572,6 @@ struct HtmlTree<'a> {
 struct OpenElement {
     element: HtmlElement,
     classes: Vec<String>,
-    /// Where its start tag begins in the fragment.
     start: usize,
     children: Vec<Inline>,
 }
@@ -1743,8 +1589,6 @@ impl HtmlTree<'_> {
         self.push_text(text, &range);
     }
 
-    /// The block's trailing line break, at `range` past the end of the
-    /// trimmed fragment: `"\n"` whatever the source's line ending.
     fn line_break(&mut self, range: &Range<usize>) {
         self.push_text("\n".to_owned(), range);
     }
@@ -1796,18 +1640,15 @@ impl HtmlTree<'_> {
                     self.close_to(index, tag.end);
                     return;
                 }
-                // `</span>` stops at a `p` (a special element): ignored.
                 HtmlElement::P => return,
                 HtmlElement::Span => {}
             }
         }
-        // `</p>` with no `p` open: the tree builder inserts an empty `p`.
         if element == HtmlElement::P {
             self.open(HtmlElement::P, Vec::new(), tag, true);
         }
     }
 
-    /// Closes `open[index..]`, ending them at fragment offset `end`.
     fn close_to(&mut self, index: usize, end: usize) {
         while self.open.len() > index {
             let Some(element) = self.open.pop() else {
@@ -1851,9 +1692,6 @@ impl HtmlTree<'_> {
         }
     }
 
-    /// Places the loose run as a block. The white space text at its ends,
-    /// which a browser renders as nothing beside a block, is
-    /// [`Block::HtmlSpace`] on either side of it rather than content.
     fn flush_loose(&mut self) {
         let mut loose = std::mem::take(&mut self.loose);
         let is_blank = |inline: &Inline| matches!(inline, Inline::Text { text, .. } if text.chars().all(is_html_space));
@@ -1878,7 +1716,6 @@ impl HtmlTree<'_> {
         }
     }
 
-    /// One white-space text of the loose run as a [`Block::HtmlSpace`].
     fn push_space(&mut self, inline: Inline) {
         if let Inline::Text { text, range } = inline {
             self.blocks.push(Block::HtmlSpace { text, range });
@@ -1892,12 +1729,10 @@ impl HtmlTree<'_> {
     }
 }
 
-/// HTML's ASCII white space.
 fn is_html_space(character: char) -> bool {
     matches!(character, '\t' | '\n' | '\u{c}' | '\r' | ' ')
 }
 
-/// A token of a kept HTML fragment, by fragment byte offsets.
 #[derive(Debug, PartialEq, Eq)]
 enum HtmlToken {
     Open {
@@ -1915,9 +1750,6 @@ enum HtmlToken {
     },
 }
 
-/// `sanitizeAllowedHtml` (`XMarkdownAttributes.ts:74-116`) decides; `None`
-/// is a fragment it escapes whole. A kept fragment is then tokenized the
-/// way the browser parses web-core's rewritten markup (see [`tokenize`]).
 fn sanitize(fragment: &str) -> Option<Vec<HtmlToken>> {
     if refuses(fragment) {
         None
@@ -1926,10 +1758,6 @@ fn sanitize(fragment: &str) -> Option<Vec<HtmlToken>> {
     }
 }
 
-/// Whether `sanitizeAllowedHtml` escapes `fragment` whole: it holds `<!`
-/// (which covers `<!--`), `<?` or `<%`; or a tag that `tagNameRe`
-/// (`/<\s*\/?\s*([A-Za-z][\w-]*)\b[^>]*>/g`) names is neither `span` nor
-/// `p`; or it has no such tag but holds a `<`.
 fn refuses(fragment: &str) -> bool {
     if fragment.is_empty() {
         return false;
@@ -1958,8 +1786,6 @@ fn refuses(fragment: &str) -> bool {
     !has_tag && fragment.contains('<')
 }
 
-/// `tagNameRe` matched at the `<` at byte `lt`: the tag name and the byte
-/// after the match's `>`.
 fn tag_name_at(text: &str, lt: usize) -> Option<(&str, usize)> {
     let mut rest = text[lt + 1..].trim_start_matches(is_js_space);
     rest = rest.strip_prefix('/').unwrap_or(rest);
@@ -1972,21 +1798,16 @@ fn tag_name_at(text: &str, lt: usize) -> Option<(&str, usize)> {
         .bytes()
         .position(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
         .unwrap_or(rest.len());
-    // `\b` after a greedy `[\w-]*` backtracks over trailing dashes.
     let name = text[name_start..name_start + name_len].trim_end_matches('-');
     let gt = text[name_start + name.len()..].find('>')?;
     Some((name, name_start + name.len() + gt + 1))
 }
 
-/// `openTagRe` (`/<(span|p)\b([^>]*?)(\/?)>/gi`) matched at the `<` at byte
-/// `lt`.
 struct OpenTag<'t> {
     element: HtmlElement,
-    /// The lowercase tag name.
     name: &'static str,
     attributes: &'t str,
     self_closing: bool,
-    /// The byte after the `>`.
     end: usize,
 }
 
@@ -2005,7 +1826,6 @@ fn open_tag_at(text: &str, lt: usize) -> Option<OpenTag<'_>> {
     } else {
         return None;
     };
-    // `\b`: the name must not run on into a word character.
     if rest[len..]
         .starts_with(|character: char| character.is_ascii_alphanumeric() || character == '_')
     {
@@ -2026,16 +1846,6 @@ fn open_tag_at(text: &str, lt: usize) -> Option<OpenTag<'_>> {
     })
 }
 
-/// The tokens the browser's tokenizer makes of a kept fragment after web-core
-/// rewrote its start tags: a `<span ...>`/`<p ...>` start tag (the classes
-/// [`tag_classes`] keeps), a `</span>`/`</p>` end tag, and text. Everything
-/// else that looks like markup in a kept fragment is removed, as the
-/// browser removes it: another end tag, `</>`, a `</` that starts a bogus
-/// comment, a start tag cut off by the end of the fragment. A start tag of
-/// another name can only survive web-core's check when `tagNameRe` read it
-/// differently from the browser (`< span <b>`); the browser would make
-/// that element and `DOMPurify` keep it, and here its tag is removed and its
-/// content kept.
 fn tokenize(fragment: &str) -> Vec<HtmlToken> {
     fn flush(tokens: &mut Vec<HtmlToken>, end: usize, text_start: usize) {
         if end > text_start {
@@ -2066,8 +1876,6 @@ fn tokenize(fragment: &str) -> Vec<HtmlToken> {
             match after.chars().next() {
                 Some(character) if character.is_ascii_alphabetic() => {
                     flush(&mut tokens, lt, text_start);
-                    // An end tag cut off by the end of the fragment is
-                    // dropped with the rest of it.
                     match fragment[lt..].find('>') {
                         Some(gt) => {
                             let name_len = after
@@ -2092,12 +1900,10 @@ fn tokenize(fragment: &str) -> Vec<HtmlToken> {
                         None => fragment.len(),
                     }
                 }
-                // `</` at the end is text.
                 None => {
                     at = lt + 1;
                     continue;
                 }
-                // `</>` and a bogus comment up to the next `>`.
                 Some(_) => {
                     flush(&mut tokens, lt, text_start);
                     fragment[lt..]
@@ -2121,12 +1927,6 @@ fn tokenize(fragment: &str) -> Vec<HtmlToken> {
     tokens
 }
 
-/// The classes web-core keeps from a start tag's attribute text: the
-/// `class` value `/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i` finds
-/// in the text after `decodeHtmlEntities` (`XMarkdownAttributes.ts:58-66`,
-/// `:103-108`), reduced by `normalizeClassList` (`:68-72`). The regex is
-/// replicated as written, so it also finds `class=` inside another
-/// attribute's name or value (`data-class="x"`).
 fn tag_classes(attributes: &str) -> Vec<String> {
     let attributes = decode_attribute_entities(attributes);
     let value = class_value(&attributes).unwrap_or_default();
@@ -2179,8 +1979,6 @@ fn class_value(attributes: &str) -> Option<&str> {
     None
 }
 
-/// `decodeHtmlEntities` (`XMarkdownAttributes.ts:58-66`): seven fixed
-/// replacements, in order, each over the result of the one before.
 fn decode_attribute_entities(value: &str) -> String {
     [
         ("&quot;", "\""),
@@ -2197,12 +1995,6 @@ fn decode_attribute_entities(value: &str) -> String {
     })
 }
 
-/// The markup `sanitizeAllowedHtml` returns for `fragment`
-/// (`XMarkdownAttributes.ts:74-116`): `escapeHtml` of a refused fragment
-/// (`:44-48`); a kept one with each start tag rewritten to its lowercase
-/// name and kept classes, and a self-closing one written as a start and an
-/// end tag. Only an image's `alt` holds this text, as markdown-it's
-/// `renderInlineAsText` copies raw HTML into it.
 fn sanitized_markup(fragment: &str) -> String {
     if refuses(fragment) {
         return fragment
@@ -2241,11 +2033,6 @@ fn sanitized_markup(fragment: &str) -> String {
     out
 }
 
-/// Character references in HTML text, as far as this module decodes them:
-/// `&#NNN;` and `&#xHH;` (the `;` optional, an invalid code point or NUL
-/// being U+FFFD) and the named references `&amp;`, `&lt;`, `&gt;`, `&quot;`,
-/// `&apos;` and `&nbsp;`. Any other `&` is text. The browser knows the
-/// whole HTML named-reference table and the legacy references without `;`.
 fn decode_entities(text: &str) -> String {
     if !text.contains('&') {
         return text.to_owned();
@@ -2263,8 +2050,6 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
-/// The character `text` (starting with `&`) refers to, and the reference's
-/// length.
 fn decode_reference(text: &str) -> Option<(char, usize)> {
     for (name, character) in [
         ("&amp;", '&'),
@@ -2297,7 +2082,6 @@ fn decode_reference(text: &str) -> Option<(char, usize)> {
     Some((character, prefix + len + semicolon))
 }
 
-/// markdown-it's `isLinkOpen` (`src/rules_inline/html_inline.ts`).
 fn is_link_open(fragment: &str) -> bool {
     let bytes = fragment.as_bytes();
     bytes.len() >= 3
@@ -2306,7 +2090,6 @@ fn is_link_open(fragment: &str) -> bool {
         && (bytes[2] == b'>' || fragment[2..].starts_with(is_js_space))
 }
 
-/// markdown-it's `isLinkClose`: `/^<\/a\s*>/i`.
 fn is_link_close(fragment: &str) -> bool {
     fragment
         .strip_prefix("</")
@@ -2314,10 +2097,6 @@ fn is_link_close(fragment: &str) -> bool {
         .is_some_and(|rest| rest.trim_start_matches(is_js_space).starts_with('>'))
 }
 
-/// markdown-it's `normalizeLink` without the punycode step: the trimmed URL
-/// through `mdurl.encode` with its default set, which keeps ASCII letters,
-/// digits, `;/?:@&=+$,-_.!~*'()#` and an existing `%XX`, and percent-encodes
-/// every other character's UTF-8 bytes.
 pub(super) fn normalize_link(url: &str) -> String {
     const KEPT: &[u8] = b";/?:@&=+$,-_.!~*'()#";
     let url = url.trim_matches(is_js_space);
@@ -2345,10 +2124,6 @@ pub(super) fn normalize_link(url: &str) -> String {
     out
 }
 
-/// markdown-it's `normalizeLinkText` without the punycode step: the
-/// trimmed URL through `mdurl.decode`, which leaves `%XX` of
-/// `;/?:@&=+$,#` and `%` encoded (upper-cased) and replaces a malformed
-/// UTF-8 sequence with U+FFFD per byte it covers.
 pub(super) fn normalize_link_text(url: &str) -> String {
     const KEPT: &[u8] = b";/?:@&=+$,#%";
     let url = url.trim_matches(is_js_space);
@@ -2357,7 +2132,6 @@ pub(super) fn normalize_link_text(url: &str) -> String {
     let mut index = 0;
     let mut copied = 0;
     while index < bytes.len() {
-        // A run of `%XX`.
         let mut run = Vec::new();
         let mut end = index;
         while bytes.get(end) == Some(&b'%')
@@ -2381,7 +2155,6 @@ pub(super) fn normalize_link_text(url: &str) -> String {
     out
 }
 
-/// `%XX` with upper-case hex digits.
 fn push_percent(out: &mut String, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     out.push('%');
@@ -2389,7 +2162,6 @@ fn push_percent(out: &mut String, byte: u8) {
     out.push(char::from(HEX[usize::from(byte & 0xF)]));
 }
 
-/// `mdurl.decode`'s replacement of one run of percent-encoded bytes.
 fn decode_percent_run(run: &[u8], kept: &[u8], out: &mut String) {
     let continuation = |byte: Option<&u8>| byte.is_some_and(|byte| byte & 0xC0 == 0x80);
     let mut index = 0;
@@ -2430,8 +2202,6 @@ fn decode_percent_run(run: &[u8], kept: &[u8], out: &mut String) {
     }
 }
 
-/// markdown-it's `validateLink`: `javascript:`, `vbscript:`, `file:` and
-/// `data:` are refused, except `data:image/(gif|png|jpeg|webp);`.
 pub(super) fn validate_link(url: &str) -> bool {
     let url = url.trim_matches(is_js_space).to_lowercase();
     let bad = ["vbscript:", "javascript:", "file:", "data:"]
@@ -2453,7 +2223,6 @@ mod tests {
         }
     }
 
-    /// The UTF-16 slice of `content` a range names.
     fn at(content: &str, range: &SourceRange) -> String {
         let units: Vec<u16> = content.encode_utf16().collect();
         String::from_utf16_lossy(&units[range.clone()])
@@ -2466,8 +2235,6 @@ mod tests {
         }
     }
 
-    /// `basic.html` (`web-elements/tests/fixtures/x-markdown/basic.html`),
-    /// whose spec reads the `h1`, `strong`, `em`, two `li` and the `code`.
     #[test]
     fn basic_fixture() {
         let content = "# Title\n\nthis is **bold** and *italic*.\n\n- item 1\n- item 2\n\ninline code: `code`.\n\n```\nblock code\n```";
@@ -2512,7 +2279,6 @@ mod tests {
             panic!("{list:?}")
         };
         assert_eq!(items.len(), 2);
-        // A tight item's text is inline content of the item itself.
         assert!(
             matches!(&items[0].children[..], [Block::Inlines { children, .. }] if children[..] == [text_node("item 1", 43..49)])
         );
@@ -2534,14 +2300,12 @@ mod tests {
             tree.text_content(),
             "Titlethis is bold and italic.item 1item 2inline code: code.block code\n"
         );
-        // pulldown-cmark's list range runs over the blank line after it.
         assert_eq!(
             at(content, tree.blocks[2].range()),
             "- item 1\n- item 2\n\n"
         );
     }
 
-    /// `table.html`.
     #[test]
     fn table_fixture() {
         let content = "\n| A | B |\n| - | - |\n| 1 | 2 |\n";
@@ -2580,7 +2344,6 @@ mod tests {
             alignments[..],
             [Alignment::Left, Alignment::Center, Alignment::Right]
         );
-        // markdown-it writes no `<tbody>` for a table without body rows.
         assert_eq!(body[..], [] as [TableRow; 0]);
     }
 
@@ -2590,11 +2353,6 @@ mod tests {
         text
     }
 
-    /// `html-tags.html`: the span keeps only its class, the `<p>` block
-    /// becomes a paragraph with its class followed by the block's last line
-    /// break, and the `<div>` block is its own text, with no line break at
-    /// the end of the content (`tests/x-markdown.spec.ts`, "should only allow
-    /// span and p html tags in markdown content").
     #[test]
     fn html_tags_fixture() {
         let content = "### Hello <span class=\"mark-red other\" style=\"color: red\" onclick=\"noop()\">World</span>\n\n<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>\n\n<div class=\"not-allowed\">Not allowed</div>";
@@ -2651,8 +2409,6 @@ mod tests {
             append(refused),
             "<div class=\"not-allowed\">Not allowed</div>"
         );
-        // A refused block keeps its line break in its text, and a `<p>` left
-        // open holds it.
         let tree = parse("<div>x</div>\n\n<p>open\r\n", None);
         let [
             Block::Inlines {
@@ -2667,8 +2423,6 @@ mod tests {
         assert_eq!(append(children), "open\n");
     }
 
-    /// The spec's "should return full text ranges for nested markdown tags"
-    /// content: both paragraphs, the `strong` and the class-less `span`.
     #[test]
     fn nested_tags() {
         let tree = parse(
@@ -2690,8 +2444,6 @@ mod tests {
 
     #[test]
     fn html_pairing() {
-        // An inline tag left open closes with its construct; a later end tag
-        // naming nothing open is ignored.
         let tree = parse("*a <span>b* c</span>", None);
         let [Inline::Emphasis { children, .. }, Inline::Text { text, .. }] = paragraph(&tree)
         else {
@@ -2699,8 +2451,6 @@ mod tests {
         };
         assert!(matches!(&children[1], Inline::Html { children, .. } if append(children) == "b"));
         assert_eq!(text, " c");
-        // `</span>` inside a `p` inside a `span` is ignored; `<p>` closes
-        // an open `p`; a stray `</p>` is an empty `p`.
         let tree = parse("<p class=a>one <span>two<p>three</span> four</p></p>", None);
         let [
             Block::HtmlParagraph {
@@ -2722,8 +2472,6 @@ mod tests {
         assert_eq!(append(one), "one two");
         assert_eq!(append(third), "three four");
         assert_eq!(empty[..], [] as [Inline; 0]);
-        // A `span` alone on its line is an HTML block: inline content with
-        // no paragraph, its text raw HTML (no emphasis), references decoded.
         let tree = parse(
             "<span class=\"x  y!\">\nfoo *bar* &amp; &#x41;\n</span>\n\nnext",
             None,
@@ -2749,7 +2497,6 @@ mod tests {
         };
         assert_eq!(classes[..], ["x"]);
         assert_eq!(append(children), "\nfoo *bar* & A\n");
-        // A comment refuses the fragment.
         let tree = parse("a <!-- x --> b", None);
         assert_eq!(paragraph(&tree)[..], [text_node("a <!-- x --> b", 0..14)]);
     }
@@ -2771,7 +2518,6 @@ mod tests {
         assert_eq!(sanitized_markup("<div>"), "&lt;div&gt;");
     }
 
-    /// `inlineview.html`: the image becomes a slot for the light-DOM child.
     #[test]
     fn inline_view_fixture() {
         let content = "inline view here ![](inlineview://badge) next";
@@ -2787,12 +2533,10 @@ mod tests {
         assert_eq!(id, "badge");
         assert_eq!(at(content, range), "![](inlineview://badge)");
         assert_eq!(tree.text_content(), "inline view here  next");
-        // `inlineview-class.html`.
         let tree = parse("![](inlineview://content-view)", None);
         assert!(
             matches!(paragraph(&tree), [Inline::InlineView { id, .. }] if id == "content-view")
         );
-        // An empty id is an image.
         let tree = parse("![](inlineview://)", None);
         assert!(matches!(paragraph(&tree), [Inline::Image { src, .. }] if src == "inlineview://"));
     }
@@ -2813,8 +2557,6 @@ mod tests {
         assert_eq!(title.as_deref(), Some("t"));
     }
 
-    /// Bare links as web-core's markdown-it 15 links them: schemes and email
-    /// addresses, not `www.` (linkify-it 6 has `fuzzyLink: false`).
     #[test]
     fn autolinks() {
         let content = "see https://example.com and www.example.com, example.com, a@b.com, mailto:c@d.com ftp://f.org/x HTTP://X.COM/a";
@@ -2844,7 +2586,6 @@ mod tests {
             assert_eq!(shown, expected_text);
             assert_eq!(source, expected_text);
         }
-        // Trailing punctuation and balanced parentheses.
         let content = "(https://en.wikipedia.org/wiki/Link_(Zelda)) and https://a.com/x.";
         let tree = parse(content, None);
         let hrefs: Vec<&str> = paragraph(&tree)
@@ -2861,7 +2602,6 @@ mod tests {
                 "https://a.com/x"
             ]
         );
-        // Not inside a link, a code span, or a raw `<a>`.
         let tree = parse(
             "[http://a.com](http://b.com) `http://c.com` <a href=x>http://d.com</a>",
             None,
@@ -2871,7 +2611,6 @@ mod tests {
             .filter(|inline| matches!(inline, Inline::Link { .. }))
             .count();
         assert_eq!(links, 1);
-        // A percent-encoded link shows decoded, except for reserved bytes.
         let tree = parse("http://bar.com/%E4%BD%A0%2F <https://q.com/%20x>", None);
         let shown: Vec<String> = paragraph(&tree)
             .iter()
@@ -2893,7 +2632,6 @@ mod tests {
         assert!(
             matches!(&inlines[0], Inline::Link { href, title, .. } if href == "a%20b" && title.as_deref() == Some("t"))
         );
-        // A refused link is its source text, its label still parsed.
         let Inline::Text { text: refused, .. } = &inlines[1] else {
             panic!("{inlines:?}")
         };
@@ -2929,7 +2667,6 @@ mod tests {
         assert_eq!(*rest, 8..19);
     }
 
-    /// Offsets are UTF-16 code units: `😀` is two.
     #[test]
     fn utf16_ranges() {
         let content = "😀 é **b**\n\n中文 *c*";
@@ -2964,11 +2701,9 @@ mod tests {
         };
         assert_eq!(*hello, 5..11);
         assert_eq!(at(content, range), "**world**");
-        // Clamped to the string; an end before the start is empty.
         assert_eq!(slice_utf16("abc", 1, 100), ("bc", 1));
         assert_eq!(slice_utf16("abc", 5, 9), ("", 3));
         assert_eq!(slice_utf16("abc", 2, 1), ("", 2));
-        // A bound inside a surrogate pair leaves the half character out.
         assert_eq!(slice_utf16("😀x😀", 1, 4), ("x", 2));
         assert_eq!(slice_utf16("😀x😀", 0, 3), ("😀x", 0));
         assert_eq!(utf16_len("😀x"), 3);
@@ -3004,7 +2739,6 @@ mod tests {
         }
     }
 
-    /// A streaming append leaves the leading blocks equal.
     #[test]
     fn incremental_prefix() {
         let before = parse("# Title\n\nthis is", None);
@@ -3053,7 +2787,6 @@ mod tests {
         else {
             panic!("{tree:#?}");
         };
-        // A loose list's items hold paragraphs.
         assert!(matches!(&items[0].children[..], [Block::Paragraph { .. }]));
         assert!(matches!(
             &children[..],
@@ -3061,8 +2794,6 @@ mod tests {
         ));
     }
 
-    /// Nesting past [`MAX_NESTING`] is dropped, so no input builds a tree
-    /// deep enough to exhaust the stack.
     #[test]
     fn nesting_limit() {
         fn depth(blocks: &[Block]) -> usize {

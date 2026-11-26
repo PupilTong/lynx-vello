@@ -124,7 +124,6 @@ use crate::layout::{
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
-/// Per-axis scrolling capability flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScrollAxes {
     pub x: bool,
@@ -151,34 +150,16 @@ impl ScrollAxes {
     pub const BOTH: Self = Self { x: true, y: true };
 }
 
-/// How a scroll container orders itself against the scroll container above
-/// it when a gesture that starts in it chains: the engine's own
-/// `scroll-capture` property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ScrollCapture {
-    /// Inner first, the CSS default: this container consumes what it can and
-    /// hands the remainder outward.
     #[default]
     Auto,
-    /// `nearest`: the nearest scroll container above this one goes first,
-    /// in either direction; this one moves only once that ancestor cannot.
     Nearest,
-    /// `nearest forward`: the ancestor goes first for a delta that
-    /// increases the offset on the axis being walked; a decreasing one keeps
-    /// the inner-first order.
     NearestForward,
-    /// `nearest backward`: the ancestor goes first for a delta that
-    /// decreases the offset on the axis being walked; an increasing one
-    /// keeps the inner-first order.
     NearestBackward,
 }
 
 impl ScrollCapture {
-    /// Whether this container hands a delta of `sign` on one axis to the
-    /// scroll container above it first: a positive delta is forward, a
-    /// negative one backward, and a zero (or NaN) delta has no direction and
-    /// is never deferred, so an axis the step does not move keeps the
-    /// inner-first order.
     #[must_use]
     pub(crate) fn defers(self, sign: f32) -> bool {
         let forward = sign > 0.0;
@@ -192,8 +173,6 @@ impl ScrollCapture {
     }
 }
 
-/// A container's `scroll-capture` on each physical axis: the
-/// `scroll-capture-x` and `scroll-capture-y` longhands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CaptureAxes {
     pub(crate) x: ScrollCapture,
@@ -201,7 +180,6 @@ pub(crate) struct CaptureAxes {
 }
 
 impl CaptureAxes {
-    /// The same value on both axes, as the `scroll-capture` shorthand sets.
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn both(capture: ScrollCapture) -> Self {
@@ -211,7 +189,6 @@ impl CaptureAxes {
         }
     }
 
-    /// The value on `axis`.
     #[must_use]
     pub(crate) fn on(self, axis: ScrollAxis) -> ScrollCapture {
         match axis {
@@ -221,37 +198,19 @@ impl CaptureAxes {
     }
 }
 
-/// One physical scroll axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollAxis {
     X,
     Y,
 }
 
-/// One scroll container's part in a chain walk: what it may consume, what
-/// it lets past, and where it stands in the order. See the module's
-/// *Chaining* section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainLink {
-    /// The axes the user may scroll directly (`overflow: scroll`).
     pub(crate) user_scrollable: ScrollAxes,
-    /// The axes on which a boundary hands the remainder outward —
-    /// `overscroll-behavior: auto`. `contain` and `none` clear the flag.
     pub(crate) chains: ScrollAxes,
-    /// Whether the container above goes first, per axis.
     pub(crate) capture: CaptureAxes,
 }
 
-/// The order a chain of links is visited in on `axis` for a delta of
-/// `sign` on it, as indices into `links`.
-///
-/// `links` is nearest-first: index 0 is the container the gesture starts in
-/// and each next index is the scroll container above the previous one. A
-/// link whose `scroll-capture` on `axis` [defers](ScrollCapture::defers) `sign` moves
-/// to directly after its parent, and the placement runs from the outermost
-/// link inward so a nested `nearest` resolves against a parent that has
-/// already found its own place. Every other link keeps its inner-first
-/// place.
 #[must_use]
 pub(crate) fn chain_order(
     links: &[ChainLink],
@@ -273,16 +232,12 @@ pub(crate) fn chain_order(
     order
 }
 
-/// A chain walk's visiting order on each axis, as indices into the links.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChainOrders {
     pub x: SmallVec<[usize; 4]>,
     pub y: SmallVec<[usize; 4]>,
 }
 
-/// The order a chain of links is visited in for `delta`, per axis: each
-/// axis's [`chain_order`], from that axis's own `scroll-capture` and the sign
-/// of its own delta. An axis with a zero delta keeps the inner-first order.
 #[must_use]
 pub(crate) fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOrders {
     ChainOrders {
@@ -291,9 +246,6 @@ pub(crate) fn chain_orders(links: &[ChainLink], delta: Vector2D<f32>) -> ChainOr
     }
 }
 
-/// How far up the chain each axis's delta may travel: the number of leading
-/// links it can reach, cut at the first link that does not chain on that
-/// axis (that link itself is still reached).
 fn chain_reach(links: &[ChainLink]) -> (usize, usize) {
     let reach = |chains: fn(&ChainLink) -> bool| {
         links
@@ -304,22 +256,6 @@ fn chain_reach(links: &[ChainLink]) -> (usize, usize) {
     (reach(|link| link.chains.x), reach(|link| link.chains.y))
 }
 
-/// Drives `delta` through a chain of links, in [`chain_orders`] and within
-/// each axis's `overscroll-behavior` reach, calling `scroll` with a link's
-/// index and the delta it is admitted; `scroll` applies what it can and
-/// returns the delta it absorbed, which is what stops chaining on (a
-/// snapped step can absorb more than it moved — see [`resolve_step`]).
-/// Returns the index of the first link that absorbed anything and the
-/// total absorbed, or `None` when nothing did.
-///
-/// When both axes visit the links in the same order it is one walk and
-/// `scroll` sees both axes at once. When the orders differ — a step that
-/// moves one axis only, past a `nearest` link — the x axis is walked in its
-/// order and then the y axis in its own, and `scroll` sees a single-axis
-/// delta; "first" is then the first link to absorb in that sequence. Two
-/// walks rather than an interleaving, because the axes are independent —
-/// neither walk reads what the other absorbed — and a link visited at
-/// different positions on the two axes has no single place to receive both.
 pub(crate) fn drive_chain(
     links: &[ChainLink],
     delta: Vector2D<f32>,
@@ -368,40 +304,19 @@ pub(crate) fn drive_chain(
     first.map(|index| (index, consumed))
 }
 
-/// One scroll container's geometry, in CSS px, with its chaining policy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollBox {
-    /// The visible area — the padding box (CSSOM-View `clientWidth`/`clientHeight`).
     pub scrollport: Size2D<f32>,
-    /// The scrolling area (CSSOM-View `scrollWidth`/`scrollHeight`), never
-    /// smaller than [`Self::scrollport`].
     pub scroll_size: Size2D<f32>,
-    /// The current offset (CSSOM-View `scrollLeft`/`scrollTop`), already
-    /// admitted ([`Self::admit`]): in `0..=max_offset`, or on an axis with a
-    /// [`Self::wrap_period`] in `[0, period)`, where an offset above
-    /// `max_offset` stands across the seam.
     pub offset: Vector2D<f32>,
-    /// The axes the user may scroll directly.
     pub user_scrollable: ScrollAxes,
-    /// The axes a boundary chains past (`overscroll-behavior: auto`).
     pub chains: ScrollAxes,
-    /// The axes whose boundary stretches and springs back
-    /// (`overscroll-behavior: contain-bounce`). Published for the runtime's
-    /// painter, which owns the stretch; the document itself always clamps.
     pub bounce: ScrollAxes,
-    /// The axes with no boundary (`overscroll-behavior: circular`). On such
-    /// an axis with content to scroll the scrolling area repeats every
-    /// [`Self::wrap_period`]: the document admits an offset anywhere in the
-    /// period ([`Self::admit`]), and the runtime's painter wraps its live
-    /// offset around it.
     pub circular: ScrollAxes,
-    /// Whether the container above goes first, per axis
-    /// (`scroll-capture-x` / `scroll-capture-y`).
     pub(crate) capture: CaptureAxes,
 }
 
 impl ScrollBox {
-    /// This container's part in a chain walk.
     #[must_use]
     pub(crate) fn link(&self) -> ChainLink {
         ChainLink {
@@ -411,8 +326,6 @@ impl ScrollBox {
         }
     }
 
-    /// The largest offset this box admits: how far its scrolling area
-    /// overhangs its scrollport, never negative.
     #[must_use]
     pub fn max_offset(&self) -> Vector2D<f32> {
         Vector2D::new(
@@ -421,11 +334,6 @@ impl ScrollBox {
         )
     }
 
-    /// The period each axis wraps with: the extent of the whole scrolling
-    /// area (`max_offset` plus the scrollport) on a [`Self::circular`] axis
-    /// whose content overflows, `None` otherwise. The same rule as the
-    /// committed frame's
-    /// [`ScrollSlot::wrap_period`](crate::visual::ScrollSlot::wrap_period).
     #[must_use]
     pub fn wrap_period(&self) -> (Option<f32>, Option<f32>) {
         let max = self.max_offset();
@@ -435,7 +343,6 @@ impl ScrollBox {
         )
     }
 
-    /// The axes with a [`Self::wrap_period`]: those with no boundary.
     #[must_use]
     pub fn wrap_axes(&self) -> ScrollAxes {
         let (x, y) = self.wrap_period();
@@ -445,10 +352,6 @@ impl ScrollBox {
         }
     }
 
-    /// `offset` as this box admits it, per axis: on an axis with a
-    /// [`Self::wrap_period`] normalized into `[0, period)`, and on every
-    /// other axis clamped to `0..=max_offset`. A non-finite value is `0`
-    /// either way.
     #[must_use]
     pub fn admit(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
         let max = self.max_offset();
@@ -463,14 +366,6 @@ impl ScrollBox {
         )
     }
 
-    /// [`Self::offset`] as a scroll progress timeline samples it: on an axis
-    /// with a [`Self::wrap_period`], an offset past `max_offset` stands at
-    /// its representative nearer the range `0..=max_offset` —
-    /// `offset - period` when the period's end is nearer than `max_offset`,
-    /// otherwise the offset itself (a tie keeps it) — so a scrollport just
-    /// before the start reads the start, not the end. Unchanged on every
-    /// other axis. The same rule as the committed frame's
-    /// [`ScrollSlot::unwrap`](crate::visual::ScrollSlot::unwrap).
     #[must_use]
     pub fn unwrapped_offset(&self) -> Vector2D<f32> {
         let max = self.max_offset();
@@ -482,20 +377,12 @@ impl ScrollBox {
     }
 }
 
-/// The period a circular axis wraps with: the whole scrolling area, `max`
-/// plus the scrollport `extent`, when the axis is circular and has content
-/// to scroll. An axis with nothing to scroll has nothing to wrap, and keeps
-/// the ordinary clamp.
 pub(crate) fn wrap_period_axis(circular: bool, max: f32, extent: f32) -> Option<f32> {
     (circular && max > 0.0).then_some(max + extent)
 }
 
-/// `value` normalized into `[0, period)`; a non-finite value, and the
-/// `rem_euclid` result that rounds up to the period itself, are the start.
 pub(crate) fn wrap_axis(value: f32, period: f32) -> f32 {
     let wrapped = value.rem_euclid(period);
-    // `rem_euclid` of a tiny negative value rounds up to the period itself,
-    // which is the start again.
     if wrapped.is_finite() && wrapped < period {
         wrapped
     } else {
@@ -503,11 +390,6 @@ pub(crate) fn wrap_axis(value: f32, period: f32) -> f32 {
     }
 }
 
-/// `value` on an axis that scrolls to `max` and wraps with `period`, read at
-/// its representative nearer the range `0..=max`: normalized into the
-/// period, then, past `max`, `value - period` when the period's end is
-/// nearer than `max` and the normalized value itself otherwise, a tie
-/// keeping it. Unchanged without a period.
 pub(crate) fn unwrap_axis(value: f32, max: f32, period: Option<f32>) -> f32 {
     let Some(period) = period else {
         return value;
@@ -595,11 +477,6 @@ pub(crate) fn resolve(
         (layout.size.width - layout.border.left - layout.border.right).max(0.0),
         (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
     );
-    // `content_size` is the scrollable overflow rectangle in border-box
-    // coordinates, floored at the padding box's far edge (css-overflow-3
-    // §3.3's "the scroll container's own padding box"), so less the start
-    // border it is the scrolling area from the scrollport's origin: an empty
-    // container's is its scrollport, whatever its far border.
     let scroll_size = Size2D::new(
         (layout.content_size.width - layout.border.left).max(scrollport.width),
         (layout.content_size.height - layout.border.top).max(scrollport.height),
@@ -619,17 +496,14 @@ pub(crate) fn resolve(
 }
 
 impl<T> Document<T> {
-    /// Whether this node has scrollable overflow.
     #[must_use]
     pub fn is_scroll_container(&self, id: NodeId) -> bool {
         self.paint_style(id).is_some_and(is_scroll_container)
     }
 
-    /// Returns this node's scroll geometry when it is a scroll container.
     #[must_use]
     pub fn scroll_box(&self, id: NodeId) -> Option<ScrollBox> {
         let style = self.paint_style(id)?;
-        // Ahead of the offset lookup: an ancestor walk asks every box.
         if !is_scroll_container(style) {
             return None;
         }
@@ -640,9 +514,6 @@ impl<T> Document<T> {
         )
     }
 
-    /// Returns the scroll offset admitted against current geometry
-    /// ([`ScrollBox::admit`]): clamped into the range, or on a circular axis
-    /// normalized into its period.
     #[must_use]
     pub fn scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.scroll_box(id)
@@ -656,29 +527,6 @@ impl<T> Document<T> {
             .unwrap_or_default()
     }
 
-    /// Scrolls to `offset` as the box admits it ([`ScrollBox::admit`]) and
-    /// returns the applied offset: clamped into the range, or on a circular
-    /// axis with content to scroll normalized into the whole period
-    /// `[0, P)`, where an offset above `max_offset` stands across the seam.
-    ///
-    /// A moved offset does not invalidate the retained frame when that frame
-    /// already carries this container as a scroll slot **and still covers the
-    /// new offset**: the frame is baked unscrolled and composes offsets at
-    /// use, so painting and hit testing both see the move with no rebuild.
-    /// Two cases fall back to invalidating. A container the retained frame
-    /// does not know — no frame yet, or one built before this box became a
-    /// scroll container. And an offset past that slot's
-    /// [`encode_window`](crate::visual::ScrollSlot::encode_window), which is
-    /// the range the frame was culled — and its
-    /// `content-visibility: auto` boxes determined — to stay valid over; past
-    /// it, the committed frame simply has no content to compose. On a
-    /// circular axis the window is the whole scrolling area and every offset
-    /// in the period composes.
-    ///
-    /// Records no request for the painter: this is the write the runtime
-    /// adopts the painter's own posted offsets with, so a painter holding an
-    /// offset of its own for the container may post over it. A scroll the
-    /// painter has to honour is [`Self::scroll_to_with`].
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -689,12 +537,7 @@ impl<T> Document<T> {
         };
         let admitted = scroll_box.admit(offset);
         if admitted != scroll_box.offset {
-            // css-scroll-anchoring-1 §2.1.1: a scroll anchoring did not make
-            // selects a new anchor at the new offset.
             self.clear_scroll_anchor(id);
-            // Intersection observations move with the offset whether or not
-            // the frame does: a scroll the retained frame composes commits
-            // nothing, so no render would say so.
             self.note_intersections_stale();
             let composable = self
                 .committed_frame()
@@ -712,29 +555,6 @@ impl<T> Document<T> {
         admitted
     }
 
-    /// CSSOM-View after a layout: an offset the scrolling area has shrunk
-    /// past is written back clamped, as Blink's
-    /// `ClampScrollOffsetAfterOverflowChange` writes it, so the area growing
-    /// again later does not carry the container back out to where it stood.
-    /// No read needs the write ([`ScrollBox::admit`] clamps every read); the
-    /// painter does, since it owns the live offset: the clamp is recorded as
-    /// one more adjustment in the container's anchoring sum
-    /// ([`Self::scroll_anchor_shift`]), so the painter moves its offset by
-    /// it on whichever frame it adopts next, and a post it made before that
-    /// is brought the same distance when it is adopted
-    /// ([`anchoring`]). Left to the painter's own re-clamp onto
-    /// each frame, the offset depended on which frames the painter happened
-    /// to adopt: a `<list>` whose cells built ahead stood at 0 for one frame
-    /// ended at that frame's end on a painter that caught it, and at the
-    /// list's end on one that did not.
-    ///
-    /// A `circular` axis is never clamped, nor is an axis the container
-    /// snaps on: css-scroll-snap-1 §4.1.3 re-snapping ([`Self::resnap`])
-    /// moves a container that stood on a snap position onto that area's new
-    /// position, reading the offset as it was written, and the painter
-    /// settles its own the same way. A container with a pending programmatic
-    /// scroll is left to its request, as anchoring leaves it. Reads nothing
-    /// when no container is scrolled.
     pub(crate) fn clamp_scroll_offsets_after_layout(&mut self) {
         if self.layout_state().scroll_offsets.is_empty() {
             return;
@@ -776,25 +596,10 @@ impl<T> Document<T> {
             let state = self.layout_state_mut();
             state.scroll_offsets.insert(scroller, clamped);
             state.scroll_anchors.entry(scroller).or_default().shift += moved;
-            // The frame carries the sum.
             self.note_visual_mutation();
         }
     }
 
-    /// Records how much farther the painter's own motion will carry `id`
-    /// past its offset ([`ScrollEntry::reach`]), as the painter's newest post
-    /// says: every adopted post overwrites it, so a drag or a wheel step after
-    /// a fling, which posts zero, ends it. A zero reach removes the entry, so
-    /// a page at rest keeps none. The next commit publishes it on the
-    /// container's slot ([`ScrollSlot::reach`]) and decides
-    /// `content-visibility: auto` against the window it stretches
-    /// ([`ScrollSlot::relevance_window`]); recording it schedules nothing —
-    /// the commits the scroll itself asks for are the ones that read it.
-    /// A node that is not live is ignored.
-    ///
-    /// [`ScrollEntry::reach`]: crate::painter::ScrollEntry::reach
-    /// [`ScrollSlot::reach`]: crate::visual::ScrollSlot::reach
-    /// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
     pub fn set_scroll_reach(&mut self, id: NodeId, reach: Vector2D<f32>) {
         let Some(slot) = self.slot(id) else {
             return;
@@ -809,8 +614,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// The reach [`Self::set_scroll_reach`] last recorded for `id`; zero when
-    /// none is.
     #[must_use]
     pub fn scroll_reach(&self, id: NodeId) -> Vector2D<f32> {
         self.slot(id)
@@ -819,16 +622,6 @@ impl<T> Document<T> {
             .unwrap_or_default()
     }
 
-    /// The offset range, `(low, high)` per axis, whose content the next
-    /// commit treats as relevant to the user for `id`'s scrolling: the
-    /// committed frame's [`ScrollSlot::relevance_window`] as the document's
-    /// own state answers it — the encode window around the stored offset,
-    /// stretched toward the pending request's target if `id` has one, else
-    /// by its [`Self::scroll_reach`], over current geometry. `None` when `id`
-    /// is no scroll container. Like every post-layout query, it reads the
-    /// last committed layout.
-    ///
-    /// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
     #[must_use]
     pub fn scroll_relevance_window(&self, id: NodeId) -> Option<(Vector2D<f32>, Vector2D<f32>)> {
         use crate::visual::frame::{encode_window_axis, relevance_window_axis};
@@ -836,8 +629,6 @@ impl<T> Document<T> {
         let max = scroll_box.max_offset();
         let wraps = scroll_box.wrap_axes();
         let offset = scroll_box.offset;
-        // Re-admitted as the build re-admits it into the slot: the geometry
-        // may have changed since the request was recorded.
         let toward = self.layout_state().scroll_requests.get(&id).map_or_else(
             || self.scroll_reach(id),
             |request| scroll_box.admit(request.target) - offset,
@@ -868,9 +659,6 @@ impl<T> Document<T> {
         Some((Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y)))
     }
 
-    /// Scrolls by a delta and returns the unconsumed remainder. An axis with
-    /// a [`ScrollBox::wrap_period`] has no boundary, so it consumes its
-    /// whole delta and leaves no remainder.
     pub fn scroll_by(&mut self, id: NodeId, delta: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return delta;
@@ -889,8 +677,6 @@ impl<T> Document<T> {
         if !node.is_element() {
             return node.flat_parent_id();
         }
-        // A top-layer element's chain ends at it: its containing block is
-        // the initial one (`tree::top_layer`).
         if node.arenas().top_layer().places_against_viewport(id) {
             return None;
         }
@@ -925,7 +711,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// Finds the nearest ancestor scrollable on every requested axis.
     #[must_use]
     pub fn nearest_user_scrollable(&self, id: NodeId, axes: ScrollAxes) -> Option<NodeId> {
         let mut current = Some(id);
@@ -944,16 +729,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// Applies a delta through the scroll chain that starts at `from`, and
-    /// returns the first container that moved with the total consumed.
-    ///
-    /// `from` may be any node: the chain is every scroll container on its
-    /// containing-block path, itself included, nearest first — `hidden`
-    /// containers too, since they carry chain policy even though only a
-    /// `scroll` axis consumes. Order and reach are `drive_chain`'s; see
-    /// the module's *Chaining* section. The named container is the first to
-    /// move in that order, which under `scroll-capture: nearest` can be an
-    /// ancestor of the one the gesture started in.
     pub fn scroll_chain(
         &mut self,
         from: NodeId,
@@ -962,9 +737,6 @@ impl<T> Document<T> {
         self.chain_with(from, delta, ScrollKind::Gesture)
     }
 
-    /// [`Self::scroll_chain`] for a discrete step with a direction and no
-    /// end position of its own — a wheel tick: each container it reaches
-    /// snaps as it lands (`resolve_step` with `ScrollKind::Directed`).
     pub fn scroll_chain_directed(
         &mut self,
         from: NodeId,
@@ -1026,9 +798,6 @@ mod tests {
         nested_scrollers_with("")
     }
 
-    /// An `outer` 200px row-flex scroller (max offset 0,800: its 100px-wide
-    /// filler sits beside the inner box) holding an `inner` 100px scroller
-    /// (max offset 200,300), with `extra_css` appended.
     fn nested_scrollers_with(extra_css: &str) -> (Document<()>, NodeId, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -1124,9 +893,6 @@ mod tests {
         assert_eq!(document.scroll_offset(inner), Vector2D::new(50.0, 300.0));
     }
 
-    /// The shrink clamps the stored offset, not only its reads: the content
-    /// growing back finds the container at the clamp, and the painter is
-    /// told the distance through the anchoring sum.
     #[test]
     fn a_shrinking_relayout_reclamps_the_offset_and_the_area_growing_back_leaves_it() {
         let (mut document, _outer, inner) = nested_scrollers();
@@ -1191,9 +957,6 @@ mod tests {
         assert_eq!(document.scroll_offset(outer), pinned_at);
     }
 
-    /// A slotted scroller chains into the scroller of its host's shadow tree
-    /// that holds the slot: the chain walks the flat tree, through the
-    /// `display: contents` slot, across the shadow boundary.
     #[test]
     fn a_slotted_scroller_chains_into_the_shadow_scroller_around_its_slot() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1410,9 +1173,6 @@ mod tests {
         );
     }
 
-    /// `contain-bounce` is `contain`'s fence in the document: the chain
-    /// stops, and a programmatic scroll still clamps — the stretch is the
-    /// painter's. What the document publishes is the `bounce` axis flag.
     #[test]
     fn contain_bounce_fences_like_contain_and_publishes_its_axes() {
         let (mut document, outer, inner) = nested_scrollers_with(
@@ -1433,12 +1193,6 @@ mod tests {
         );
     }
 
-    /// `circular` is `contain`'s fence in the document too, and the axis has
-    /// no boundary: the inner scroller's y (max 300 over a 100px scrollport)
-    /// wraps with a period of 400. A drag step on it is absorbed whole and
-    /// every offset the document writes is normalized into `[0, 400)`, one
-    /// past `max` included — the scrollport then straddles the seam. The x
-    /// axis is no circle and still clamps.
     #[test]
     fn circular_fences_like_contain_and_publishes_its_axes() {
         let (mut document, outer, inner) = nested_scrollers_with(
@@ -1473,9 +1227,6 @@ mod tests {
         }
     }
 
-    /// `scroll_by` on a circular axis consumes its whole delta: the axis has
-    /// no boundary, so nothing remains to hand on. The bounded x axis still
-    /// reports what its range refused.
     #[test]
     fn scroll_by_on_a_circular_axis_leaves_no_remainder() {
         let (mut document, _outer, inner) = nested_scrollers_with(
@@ -1494,11 +1245,6 @@ mod tests {
         assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 350.0));
     }
 
-    /// The period and the representative a scroll progress timeline reads,
-    /// over a box's own geometry: 100px of scrollport over 400px of
-    /// content, so `max` 300 and a period of 400 on a circular axis. Past
-    /// `max`, the midpoint of the seam (350) decides: below it the offset
-    /// reads as itself, above it as the start's copy one period back.
     #[test]
     fn a_circular_box_admits_the_period_and_unwraps_past_the_seams_midpoint() {
         let scroll_box = |offset: Vector2D<f32>, circular: ScrollAxes| ScrollBox {
@@ -1779,9 +1525,6 @@ mod tests {
         }
     }
 
-    /// A horizontal scroller inside a horizontal pager inside a vertical
-    /// coordinator, the two inner ones capturing on y only: x nests inner
-    /// first as usual, y goes outermost first.
     #[test]
     fn a_y_only_capture_leaves_x_nesting_inner_first() {
         use ScrollCapture::{Auto, NearestForward};

@@ -19,15 +19,11 @@ use super::attributes::{absolute_length, vector_sizes, view_box};
 use crate::layout::{NaturalSize, Size};
 use crate::tree::document::{Document, NodeId};
 
-/// Whether `attribute` of `element` is one an `svg` element's natural size
-/// is computed from.
 pub(crate) fn sizes_root(element: &str, attribute: &str) -> bool {
     element == super::SVG_TAG && matches!(attribute, "width" | "height" | "viewBox")
 }
 
 impl<T> Document<T> {
-    /// Puts the natural size its attributes give on the SVG `svg` element
-    /// `id`.
     pub(crate) fn update_svg_natural_size(&mut self, id: NodeId) {
         let node = self.live(id);
         let natural = natural_size(
@@ -39,7 +35,6 @@ impl<T> Document<T> {
     }
 }
 
-/// The natural size of an `svg` element with these attributes.
 fn natural_size(
     width: Option<&str>,
     height: Option<&str>,
@@ -52,7 +47,6 @@ fn natural_size(
         .map(|view_box| (view_box.w, view_box.h));
     let ((natural_width, natural_height), _viewport) =
         vector_sizes(absolute_width, absolute_height, view_box);
-    // An axis authored with anything but an absolute length is CSS's.
     #[expect(
         clippy::cast_precision_loss,
         reason = "a whole-px natural size from `vector_sizes`, far below f32's integer range"

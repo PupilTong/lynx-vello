@@ -69,10 +69,6 @@ use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
 };
 
-/// §4.2: the distance from the shortest lane within which two lanes count as
-/// equally filled. `normal` is `1em`; a percentage resolves against the used
-/// grid-axis content-box size, which placement always runs after and which the
-/// threshold never feeds back into.
 fn tie_threshold(tolerance: &FitTolerance, font_size: f32, basis: f32) -> f32 {
     match tolerance {
         FitTolerance::Normal => font_size.max(0.0),
@@ -83,11 +79,6 @@ fn tie_threshold(tolerance: &FitTolerance, font_size: f32, basis: f32) -> f32 {
     }
 }
 
-/// §3.3.1: placement runs after sizing, so `auto-fit` occupancy is a
-/// heuristic. Every track a definite-position item covers counts as occupied;
-/// then, with `auto_span_total` the sum of the spans of all auto-placed items,
-/// so do the first that many tracks still unoccupied. Every other `auto-fit`
-/// track collapses.
 fn auto_fit_occupancy(
     range: TrackSpan,
     placements: &[AxisPlacement],
@@ -120,8 +111,6 @@ fn auto_fit_occupancy(
     occupied
 }
 
-/// Whether a `span`-track window starting at `start` is free of collapsed
-/// lanes. A collapsed lane is zero-sized, so nothing may be placed across it.
 #[inline]
 fn window_is_open(tracks: &[Track], start: usize, span: usize) -> bool {
     !tracks[start..start + span]
@@ -129,10 +118,6 @@ fn window_is_open(tracks: &[Track], start: usize, span: usize) -> bool {
         .any(|track| track.collapsed)
 }
 
-/// §4.4 step 1: the lane whose spanned tracks have the smallest maximum
-/// running position, with everything within `tolerance` of that minimum
-/// counting as equally short, resolved in favour of the first such lane at or
-/// after the auto-placement cursor.
 fn choose_lane(
     running: &[f32],
     tracks: &[Track],
@@ -163,9 +148,6 @@ fn choose_lane(
     before_cursor.expect("the shortest lane is always within its own tolerance")
 }
 
-/// §6.3: the stacking range is the one alignment subject, so content
-/// distribution collapses to a single offset and the distributed values take
-/// their fallback alignment.
 fn stacking_content_offset(free: f32, alignment: AlignFlags) -> f32 {
     alignment_spacing_from_free_space(free.max(0.0), 1, alignment).0
 }
@@ -184,9 +166,6 @@ fn grid_axis_area(axis: Axis, span: TrackSpan) -> GridArea {
     }
 }
 
-/// §3.4: every candidate position of every item, in item order: a
-/// definite-position item's own span, then each start an auto-placed item's
-/// span fits.
 fn candidate_positions<'a>(
     placements: &'a [AxisPlacement],
     tracks: &'a [Track],
@@ -219,7 +198,6 @@ fn candidate_positions<'a>(
         })
 }
 
-/// The number of tracks an item spans at each of its candidate positions.
 #[inline]
 fn placement_span(placement: AxisPlacement, count: usize) -> usize {
     match placement {
@@ -228,9 +206,6 @@ fn placement_span(placement: AxisPlacement, count: usize) -> usize {
     }
 }
 
-/// §3.4's sizing entries (see the module docs): one aggregate per track any
-/// span-1 item may sit in, over the items themselves, and a clone of every
-/// spanning item at each of its candidate positions.
 fn sizing_entries<'a, N: Copy>(
     items: &'a mut [GridItem<N>],
     placements: &[AxisPlacement],
@@ -280,8 +255,6 @@ fn sizing_entries<'a, N: Copy>(
             });
         }
     }
-    // §12.5 step 4 reads the flex factors the per-position entries span,
-    // summed in their order; the aggregates stand for several of them.
     sizing.spanned_flex_sum = candidate_positions(placements, &tracks.tracks, first_line)
         .flat_map(|(_, span)| {
             tracks.tracks[tracks.span_indices(span.start, span.end)]
@@ -293,10 +266,6 @@ fn sizing_entries<'a, N: Copy>(
     sizing
 }
 
-/// The per-position clones `sizing_entries` stands for, one per item and
-/// candidate position in item order, copied from the span-1 items the run
-/// measured and from its spanning clones so that their measurements are not
-/// taken again.
 #[cfg(debug_assertions)]
 fn per_position_items<N: Copy>(
     sizing: &LaneSizingItems<'_, N>,
@@ -331,8 +300,6 @@ fn line_offset(tracks: usize) -> i32 {
     i32::try_from(tracks).expect("grid track counts are clamped to 20,000")
 }
 
-/// Sizes the grid axis once: §12 track sizing over the sizing item list, with
-/// the stacking axis passed as indefinite.
 #[allow(clippy::too_many_arguments)]
 fn size_grid_axis<T>(
     tree: &T,
@@ -341,8 +308,6 @@ fn size_grid_axis<T>(
     tracks: &mut TrackSet,
     specs: &[AxisTrackSpec<'_>],
     items: &mut [GridItem<T::NodeId>],
-    // The items are as `resolve_grid_item` built them: resolved against no
-    // basis, nothing measured.
     items_fresh: bool,
     placements: &[AxisPlacement],
     basis: Size<Option<f32>>,
@@ -354,14 +319,8 @@ fn size_grid_axis<T>(
     T: LayoutTree,
 {
     initialize_tracks(tracks, specs, axis.size(basis), gap);
-    // Nothing reads the sizing entries unless some track consults the items
-    // placed in it, so an all-fixed grid axis builds none of them. The
-    // condition is `size_tracks`'s own, borrowed rather than restated.
     let reads_items = track_sizing_reads_items(tracks);
     if reads_items && !items_fresh {
-        // An earlier run measured the span-1 items in place: undo what it
-        // wrote. Only an intrinsic keyword had a size filled in, and the
-        // spanning clones below are taken from the items too.
         let item_basis = axis.pack(None, axis.other().size(basis));
         for item in items.iter_mut() {
             if item.intrinsic.has_intrinsic() {
@@ -372,11 +331,6 @@ fn size_grid_axis<T>(
         }
     }
     if reads_items {
-        // An intrinsic keyword in the stacking axis (`width: min-content` on
-        // an item of lanes running across the rows) sizes the item the same
-        // in every lane, since that axis has no tracks: resolve it before the
-        // grid axis measures the item across it, or the grid-axis
-        // contribution is taken at the wrong cross size.
         let stacking = axis.other();
         for item in items.iter_mut() {
             resolve_item_intrinsic_dimensions(tree, state, item, stacking, None, basis);
@@ -399,8 +353,6 @@ fn size_grid_axis<T>(
         alignment,
         scratch,
     );
-    // The aggregates must size the tracks exactly as one clone per candidate
-    // position would.
     #[cfg(debug_assertions)]
     if reads_items {
         let mut per_position = per_position_items(
@@ -428,7 +380,6 @@ fn size_grid_axis<T>(
             &mut IntrinsicSizingScratch::default(),
         );
         for (index, (track, expected)) in tracks.tracks.iter().zip(&expected.tracks).enumerate() {
-            // The aggregation is exact, not close: the same numbers.
             #[allow(clippy::float_cmp)]
             let same = track.base == expected.base
                 && track.growth_limit == expected.growth_limit
@@ -447,39 +398,23 @@ fn size_grid_axis<T>(
     }
 }
 
-/// One in-flow item after placement, before the stacking-axis content
-/// distribution offset exists.
 struct PlacedItem<N> {
     node: N,
     layout: Layout,
-    /// Margin-box start in the stacking axis, from the content edge.
     stacking_start: f32,
-    /// Margin-box extent in the stacking axis.
     stacking_extent: f32,
-    /// What sits between the container's border-box origin and the item's
-    /// border box on the stacking axis regardless of the distribution offset:
-    /// the content origin, the start margin, and any relative inset.
     stacking_bias: f32,
-    /// Index of the first track the item covers in the grid axis.
     first_track: usize,
-    /// Index of the last track the item covers in the grid axis.
     last_track: usize,
-    /// Whether this item is the first one placed in at least one of its tracks.
     first_in_track: bool,
-    /// Whether this item is the last one placed in at least one of its
-    /// tracks; settled once the whole pass has placed every item.
     last_in_track: bool,
     baseline: Option<f32>,
     last_baseline: Option<f32>,
-    /// The relative offset `layout.location` carries, which the container's
-    /// baselines leave out.
     relative: Point<f32>,
     overflow: Point<Overflow>,
-    /// A sticky item's grid-axis lane span, its containing block there.
     sticky_area: Option<Edges<f32>>,
 }
 
-/// Everything §4.4's pass reads that is fixed for the whole pass.
 #[allow(clippy::struct_excessive_bools)]
 struct LanesContext<'a> {
     grid_axis: Axis,
@@ -487,36 +422,20 @@ struct LanesContext<'a> {
     inner_grid: f32,
     content_origin: Point<f32>,
     stacking_gap: f32,
-    /// The container's content-box size in the stacking axis where it is
-    /// definite: the stacking-axis half of every item's containing block
-    /// (§4.4.1).
     stacking_basis: Option<f32>,
     tolerance: f32,
     rtl: bool,
     goal: LayoutGoal,
-    /// Whether every live track of the grid axis is sized by its own function
-    /// alone, which is what an auto-placed item's area independence needs.
     all_tracks_fixed: bool,
-    /// The container's own measurement was asked for an exact last baseline
-    /// (`LayoutInput::reads_last_baseline`). Which items close a track, and
-    /// so give that baseline (§6.5), is known only once every item is
-    /// placed, so each item's measurement is asked for its own.
     reads_last_baseline: bool,
-    /// The container's own measurement was asked for its first baseline
-    /// (`LayoutInput::reads_first_baseline`), which any item may give.
     reads_first_baseline: bool,
 }
 
 struct LanesPass<N> {
     items: Vec<PlacedItem<N>>,
-    /// §5: the endmost outer edge any item reaches. Every lane starts at the
-    /// content edge, so this is the whole stacking range.
     stacking_range: f32,
 }
 
-/// §4.4 steps 1–3, in order-modified document order. Lays each item out at its
-/// final grid-axis geometry and its pre-distribution stacking position; step 4
-/// (`dense` backfilling) is not implemented, so the pass is strictly sparse.
 #[allow(clippy::too_many_lines)]
 fn run_lanes<T>(
     tree: &T,
@@ -540,7 +459,6 @@ where
 
     for (item, placement) in items.iter_mut().zip(placements) {
         let (start, span, definite) = match *placement {
-            // A definite position is used as-is and leaves the cursor alone.
             AxisPlacement::Definite(span) => (
                 usize::try_from(span.start - first_line)
                     .expect("the implicit grid covers every definite span"),
@@ -568,19 +486,11 @@ where
 
         item.area = grid_axis_area(axis, lines);
         let track_area = context.tracks.area_size(lines.start, lines.end);
-        // §4.4.1: the containing block is the spanned tracks in the grid axis
-        // and the container's content box in the stacking axis, which is
-        // what percentages resolve against. The item is placed at a running
-        // position rather than inside a sized area, so nothing stretches it
-        // in the stacking axis and its geometry takes no size there.
         let containing_block = axis.pack(Some(track_area), context.stacking_basis);
         let area = axis.pack(Some(track_area), None);
         refresh_item_basis(tree, item, containing_block);
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
-        // A grid-axis intrinsic keyword measures across an indefinite stacking
-        // size, but a stacking-axis one measures across the lane it landed in,
-        // whose grid-axis size is already resolved.
         resolve_item_intrinsic_dimensions(tree, state, item, axis, None, containing_block);
         resolve_item_intrinsic_dimensions(
             tree,
@@ -594,10 +504,6 @@ where
         let item_goal = match context.goal.independence() {
             None => context.goal,
             Some(container) => {
-                // §3.4: an auto-placed item contributes to every lane it could
-                // land in, so its area only stands still when every live track
-                // does. Which lane it lands in follows the earlier siblings'
-                // sizes, never its own content.
                 let area_is_fixed = if definite {
                     span_is_fixed(context.tracks, lines)
                 } else {
@@ -610,7 +516,6 @@ where
                     axis.pack(area_is_fixed, false),
                     container,
                 );
-                // The stacking axis has no area to chain off at all.
                 stacking.set_size(&mut independent, false);
                 LayoutGoal::Commit {
                     content_independent: independent,
@@ -625,8 +530,6 @@ where
                 .reading_first_baseline(context.reads_first_baseline && !item_goal.commits()),
         );
 
-        // Auto margins take the grid-axis free space; in the stacking axis
-        // there is none to take, so they stay at zero.
         let mut margin = item.margin;
         let auto_start = item.margin_auto.start(axis);
         let auto_end = item.margin_auto.end(axis);
@@ -662,15 +565,11 @@ where
             logical_track_start
         };
 
-        // §4.4 step 2: the item starts where the last of its lanes ends.
         let position = running[start..start + span]
             .iter()
             .copied()
             .fold(0.0_f32, f32::max);
         let stacking_extent = (stacking.size(output.size) + stacking.sum(margin)).max(0.0);
-        // §6.1: the stacking gutter sits before every item but the first in a
-        // track, which is what leaving each lane's running position at zero
-        // until its first item does.
         for lane in &mut running[start..start + span] {
             *lane = position + stacking_extent + context.stacking_gap;
         }
@@ -687,9 +586,6 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = margin;
-        // css-grid-3 §4.4.1: a sticky item's containing block spans its
-        // lanes in the grid axis; the stacking axis is filled in at commit,
-        // once the container's content extent is known.
         let sticky_area = (item.position == PositionProperty::Sticky).then(|| {
             let mut containing = Edges::ZERO;
             let area_start = axis.point(context.content_origin) + grid_start;
@@ -724,7 +620,6 @@ where
             overflow: item.overflow,
         });
     }
-    // Placement is final now, so the last item of each track is known.
     used.fill(false);
     for item in placed.iter_mut().rev() {
         let tracks = item.first_track..=item.last_track;
@@ -738,16 +633,6 @@ where
     }
 }
 
-/// §6.5: with lanes running down the columns the container's first baseline is
-/// the highest first baseline among the items placed first in each track, and
-/// its last baseline the lowest last baseline among the items placed last in
-/// each track; with lanes running across the rows the first baseline is the
-/// first item's, in order, in the first track that received one, and the
-/// last baseline the last item's, in order, in the last track that received
-/// one. An item without a baseline contributes none — no bottom edge is
-/// synthesised in its place. Positions leave relative offsets out: relative
-/// positioning moves no other box's baseline (css-position-3 §2), its
-/// container's included.
 fn lanes_baselines<N>(items: &[PlacedItem<N>], grid_axis: Axis) -> [Option<f32>; 2] {
     let at = |item: &PlacedItem<N>, baseline: Option<f32>| {
         baseline.map(|baseline| item.layout.location.y - item.relative.y + baseline)
@@ -798,9 +683,6 @@ where
     let scroll_container = is_scroll_container(style.overflow());
     let gap_value = style.gap();
     let rtl = style.direction() == direction::T::Rtl;
-    // §2.3: with the orientation property still unspecified, only its initial
-    // `normal` behaviour exists — the block axis carries the tracks exactly
-    // when `grid-template-rows` alone names any.
     let grid_axis = if matches!(style.grid_template_columns(), GridTemplateComponent::None)
         && !matches!(style.grid_template_rows(), GridTemplateComponent::None)
     {
@@ -817,9 +699,6 @@ where
     let content_alignment = Size::new(justify_content, align_content);
     let align_items = normalize_item_alignment(style.align_items().0, false, rtl);
     let justify_items = normalize_item_alignment(style.justify_items().computed.0.0, true, rtl);
-    // §6.2: in the grid axis the box alignment properties work exactly as in a
-    // regular grid container, so the `normal` rule of css-grid-1 §6.2 reaches
-    // lanes items through the shared `resolve_grid_item`.
     let item_defaults = ItemDefaults {
         align_items: align_items.unwrap_or(AlignFlags::STRETCH),
         align_items_normal: align_items.is_none(),
@@ -879,8 +758,6 @@ where
         in_flow.sort_unstable_by_key(|item| (item.ordered.css_order, item.ordered.document_index));
     }
 
-    // The stacking axis has no lines of its own, so only the grid axis's
-    // placement longhands are read.
     let placements = in_flow
         .iter()
         .map(|item| {
@@ -911,21 +788,15 @@ where
             }
         }
     }
-    // The implicit grid grows until the largest auto-placed span fits, as the
-    // regular grid's auto-placement does when a span overruns the explicit
-    // tracks.
     range.end = range
         .end
         .max(range.start.saturating_add(line_offset(largest_auto_span)))
         .min(GRID_LINE_LIMIT);
-    // Only an `auto-fit` track reads the occupancy.
     let occupied = if explicit.auto_fit.is_some() {
         auto_fit_occupancy(range, &placements, auto_span_total)
     } else {
         Vec::new()
     };
-    // A `grid-auto-*` list is read only for coordinates outside the explicit
-    // grid.
     let auto_tracks = &match grid_axis {
         Axis::Horizontal => style.grid_auto_columns(),
         Axis::Vertical => style.grid_auto_rows(),
@@ -938,8 +809,6 @@ where
         &occupied,
     );
 
-    // Before placement an item's grid-axis area is unknown, so only its
-    // stacking-axis percentages resolve (§4.4.1).
     let stacking_basis = stacking_axis.size(percentage_basis);
     let item_basis = grid_axis.pack(None, stacking_basis);
     let mut items = in_flow
@@ -953,10 +822,6 @@ where
                 item_basis,
                 item_defaults,
             );
-            // §6.5 allows baseline self-alignment to fall back in the stacking
-            // axis; grid-axis baseline sharing is not implemented either, so
-            // both axes take the fallback before anything reads them: `start`
-            // for `baseline`, and `end` for `last baseline`.
             for alignment in [&mut item.align_self, &mut item.justify_self] {
                 if *alignment == AlignFlags::BASELINE {
                     *alignment = AlignFlags::START;
@@ -976,15 +841,6 @@ where
     let mut items_fresh = true;
     let grid_basis = grid_axis.size(percentage_basis);
     let grid_alignment = grid_axis.size(content_alignment);
-    // The grid axis's available grid space (css-grid-2 §12.1; see
-    // `ContainerPrologue`). Lanes down the columns with a width the container
-    // does not have under a definite available width take its fit-content
-    // width, from grid-axis track sizing under the two intrinsic constraints
-    // (or a size-contained inline axis's substituted extent), and need no
-    // provisional run at the stretch-fit size: the width is all that run
-    // would have decided. Lanes across the rows already have a max-content
-    // block axis; the stacking axis is sized by the items that stack along
-    // it, whatever space it is offered.
     let decided_grid = fit_content_width
         .filter(|_| grid_axis == Axis::Horizontal)
         .map(|stretch_fit| {
@@ -1036,9 +892,6 @@ where
     let grid_outer = final_outer_axis(&metrics, grid_axis, grid_content);
     let grid_inner = (grid_outer - grid_axis.size(metrics.box_inset)).max(0.0);
     let grid_gap = resolve_gap_axis(grid_axis.size(gap_value), Some(grid_inner));
-    // The grid axis reruns under its now-definite basis whenever that basis
-    // was missing (a decided fit-content width is one) or the gutter it feeds
-    // came out at a different value.
     #[allow(
         clippy::float_cmp,
         reason = "the rerun is keyed on the used gutter being a different value, not a near one"
@@ -1092,10 +945,6 @@ where
         reads_first_baseline: input.reads_first_baseline && !input.goal.commits(),
     };
     let stacking_content = |range: f32| stacking_axis.size(contained.extents()).unwrap_or(range);
-    // A percentage stacking gutter against an indefinite stacking size is
-    // cyclic: it resolves to zero here, and the size that produces is what the
-    // real gutter then resolves against. The first pass therefore only
-    // measures — no child is ever committed twice.
     let cyclic_stacking_gap = stacking_axis.size(percentage_basis).is_none()
         && matches!(
             stacking_axis.size(gap_value),
@@ -1131,8 +980,6 @@ where
     let outer_size = grid_axis.pack(grid_outer, stacking_outer);
     let final_inner = grid_axis.pack(grid_inner, stacking_inner);
 
-    // A horizontal stacking axis under `direction: rtl` stacks from the
-    // inline-start edge, which is the right one.
     let stacking_reverse = rtl && stacking_axis == Axis::Horizontal;
     let mut content_size = Size::ZERO;
     for placed in &mut pass.items {
@@ -1152,7 +999,6 @@ where
             item_end_margin(scroll_container, placed.layout.margin),
         );
     }
-    // Layout containment exports no baseline (css-contain-2 §3.2).
     let [first_baseline, last_baseline] = if layout_contained {
         [None, None]
     } else {
@@ -1160,9 +1006,6 @@ where
     };
     if commits_layout {
         for placed in pass.items {
-            // css-grid-3 §4.4.1: the grid axis uses its area; the stacking
-            // axis uses the container's full content box. A scroll container
-            // extends the latter over its scrolling contents.
             let start = stacking_axis.start(metrics.border) + stacking_axis.start(metrics.padding);
             let end = if scroll_container {
                 let scrolling_end =
@@ -1187,9 +1030,6 @@ where
                 Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
             );
         }
-        // §8: the stacking axis has exactly two lines, the range's own edges,
-        // so grid-aligned absolute positioning resolves against a one-track
-        // set spanning it.
         let stacking_tracks = TrackSet {
             tracks: vec![Track {
                 base: pass.stacking_range,
@@ -1204,12 +1044,8 @@ where
             Axis::Horizontal => (&tracks, &stacking_tracks),
             Axis::Vertical => (&stacking_tracks, &tracks),
         };
-        // Negative line numbers count back from the explicit end, so each axis
-        // needs its own count: the template's in the grid axis, one in the
-        // stacking axis.
         let explicit_lines = grid_axis.pack(explicit_len, 1);
         let absolute = absolute.expect("commit keeps out-of-flow grid-lanes items");
-        // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
             if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
                 Size::ZERO
@@ -1285,7 +1121,6 @@ mod tests {
     #[test]
     fn auto_fit_occupancy_keeps_definite_tracks_and_one_track_per_auto_span() {
         let range = TrackSpan { start: 0, end: 6 };
-        // Two auto-placed items of span one keep the first two free tracks.
         assert_eq!(
             auto_fit_occupancy(
                 range,
@@ -1298,12 +1133,10 @@ mod tests {
             ),
             vec![true, true, false, true, false, false]
         );
-        // With no auto-placed item only the definite span survives.
         assert_eq!(
             auto_fit_occupancy(range, &[definite(2, 4)], 0),
             vec![false, false, true, true, false, false]
         );
-        // A negative implicit track is part of the range and takes its turn.
         assert_eq!(
             auto_fit_occupancy(
                 TrackSpan { start: -1, end: 2 },
@@ -1314,7 +1147,6 @@ mod tests {
         );
     }
 
-    /// One track per flag, collapsed where it is set.
     fn lanes(collapsed: &[bool]) -> Vec<Track> {
         collapsed
             .iter()
@@ -1328,22 +1160,15 @@ mod tests {
     #[test]
     fn choose_lane_takes_the_shortest_lane_then_the_cursor_within_tolerance() {
         let open = lanes(&[false, false, false]);
-        // Exact shortest lane with no ties.
         assert_eq!(choose_lane(&[30.0, 10.0, 20.0], &open, 1, 0, 0.0), 1);
-        // A tie ahead of the cursor wins over the same tie behind it.
         assert_eq!(choose_lane(&[10.0, 10.0, 10.0], &open, 1, 2, 0.0), 2);
-        // No possible lane at or after the cursor falls back to the first one.
         assert_eq!(choose_lane(&[10.0, 10.0, 30.0], &open, 1, 2, 0.0), 0);
-        // The tolerance widens the tie: lane 2 is within 16px of lane 1.
         assert_eq!(choose_lane(&[10.0, 20.0, 10.0], &open, 1, 1, 16.0), 1);
         assert_eq!(choose_lane(&[10.0, 20.0, 10.0], &open, 1, 1, 0.0), 2);
-        // A span takes the largest running position of the lanes it covers, so
-        // the tall lane rules out both windows that reach it.
         assert_eq!(
             choose_lane(&[0.0, 50.0, 10.0, 0.0], &lanes(&[false; 4]), 2, 0, 0.0),
             2
         );
-        // Collapsed lanes are never spanned.
         assert_eq!(
             choose_lane(&[0.0, 0.0, 10.0], &lanes(&[false, true, false]), 1, 0, 0.0),
             0
@@ -1352,7 +1177,6 @@ mod tests {
             choose_lane(&[30.0, 0.0, 10.0], &lanes(&[false, true, false]), 1, 1, 0.0),
             2
         );
-        // `infinite` makes every open lane possible, so the cursor decides.
         assert_eq!(
             choose_lane(&[0.0, 90.0, 0.0], &open, 1, 1, f32::INFINITY),
             1
@@ -1371,7 +1195,6 @@ mod tests {
         assert_eq!(stacking_content_offset(40.0, A::SPACE_BETWEEN), 0.0);
         assert_eq!(stacking_content_offset(40.0, A::SPACE_AROUND), 20.0);
         assert_eq!(stacking_content_offset(40.0, A::SPACE_EVENLY), 20.0);
-        // An overflowing stacking range never pulls the items backwards.
         assert_eq!(stacking_content_offset(-40.0, A::END), 0.0);
     }
 }

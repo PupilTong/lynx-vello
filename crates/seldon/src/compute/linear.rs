@@ -84,8 +84,6 @@ impl<N> PendingLayoutItem<N> for AbsoluteItem<N> {
 struct LinearItemFlags(u8);
 
 impl LinearItemFlags {
-    /// A margin or padding percentage reads the container's inline size,
-    /// which was not known when the item was resolved.
     const BOX_REFRESH: u8 = 1 << 0;
     const RELATIVE_OFFSET: u8 = 1 << 1;
     const FROZEN: u8 = 1 << 2;
@@ -116,7 +114,6 @@ impl LinearItemFlags {
     }
 }
 
-/// Scratch state for one in-flow linear-layout item.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct LinearItem<N> {
@@ -134,16 +131,8 @@ struct LinearItem<N> {
     cross_size_is_definite: bool,
     violation: f32,
     flags: LinearItemFlags,
-    /// Per physical axis: every value this item's committed input carries on
-    /// the axis is imposed — by the item's own style, or by the container —
-    /// rather than measured from the item, so the input survives any change
-    /// confined to the item's own subtree. Becomes the commit input's
-    /// `content_independent`.
     content_independent: Size<bool>,
-    /// Per axis: the item's own size/min/max values are pure lengths, or
-    /// percentages of a container axis that is itself content-independent.
     values_stable: Size<bool>,
-    /// No margin or padding percentage tracks a content-derived inline basis.
     edges_stable: bool,
 }
 super::util::impl_item_geometry!(LinearItem);
@@ -223,16 +212,12 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     match value {
         Inset::LengthPercentage(lp) => lp.has_percentage(),
         Inset::Auto => false,
-        // Conservatively yes: a refresh re-resolves the inset, whatever the
-        // unresolvable form turns out to be, and keeps a call off every item.
         Inset::AnchorFunction(_)
         | Inset::AnchorSizeFunction(_)
         | Inset::AnchorContainingCalcFunction(_) => true,
     }
 }
 
-/// The item's refresh bits. `nudges` is set only for a `position: relative`
-/// item of a committing pass, the one pass that reads its offset.
 #[inline]
 fn initial_item_flags(
     style: &impl CoreStyle,
@@ -282,12 +267,6 @@ fn resolve_item<N>(
     } else {
         Point::ZERO
     };
-    // A value is *stable* when it is a pure length, or a percentage whose
-    // basis — the container's axis — is itself content-independent. Only
-    // stable values can license an in-place relayout: an unstable one
-    // re-resolves differently once the container re-sizes to changed content.
-    // Computed on commit passes only; a measurement pass commits nothing and
-    // would pay for an answer nobody reads.
     let (values_stable, edges_stable) = container_independent
         .map_or((Size::new(false, false), false), |container| {
             item_value_stability(&style, geometry.aspect_ratio, container)
@@ -313,8 +292,6 @@ fn resolve_item<N>(
     }
 }
 
-/// Resolves the item's margin and padding again against the inline size
-/// that is now known. A value with no percentage resolves to what it was.
 #[inline]
 fn refresh_item_edges<N>(
     style: impl CoreStyle,
@@ -592,8 +569,6 @@ fn measure_item<T>(
     }
 
     if let Some(container) = container_independent {
-        // Every branch above has decided where each axis's used size comes
-        // from; record the ones the item's own content cannot move.
         let axis_stable = |axis: Axis| {
             item.edges_stable
                 && axis.size(item.values_stable)
@@ -601,17 +576,12 @@ fn measure_item<T>(
         };
         let main_independent = axis_stable(axes.main)
             && if forced_main.is_some() {
-                // A weight distributed the container's free main space: the
-                // shares of the item's siblings are their own content's
-                // business, but not this item's.
                 axes.main.size(container)
             } else {
                 axes.main.size(known).is_some()
             };
         let cross_independent = axis_stable(axes.cross)
             && if should_stretch {
-                // The stretch target is the container's cross size, imposed
-                // only when that size is itself content-independent.
                 axes.cross.size(container)
             } else if ratio_fixed_cross {
                 main_independent
@@ -803,8 +773,6 @@ fn size_items<T>(
 ) where
     T: LayoutTree,
 {
-    // The items the container's first baseline is read from
-    // (`container_baseline`): every one in a row, the first in a column.
     let needs_probe_baseline =
         |index: usize| first_baseline_requested && (axes.main == Axis::Horizontal || index == 0);
     let constrained_main = axes.main.size(constraint_inner_size);
@@ -1307,8 +1275,6 @@ where
             ));
         }
     }
-    // Every axis is settled without the children — each one either definite
-    // or contained — so a measurement can answer from the box alone.
     let settled_without_children = Size::new(
         outer_size.width.is_some() || contained.width().is_some(),
         outer_size.height.is_some() || contained.height().is_some(),
@@ -1390,8 +1356,6 @@ where
         }
         let css_order = child_style.order();
         has_nonzero_order |= css_order != 0;
-        // Only a commit places the item, so only a commit reads its relative
-        // offset (`commit_in_flow`).
         let nudges = commits_layout && position == PositionProperty::Relative;
         let flags = initial_item_flags(&child_style, percentage_basis.width, nudges);
         let item = resolve_item(
@@ -1428,9 +1392,6 @@ where
         inner_size,
         inner_available_space,
         weight_sum,
-        // A measurement probes the items its first baseline is read from only
-        // when its caller reads that baseline; a commit reads the committed
-        // items' (`commit_in_flow`).
         input.reads_first_baseline && !commits_layout && !layout_contained,
         container_independent,
     );
@@ -1511,8 +1472,6 @@ where
         content_origin,
         scroll_container,
     );
-    // A box this one is the containing block of may sit deeper than its
-    // children (`LayoutTree::hoisted_children`).
     if !hidden_items.is_empty()
         || !absolute_items.is_empty()
         || tree.has_hoisted_children(state, node)

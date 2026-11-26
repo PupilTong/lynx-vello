@@ -149,9 +149,6 @@ fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
     assert_eq!((layout.size.width, layout.size.height), (40.0, 20.0));
 }
 
-/// A frame draws the picture the element presents, and only that: a URL
-/// the embedder asked for without presenting it is requested and never
-/// read, and presenting it instead is what the next frame reads.
 #[test]
 fn a_frame_reads_the_picture_the_element_presents() {
     const SRC: &str = "app:///src.png";
@@ -205,11 +202,6 @@ fn object_position_and_image_rendering_are_accepted_together() {
     assert_eq!(open, 0);
 }
 
-/// The frame reads each source with the size it draws it at: the fitted rect
-/// for a replaced element, so a store can size its decode to the draw rather
-/// than to the intrinsic size. `object-fit: cover` on a square image in a
-/// 200x100 box draws a 200x200 copy clipped to the box, and that is what the
-/// hint has to say — the copy's size, not the box's.
 #[test]
 fn a_read_carries_the_drawn_size_as_its_hint() {
     for (fit, expected) in [
@@ -232,12 +224,6 @@ fn a_read_carries_the_drawn_size_as_its_hint() {
     }
 }
 
-/// Regression: a load completing after its element was freed must not panic.
-///
-/// Freeing is the only place an id stops meaning anything, so the free is
-/// where a box's hold on the URL it presents goes; before this, an ordinary
-/// unmount during a load reached a stale-id panic, which is fatal on
-/// abort-only Wasm.
 #[test]
 fn freeing_a_node_mid_load_leaves_no_stale_binding() {
     let mut h = Harness::new("");

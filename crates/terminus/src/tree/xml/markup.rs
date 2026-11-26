@@ -9,17 +9,12 @@ use super::{MAX_NESTING, XmlError, with_xml};
 const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// A namespace the tree has elements for that XML content can be built in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XmlNamespace {
-    /// The SVG namespace ([`crate::svg::SVG_NAMESPACE`]).
     Svg,
 }
 
 impl XmlNamespace {
-    /// The namespace an element whose namespace URI is `uri` is kept in:
-    /// `unqualified` for an element in no namespace, `None` for one the
-    /// tree has no elements for.
     fn of(uri: Option<&str>, unqualified: Option<Self>) -> Option<Self> {
         match uri {
             None => unqualified,
@@ -29,52 +24,35 @@ impl XmlNamespace {
     }
 }
 
-/// A parsed XML document: its kept elements, their attributes and every
-/// text node, in document order ([module docs](self)).
 #[derive(Debug, Clone)]
 pub(crate) struct XmlMarkup {
-    /// Preorder; `nodes[0]` is the root element.
     nodes: Vec<MarkupNode>,
-    /// Every element's attributes, an element's contiguous.
     attributes: Vec<(Span, Span)>,
-    /// The text every [`Span`] indexes.
     strings: String,
 }
 
-// The bytes are parsed off the document's thread and the result handed over.
 const _: () = {
     const fn send_sync<T: Send + Sync>() {}
     send_sync::<XmlMarkup>();
 };
 
-/// A range of [`XmlMarkup::strings`]. `u32`: a document past 4 GiB is
-/// refused long before (the host bounds what it reads).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Span {
     start: u32,
     len: u32,
 }
 
-/// One element or text node.
 #[derive(Debug, Clone, Copy)]
 struct MarkupNode {
-    /// An element's local name, or a text node's text.
     content: Span,
-    /// The index one past this node's subtree in [`XmlMarkup::nodes`].
     end: u32,
-    /// The first of this element's attributes in [`XmlMarkup::attributes`].
     attributes_start: u32,
-    /// How many attributes it has; [`TEXT`] for a text node.
     attributes_len: u16,
-    /// An element's namespace; unread for a text node. It sits in the
-    /// node's padding.
     namespace: XmlNamespace,
 }
 
-/// [`MarkupNode::attributes_len`] of a text node.
 const TEXT: u16 = u16::MAX;
 
-/// One node of an [`XmlMarkup`], as the builder reads it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum XmlItem<'a> {
     Element {
@@ -86,13 +64,6 @@ pub(crate) enum XmlItem<'a> {
 }
 
 impl XmlMarkup {
-    /// Parses `bytes` as an XML document, an element in no namespace read
-    /// in `unqualified` ([module docs](self)).
-    ///
-    /// # Errors
-    ///
-    /// [`with_xml`]'s, and [`XmlError::ForeignRoot`] when the root element
-    /// is dropped.
     pub(crate) fn parse(bytes: &[u8], unqualified: Option<XmlNamespace>) -> Result<Self, XmlError> {
         with_xml(bytes, |xml| {
             let root = xml.root_element();
@@ -108,13 +79,11 @@ impl XmlMarkup {
         })
     }
 
-    /// How many nodes it holds, elements and text.
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// The node at `index`.
     pub(crate) fn item(&self, index: usize) -> XmlItem<'_> {
         let node = self.nodes[index];
         if node.attributes_len == TEXT {
@@ -128,7 +97,6 @@ impl XmlMarkup {
         }
     }
 
-    /// The children of the node at `index`, by index, in order.
     pub(crate) fn children(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
         let end = self.nodes[index].end as usize;
         let mut next = index + 1;
@@ -141,22 +109,18 @@ impl XmlMarkup {
         })
     }
 
-    /// The indices one past the node at `index`'s subtree.
     pub(crate) fn subtree(&self, index: usize) -> Range<usize> {
         index..self.nodes[index].end as usize
     }
 
-    /// The text of `span`.
     pub(crate) fn text(&self, span: Span) -> &str {
         &self.strings[span.start as usize..(span.start + span.len) as usize]
     }
 
-    /// An attribute's name and value.
     pub(crate) fn attribute(&self, attribute: (Span, Span)) -> (&str, &str) {
         (self.text(attribute.0), self.text(attribute.1))
     }
 
-    /// `prefix` followed by `text`, as one span.
     fn intern(&mut self, prefix: &str, text: &str) -> Span {
         let start = self.strings.len();
         self.strings.push_str(prefix);
@@ -167,8 +131,6 @@ impl XmlMarkup {
         }
     }
 
-    /// Appends `node` (an element kept in `namespace`, `depth` deep) and
-    /// its subtree.
     fn element(
         &mut self,
         node: roxmltree::Node<'_, '_>,
@@ -241,7 +203,6 @@ mod tests {
         )
     }
 
-    /// Every node as `name[attr=value,…]` or `"text"`, in order.
     fn dump(markup: &XmlMarkup) -> Vec<String> {
         (0..markup.len())
             .map(|index| match markup.item(index) {
@@ -264,7 +225,6 @@ mod tests {
             .collect()
     }
 
-    /// The per-node and per-attribute cost the module docs state.
     #[test]
     fn node_and_attribute_sizes() {
         assert_eq!(std::mem::size_of::<super::MarkupNode>(), 20);

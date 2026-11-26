@@ -141,7 +141,6 @@ pub(crate) fn ring_path_into(path: &mut BezPath, outer: &BoxShape, inner: &BoxSh
     inner.append_to(path);
 }
 
-/// [`ring_path_into`] into a fresh path (test convenience).
 #[cfg(test)]
 fn ring_path(outer: &BoxShape, inner: &BoxShape) -> BezPath {
     let mut path = BezPath::new();
@@ -161,14 +160,11 @@ pub(crate) fn inner_radii(radii: &CornerRadii, border: &Edges<f32>) -> CornerRad
     }
 }
 
-/// The reference boxes a basic shape can resolve against, all in the item's
-/// local (border-box-origin) space.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReferenceBoxes<'a> {
     pub border: Rect,
     pub padding: Rect,
     pub content: Rect,
-    /// Outer (border-box) radii.
     pub radii: &'a CornerRadii,
     pub border_widths: &'a Edges<f32>,
     pub padding_widths: &'a Edges<f32>,
@@ -440,9 +436,6 @@ fn resolve(length: &LengthPercentage, basis: f64) -> f64 {
     length.resolve(Length::new(basis as f32)).px() as f64
 }
 
-/// `data` as a kurbo path, its arcs turned into cubics at `tolerance`
-/// (bounded per radius by `svg::shapes::arc_tolerance`). Also what
-/// an SVG `path` element's computed `d` is drawn from (`crate::svg::record`).
 pub(crate) fn svg_path(data: &SVGPathData, tolerance: f64) -> BezPath {
     let reduce_commands = true;
     let normalized = data.normalize(reduce_commands);

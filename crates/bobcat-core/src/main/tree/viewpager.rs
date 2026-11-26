@@ -186,18 +186,11 @@ use super::{
     element_child_index, element_children, is_truthy,
 };
 
-/// Native's pager tag, and the one `x-viewpager-ng` stands for in web-core.
 pub(super) const VIEWPAGER_TAG: &str = "viewpager";
 pub(super) const X_VIEWPAGER_TAG: &str = "x-viewpager-ng";
-/// Native's page tag, and the one `x-viewpager-item-ng` stands for in web-core.
 pub(super) const VIEWPAGER_ITEM_TAG: &str = "viewpager-item";
 pub(super) const X_VIEWPAGER_ITEM_TAG: &str = "x-viewpager-item-ng";
 
-/// The `viewpager` and `viewpager-item` policy, in `x-viewpager-ng.css`'s
-/// own order; see the module documentation for what each rule is for.
-///
-/// Each important declaration sits on a line of its own, because
-/// [`super::ua_sheet`]'s pinned test reads the sheet line by line.
 pub(super) const UA_RULES: &str = r#"
 @property --viewpager-initial-index { syntax: "<integer>"; inherits: true; initial-value: -1; }
 viewpager, x-viewpager-ng {
@@ -221,30 +214,19 @@ viewpager-item, x-viewpager-item-ng {
 viewpager-item, x-viewpager-item-ng { position: relative !important; }
 "#;
 
-/// The event a pager fires with its offset in pages at each `scroll`.
 pub(super) const OFFSET_CHANGE_EVENT: &str = "offsetchange";
-/// The event a pager fires when a `scrollend` leaves it on another page.
 pub(super) const CHANGE_EVENT: &str = "change";
-/// The event a pager fires when a finger lifts, with the page it heads for.
 pub(super) const WILL_CHANGE_EVENT: &str = "willchange";
 
-/// Installs one pager component under both of its tag names, queueing its
-/// events on `events`. Must run before any element could carry either tag,
-/// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let viewpager: Rc<dyn CustomElement<()>> = Rc::new(Viewpager::new(events));
     document.define_shared(VIEWPAGER_TAG, Rc::clone(&viewpager));
     document.define_shared(X_VIEWPAGER_TAG, viewpager);
 }
 
-/// The pager component: the `selectTab` method and the pager's events
-/// (the module documentation's "Events").
 struct Viewpager {
     events: ComponentEvents,
-    /// The fingers down on each pager, which `change`'s `isDragged` reports.
     touch_count: TouchCount,
-    /// The page each connected pager last reported, `0` at connection;
-    /// dropped when it is freed.
     pages: RefCell<FxHashMap<NodeId, usize>>,
 }
 
@@ -257,7 +239,6 @@ impl Viewpager {
         }
     }
 
-    /// The pager's own `scroll`: `offsetchange`, with the offset in pages.
     fn scrolled(&self, document: &LynxDocument, pager: NodeId) {
         if !document.has_listener(pager, OFFSET_CHANGE_EVENT) {
             return;
@@ -275,10 +256,6 @@ impl Viewpager {
         );
     }
 
-    /// The pager's own `scrollend`: `change`, when the page whose snap
-    /// position is nearest the offset it came to rest at is another than
-    /// the one last reported. The page is recorded whether or not anything
-    /// listens.
     fn scroll_ended(&self, document: &LynxDocument, pager: NodeId) {
         let Some(shown) = shown_page(document, pager) else {
             return;
@@ -307,8 +284,6 @@ impl Viewpager {
         }
     }
 
-    /// A finger lifted from the pager: `willchange`, with the page nearest
-    /// the offset it was let go at.
     fn released(&self, document: &LynxDocument, pager: NodeId) {
         if !document.has_listener(pager, WILL_CHANGE_EVENT) {
             return;
@@ -330,29 +305,18 @@ impl Viewpager {
     }
 }
 
-/// `pager`'s horizontal offset and its page width — its scrollport's width,
-/// web-core's `clientWidth` — from the last completed layout, or `None` when
-/// it has no box, is no scroll container, or is zero pixels wide.
 fn offset_and_page_width(document: &LynxDocument, pager: NodeId) -> Option<(f32, f32)> {
     let scroll_box = rendered_scroll_box(document, pager)?;
     let width = scroll_box.scrollport.width;
     (width > 0.0).then_some((scroll_box.offset.x, width))
 }
 
-/// The page `willchange` names for a pager let go `pages` pages from its
-/// start with `count` element children: web-core's
-/// `max(0, min(Math.round(pages), count - 1))`, where `Math.round` takes a
-/// half up.
 fn heading_page(pages: f64, count: usize) -> f64 {
     #[expect(clippy::cast_precision_loss, reason = "a child count, far below 2^52")]
     let last = count as f64 - 1.0;
     (pages + 0.5).floor().min(last).max(0.0)
 }
 
-/// The element child of `pager` whose snap position on x is nearest the
-/// pager's offset ([`nearest_snap_position`]), as its index among the
-/// pager's element children; `None` when the pager has no box or no snap
-/// position.
 fn shown_page(document: &LynxDocument, pager: NodeId) -> Option<usize> {
     let scroll_box = rendered_scroll_box(document, pager)?;
     let positions = document.snap_positions(pager)?;
@@ -362,7 +326,6 @@ fn shown_page(document: &LynxDocument, pager: NodeId) -> Option<usize> {
 }
 
 impl CustomElement<()> for Viewpager {
-    /// Its own `scroll` and `scrollend`, and the touches on it.
     fn observed_events(&self) -> &'static [&'static str] {
         &[
             SCROLL_EVENT,
@@ -386,11 +349,6 @@ impl CustomElement<()> for Viewpager {
         self.touch_count.forget(element);
     }
 
-    /// A `scroll` or `scrollend` counts only at the pager itself, its one
-    /// at-target delivery: a scroller inside a page fires its own, whose
-    /// capture pass crosses the pager. A touch counts at the one delivery
-    /// [`TouchCount::observe`] answers for, and a `touchend` there is a
-    /// release.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
@@ -425,47 +383,6 @@ impl CustomElement<()> for Viewpager {
     }
 }
 
-/// `selectTab({index, smooth = true})` on `pager`, with `params` as the JSON
-/// text the realm serialized: CSSOM-View's "scroll an element into view"
-/// ([`terminus::link::Document::scroll_into_view`]) on the pager's element child number
-/// `index`, the same algorithm the base set's `scrollIntoView` runs
-/// ([`super::base_methods`]).
-///
-/// - `index` must be a JSON number; a missing one, or one that is not a number — `NaN` and the
-///   infinities serialize as `null` — is code 4 with nothing moved, which is Android's and
-///   Harmony's answer (`LynxUIViewPager.kt:172-174`, `ui_viewpager.cc:224-227`); web-core
-///   multiplies whatever it is given.
-/// - A fraction is truncated toward zero, as iOS (`intValue`, `LynxUIViewPager.m:771`) and Harmony
-///   (`static_cast<int32_t>`, `ui_viewpager.cc:222`) read it, and as `scroll-view`'s
-///   `scrollTo({index})` reads its own; web-core multiplies it as given.
-/// - The page is the pager's element child number `index`, text nodes skipped ([`element_child`]).
-///   A negative index, or one past the last page, names no page and is code 4 with nothing moved,
-///   which is Android's and Harmony's answer (`LynxUIViewPager.kt:168-170`,
-///   `ui_viewpager.cc:229-235`; iOS answers its generic code 1); web-core clamps.
-///
-/// The options:
-///
-/// - `inline: start` puts the page's start edge at the pager's start edge, the position web-core's
-///   `clientWidth * index` (`XViewpagerNg.ts:26-35`) stands for when every page is as wide as the
-///   pager.
-/// - `block: nearest` leaves the axis the method is not about where it is.
-/// - `container: nearest` scrolls the pager and never an ancestor of it, the same choice as the
-///   base set's `scrollIntoView` (user ruling 2026-10-10). A pager that is no scroll container (an
-///   author restyled its `overflow`) is left alone rather than handing the scroll to the scroll
-///   container above it.
-///
-/// What the standard algorithm adds: the page's own layout position, so pages an author sized
-/// narrower than the pager, and a `wrapper` child holding a page, land where they are laid out;
-/// the pager's `scroll-padding` and the page's `scroll-margin`; and the inline start edge mirrored
-/// under `direction: rtl`. Positions are the last completed layout's: a UI method never flushes.
-///
-/// `smooth` is read with JavaScript truthiness, as web-core's
-/// `smooth ? 'smooth' : 'instant'` reads it, and a missing one is `true`. A
-/// smooth turn is animated by the painter and leaves the document's offset
-/// where it was until the painter posts it back; an instant one moves the
-/// document at once. A pager or page with no box (`display: none`) has
-/// nothing to scroll, and the call still succeeds with nothing moved and
-/// nothing recorded, as web-core's does against a zero `clientWidth`.
 pub(super) fn select_tab(
     document: &mut LynxDocument,
     pager: NodeId,
@@ -483,8 +400,6 @@ pub(super) fn select_tab(
         ScrollBehavior::Instant
     };
     let page = element_child(document, pager, index).ok_or(InvalidParams)?;
-    // `container: nearest` is the page's nearest scroll container, which is
-    // an ancestor of the pager when the pager itself is none.
     if document.scroll_box(pager).is_none() {
         return Ok(());
     }
@@ -502,7 +417,7 @@ pub(super) fn select_tab(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::scroll::ScrollBehavior;
     use terminus::link::stylo::properties::PropertyId;
@@ -518,7 +433,6 @@ mod tests {
         select_tab,
     };
 
-    /// Whether `node` is a pager, under either of its tag names.
     fn is_viewpager(document: &LynxDocument, node: NodeId) -> bool {
         document
             .get(node)
@@ -526,14 +440,11 @@ mod tests {
             .is_some_and(|tag| tag == VIEWPAGER_TAG || tag == X_VIEWPAGER_TAG)
     }
 
-    /// Both spellings of the pager, each with the item spelling that goes
-    /// with it.
     const SPELLINGS: [(&str, &str); 2] = [
         (VIEWPAGER_TAG, VIEWPAGER_ITEM_TAG),
         (X_VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG),
     ];
 
-    /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -554,8 +465,6 @@ mod tests {
         )
     }
 
-    /// A pager of `tag` with `count` items of `item_tag` under the page,
-    /// with `style` inline on the pager.
     fn build_pager(
         document: &mut LynxDocument,
         (tag, item_tag): (&str, &str),
@@ -568,8 +477,6 @@ mod tests {
             .collect();
         (pager, items)
     }
-
-    // --- the UA rules -------------------------------------------------------
 
     #[test]
     fn a_pager_scrolls_x_snapping_mandatory_and_keeps_a_row() {
@@ -640,8 +547,6 @@ mod tests {
         }
     }
 
-    /// An item written outside any pager is an ordinary container, not a
-    /// hidden one (the recorded `list-item` decision).
     #[test]
     fn an_item_outside_a_pager_still_generates_a_box() {
         let mut document = document();
@@ -674,12 +579,6 @@ mod tests {
         }
     }
 
-    // --- the row invariant --------------------------------------------------
-
-    /// Every way this grammar lets an author move a flex or linear main axis
-    /// or wrap its line, inline or from an author sheet, `!important` or
-    /// not, still lays the pages out as one row at the pager's width. The
-    /// deprecated `linear-orientation` is not a property here at all.
     #[test]
     fn author_main_axis_styles_still_produce_a_row_of_pages() {
         const SIZE: &str = "width: 200px; height: 100px;";
@@ -735,8 +634,6 @@ mod tests {
         }
     }
 
-    /// The e2e card `item-position-absolute`: items the author positions
-    /// absolutely stay in the row.
     #[test]
     fn an_item_positioned_absolutely_stays_in_the_row() {
         for spelling in SPELLINGS {
@@ -761,8 +658,6 @@ mod tests {
         }
     }
 
-    /// A page is the pager's content box: its border and padding sit around
-    /// the row, and each page is exactly as wide as what is left.
     #[test]
     fn items_are_the_pagers_content_box() {
         for spelling in SPELLINGS {
@@ -779,8 +674,6 @@ mod tests {
             assert_eq!(rect(&document, items[1]), (285.0, 15.0, 270.0, 170.0));
         }
     }
-
-    // --- the attributes -----------------------------------------------------
 
     #[test]
     fn enable_scroll_or_horizontal_gesture_false_leaves_only_script() {
@@ -831,10 +724,6 @@ mod tests {
         }
     }
 
-    // --- the initial page ---------------------------------------------------
-
-    /// A 200px pager of `count` pages under the page, spelled `spelling`, with
-    /// `attributes` written before anything is laid out.
     fn initial_pager(
         spelling: (&str, &str),
         attributes: &[(&str, &str)],
@@ -864,7 +753,6 @@ mod tests {
             .collect()
     }
 
-    /// The request the committed frame carries to the painter for `pager`.
     fn carried(document: &mut LynxDocument, pager: NodeId) -> Option<(f32, ScrollBehavior)> {
         let frame = document.commit();
         let index = frame.slot_of(pager).expect("the pager has a slot");
@@ -873,9 +761,6 @@ mod tests {
             .map(|request| (request.target.x, request.behavior))
     }
 
-    /// `select-index` first, then `initial-select-index` — web-core's order —
-    /// in the first commit, which carries the position to the painter as an
-    /// instant request.
     #[test]
     fn the_first_commit_starts_on_the_selected_page() {
         for spelling in SPELLINGS {
@@ -929,9 +814,6 @@ mod tests {
         }
     }
 
-    /// A present `select-index` that is not an integer does not fall back to
-    /// `initial-select-index` — the fork's typed `attr()` fallback gap
-    /// (`docs/style-assumptions.md` §27) — so the pager shows its first page.
     #[test]
     fn a_select_index_that_is_no_integer_shows_the_first_page() {
         for select in ["abc", "1.5", ""] {
@@ -962,9 +844,6 @@ mod tests {
         }
     }
 
-    /// Each new target is honoured once, so changing the attribute in force
-    /// after the first layout turns the pager, instantly — where web-core
-    /// reads it once, at connect.
     #[test]
     fn changing_the_index_in_force_turns_the_pager() {
         let (mut document, pager, _) = initial_pager(SPELLINGS[0], &[("select-index", "1")], 4);
@@ -983,19 +862,15 @@ mod tests {
         document.set_attribute(pager, "initial-select-index", "2");
         document.commit();
         assert_eq!(offset_x(&document, pager), 400.0);
-        // `select-index` takes over from `initial-select-index`.
         document.set_attribute(pager, "select-index", "0");
         document.commit();
         assert_eq!(offset_x(&document, pager), 0.0);
     }
 
-    /// A user who moved away is not moved back by a commit that leaves the
-    /// target where it was.
     #[test]
     fn an_unrelated_commit_leaves_a_swiped_pager_alone() {
         let (mut document, pager, items) = initial_pager(SPELLINGS[0], &[("select-index", "2")], 4);
         document.commit();
-        // Where main writes the offset the painter posted for a swipe.
         document.scroll_to(pager, Vector2D::new(0.0, 0.0));
         document.set_inline_style(items[0], "opacity: 0.5");
         assert_eq!(
@@ -1016,9 +891,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 0.0);
     }
 
-    /// `sibling-index()` counts the item's own parent's children, so a page
-    /// inserted or removed ahead of the target makes another page the
-    /// target, and the pager turns to it.
     #[test]
     fn inserting_or_removing_a_page_ahead_of_the_target_moves_the_target() {
         let (mut document, pager, items) = initial_pager(SPELLINGS[0], &[("select-index", "2")], 4);
@@ -1043,9 +915,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 400.0);
     }
 
-    /// A `wrapper` around each page makes every page the first child of its
-    /// own parent: all of them count as index 0. Pages sharing one
-    /// `wrapper` count as they would without it.
     #[test]
     fn wrapped_pages_count_among_their_own_parents_children() {
         for (select, expected) in [("0", "nearest"), ("1", "none")] {
@@ -1075,8 +944,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 400.0);
     }
 
-    /// Every pager sets the index from its own attributes, so a pager inside
-    /// another's page does not inherit the outer one's.
     #[test]
     fn a_nested_pager_does_not_inherit_the_outer_index() {
         let (mut document, outer, pages) = initial_pager(SPELLINGS[0], &[("select-index", "1")], 2);
@@ -1096,8 +963,6 @@ mod tests {
         assert_eq!(offset_x(&document, outer), 200.0);
     }
 
-    /// A `display: none` pager has no scroll slot, so nothing is honoured
-    /// until it is shown; the first commit that shows it starts on the page.
     #[test]
     fn a_pager_shown_later_starts_on_the_selected_page_when_shown() {
         let mut document = document();
@@ -1115,11 +980,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 400.0);
     }
 
-    /// A zero-width pager is a scroll container with nowhere to go: its
-    /// target is honoured at offset 0 in its first commit, and a target is
-    /// honoured once, so widening the pager later leaves it on the first
-    /// page. web-core instead retries each animation frame until the pager
-    /// has a width. Pinned as it is; recorded in `deviations.md`.
     #[test]
     fn a_pager_that_is_zero_wide_at_its_first_commit_stays_on_the_first_page() {
         let mut document = document();
@@ -1137,8 +997,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 0.0);
     }
 
-    /// Pages that arrive after the pager's first layout bring the target
-    /// with them, and a new target is honoured.
     #[test]
     fn pages_that_arrive_later_bring_the_target_with_them() {
         let (mut document, pager, _) = initial_pager(SPELLINGS[1], &[("select-index", "2")], 0);
@@ -1151,9 +1009,6 @@ mod tests {
         assert_eq!(offset_x(&document, pager), 400.0);
     }
 
-    // --- selectTab ----------------------------------------------------------
-
-    /// A laid-out 200px pager of four pages: max offset 600.
     fn four_pages() -> (LynxDocument, NodeId) {
         let mut document = document();
         let (pager, _) = build_pager(
@@ -1177,9 +1032,6 @@ mod tests {
             .map(|request| (request.target, request.behavior))
     }
 
-    /// The page's start edge lands at the pager's start edge: page 2 of a
-    /// row of 200px pages is at 400. An instant turn moves the document at
-    /// once; a smooth one is a request the painter carries out.
     #[test]
     fn select_tab_scrolls_the_page_into_view() {
         let (mut document, pager) = four_pages();
@@ -1205,9 +1057,6 @@ mod tests {
         );
     }
 
-    /// The page's laid-out position decides, not `index` times the pager's
-    /// width: pages an author made half as wide put page 2 at 200. The
-    /// pager's `scroll-padding` insets the start edge the page aligns to.
     #[test]
     fn select_tab_uses_the_pages_layout_position_not_an_assumed_width() {
         let mut document = document();
@@ -1264,13 +1113,8 @@ mod tests {
         }
     }
 
-    /// A fraction is truncated toward zero; an index naming no page, past
-    /// the end or below zero, is code 4 with nothing moved and nothing
-    /// recorded.
     #[test]
     fn select_tab_truncates_a_fraction_and_refuses_an_index_naming_no_page() {
-        // `-0.5` truncates to page 0, as `intValue` and `static_cast` read
-        // it and as `scroll-view`'s `scrollTo({index})` does here.
         for (index, expected) in [("2.9", 400.0), ("1.5", 200.0), ("-0.5", 0.0)] {
             let (mut document, pager) = four_pages();
             document.scroll_to(pager, Vector2D::new(600.0, 0.0));
@@ -1295,9 +1139,6 @@ mod tests {
         }
     }
 
-    /// Only element children are pages: a text node between two pages does
-    /// not shift the index. White space, so it generates no box of its own
-    /// either (css-flexbox-1 §4) and the offsets stay the pages' alone.
     #[test]
     fn select_tab_counts_element_children_only() {
         let mut document = document();
@@ -1345,10 +1186,6 @@ mod tests {
         }
     }
 
-    /// A pager with no box (`display: none`) gives its pages none, so
-    /// `scroll_into_view` has nothing to scroll; a pager an author made no
-    /// scroll container (`overflow: visible`) is left alone. Either way the
-    /// call succeeds, nothing moves, and no frame carries a request for it.
     #[test]
     fn select_tab_on_a_pager_that_cannot_scroll_moves_nothing() {
         for style in ["display: none", "overflow: visible"] {
@@ -1367,9 +1204,6 @@ mod tests {
         }
     }
 
-    /// `selectTab` scrolls the pager alone: a pager that is no scroll
-    /// container does not hand the scroll to the scroll container above it,
-    /// which would otherwise be the page's nearest one.
     #[test]
     fn select_tab_never_scrolls_an_ancestor_of_the_pager() {
         let mut document = document();
@@ -1399,8 +1233,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(outer), None);
     }
 
-    // --- the events ---------------------------------------------------------
-
     use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
@@ -1409,8 +1241,6 @@ mod tests {
     use super::super::{ComponentEvents, Field};
     use super::{CHANGE_EVENT, OFFSET_CHANGE_EVENT, WILL_CHANGE_EVENT, heading_page};
 
-    /// A laid-out pager of `spelling` with `count` pages, 200 x 100, with the
-    /// document's component events: snap positions every 200px.
     fn evented(
         spelling: (&str, &str),
         style: &str,
@@ -1424,14 +1254,10 @@ mod tests {
 
     const PAGER: &str = "width: 200px; height: 100px";
 
-    /// The pager's `scrollend`, delivered as the runtime delivers the
-    /// kernel's: at the pager, not bubbling, not composed.
     fn scroll_ended(document: &mut LynxDocument, pager: NodeId) {
         document.dispatch_element_event(pager, "scrollend", &EventDetail::None, false, false, 0.0);
     }
 
-    /// A `scroll` to `offset` and the `scrollend` the pager comes to rest
-    /// with there.
     fn rested(document: &mut LynxDocument, pager: NodeId, offset: f32) {
         scrolled(document, pager, x(offset));
         scroll_ended(document, pager);
@@ -1459,7 +1285,6 @@ mod tests {
         touched(&mut document, items[0], TOUCH_END);
         assert_eq!(fields_heard(&events, pager), [], "nobody listens");
 
-        // The page was recorded while nobody listened.
         listen(&mut document, pager, CHANGE_EVENT);
         rested(&mut document, pager, 210.0);
         assert_eq!(fields_heard(&events, pager), []);
@@ -1467,9 +1292,6 @@ mod tests {
         assert_eq!(fields_heard(&events, pager), [change(2.0, false)]);
     }
 
-    /// `offsetchange` carries the offset in pages at each `scroll`: the
-    /// offset over the pager's scrollport width, under either spelling. A
-    /// pager zero pixels wide has no page width and reports nothing.
     #[test]
     fn offsetchange_reports_the_offset_in_pages() {
         for spelling in SPELLINGS {
@@ -1496,10 +1318,6 @@ mod tests {
         assert_eq!(fields_heard(&events, pager), [], "no page width");
     }
 
-    /// `change` is decided at `scrollend` alone, on the page whose snap
-    /// position is nearest the rest offset, and only when it is another
-    /// page than the last one reported (0 at connection). 199 is the
-    /// second page, where web-core's `floor` reads the first.
     #[test]
     fn change_fires_at_scrollend_on_a_new_page_only() {
         let (mut document, events, pager, _) = evented(SPELLINGS[1], PAGER, 3);
@@ -1516,8 +1334,6 @@ mod tests {
         assert_eq!(fields_heard(&events, pager), []);
     }
 
-    /// `change`'s `isDragged` is whether a finger is down on the pager as
-    /// it comes to rest.
     #[test]
     fn change_reports_whether_a_finger_is_down() {
         let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
@@ -1530,9 +1346,6 @@ mod tests {
         assert_eq!(fields_heard(&events, pager), [change(2.0, false)]);
     }
 
-    /// `willchange` comes when a finger lifts, once per `touchend` — on a
-    /// page or at the pager itself — and names the page the offset rounds
-    /// to; a `touchcancel` sends none.
     #[test]
     fn willchange_names_the_page_the_release_rounds_to() {
         let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
@@ -1559,8 +1372,6 @@ mod tests {
         assert_eq!(fields_heard(&events, pager), []);
     }
 
-    /// The page is clamped to the element children: two pages an author
-    /// made 400px wide leave a range of three page widths.
     #[test]
     fn willchange_is_clamped_to_the_last_page() {
         let (mut document, events) = with_component_events(PageConfig::default());
@@ -1592,9 +1403,6 @@ mod tests {
         }
     }
 
-    /// A scroller inside a page fires its own `scroll` and `scrollend`,
-    /// whose capture pass crosses the pager; the pager decides nothing on
-    /// them.
     #[test]
     fn a_scroller_inside_a_page_is_not_the_pagers() {
         let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
@@ -1614,8 +1422,6 @@ mod tests {
         rested(&mut document, pager, 400.0);
         listen(&mut document, pager, CHANGE_EVENT);
         listen(&mut document, pager, OFFSET_CHANGE_EVENT);
-        // Back on the first page with no `scrollend` of its own: a
-        // `scrollend` the pager took for its own would report it.
         document.scroll_to(pager, x(0.0));
         scrolled(&mut document, inner, Vector2D::new(0.0, 100.0));
         scroll_ended(&mut document, inner);

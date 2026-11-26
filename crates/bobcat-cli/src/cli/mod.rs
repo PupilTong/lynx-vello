@@ -110,16 +110,11 @@ impl CliError {
         Self::Arguments(message.into())
     }
 
-    /// The error a run ends with on an event for which
-    /// [`EngineEvent::is_fatal`] holds. A view that could not start keeps its
-    /// own error; any other fatal event, an engine panic, is a script error.
     fn from_fatal_event(input: &str, event: EngineEvent) -> Self {
         let input = input.to_owned();
         match event {
             EngineEvent::StartupFailed(source) => Self::StartView { input, source },
             EngineEvent::Panicked(source) => Self::Script { input, source },
-            // A fatal event a later engine adds ends the run as well, named
-            // by its debug form.
             event => Self::Script {
                 input,
                 source: ScriptError {
@@ -143,12 +138,10 @@ impl CliError {
     }
 }
 
-/// Runs Bobcat with arguments from the current process.
 pub fn run_from_env() -> Result<(), CliError> {
     run(std::env::args_os().skip(1))
 }
 
-/// Runs Bobcat with an explicit argument sequence.
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError> {
     match args::parse(arguments)? {
         args::Invocation::Help => {
@@ -160,11 +153,6 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             Ok(())
         }
         args::Invocation::Run(options) => {
-            // The platform's fonts are discovered once per process, and the
-            // first layout that shapes text would otherwise do it on the Lynx
-            // main thread. Started here so it overlaps decoding the input and
-            // booting the view; a thread that could not be started leaves
-            // that discovery to the first layout, which is still correct.
             let _ = std::thread::Builder::new()
                 .name("bobcat-fonts".to_owned())
                 .spawn(bobcat_core::preload_system_fonts);
@@ -178,11 +166,6 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
     }
 }
 
-/// Starts the page's group, then has it ask the platform for the font
-/// fallback of the scripts `--preload-scripts` named, in the page's
-/// language, before the view is built — through the group, as a host whose
-/// view comes later would. Nothing is preloaded when none are named, so the
-/// font discovery the startup thread runs is not waited for here.
 fn start_group<R: bobcat_core::EventRequester>(
     event_requester: std::sync::Arc<R>,
     locale: &str,

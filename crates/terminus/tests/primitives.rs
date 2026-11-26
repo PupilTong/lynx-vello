@@ -162,7 +162,6 @@ fn insert_before_reorders_within_one_parent() {
 
 #[test]
 fn drop_subtree_frees_detaches_and_returns_payloads() {
-    /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Payload(i32);
     let mut doc: Document<Payload> =
@@ -189,7 +188,6 @@ fn drop_subtree_frees_detaches_and_returns_payloads() {
 
 #[test]
 fn drop_element_frees_one_node_and_leaves_its_element_children_allocated() {
-    /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq)]
     struct Payload(i32);
     let mut doc: Document<Payload> =
@@ -223,9 +221,6 @@ fn drop_element_frees_one_node_and_leaves_its_element_children_allocated() {
     assert_eq!(doc.get(container).unwrap().child_ids(), &[grandchild]);
 }
 
-/// The other half of the rule: an element is what an embedder names, so it
-/// survives its parent as a detached root — a text node is not, so leaving it
-/// behind would leak it, and it goes with the node that owns it.
 #[test]
 fn drop_element_frees_the_text_nodes_under_it() {
     let mut doc = test_document();

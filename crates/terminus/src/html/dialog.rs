@@ -119,19 +119,11 @@ use crate::tree::custom::{CustomElement, MethodCall, MethodError, MethodOutcome}
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
-/// HTML's tag.
 pub const DIALOG_TAG: &str = "dialog";
-/// The boolean attribute that says the dialog is showing.
 const OPEN_ATTRIBUTE: &str = "open";
-/// The event [`close`] queues.
 const CLOSE_EVENT: &str = "close";
-/// The event [`request_close`] queues ahead of `close`.
 const CANCEL_EVENT: &str = "cancel";
 
-/// HTML's UA rules for `dialog` and `::backdrop`, adapted as the module
-/// documentation lists, each at zero specificity ([`link::html`](crate::link::html), "The UA
-/// rules"). The display `dialog` gets is the embedder's, written ahead of
-/// them.
 pub const UA_RULES: &str = r#"
 :where(dialog:not([open]), dialog[open="false"]) { display: none; }
 :where(dialog) {
@@ -155,14 +147,10 @@ pub const UA_RULES: &str = r#"
 :where(dialog)::backdrop { background: rgba(0, 0, 0, 0.1); }
 "#;
 
-/// Installs the `dialog` component ([`Document::define_html_elements`]).
 pub(super) fn define<T>(document: &mut Document<T>) {
     document.define(DIALOG_TAG, Box::new(Dialog));
 }
 
-/// The `dialog` component: keeps `:open` and `:modal` and top-layer
-/// membership in step with the `open` attribute, and answers HTML's four
-/// methods.
 struct Dialog;
 
 impl<T> CustomElement<T> for Dialog {
@@ -170,9 +158,6 @@ impl<T> CustomElement<T> for Dialog {
         vec![OPEN_ATTRIBUTE.to_owned()]
     }
 
-    /// Clears a `:modal` left behind by a removal: the unlink took the
-    /// element out of the top layer, and HTML's removing steps set "is modal"
-    /// to false.
     fn connected_callback(&self, document: &mut Document<T>, element: NodeId) {
         if !document.blocks_document(element) {
             set_state(document, element, ElementState::MODAL, false);
@@ -192,9 +177,6 @@ impl<T> CustomElement<T> for Dialog {
             set_state(document, element, ElementState::OPEN, true);
         } else {
             set_state(document, element, ElementState::OPEN, false);
-            // A modal dialog leaves the layer; a dialog showing as a popover
-            // is the popover's to take out (`Document::hide_popover`), as
-            // HTML's `close()` leaves it.
             if document.blocks_document(element) {
                 document.remove_from_top_layer(element);
             }
@@ -202,7 +184,6 @@ impl<T> CustomElement<T> for Dialog {
         }
     }
 
-    /// `HTMLDialogElement`'s four methods; see the module documentation.
     fn invoke(
         &self,
         document: &mut Document<T>,
@@ -229,11 +210,8 @@ impl<T> CustomElement<T> for Dialog {
     }
 }
 
-/// HTML's `InvalidStateError`: `show()` on a modal dialog, `showModal()` on
-/// an open non-modal or a disconnected one.
 pub use super::InvalidState;
 
-/// HTML's `show()`.
 pub fn show<T>(document: &mut Document<T>, dialog: NodeId) -> Result<(), InvalidState> {
     if is_open(document, dialog) {
         return if document.blocks_document(dialog) {
@@ -246,7 +224,6 @@ pub fn show<T>(document: &mut Document<T>, dialog: NodeId) -> Result<(), Invalid
     Ok(())
 }
 
-/// HTML's `showModal()`.
 pub fn show_modal<T>(document: &mut Document<T>, dialog: NodeId) -> Result<(), InvalidState> {
     if is_open(document, dialog) {
         return if document.blocks_document(dialog) {
@@ -264,8 +241,6 @@ pub fn show_modal<T>(document: &mut Document<T>, dialog: NodeId) -> Result<(), I
     Ok(())
 }
 
-/// HTML's `close()`: closes an open dialog and queues its `close` on the
-/// document's [`QueuedEventSink`](crate::event::QueuedEventSink).
 pub fn close<T>(document: &mut Document<T>, dialog: NodeId) {
     if !is_open(document, dialog) {
         return;
@@ -274,8 +249,6 @@ pub fn close<T>(document: &mut Document<T>, dialog: NodeId) {
     document.queue_element_event(dialog, CLOSE_EVENT);
 }
 
-/// HTML's `requestClose()` without cancelability: queues `cancel`, then
-/// closes an open dialog as [`close`] does.
 pub fn request_close<T>(document: &mut Document<T>, dialog: NodeId) {
     if !is_open(document, dialog) {
         return;
@@ -284,8 +257,6 @@ pub fn request_close<T>(document: &mut Document<T>, dialog: NodeId) {
     close(document, dialog);
 }
 
-/// Whether an `open` attribute value opens the dialog: present and not
-/// `"false"`.
 fn opens(value: Option<&str>) -> bool {
     value.is_some_and(|value| value != "false")
 }
@@ -299,8 +270,6 @@ fn is_open<T>(document: &Document<T>, dialog: NodeId) -> bool {
     )
 }
 
-/// Sets or clears `flags` only when that changes them, so an unchanged state
-/// schedules no restyle.
 fn set_state<T>(document: &mut Document<T>, element: NodeId, flags: ElementState, on: bool) {
     let current = document
         .get(element)
@@ -326,7 +295,6 @@ mod tests {
     use crate::test_common::Doc;
     use crate::tree::document::NodeId;
 
-    /// A sink that keeps what it is handed, in order.
     #[derive(Default)]
     struct Recorder(RefCell<Vec<(NodeId, &'static str)>>);
 
@@ -342,8 +310,6 @@ mod tests {
         }
     }
 
-    /// A document with HTML's elements defined, a modal dialog and a
-    /// sibling in it, and `sink` registered when there is one.
     fn modal_dialog(sink: Option<Rc<Recorder>>) -> (Doc, NodeId, NodeId) {
         let mut doc = Doc::new();
         doc.dom.define_html_elements();
@@ -356,8 +322,6 @@ mod tests {
         (doc, dialog, sibling)
     }
 
-    /// `close()` hands its `close` to the sink while it runs, so an event
-    /// queued after it lands after it.
     #[test]
     fn close_queues_its_event_on_the_sink_in_order_with_the_next_one() {
         let sink = Rc::new(Recorder::default());
@@ -383,7 +347,6 @@ mod tests {
         );
     }
 
-    /// `requestClose()` queues `cancel`, then `close`, each when it happens.
     #[test]
     fn request_close_queues_cancel_then_close_on_the_sink() {
         let sink = Rc::new(Recorder::default());
@@ -396,8 +359,6 @@ mod tests {
         );
     }
 
-    /// With no sink registered, the events are dropped and the dialog
-    /// still closes.
     #[test]
     fn with_no_sink_the_events_are_dropped() {
         let (mut doc, dialog, _) = modal_dialog(None);

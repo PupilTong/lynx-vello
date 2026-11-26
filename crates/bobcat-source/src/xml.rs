@@ -24,29 +24,15 @@ const CDATA_END: &str = "]]>";
 const LYNX_ROOT_CLOSING_TAG: &str = "</lynx>";
 const BYTE_ORDER_MARK: char = '\u{feff}';
 
-/// The metadata and source sections extracted from one valid Lynx XML document.
-///
-/// Missing optional sections are `None`; present but empty sections are
-/// `Some("")`. The required main-thread section may itself be empty because
-/// the source grammar treats presence and runtime executability separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LynxXml<'source> {
-    /// The non-empty `<lynx engine-version="...">` attribute value.
     pub engine_version: &'source str,
-    /// The optional `<style>` body.
     pub style: Option<&'source str>,
-    /// The required `<script thread="main">` body.
     pub main_thread_script: &'source str,
-    /// The optional `<script thread="background">` body.
     pub background_thread_script: Option<&'source str>,
 }
 
-/// Why a Lynx XML document could not be parsed.
-///
-/// [`ParseError::offset`] counts UTF-16 code units to match the public web
-/// parser and its formatted errors. [`ParseError::byte_offset`] exposes the
-/// corresponding UTF-8 byte boundary for Rust callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
     offset: usize,
@@ -64,22 +50,16 @@ impl ParseError {
         }
     }
 
-    /// The UTF-16 code-unit offset at which parsing failed.
-    ///
-    /// This is the coordinate included by [`fmt::Display`] and matches
-    /// JavaScript string indexing in the reference web parser.
     #[must_use]
     pub const fn offset(&self) -> usize {
         self.offset
     }
 
-    /// The UTF-8 byte offset at which parsing failed.
     #[must_use]
     pub const fn byte_offset(&self) -> usize {
         self.byte_offset
     }
 
-    /// The human-readable reason without the offset prefix.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -98,24 +78,6 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// Parses a complete Lynx XML source document.
-///
-/// Section bodies borrow directly from `source`. Malformed input returns the
-/// first structural error and never yields a partial result.
-///
-/// # Example
-///
-/// ```
-/// let source = r#"<lynx engine-version="4.2">
-///   <style>.title { color: red; }</style>
-///   <script thread="main"><![CDATA[globalThis.renderPage = () => {};]]></script>
-/// </lynx>"#;
-/// let parsed = bobcat_source::xml::parse(source)?;
-/// assert_eq!(parsed.engine_version, "4.2");
-/// assert_eq!(parsed.style, Some(".title { color: red; }"));
-/// assert!(parsed.main_thread_script.contains("renderPage"));
-/// # Ok::<(), bobcat_source::xml::ParseError>(())
-/// ```
 pub fn parse(source: &str) -> Result<LynxXml<'_>, ParseError> {
     Parser::new(source).parse()
 }

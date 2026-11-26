@@ -15,26 +15,14 @@
 
 use super::content::{BoxAt, SourceMap};
 
-/// The UTF-8 length of the U+FFFC each atomic box adds to the layout's text.
 const OBJECT_LEN: usize = 3;
 
-/// One committed paragraph's offset bridge: its normalized text, its source
-/// map, its atomic boxes, and where the source content ends in its display
-/// layout.
-///
-/// Both paragraph kinds hand one out
-/// ([`crate::text::block::TextBlock::offset_map`],
-/// [`crate::text::inline::InlineFlow::offset_map`]).
 #[derive(Clone, Copy)]
 pub struct OffsetMap<'a> {
     text: &'a str,
     map: &'a SourceMap,
-    /// Where the source content ends in the normalized text.
     cut_byte: usize,
-    /// The content's atomic boxes, in text order.
     boxes: &'a [BoxAt],
-    /// How many of `boxes` the display layout holds: those before the cut,
-    /// which come first in its text.
     shown_boxes: usize,
 }
 
@@ -66,56 +54,31 @@ impl<'a> OffsetMap<'a> {
         }
     }
 
-    /// The paragraph's normalized content text, up to [`Self::cut_byte`] the
-    /// text the display layout was built over, but for the U+FFFC the
-    /// layout holds before the byte of each atomic box. Past a truncation
-    /// cut the display layout holds its tail instead.
     #[must_use]
     pub const fn display_text(&self) -> &'a str {
         self.text
     }
 
-    /// How many source UTF-16 units the paragraph was built from.
     #[must_use]
     pub const fn source_len(&self) -> u32 {
         self.map.source_len()
     }
 
-    /// How many atomic inline boxes the source units before `unit` hold.
-    /// Every box counts one source unit and is no text, so
-    /// `unit - boxes_before(unit)` is `unit` as an offset into the
-    /// paragraph's text content alone. A box past the end of the shown
-    /// source content — after a `<text>`'s `nowrap` cut — is not counted.
     #[must_use]
     pub fn boxes_before(&self, unit: u32) -> u32 {
         self.map.boxes_before(unit)
     }
 
-    /// Where the source content ends in the display layout's text: the
-    /// text's end, or a truncation cut's byte, past which the display layout
-    /// shows the dots or the inline-truncation content — no source text.
     #[must_use]
     pub const fn cut_byte(&self) -> usize {
         self.cut_byte + OBJECT_LEN * self.shown_boxes
     }
 
-    /// Whether a truncation cut replaced the content's tail in the display
-    /// layout: then a byte at or past [`Self::cut_byte`] is no source text.
     #[must_use]
     pub const fn truncated(&self) -> bool {
         self.cut_byte < self.text.len()
     }
 
-    /// The display byte of the source unit `unit`, read as a position before
-    /// that unit's character. A unit inside a surrogate pair rounds down to
-    /// the character's start, one inside a collapsed white-space span lands
-    /// on the byte the span emitted, and one on an atomic box on the box's
-    /// object.
-    ///
-    /// `None` at or past the end of the source content the text shows: the
-    /// text's end has no unit of its own here ([`Self::unit_to_byte_or_end`]
-    /// answers it), and a `<text>`'s `nowrap` cut drops everything after its
-    /// first line from the text.
     #[must_use]
     pub fn unit_to_byte(&self, unit: u32) -> Option<usize> {
         let byte = self.map.unit_to_byte(self.text, unit)? as usize;
@@ -123,13 +86,9 @@ impl<'a> OffsetMap<'a> {
         if let Ok(slot) = shown.binary_search_by_key(&unit, |entry| entry.unit) {
             return Some(self.object_byte(slot));
         }
-        // The boxes at the byte come before its character.
         Some(byte + OBJECT_LEN * shown.partition_point(|entry| entry.byte as usize <= byte))
     }
 
-    /// [`Self::unit_to_byte`], with the end of the shown source content —
-    /// the source's end, unless a `<text>`'s `nowrap` cut dropped what
-    /// follows its first line — answering the text's end. `None` past it.
     #[must_use]
     pub fn unit_to_byte_or_end(&self, unit: u32) -> Option<usize> {
         let shown = self.map.shown_len();
@@ -140,13 +99,6 @@ impl<'a> OffsetMap<'a> {
         }
     }
 
-    /// The source unit of the display byte `byte` read as a *start*: the
-    /// unit of the character at it. A byte of spliced text (an inline box's
-    /// edge), which has no unit, answers the unit after it; a collapsed
-    /// span's emitted byte answers the span's first unit; an atomic box's
-    /// object answers the box's unit. A byte inside a character counts as
-    /// that character's start; at or past the text's end it is
-    /// [`Self::unit_before`] of the end.
     #[must_use]
     pub fn byte_to_unit(&self, byte: usize) -> u32 {
         let (byte, object) = self.text_byte(byte);
@@ -162,15 +114,9 @@ impl<'a> OffsetMap<'a> {
         self.map.byte_to_unit(self.text, Self::narrow(byte))
     }
 
-    /// The source unit boundary at the display byte `byte` read as an
-    /// *end*: every unit strictly before the byte, plus a collapsed span
-    /// sitting at it, but never an atomic box at it — a box whose object
-    /// lies before the byte is before it. A byte inside a character counts
-    /// as that character's start; past the text's end it is the end.
     #[must_use]
     pub fn unit_before(&self, byte: usize) -> u32 {
         let (text_byte, object) = self.text_byte(byte);
-        // The boxes whose objects end at or before the byte.
         let boxes_before = object.unwrap_or_else(|| self.objects_before(byte));
         let text_byte = self.floor(text_byte).min(self.text.len());
         let unit = self.map.unit_before(self.text, Self::narrow(text_byte));
@@ -181,13 +127,10 @@ impl<'a> OffsetMap<'a> {
             .map_or(unit, |entry| unit.max(entry.unit + 1))
     }
 
-    /// The display byte of shown box `slot`'s object.
     fn object_byte(&self, slot: usize) -> usize {
         self.boxes[slot].byte as usize + OBJECT_LEN * slot
     }
 
-    /// How many shown boxes' objects start before display byte `byte`: a
-    /// binary search over the slots, whose object bytes ascend with them.
     fn objects_before(&self, byte: usize) -> usize {
         let mut low = 0;
         let mut high = self.shown_boxes;
@@ -202,9 +145,6 @@ impl<'a> OffsetMap<'a> {
         low
     }
 
-    /// The normalized byte at display byte `byte`, and the shown box whose
-    /// object holds the byte, if one does: a byte inside an object counts as
-    /// its start.
     fn text_byte(&self, byte: usize) -> (usize, Option<usize>) {
         let before = self.objects_before(byte + 1);
         if let Some(slot) = before.checked_sub(1)
@@ -215,7 +155,6 @@ impl<'a> OffsetMap<'a> {
         (byte - OBJECT_LEN * before, None)
     }
 
-    /// `byte` moved down to a character boundary of the text.
     fn floor(&self, byte: usize) -> usize {
         if byte >= self.text.len() {
             return byte;

@@ -106,7 +106,6 @@ fn laid_out_at(
     constraint: BlockConstraint,
 ) -> TextBlock {
     let mut block = TextBlock::new(context, style, items, truncation);
-    // A test reads the laid-out result, which is a commit's to produce.
     block.commit(context, constraint);
     block
 }
@@ -153,8 +152,6 @@ fn flattened_items_keep_source_order_and_identity() {
     assert_close(origin.x, 20.0);
     assert_close(size.width, 10.0);
     assert_close(block.size().width, 50.0);
-    // The 10px box sits on the baseline, 2px above the text's 8px ascent,
-    // over the text's 2px descent: a 12px line box (CSS 2.2 §10.8.1).
     assert_close(block.size().height, 12.0);
     assert_eq!(block.source_of(0), SourceItem::Content(0));
     assert_eq!(block.source_of(1), SourceItem::Content(2));
@@ -177,8 +174,6 @@ fn a_box_without_a_baseline_sits_its_bottom_edge_on_the_baseline() {
     let mut context = text_context();
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
 
-    // The box is all ascent, 30 above the baseline; the text adds its 2px
-    // descent below it: line height 32, baseline 30 (CSS 2.2 §10.8.1).
     let line = block.lines()[0];
     assert_close(line.height, 32.0);
     assert_close(line.baseline, 30.0);
@@ -199,8 +194,6 @@ fn a_box_baseline_reserves_its_remainder_below_the_text_baseline() {
     let mut context = text_context();
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
 
-    // 24 above the baseline and 6 below it, both reserved: line height 30,
-    // baseline 24, the box flush with the line box (CSS 2.2 §10.8.1).
     let line = block.lines()[0];
     assert_close(line.height, 30.0);
     assert_close(line.baseline, 24.0);
@@ -209,13 +202,6 @@ fn a_box_baseline_reserves_its_remainder_below_the_text_baseline() {
     assert_close(origin.y + 30.0, line.baseline + 6.0);
 }
 
-/// Where each `vertical-align` puts a box smaller than its line, against the
-/// root inline box — here the run's own style, the strut no host gave.
-///
-/// Ahem 10px at `line-height: 40px`: ascent 8, descent 2, x-height 8, and
-/// 15px of half-leading on each side, so the line box is 40 with its
-/// baseline at 23. The box is 10 by 6 and has no baseline of its own, so
-/// it is all ascent (css-inline-3 §4).
 #[test]
 fn every_vertical_align_value_lands_where_css_places_it() {
     let style = RunStyle {
@@ -225,15 +211,12 @@ fn every_vertical_align_value_lands_where_css_places_it() {
     let mut context = text_context();
     for (value, top) in [
         (VerticalAlign::Baseline, 17.0),
-        // `sub` drops 1/5 of the root's font size, `super` raises 1/3.
         (VerticalAlign::Sub, 19.0),
         (VerticalAlign::Super, 23.0 - 10.0 / 3.0 - 6.0),
         (VerticalAlign::Top, 0.0),
-        // The box's top at the root's ascent, its bottom at the descent.
         (VerticalAlign::TextTop, 15.0),
         (VerticalAlign::Bottom, 34.0),
         (VerticalAlign::TextBottom, 19.0),
-        // The box's middle at half the x-height above the baseline.
         (VerticalAlign::Middle, 16.0),
         (VerticalAlign::Center, 16.0),
         (VerticalAlign::Length(5.0), 12.0),
@@ -248,9 +231,6 @@ fn every_vertical_align_value_lands_where_css_places_it() {
         assert_close(origin.y, top);
     }
 
-    // Half the root's 40px line height is a 20px raise: the box reaches 26
-    // above the baseline, 3 past the strut, so the line box grows by 3 and
-    // the box is flush with its top.
     let items = [
         run(&style, "aaaa"),
         atom(1, 10.0, 6.0, VerticalAlign::Percent(0.5)),
@@ -282,10 +262,7 @@ fn maxline_ellipsis_backs_off_three_units_and_appends_dots() {
     assert_eq!(lines[0].ellipsis_count, 0);
     assert_eq!(lines[1].ellipsis_count, 3);
     assert_close(block.size().height, 20.0);
-    // The visible line end excludes the wrapped space, so the cut backs off
-    // from unit 9: "a" plus three dots, four Ahem advances.
     assert_close(lines[1].advance, 40.0);
-    // The dots carry their own identity, styled after the cut run.
     let display = block.display();
     let styles = 0..u16::try_from(display.styles().len()).expect("fits");
     assert!(
@@ -312,8 +289,6 @@ fn a_short_cut_line_shrinks_the_dots_to_its_own_length() {
     let mut context = text_context();
     let block = laid_out(&mut context, block_style, &items, None, Some(50.0));
 
-    // Natural line 2 shows "a" — one visible unit, fewer than three: the cut
-    // moves to the line start and the dots shrink to one.
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1].ellipsis_count, 1);
@@ -337,7 +312,6 @@ fn maxlength_cuts_without_backing_off_and_keeps_three_dots() {
     assert_eq!(lines.len(), 1);
     assert_eq!((lines[0].source_start, lines[0].source_end), (0, 9));
     assert_eq!(lines[0].ellipsis_count, 5);
-    // "aaaa" plus three dots.
     assert_close(block.size().width, 70.0);
 }
 
@@ -415,8 +389,6 @@ fn truncation_content_reserves_its_width_on_the_cut_line() {
 
     assert!(block.truncated());
     assert!(block.truncation_visible());
-    // The fitting walk frees two 10px clusters for the 20px content; the
-    // wrapped space is outside the visible range and never counts as freed.
     assert_eq!(block.lines()[1].ellipsis_count, 2);
     assert_close(block.lines()[1].advance, 40.0);
     let display = block.display();
@@ -453,7 +425,6 @@ fn truncation_content_wider_than_the_container_is_hidden() {
     assert!(block.truncated());
     assert!(!block.truncation_visible());
     assert_hidden(&block, 9);
-    // The cut lands at the line start and no dots are appended.
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1].ellipsis_count, 4);
@@ -482,9 +453,6 @@ fn retreating_across_a_box_hides_it() {
         ..BlockStyle::default()
     };
     let mut context = text_context();
-    // Natural line 2 shows "aaa" plus the box (units 5..9; the wrapped
-    // space belongs to no line and never counts as freed): freeing 20px
-    // removes the 'a' at unit 7 and the box at unit 8.
     let block = laid_out(&mut context, block_style, &items, Some(&tail), Some(50.0));
 
     assert!(block.truncation_visible());
@@ -532,14 +500,10 @@ fn justify_stretches_every_line_but_the_last() {
 
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
-    // Line 1 content "aa a" is 40px in 50: the inner space stretches by 10.
-    // Justification mutates cluster advances, which `LineMetrics::advance`
-    // does not reflect, so the glyph runs' right edge is what is measured.
     assert_close(right_edge(block.display(), 0), 60.0);
     assert_close(right_edge(block.display(), 1), 30.0);
 }
 
-/// The rightmost glyph edge of one line, trailing whitespace included.
 fn right_edge(layout: &parley::Layout<()>, line: usize) -> f32 {
     layout
         .get(line)
@@ -650,8 +614,6 @@ fn text_indent_shifts_and_shortens_the_first_line_only() {
     let style = ahem_style();
     let items = [run(&style, "aaaa aaaa")];
     let mut context = text_context();
-    // The caller resolves `text-indent` and hands the block the px, because a
-    // percentage's basis is the definite inline size and not the break width.
     let resolve = |indent: TextIndent, basis: f32| match indent {
         TextIndent::Px(value) => value,
         TextIndent::Percent(fraction) => fraction * basis,
@@ -784,7 +746,6 @@ fn max_chars_zero_cuts_everything() {
     assert!(clip.truncated());
     assert_eq!(clip.lines().len(), 1);
     assert_close(clip.size().width, 0.0);
-    // The empty display borrows the natural line's geometry for the report.
     assert_close(clip.lines()[0].height, 10.0);
 
     let beyond = laid_out(
@@ -818,7 +779,6 @@ fn a_maxlength_cut_inside_a_surrogate_pair_rounds_down() {
     );
 
     assert!(block.truncated());
-    // Four source units; the cut at unit 2 rounds down to the pair start.
     assert_eq!(block.lines()[0].ellipsis_count, 2);
     assert_eq!(
         (block.lines()[0].source_start, block.lines()[0].source_end),
@@ -831,8 +791,6 @@ fn content_that_exactly_fills_max_lines_is_not_truncated() {
     let style = ahem_style();
     let mut context = text_context();
 
-    // A trailing preserved newline leaves parley one renderless line short
-    // of done; that must not read as overflow.
     let trailing_break = laid_out(
         &mut context,
         BlockStyle {
@@ -862,7 +820,6 @@ fn content_that_exactly_fills_max_lines_is_not_truncated() {
     assert!(!single.truncated());
     assert_close(single.size().width, 10.0);
 
-    // A hanging trailing space overflows the width without being content.
     let hanging = laid_out(
         &mut context,
         BlockStyle {
@@ -925,7 +882,6 @@ fn a_cut_between_adjacent_boxes_keeps_the_earlier_one() {
         None,
     );
 
-    // Both boxes share one byte position; the cut is a unit decision.
     let (_, origin, _) = visible_box(&block, 1);
     assert_close(origin.x, 10.0);
     assert_hidden(&block, 2);
@@ -953,8 +909,6 @@ fn a_box_directly_before_the_cut_survives_it() {
         None,
     );
 
-    // The box and 'c' share byte 2, but the box's unit (2) precedes the cut
-    // (3): the render is "ab", the box, then the dots.
     let (_, origin, _) = visible_box(&block, 9);
     assert_close(origin.x, 20.0);
     assert_eq!(block.lines()[0].ellipsis_count, 2);
@@ -992,7 +946,6 @@ fn truncation_content_never_shows_on_a_pure_maxlength_cut() {
     assert!(block.truncated());
     assert!(!block.truncation_visible());
     assert_hidden(&block, 9);
-    // The presence of truncation content also suppresses the dots.
     assert_close(block.size().width, 40.0);
 }
 
@@ -1041,9 +994,6 @@ fn an_empty_block_lays_out_to_nothing() {
     assert!(!block.truncated());
 }
 
-/// An editing host's paragraph is never shorter than one line: with no
-/// content it lays out one empty line of its strut, the line its caret sits
-/// on, which is zero wide and as tall as the strut's `line-height`.
 #[test]
 fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
     let mut context = text_context();
@@ -1071,8 +1021,6 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
                     };
                     assert_eq!((line.source_start, line.source_end), (0, 0));
                     assert_eq!(line.ellipsis_count, 0);
-                    // Ahem's 10px em centred in the 24px line: 7px of
-                    // half-leading above its 8px ascent.
                     assert_close(line.top, 0.0);
                     assert_close(line.height, 24.0);
                     assert_close(line.baseline, 15.0);
@@ -1082,16 +1030,12 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
                     assert_eq!(block.last_baseline(), Some(15.0));
                     assert!(!block.truncated());
                     assert_eq!(block.boxes(), []);
-                    // The substitute space parley shapes is in the strut.
                     for index in 0..block.style_count() {
                         assert_eq!(
                             block.source_of(u16::try_from(index).unwrap()),
                             SourceItem::Strut
                         );
                     }
-                    // It is no content: an empty range has the line's height,
-                    // a point on the line hits nothing, and the block's
-                    // intrinsic widths are zero.
                     assert_eq!(
                         block.range_boxes(0, 0),
                         Some(vec![Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 24.0))])
@@ -1105,9 +1049,6 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
         }
     }
 
-    // Without a strut of its own the block takes the initial font's, which
-    // this context, holding Ahem alone, has no face for: the line is still
-    // there, as tall as that font's metrics.
     let block = laid_out(
         &mut context,
         BlockStyle {
@@ -1122,10 +1063,6 @@ fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
     assert_close(block.size().width, 0.0);
 }
 
-/// The one empty line is zero wide, so `text-align` places it where it
-/// places a zero-wide line: a caret on it sits at the start, the exact
-/// centre or the end of the measure, never shifted by the substitute
-/// space parley shaped for it.
 #[test]
 fn the_empty_strut_line_aligns_as_a_zero_wide_line() {
     let mut context = text_context();
@@ -1157,8 +1094,6 @@ fn the_empty_strut_line_aligns_as_a_zero_wide_line() {
     }
 }
 
-/// Content keeps its own lines whatever the flag says, and the flag alone
-/// makes no line: without it an empty block is still empty.
 #[test]
 fn the_strut_line_is_only_for_empty_content() {
     let style = ahem_style();
@@ -1177,8 +1112,6 @@ fn the_strut_line_is_only_for_empty_content() {
     );
     assert_eq!(block.lines().len(), 1);
     assert_eq!(block.size(), Size::new(20.0, 10.0));
-    // A newline that ends the text adds its own empty line, as without the
-    // flag.
     let block = laid_out(
         &mut context,
         keeping.clone(),
@@ -1187,8 +1120,6 @@ fn the_strut_line_is_only_for_empty_content() {
         Some(50.0),
     );
     assert_eq!(block.lines().len(), 2);
-    // Content a cut leaves nothing of is no empty content: the block reports
-    // what it reports without the flag.
     for keeps in [true, false] {
         let block = laid_out(
             &mut context,
@@ -1243,9 +1174,6 @@ fn the_paragraph_direction_is_detected_from_the_content() {
     );
     assert!(!ascii.display().is_rtl());
 
-    // The declared direction still decides alignment on detected-RTL
-    // content: Start under declared Ltr stays left, under declared Rtl it
-    // moves right by the line's free space.
     let left = laid_out(
         &mut context,
         BlockStyle {
@@ -1293,8 +1221,6 @@ fn content_widths_track_box_resizes_and_survive_justification() {
     block.commit(&mut context, BlockConstraint::new(None, 0.0));
     assert_close(block.content_widths().min, 55.0);
 
-    // Justification mutates cluster advances on the retained layout; the
-    // reported widths come from the unjustified pass and stay put.
     let mut justified = TextBlock::new(
         &mut context,
         BlockStyle {
@@ -1331,10 +1257,6 @@ fn a_maxlength_cut_on_a_wrapped_box_keeps_the_dots() {
         Some(20.0),
     );
 
-    // "bb" wraps as a whole word, so the box takes natural line 2 alone;
-    // the cut at unit 2 addresses that line — the box's unit before it kept
-    // line 1 out of it — and the dots render there instead of being clamped
-    // away with a mislocated cut.
     assert!(block.truncated());
     assert_hidden(&block, 5);
     let lines = block.lines();
@@ -1371,9 +1293,6 @@ fn a_wrapped_box_does_not_widen_the_dots_back_off() {
         Some(40.0),
     );
 
-    // Line 1 shows "aaaa" (units 0..4); the box shares byte 4 with 'b' but
-    // sits on the uncommitted line, so the back-off is 4 − 3 = 1 and the
-    // dots fit: "a...".
     assert!(block.truncated());
     let lines = block.lines();
     assert_eq!(lines.len(), 1);
@@ -1401,22 +1320,11 @@ fn the_fitting_walk_removes_at_least_two_units() {
         Some(50.0),
     );
 
-    // A 10px tail would fit in the space of the final cluster alone, but the
-    // web's loop decrements before its first width check: two units go.
     assert!(block.truncation_visible());
     assert_eq!(block.lines()[1].ellipsis_count, 2);
     assert_close(block.lines()[1].advance, 30.0);
 }
 
-// ---------------------------------------------------------------------------
-// The probe/commit contract.
-//
-// A container sizes a block by asking it several questions — max-content,
-// min-content, a trial width — and only the last answer is the one paint
-// reads. These pin that a question never becomes the answer.
-// ---------------------------------------------------------------------------
-
-/// A repeated constraint is answered from the memo, without re-breaking.
 #[test]
 fn a_remembered_constraint_costs_no_break() {
     let style = ahem_style();
@@ -1437,8 +1345,6 @@ fn a_remembered_constraint_costs_no_break() {
     );
 }
 
-/// The memo holds three constraints, because that is what a container cycles
-/// a leaf through — max-content, min-content, used width — in one pass.
 #[test]
 fn the_memo_absorbs_the_constraint_cycle_a_container_produces() {
     let style = ahem_style();
@@ -1456,7 +1362,6 @@ fn the_memo_absorbs_the_constraint_cycle_a_container_produces() {
     }
     let after_cold = block.break_count();
 
-    // The alternation a single-entry cache thrashes on.
     for constraint in [cycle[0], cycle[2], cycle[1], cycle[0]] {
         block.probe(&mut context, constraint);
     }
@@ -1467,8 +1372,6 @@ fn the_memo_absorbs_the_constraint_cycle_a_container_produces() {
     );
 }
 
-/// A commit is never answered from the memo: its line breaks are what paint
-/// reads, so it must actually put the retained layout there.
 #[test]
 fn a_commit_is_never_served_from_the_memo() {
     let style = ahem_style();
@@ -1479,13 +1382,10 @@ fn a_commit_is_never_served_from_the_memo() {
     let narrow = BlockConstraint::new(Some(40.0), 0.0);
     let wide = BlockConstraint::new(None, 0.0);
 
-    // The memo now holds `narrow`, but the retained layout has moved to `wide`.
     let probed = block.probe(&mut context, narrow);
     block.probe(&mut context, wide);
     let after_probes = block.break_count();
 
-    // A commit at `narrow` must put the layout back there rather than reply
-    // from the memo — those lines are the ones paint reads.
     let committed = block.commit(&mut context, narrow);
     assert!(
         block.break_count() > after_probes,
@@ -1498,15 +1398,11 @@ fn a_commit_is_never_served_from_the_memo() {
     assert!(block.has_committed());
     assert!(!block.is_probe_dirty());
 
-    // Re-committing where the layout already sits is free, exactly as
-    // `TextLayout::break_to` is on the path this replaces.
     let settled = block.break_count();
     block.commit(&mut context, narrow);
     assert_eq!(block.break_count(), settled);
 }
 
-/// A probe that follows a commit leaves the block owing a restore, and the
-/// restore puts the committed geometry back exactly.
 #[test]
 fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
     let style = ahem_style();
@@ -1518,7 +1414,6 @@ fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
     let committed = block.commit(&mut context, used);
     let committed_lines = block.lines().len();
 
-    // A later pass probes a different width and never commits it.
     block.probe(&mut context, BlockConstraint::new(None, 0.0));
     assert!(
         block.is_probe_dirty(),
@@ -1535,7 +1430,6 @@ fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
     );
 }
 
-/// Nothing may read a paragraph no commit produced.
 #[test]
 fn a_block_reports_no_commit_until_one_has_happened() {
     let style = ahem_style();
@@ -1559,8 +1453,6 @@ fn a_block_reports_no_commit_until_one_has_happened() {
     assert!(block.has_committed());
 }
 
-/// Re-asserting a size a box already has must not invalidate anything: the
-/// measure/align round trip repeats every pass.
 #[test]
 fn re_asserting_an_unchanged_box_size_costs_nothing() {
     let style = ahem_style();
@@ -1589,8 +1481,6 @@ fn re_asserting_an_unchanged_box_size_costs_nothing() {
     );
     assert!(!block.is_probe_dirty());
 
-    // A real change does invalidate, but keeps the block paintable: clearing
-    // `committed` would drop the paragraph from paint entirely.
     block.set_box_size(1, Size::new(30.0, 10.0), None);
     assert!(
         block.has_committed(),
@@ -1599,8 +1489,6 @@ fn re_asserting_an_unchanged_box_size_costs_nothing() {
     assert!(block.is_probe_dirty(), "and it owes a re-layout");
 }
 
-/// The min-content width is read off a layout that has box sizes written in,
-/// never from construction, where no atom has a size yet.
 #[test]
 fn min_content_width_accounts_for_a_resized_atom() {
     let style = ahem_style();
@@ -1635,7 +1523,6 @@ fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
     })
 }
 
-/// The one box `range_boxes` answers for `[start, end)`.
 fn only_box(block: &TextBlock, start: u32, end: u32) -> Rect<f32> {
     let boxes = block.range_boxes(start, end).expect("a valid range");
     assert_eq!(boxes.len(), 1, "one line's worth of [{start}, {end})");
@@ -1658,15 +1545,10 @@ fn a_truncated_display_keeps_the_tab_stops() {
         None,
     );
     assert!(block.truncated());
-    // A native stop every 20px: the tab at the line start runs to 20.
     assert_close(only_box(&block, 1, 2).origin.x, 20.0);
-    // The tab, `a`, and three dots.
     assert_close(block.size().width, 60.0);
 }
 
-/// The last reported line's baseline, for the layout pass's `last baseline`
-/// alignment: the first's on one line, the last line's own on several, the
-/// last *visible* line's under a clamp, and none without a line.
 #[test]
 fn the_last_baseline_is_the_last_reported_line_s() {
     let style = ahem_style();
@@ -1711,9 +1593,6 @@ fn the_last_baseline_is_the_last_reported_line_s() {
     assert_eq!(empty.last_baseline(), None);
 }
 
-/// A host's strut is the establishing element's own font: every line box
-/// starts with it (CSS 2.2 §10.8.1), so a line of smaller text, and a line of
-/// only a box, are at least the strut's height.
 #[test]
 fn the_strut_is_the_root_inline_box_every_line_starts_with() {
     let small = RunStyle {
@@ -1725,7 +1604,6 @@ fn the_strut_is_the_root_inline_box_every_line_starts_with() {
         ..BlockStyle::default()
     };
     let mut context = text_context();
-    // 5px glyphs on the 10px strut's line: baseline 8, height 10.
     let block = laid_out(
         &mut context,
         with_strut.clone(),
@@ -1735,7 +1613,6 @@ fn the_strut_is_the_root_inline_box_every_line_starts_with() {
     );
     assert_close(block.lines()[0].height, 10.0);
     assert_close(block.lines()[0].baseline, 8.0);
-    // Without one, the first run is its own strut: a 5px line.
     let block = laid_out(
         &mut context,
         BlockStyle::default(),
@@ -1745,23 +1622,16 @@ fn the_strut_is_the_root_inline_box_every_line_starts_with() {
     );
     assert_close(block.lines()[0].height, 5.0);
 
-    // A box alone: 6 above the baseline, under the strut's 2 of descent.
     let items = [atom(1, 10.0, 6.0, VerticalAlign::Baseline)];
     let block = laid_out(&mut context, with_strut, &items, None, None);
     assert_close(block.lines()[0].height, 10.0);
     assert_close(block.lines()[0].baseline, 8.0);
     let (_, origin, _) = visible_box(&block, 1);
     assert_close(origin.y, 2.0);
-    // Without a strut there is none: the box is the line.
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
     assert_close(block.lines()[0].height, 6.0);
 }
 
-/// `white-space: pre-wrap`: spaces are kept, a space before a newline does
-/// not swallow the newline's forced break (the Chromium override trap in
-/// `shape.rs`), and a carriage return is a space (CSS Text 3 §4.1.1), so
-/// `"a\r\nb"` is two lines, the first one square wide once its hanging
-/// space is set aside.
 #[test]
 fn preserved_runs_keep_spaces_and_their_forced_breaks() {
     let mut context = text_context();
@@ -1790,9 +1660,6 @@ fn preserved_runs_keep_spaces_and_their_forced_breaks() {
     }
 }
 
-/// The offset bridge of a verbatim paragraph: every source unit is one
-/// character's, so units and bytes walk together, a surrogate pair's second
-/// unit rounding down to its start; the end answers the text's end.
 #[test]
 fn a_verbatim_offset_map_walks_units_and_bytes_together() {
     let mut context = text_context();
@@ -1817,7 +1684,6 @@ fn a_verbatim_offset_map_walks_units_and_bytes_together() {
         assert_eq!(map.unit_before(byte), unit, "byte {byte}");
         unit += u32::try_from(character.len_utf16()).unwrap();
     }
-    // Inside the surrogate pair: its start.
     assert_eq!(map.unit_to_byte(7), Some(6));
     assert_eq!(map.unit_to_byte(9), None, "the end has no character");
     assert_eq!(map.unit_to_byte_or_end(9), Some(text.len()));
@@ -1826,8 +1692,6 @@ fn a_verbatim_offset_map_walks_units_and_bytes_together() {
     assert_eq!(map.unit_before(text.len()), 9);
 }
 
-/// A clamp's cut: the display layout holds the dots past `cut_byte`, which
-/// are no source text, while every unit keeps its content byte.
 #[test]
 fn a_truncated_offset_map_reports_its_cut() {
     let mut context = text_context();
@@ -1855,16 +1719,10 @@ fn a_truncated_offset_map_reports_its_cut() {
     );
 }
 
-/// The cut that lays inline-truncation content in at a clamp frees width
-/// measured on the line unjustified: `text-align: justify` widens the space
-/// on the clamped line where it shows, not in the arithmetic.
 #[test]
 fn a_justified_clamp_frees_unjustified_width_for_the_truncation_content() {
     let mut context = text_context();
     let style = ahem_style();
-    // "aa bb " fills the first of the 55px lines, its space hanging; the
-    // 32px box needs "a bb" freed unjustified (40), where the space
-    // justified by the line's 5px of free space would stop at " bb" (35).
     let block = laid_out(
         &mut context,
         BlockStyle {
@@ -1883,9 +1741,6 @@ fn a_justified_clamp_frees_unjustified_width_for_the_truncation_content() {
     assert_eq!(lines[0].ellipsis_count, 4, "cut after the first `a`");
 }
 
-/// An atomic box is one source unit and, in the display layout, the U+FFFC
-/// parley holds an inline object as: every display byte the map answers is
-/// the layout's own, the object's three bytes reading as the box's unit.
 #[test]
 fn an_atomic_box_is_its_object_in_the_offset_map() {
     let mut context = text_context();
@@ -1914,18 +1769,13 @@ fn an_atomic_box_is_its_object_in_the_offset_map() {
         assert_eq!(cluster.text_range().start, byte, "unit {unit}");
     }
     assert_eq!(map.unit_to_byte_or_end(5), Some(7));
-    // Inside the object: the box.
     assert_eq!(map.byte_to_unit(3), 2);
     assert_eq!(map.byte_to_unit(7), 5);
-    // An end before the object leaves the box out; one after it takes it.
     for (byte, unit) in [(2, 2), (3, 2), (5, 3), (6, 4), (7, 5)] {
         assert_eq!(map.unit_before(byte), unit, "byte {byte}");
     }
 }
 
-/// `white-space: nowrap` shows a `<text>`'s first line only: the units after
-/// its first newline are in no byte, and the end of what it shows is the
-/// text's end.
 #[test]
 fn a_first_line_offset_map_shows_no_unit_past_its_line() {
     let mut context = text_context();

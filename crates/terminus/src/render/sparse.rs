@@ -67,49 +67,27 @@ use crate::peniko::{Color, Extend, Fill, ImageAlphaType, ImageData, ImageFormat,
 use crate::render::image::ImageDescriptor;
 use crate::render::picture::{FrameTarget, FrameWriter, PictureFrame, PictureId};
 
-/// What one frame cost, and what it could not draw.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Stats {
-    /// Replaying the list into the sparse-strip scene (path flattening and
-    /// strip generation run here, on the CPU).
     pub(crate) encode: Duration,
-    /// Waiting for another target's render to let the shared renderer go.
     pub(crate) wait: Duration,
-    /// `Renderer::render` and the submit: the span the shared renderer is
-    /// held.
     pub(crate) render: Duration,
     pub(crate) draws: u32,
     pub(crate) glyph_runs: u32,
     pub(crate) layers: u32,
-    /// Image draws with no readable pixels, and texture draws with no
-    /// texture bound.
     pub(crate) images_skipped: u32,
-    /// Bitmap draws with no upload whose lent pixels were gone: drawn as
-    /// nothing like an unreadable image, but recoverable, since the owner
-    /// can read the pixels again ([`SparseBackend::lost`]).
     pub(crate) images_lost: u32,
 }
 
-/// One target's rasterizer: the scene its renders fill, the textures it
-/// binds, and its pins on the bitmaps it draws, over the [`SharedRaster`]
-/// of the [`SharedGpu`] it was built on.
 pub(crate) struct SparseBackend {
     gpu: Arc<SharedGpu>,
-    /// This target's name in the bitmaps' pins.
     target: u64,
-    /// How many of this target's renders have drawn a bitmap.
     generation: u64,
     scene: Scene,
-    /// What [`replay`] keeps across renders: glifo's outline cache and the
-    /// scratch path.
     replay: Replay,
-    /// The bound textures, by id.
     bound: FxHashMap<u64, wgpu::TextureView>,
-    /// The bitmaps the current render draws from textures of their own,
-    /// bound for it beside [`Self::bound`].
     textures: Vec<(TextureId, wgpu::TextureView)>,
     pub(crate) last: Stats,
-    /// Every [`Stats::images_lost`] of this target's renders, summed.
     lost: u64,
 }
 
@@ -122,27 +100,19 @@ impl std::fmt::Debug for SparseBackend {
     }
 }
 
-/// The state [`replay`] keeps from one render to the next.
 #[derive(Default)]
 pub(crate) struct Replay {
-    /// glifo's outline and hinting caches, maintained after every render.
     glyphs: GlyphPrepCache,
-    /// The path a non-rectangular shape is rebuilt into for the scene.
     path: BezPath,
-    /// Per open clip or layer, whether it was replayed as a non-isolated
-    /// clip, which its pop closes with `pop_clip`.
     open: Vec<bool>,
 }
 
 impl Replay {
-    /// Ends a render: lets glifo's outline cache age out what it no longer
-    /// draws.
     pub(crate) fn maintain(&mut self) {
         self.glyphs.maintain();
     }
 }
 
-/// `shape` as a path in `list`'s arena, rebuilt into `path`.
 fn shape_path<'p>(
     path: &'p mut BezPath,
     list: &DisplayList,
@@ -160,8 +130,6 @@ fn shape_path<'p>(
     path
 }
 
-/// Sets `paint` on `scene` with `transform` as its paint transform; `false`
-/// when the paint draws nothing (an image with no pixels to draw).
 fn set_paint(
     scene: &mut Scene,
     paint: &Paint,
@@ -188,8 +156,6 @@ fn set_paint(
             }
         },
         Paint::Texture(paint) => {
-            // A texture a render cannot bind fails the whole render, so one
-            // the bake that made it has since released draws nothing.
             if !(pictures.bound)(paint.texture.id()) {
                 stats.images_skipped += 1;
                 return false;
@@ -202,28 +168,17 @@ fn set_paint(
     true
 }
 
-/// Why a bitmap paint draws nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Missing {
-    /// Its pixels cannot be drawn: too long a side, too few bytes.
     Unreadable,
-    /// No upload of it is resident and the pixels it was lent are gone.
     Lost,
 }
 
-/// How a replay resolves the pictures a list paints with.
 pub(crate) struct Pictures<'a> {
-    /// A bitmap paint to the image the scene draws, or why it draws
-    /// nothing.
     pub(crate) bitmap: &'a mut dyn FnMut(&ImagePaint) -> Result<Image, Missing>,
-    /// Whether a texture id is bound for the render.
     pub(crate) bound: &'a dyn Fn(u64) -> bool,
 }
 
-/// The image a texture paint draws: the texture under its own id, the
-/// repeated edge a bake added included on a padded axis only. A region that
-/// covers the whole texture is passed as [`TextureRegion::Full`], which
-/// `vello_gpu` samples with a hardware sampler, its faster path.
 fn texture_image(texture: Texture, sampler: ImageSampler) -> Image {
     let (width, height) = texture.size();
     let (texture_width, texture_height) = texture.texture_size();
@@ -253,8 +208,6 @@ fn texture_image(texture: Texture, sampler: ImageSampler) -> Image {
     }
 }
 
-/// Replays `list` into `scene`, which the caller has reset to its target
-/// size, resolving its pictures through `pictures`.
 pub(crate) fn replay(
     scene: &mut Scene,
     list: &DisplayList,
@@ -280,8 +233,6 @@ pub(crate) fn replay(
                 scene.set_transform(list.transform(draw.transform));
                 scene.set_fill_rule(draw.rule);
                 match draw.shape {
-                    // Under an axis-aligned transform and clip, a
-                    // rectangle draws without strips.
                     Shape::Rect(rect) => scene.fill_rect(&rect),
                     shape => scene.fill_path(shape_path(path, list, shape, FILL_TOLERANCE)),
                 }
@@ -298,8 +249,6 @@ pub(crate) fn replay(
                 }
                 stats.draws += 1;
                 scene.set_transform(list.transform(draw.transform));
-                // `vello_gpu` strokes through kurbo, which applies the dash
-                // pattern the stroke carries.
                 scene.set_stroke((**stroke).clone());
                 scene.stroke_path(shape_path(path, list, draw.shape, STROKE_TOLERANCE));
             }
@@ -310,10 +259,6 @@ pub(crate) fn replay(
                 scene.set_transform(list.transform(region.transform));
                 scene.set_fill_rule(region.rule);
                 match (isolated, region.shape) {
-                    // A non-isolated clip: no layer texture, its coverage
-                    // intersected into the strips of what it holds. A layer
-                    // pushed inside it composites cut to its own path within
-                    // this clip.
                     (false, Shape::Rect(rect)) => scene.push_clip_rect(&rect),
                     (false, shape) => {
                         scene.push_clip_path(shape_path(path, list, shape, FILL_TOLERANCE));
@@ -367,8 +312,6 @@ pub(crate) fn replay(
     stats
 }
 
-/// Fills `blur`, centred on its rect, over the 2.5σ-inflated area around
-/// it.
 fn blurred_rounded_rect(scene: &mut Scene, list: &DisplayList, blur: &BlurredRoundedRect) {
     scene.set_paint(blur.color);
     scene.reset_paint_transform();
@@ -383,8 +326,6 @@ fn blurred_rounded_rect(scene: &mut Scene, list: &DisplayList, blur: &BlurredRou
     );
 }
 
-/// Opens `shadow`'s filter layer on `scene`. The filter's offsets are taken
-/// through the transform set when it is pushed: the list's own space.
 fn push_shadow(scene: &mut Scene, shadow: &DropShadow) {
     scene.set_transform(Affine::IDENTITY);
     scene.push_filter_layer(Filter::from_primitive(FilterPrimitive::DropShadowOnly {
@@ -396,8 +337,6 @@ fn push_shadow(scene: &mut Scene, shadow: &DropShadow) {
     }));
 }
 
-/// Draws `run` of `list` with the paint already set on `scene`, outlining
-/// its glyphs through glifo with `cache`.
 fn replay_glyphs(
     scene: &mut Scene,
     list: &DisplayList,
@@ -429,20 +368,12 @@ fn replay_glyphs(
         builder = builder.glyph_transform(transform);
     }
     let glyphs = list.glyphs_of(run).iter().copied();
-    // A glyph the font cannot outline draws nothing.
     let _ = match run.style {
         GlyphStyle::Fill => builder.fill_glyphs(glyphs),
         GlyphStyle::Stroke(_) => builder.stroke_glyphs(glyphs),
     };
 }
 
-/// The CPU half of a render on its own, for benchmarks: a list replayed
-/// into a sparse-strip scene, every path flattened and turned into strips,
-/// with nothing submitted to a device.
-///
-/// A bitmap paint draws as a placeholder external texture, whose fill is
-/// stripped as any image fill is; what a real render adds is the upload,
-/// once per bitmap.
 pub struct StripScene {
     scene: Scene,
     replay: Replay,
@@ -458,7 +389,6 @@ impl std::fmt::Debug for StripScene {
 }
 
 impl StripScene {
-    /// A scene for a `width` × `height` target.
     #[must_use]
     pub fn new(width: u16, height: u16) -> Self {
         Self {
@@ -467,8 +397,6 @@ impl StripScene {
         }
     }
 
-    /// Replays `list` into the scene, emptied first, and answers how many
-    /// draws and glyph runs it recorded.
     pub fn fill(&mut self, list: &DisplayList) -> u32 {
         let (width, height) = (self.scene.width(), self.scene.height());
         self.scene.reset_and_resize(width, height);
@@ -495,9 +423,6 @@ impl StripScene {
     }
 }
 
-/// glifo's glyph-run backend over a `vello_gpu` scene, with the outline
-/// cache [`Replay`] keeps and the glyph atlas off: every glyph is drawn as
-/// its outline.
 struct Glyphs<'a> {
     scene: &'a mut Scene,
     cache: &'a mut GlyphPrepCache,
@@ -529,9 +454,6 @@ impl<'a> GlyphRunBackend<'a> for Glyphs<'a> {
         Iter: Iterator<Item = glifo::Glyph> + Clone,
     {
         let mut glyph_run = run.build(glyphs, self.cache.as_mut(), AtlasCacher::Disabled);
-        // glifo folds a uniform scale of the run's transform into the font
-        // size and draws the larger outline without it, so the stroke is
-        // widened by that scale: the width the transform would have given.
         let stroke = self.scene.stroke().clone();
         let mut adjusted = stroke.clone();
         adjusted.width *= glyph_run.stroke_adjustment();
@@ -558,35 +480,13 @@ impl<'a> GlyphRunBackend<'a> for Glyphs<'a> {
     }
 }
 
-/// The bitmap bytes kept resident across renders, in bitmaps' textures, for
-/// every target on a [`SharedGpu`].
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_BITMAP_BYTES: u64 = 128 * 1024 * 1024;
-/// The bitmap bytes kept resident across renders, in bitmaps' textures, for
-/// every target on a [`SharedGpu`].
 #[cfg(target_arch = "wasm32")]
 const MAX_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The smallest side of an intermediate layer texture: `vello_gpu`'s
-/// default, which its `LayersConfig` documentation gives as the choice for
-/// mobile GPUs, where smaller intermediates cost less than the extra render
-/// passes they need. Textures grow to the largest layer a render needs and
-/// do not shrink.
 const MIN_LAYER_SIDE: u16 = 512;
 
-/// The settings a renderer on `device` is built with.
-///
-/// A layer's intermediate texture is as large as the layer's clip, and a
-/// render rejects a layer longer than [`LayersConfig::max_texture_size`]
-/// outright (`vello_gpu`'s default is 4096): a page-sized clip kept as a
-/// layer on a target 4097 px tall would fail the whole frame. A layer lies
-/// within its target, and no target is longer than the device's longest
-/// texture side, so that side is the bound: every layer any target can hold
-/// renders.
-///
-/// The glyph atlas keeps `vello_gpu`'s default, whose pages are created on
-/// first use: with glifo's atlas cache off ([`Glyphs`]) nothing allocates in
-/// it, and it holds nothing else.
 fn render_settings(device: &wgpu::Device) -> RenderSettings {
     let longest = u16::try_from(device.limits().max_texture_dimension_2d).unwrap_or(u16::MAX);
     RenderSettings::default().with_memory_settings(MemorySettings {
@@ -599,25 +499,18 @@ fn render_settings(device: &wgpu::Device) -> RenderSettings {
     })
 }
 
-/// One bitmap upload's identity: the pixels, read under one layout, or the
-/// picture whose texture is rewritten in place.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum BitmapKey {
     Blob {
         blob: u64,
         width: u32,
         height: u32,
-        /// [`ImageFormat`] and [`ImageAlphaType`] by their `repr(u8)`: one
-        /// blob read under another layout is other pixels.
         layout: (u8, u8),
     },
-    /// A picture one element owns: one texture under one id, whatever frame
-    /// it holds ([`SharedRaster::write_picture`]).
     Picture(PictureId),
 }
 
 impl BitmapKey {
-    /// The key the bitmap `image` names is uploaded under.
     fn of(image: &ImageDescriptor) -> Self {
         Self::Blob {
             blob: image.blob,
@@ -627,7 +520,6 @@ impl BitmapKey {
         }
     }
 
-    /// The blob a blob's upload holds.
     #[cfg(test)]
     fn blob(&self) -> Option<u64> {
         match self {
@@ -636,7 +528,6 @@ impl BitmapKey {
         }
     }
 
-    /// The key a draw of `image` is drawn from.
     fn drawn(image: &ImageRef) -> Self {
         image
             .picture
@@ -644,31 +535,20 @@ impl BitmapKey {
     }
 }
 
-/// One target's hold on a bitmap: the target's render generation that last
-/// drew it.
 #[derive(Clone, Copy)]
 struct Pin {
     target: u64,
     generation: u64,
 }
 
-/// One uploaded bitmap: a texture of its own, drawn as an external texture.
 struct Bitmap {
     id: TextureId,
     view: wgpu::TextureView,
     opaque: bool,
     bytes: u64,
-    /// For a picture's texture, the generation of the frame last written
-    /// into it and what that frame is; `None` for a blob's upload, which
-    /// never changes.
     written: Option<(u64, ImageDescriptor)>,
-    /// The [`Bitmaps::stamp`] of the render that last drew it, by any
-    /// target: the release order.
     last_drawn: u64,
-    /// Per target that has drawn it, the last generation that did.
     pins: SmallVec<[Pin; 2]>,
-    /// How many leases hold it ([`BitmapLeases`]): while any does, it is
-    /// not released, drawn recently or not.
     leases: u32,
 }
 
@@ -680,9 +560,6 @@ impl Bitmap {
         }
     }
 
-    /// Records that `drawing`'s current render draws this bitmap, dropping
-    /// the pins of targets no longer live, and binds its texture for that
-    /// render the first time the render draws it.
     fn mark(&mut self, drawing: &mut Drawing<'_>, targets: &FxHashMap<u64, u64>) {
         let (generation, stamp) = drawing.tick.expect("a drawing render has ticked");
         self.last_drawn = stamp;
@@ -703,8 +580,6 @@ impl Bitmap {
         drawing.textures.push((self.id, self.view.clone()));
     }
 
-    /// Whether a live target drew it in one of its last [`PINNED_RENDERS`]
-    /// bitmap-drawing renders.
     fn pinned(&self, targets: &FxHashMap<u64, u64>) -> bool {
         self.pins.iter().any(|pin| {
             targets
@@ -714,32 +589,11 @@ impl Bitmap {
     }
 }
 
-/// How many of a target's latest bitmap-drawing renders pin what they drew.
-/// A frame is several renders of one target — its `filter: blur()` and
-/// vector bakes, then the composite — so what the composite drew stays
-/// pinned through the next frame's bakes. A render that draws no bitmap
-/// (most bakes) is not one of them.
 const PINNED_RENDERS: u64 = 4;
 
-/// The rasterizer state every target on one device shares: `vello_gpu`'s
-/// renderer with the resources paired to it, and the bitmaps drawn through
-/// it.
-///
-/// # Locking
-///
-/// Targets render from the threads that own them, and each fills a scene
-/// of its own. The CPU half of a render — the list replayed into that
-/// scene, every path flattened and turned into strips — holds no lock but a
-/// short [`Self::bitmaps`] hold per bitmap draw, which converts no pixels
-/// and uploads nothing. The GPU half holds [`Self::renderer`] throughout:
-/// `Renderer::render` (its layer schedule and the command encoding) and the
-/// submit. Two targets therefore strip their scenes in parallel and take
-/// turns only for the GPU half. The two locks are never held together.
 pub(crate) struct SharedRaster {
     renderer: Mutex<Paired>,
     bitmaps: Mutex<Bitmaps>,
-    /// How many bitmaps have been uploaded, by any target: read without a
-    /// lock by a lease holder that only rechecks once something was.
     uploads: AtomicU64,
 }
 
@@ -749,72 +603,28 @@ impl std::fmt::Debug for SharedRaster {
     }
 }
 
-/// A renderer and the resources it was created with, which `vello_gpu`
-/// requires to be used together only.
 struct Paired {
     renderer: Renderer,
     resources: Resources,
 }
 
-/// The bitmaps renders draw, uploaded once per [`BitmapKey`] and released
-/// once no live target draws them.
-///
-/// # Upload
-///
-/// A bitmap is converted to the premultiplied RGBA8 `vello_gpu` samples
-/// ([`premultiplied`]) and written to a texture of its own, which every
-/// render that draws it binds and samples whole as an external texture:
-/// `vello_gpu` keeps no image store for its callers. The key names the blob,
-/// its size and its layout, so a blob drawn at another size or under another
-/// layout is another upload, and pixels that change take a new blob and so a
-/// new key; the old upload ages out below. A blob drawn with any extend or
-/// filter, or by two targets, is one upload: `vello_gpu` clamps every tap of
-/// a padded axis to the image's own edge, and reads a nearest-neighbour
-/// sample at the position computed, with no atlas offset added to it.
-///
-/// # Lifecycle
-///
-/// Each target counts its renders that draw a bitmap — its generations —
-/// and a bitmap is pinned while some live target drew it in one of its
-/// last [`PINNED_RENDERS`] generations; a target that goes away
-/// ([`SparseBackend`]'s `Drop`) pins nothing more. A bitmap a painter
-/// leases ([`BitmapLeases`]) is held whether drawn recently or not. Once a
-/// render is submitted, the unpinned, unleased uploads are released least
-/// recently drawn first
-/// (by any target) until the resident bytes are back within the budget, by
-/// dropping their textures; wgpu keeps a texture alive until the work
-/// submitted on it is done. Renders whose own bitmaps exceed the budget keep
-/// them all while they are pinned: the bound is on what is kept across
-/// renders.
 pub(crate) struct Bitmaps {
     entries: FxHashMap<BitmapKey, Bitmap>,
-    /// Bytes of every upload.
     bytes: u64,
-    /// Each live target's latest generation.
     targets: FxHashMap<u64, u64>,
-    /// Each lease owner's leased uploads ([`BitmapLeases`]); every key
-    /// listed counts once in its upload's [`Bitmap::leases`].
     leases: FxHashMap<u64, Vec<BitmapKey>>,
-    /// How many renders, by any target, have drawn a bitmap.
     stamp: u64,
     budget: u64,
 }
 
-/// What one render of one target records on the bitmaps it draws.
 struct Drawing<'a> {
     target: u64,
-    /// The target's generation count.
     generation: &'a mut u64,
-    /// The render's generation and [`Bitmaps::stamp`], once it has drawn a
-    /// bitmap.
     tick: Option<(u64, u64)>,
-    /// Where the textures of the render's bitmaps go, each once, to be bound
-    /// for it.
     textures: &'a mut Vec<(TextureId, wgpu::TextureView)>,
 }
 
 impl Bitmaps {
-    /// No bitmaps yet, `budget` bytes to keep.
     fn new(budget: u64) -> Self {
         Self {
             entries: FxHashMap::default(),
@@ -826,8 +636,6 @@ impl Bitmaps {
         }
     }
 
-    /// The upload under `key`, marked drawn by `drawing`'s render — whose
-    /// first bitmap draw this makes it one of its target's generations.
     fn hit(
         &mut self,
         key: &BitmapKey,
@@ -845,8 +653,6 @@ impl Bitmaps {
         Some(bitmap.image(sampler))
     }
 
-    /// Adds the upload `bitmap` under `key`, drawn by `drawing`'s render,
-    /// which [`Self::hit`] has ticked.
     fn insert(
         &mut self,
         key: BitmapKey,
@@ -863,8 +669,6 @@ impl Bitmaps {
             .image(sampler)
     }
 
-    /// Releases the unpinned, unleased uploads, least recently drawn first,
-    /// until the resident bytes are within the budget.
     fn release(&mut self) {
         while self.bytes > self.budget {
             let victim = self
@@ -886,8 +690,6 @@ impl Bitmaps {
 }
 
 impl Bitmaps {
-    /// Leases `image`'s upload to `owner`, when it exists; otherwise
-    /// changes nothing. Answers whether it leased.
     fn lease(&mut self, owner: u64, image: &ImageDescriptor) -> bool {
         let key = BitmapKey::of(image);
         let Some(bitmap) = self.entries.get_mut(&key) else {
@@ -898,10 +700,6 @@ impl Bitmaps {
         true
     }
 
-    /// Leases `picture`'s texture to `owner`, when it exists and `owner`
-    /// does not hold it already; answers the generation of the frame last
-    /// written into it and what that frame is, or `None` when there is no
-    /// texture.
     fn lease_picture(&mut self, owner: u64, picture: PictureId) -> Option<(u64, ImageDescriptor)> {
         let key = BitmapKey::Picture(picture);
         let bitmap = self.entries.get_mut(&key)?;
@@ -913,10 +711,6 @@ impl Bitmaps {
         bitmap.written
     }
 
-    /// Makes `owner`'s leases exactly the uploads of `held` and the
-    /// textures of `pictures` that exist: the new set is leased before the
-    /// old one is let go, under the one lock hold, so an upload in both is
-    /// never unleased between.
     fn replace_leases<'a>(
         &mut self,
         owner: u64,
@@ -938,7 +732,6 @@ impl Bitmaps {
         self.unlease(&old);
     }
 
-    /// Ends every lease `owner` holds.
     fn end_leases(&mut self, owner: u64) {
         if let Some(old) = self.leases.remove(&owner) {
             self.unlease(&old);
@@ -954,11 +747,6 @@ impl Bitmaps {
     }
 }
 
-/// One owner's leases on a [`SharedGpu`]'s uploads: a hold on a bitmap's
-/// upload that, unlike a render's pins, does not depend on having drawn it
-/// recently, so a painter whose host let go of a bitmap's pixels can still
-/// draw it from its upload. Released uploads skip a leased one as they skip
-/// a pinned one; every lease ends when this is dropped.
 pub(crate) struct BitmapLeases {
     gpu: Arc<SharedGpu>,
     owner: u64,
@@ -973,7 +761,6 @@ impl std::fmt::Debug for BitmapLeases {
 }
 
 impl BitmapLeases {
-    /// A lease owner holding nothing yet on `gpu`'s uploads.
     pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
             gpu: Arc::clone(gpu),
@@ -981,20 +768,14 @@ impl BitmapLeases {
         }
     }
 
-    /// Whether these leases are on `gpu`'s uploads.
     pub(crate) fn on(&self, gpu: &Arc<SharedGpu>) -> bool {
         Arc::ptr_eq(&self.gpu, gpu)
     }
 
-    /// Leases `image`'s upload, when one exists; otherwise holds nothing
-    /// more. Answers whether it leased.
     pub(crate) fn lease(&self, image: &ImageDescriptor) -> bool {
         self.gpu.raster.bitmaps().lease(self.owner, image)
     }
 
-    /// Replaces every lease held with the uploads of `held` and the
-    /// textures of `pictures` that exist, with no moment in which an upload
-    /// in both sets is unleased.
     pub(crate) fn replace<'a>(
         &self,
         held: impl IntoIterator<Item = &'a ImageDescriptor>,
@@ -1006,15 +787,10 @@ impl BitmapLeases {
             .replace_leases(self.owner, held, pictures);
     }
 
-    /// Leases `picture`'s texture, when it has one, answering the
-    /// generation of the frame last written into it and what that frame is.
     pub(crate) fn lease_picture(&self, picture: PictureId) -> Option<(u64, ImageDescriptor)> {
         self.gpu.raster.bitmaps().lease_picture(self.owner, picture)
     }
 
-    /// Writes `frame`, frame `generation` of `picture`, which `descriptor`
-    /// names, into the picture's own texture and leases it
-    /// ([`SharedRaster::write_picture`]); answers whether it was written.
     pub(crate) fn write_picture<W: FrameWriter>(
         &self,
         picture: PictureId,
@@ -1033,10 +809,6 @@ impl BitmapLeases {
         )
     }
 
-    /// Uploads `frame`, the platform frame `descriptor` names, through its
-    /// own writer and leases the upload, which draws it from then on as a
-    /// CPU bitmap's upload is drawn ([`ImageRef::uploaded`]); an upload
-    /// already there is leased instead. Answers whether it is leased.
     pub(crate) fn upload_frame<W: FrameWriter>(
         &self,
         descriptor: &ImageDescriptor,
@@ -1054,8 +826,6 @@ impl BitmapLeases {
         raster.upload_frame(device, queue, self.owner, descriptor, frame)
     }
 
-    /// How many bitmaps have been uploaded on this device, by any target:
-    /// nothing a lease could newly hold exists unless this moved.
     pub(crate) fn uploads(&self) -> u64 {
         self.gpu.raster.uploads.load(Ordering::Acquire)
     }
@@ -1067,16 +837,11 @@ impl Drop for BitmapLeases {
     }
 }
 
-/// What a bitmap's texture is used as: sampled, and written by a copy.
 const BITMAP_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
 
-/// What a platform frame's texture is used as: a bitmap's usages and a
-/// render attachment, which the browser's `copyExternalImageToTexture`
-/// requires of its destination ([`FrameTarget`]).
 const FRAME_USAGE: wgpu::TextureUsages = BITMAP_USAGE.union(wgpu::TextureUsages::RENDER_ATTACHMENT);
 
-/// An empty `width` × `height` RGBA8 texture with `usage`.
 fn bitmap_texture(
     device: &wgpu::Device,
     width: u32,
@@ -1099,8 +864,6 @@ fn bitmap_texture(
     })
 }
 
-/// A texture of its own holding `texels`, a `width` × `height` premultiplied
-/// RGBA8 bitmap, and the id it is drawn under: `id`, or a fresh one.
 fn own_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1117,15 +880,12 @@ fn own_texture(
     )
 }
 
-/// What a write puts into a picture's texture: CPU pixels converted to
-/// premultiplied texels, or a platform frame its own writer copies.
 enum Content<'a, W> {
     Texels { texels: Cow<'a, [u8]>, opaque: bool },
     Frame(&'a W),
 }
 
 impl<W: FrameWriter> Content<'_, W> {
-    /// The usages the texture written needs.
     const fn usage(&self) -> wgpu::TextureUsages {
         match self {
             Self::Texels { .. } => BITMAP_USAGE,
@@ -1133,8 +893,6 @@ impl<W: FrameWriter> Content<'_, W> {
         }
     }
 
-    /// Whether every pixel is opaque, as far as is known: a platform frame
-    /// is never read back, so it is drawn as one that may not be.
     const fn opaque(&self) -> bool {
         match self {
             Self::Texels { opaque, .. } => *opaque,
@@ -1142,7 +900,6 @@ impl<W: FrameWriter> Content<'_, W> {
         }
     }
 
-    /// The bytes the texture is counted as.
     fn bytes(&self, width: u32, height: u32) -> u64 {
         match self {
             Self::Texels { texels, .. } => texels.len() as u64,
@@ -1150,7 +907,6 @@ impl<W: FrameWriter> Content<'_, W> {
         }
     }
 
-    /// Queues the write into `texture`, which is `width` × `height`.
     fn write(
         &self,
         device: &wgpu::Device,
@@ -1174,9 +930,6 @@ impl<W: FrameWriter> Content<'_, W> {
     }
 }
 
-/// Writes `texels`, a `width` × `height` premultiplied RGBA8 bitmap, over
-/// the whole of `texture`, which is that size. The write lands before the
-/// next submitted work, so a render submitted after it samples it.
 fn write_texels(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
@@ -1201,11 +954,7 @@ fn write_texels(
 }
 
 impl SharedRaster {
-    /// The renderer, its resources and the bitmap table on `device`, whose
-    /// queue is `queue`.
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        // The target size here only seeds a config buffer; every render
-        // renders at its target's size.
         let (renderer, resources) = Renderer::new_with(
             device,
             queue,
@@ -1226,30 +975,19 @@ impl SharedRaster {
         }
     }
 
-    /// Locks the renderer and its resources for one render's GPU half.
-    ///
-    /// A poisoned lock is taken anyway, here and in [`Self::bitmaps`]: the
-    /// panic it records was another target's, and the state it guards is
-    /// consistent between the steps a holder takes.
     fn renderer(&self) -> MutexGuard<'_, Paired> {
         self.renderer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Locks the bitmap table.
     fn bitmaps(&self) -> MutexGuard<'_, Bitmaps> {
         self.bitmaps.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Sets how many bytes of unleased, unpinned uploads are kept, so a test
-    /// outside this module can watch an upload be released. Only on a stack
-    /// of the test's own ([`SharedGpu::private`]).
     #[cfg(test)]
     pub(crate) fn set_bitmap_budget(&self, bytes: u64) {
         self.bitmaps().budget = bytes;
     }
 
-    /// The id `picture`'s texture is drawn under and the texture's size,
-    /// when it has one: what a test pins a rewrite in place by.
     #[cfg(test)]
     pub(crate) fn picture_texture(&self, picture: PictureId) -> Option<(u64, u32, u32)> {
         let bitmaps = self.bitmaps();
@@ -1258,15 +996,6 @@ impl SharedRaster {
         Some((bitmap.id.0, texture.width(), texture.height()))
     }
 
-    /// The image drawing `image` under `sampler` in `drawing`'s render,
-    /// converted and uploaded on a miss; [`Missing`] when there is no upload
-    /// and its pixels are unreadable, longer than the device's longest
-    /// texture side or, lent, gone.
-    ///
-    /// The pixels are read on a miss alone: a hit is decided by the
-    /// descriptor. The conversion and the upload are made with no lock
-    /// held; another target may upload the same key meanwhile, and then its
-    /// upload is drawn and this one dropped.
     fn bitmap(
         &self,
         device: &wgpu::Device,
@@ -1316,19 +1045,6 @@ impl SharedRaster {
         Ok(image)
     }
 
-    /// Writes `frame`, frame `generation` of `picture`, which `descriptor`
-    /// names, into the picture's own texture and leases it to `owner`,
-    /// answering whether it was written: `false` for a frame that cannot be
-    /// drawn (too few bytes, a zero or too long side, a platform frame its
-    /// writer could not copy), which leaves the texture as it was.
-    ///
-    /// The texture is rewritten in place under its one id when the frame is
-    /// the size of the last and the texture has the usages the frame's
-    /// write needs, and replaced by a new one under the same id when it does
-    /// not, so every draw of the picture, in a list composed before the write
-    /// or after it, samples the newest frame. The conversion runs with no
-    /// lock held; the write itself is queued, and lands before the next
-    /// submitted render.
     #[expect(
         clippy::too_many_arguments,
         reason = "the device pair, the lease owner, and the frame with its three names"
@@ -1394,11 +1110,6 @@ impl SharedRaster {
         true
     }
 
-    /// What a write of frame `generation` of `picture`, which `descriptor`
-    /// names, ends with once its texture is written: the texture made the
-    /// picture's — `replaced`, a new texture under its id, or else the one
-    /// `held` names, written in place — holding `bytes` and `opaque` or
-    /// not, and leased to `owner`.
     #[expect(
         clippy::too_many_arguments,
         reason = "the lease owner, the frame with its two names, its two textures and its content"
@@ -1432,9 +1143,6 @@ impl SharedRaster {
             bitmap.opaque = opaque;
             bitmap.written = written;
         } else {
-            // Released between the two locks: the texture the write went
-            // into is gone with it, so the new one, or the one written in
-            // place, is the picture's now.
             let (id, view) = replaced.unwrap_or_else(|| {
                 let (id, _, texture) = held.expect("a write in place had a texture");
                 (
@@ -1469,13 +1177,6 @@ impl SharedRaster {
         self.uploads.fetch_add(1, Ordering::Release);
     }
 
-    /// Uploads `frame`, the platform frame `descriptor` names, into a
-    /// texture of its own through the frame's writer, keyed as a CPU
-    /// bitmap's upload is, and leases it to `owner`. Answers whether it is
-    /// leased: `false` for a side that is zero or longer than the device's
-    /// longest, or a frame its writer could not copy. Another target that
-    /// uploaded the same frame meanwhile keeps its upload, and this one is
-    /// dropped.
     fn upload_frame<W: FrameWriter>(
         &self,
         device: &wgpu::Device,
@@ -1517,11 +1218,6 @@ impl SharedRaster {
         bitmaps.lease(owner, descriptor)
     }
 
-    /// The GPU half of a render on `gpu`, whose rasterizer this is: `scene`,
-    /// which a target has filled, drawn into `view` over `clear`, or over
-    /// what it holds with `None`, with `bindings` bound, under the renderer
-    /// lock — the render and the submit — and then the releases.
-    /// Notes the wait for the lock and the time it was held in `stats`.
     fn render(
         &self,
         gpu: &SharedGpu,
@@ -1571,16 +1267,11 @@ impl SharedRaster {
     }
 }
 
-/// Whether `image` has pixels to convert: no zero side, and a blob holding
-/// at least the bytes the image needs.
 fn readable(image: &ImageData) -> bool {
     let (width, height) = (image.width as usize, image.height as usize);
     width != 0 && height != 0 && image.data.data().len() >= width * 4 * height
 }
 
-/// `image`'s pixels as premultiplied RGBA8, and whether every pixel is
-/// opaque; `None` when the blob holds fewer bytes than the image needs.
-/// Pixels that already are premultiplied RGBA8 are borrowed, not copied.
 fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
     if !readable(image) {
         return None;
@@ -1613,14 +1304,12 @@ fn premultiplied(image: &ImageData) -> Option<(Cow<'_, [u8]>, bool)> {
     Some((Cow::Owned(data), opaque))
 }
 
-/// The next target's name in the bitmaps' pins.
 fn next_target() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl SparseBackend {
-    /// A target's rasterizer on `gpu`.
     pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
             gpu: Arc::clone(gpu),
@@ -1635,14 +1324,10 @@ impl SparseBackend {
         }
     }
 
-    /// How many bitmap draws of this target's renders found neither an
-    /// upload nor the pixels they were lent ([`Stats::images_lost`]),
-    /// summed over its life.
     pub(crate) fn lost(&self) -> u64 {
         self.lost
     }
 
-    /// Binds `bound` to every draw of `texture`, or with `None` unbinds it.
     pub(crate) fn bind(&mut self, texture: &Texture, bound: Option<wgpu::Texture>) {
         match bound {
             Some(bound) => {
@@ -1657,13 +1342,6 @@ impl SparseBackend {
         }
     }
 
-    /// Renders `list` into `view`, a `width`×`height` RGBA8 target cleared
-    /// to `base_color` first. `vello_gpu` renders at the size of the
-    /// texture `view` covers, which is this size.
-    ///
-    /// The list is replayed into this target's scene with no lock held but
-    /// the bitmap table's, briefly, per bitmap draw; the shared renderer is
-    /// locked for the render and submit that follow (see [`SharedRaster`]).
     pub(crate) fn render(
         &mut self,
         list: &DisplayList,
@@ -1698,13 +1376,6 @@ impl SparseBackend {
 
         let started = ClockInstant::now();
         scene.reset_and_resize(w, h);
-        // A layer blending over the root blends against what is under the
-        // whole list, which on the target is the base colour. `vello_gpu`
-        // renders a root that is a blend target into a transparent
-        // intermediate and blits that over the cleared target, so the clear
-        // colour is under the blend rather than in it: the base colour is
-        // drawn as the scene's first fill instead, which over a transparent
-        // clear composes to the same pixels the clear would have.
         let underlay = base_color.components[3] > 0.0 && list.blends_at_root();
         if underlay {
             scene.set_transform(Affine::IDENTITY);
@@ -1754,8 +1425,6 @@ impl SparseBackend {
 }
 
 impl Drop for SparseBackend {
-    /// Gives up this target's pins: what only it drew becomes releasable at
-    /// the next render that runs over the budget.
     fn drop(&mut self) {
         self.gpu.raster.bitmaps().targets.remove(&self.target);
     }
@@ -1779,8 +1448,6 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-    /// A stack of its own, a target's backend on it, and one `width` ×
-    /// `height` texture read back after each render.
     struct Rig {
         gpu: Arc<SharedGpu>,
         backend: SparseBackend,
@@ -1794,7 +1461,6 @@ mod tests {
             Self::on(&SharedGpu::private(SharedRaster::new), width, height)
         }
 
-        /// A target's backend on `gpu`, with its own texture.
         fn on(gpu: &Arc<SharedGpu>, width: u32, height: u32) -> Self {
             let gpu = Arc::clone(gpu);
             let backend = SparseBackend::new(&gpu);
@@ -1821,8 +1487,6 @@ mod tests {
             }
         }
 
-        /// Renders `scene` over white and answers the target's pixel at
-        /// each of `at`.
         fn render(&mut self, scene: &DisplayList) -> Pixels {
             let device = &self.gpu.device;
             let view = self
@@ -1881,13 +1545,11 @@ mod tests {
     }
 
     impl Rig {
-        /// The stack's bitmap table.
         fn bitmaps(&self) -> std::sync::MutexGuard<'_, Bitmaps> {
             self.gpu.raster.bitmaps()
         }
     }
 
-    /// One read-back target.
     struct Pixels {
         width: u32,
         rgba: Vec<u8>,
@@ -1900,7 +1562,6 @@ mod tests {
         }
     }
 
-    /// A straight-alpha RGBA8 bitmap of `texels`, `width` wide.
     fn bitmap(width: u32, texels: &[[u8; 4]]) -> ImageData {
         let bytes: Vec<u8> = texels.iter().flatten().copied().collect();
         ImageData {
@@ -1912,7 +1573,6 @@ mod tests {
         }
     }
 
-    /// Fills `rect` with `image`, placed by `brush`.
     fn draw(
         scene: &mut DisplayList,
         image: &ImageData,
@@ -1939,16 +1599,11 @@ mod tests {
         );
     }
 
-    /// A bilinear draw padded past its last texel's centre reads that texel
-    /// (clamp-to-edge), not a blend of the last two, and a repeating one
-    /// keeps its period, filtering across the seam between periods as
-    /// within one: one upload serves both.
     #[test]
     fn a_padded_axis_filters_to_the_last_texel_and_a_repeating_one_keeps_its_period() {
         let mut rig = Rig::new(64, 16);
         let image = bitmap(2, &[RED, BLUE]);
         let mut scene = DisplayList::new();
-        // Two texels at 8 px each, padded out to 32 px.
         draw(
             &mut scene,
             &image,
@@ -1957,7 +1612,6 @@ mod tests {
             Affine::scale(8.0),
             Rect::new(0.0, 0.0, 32.0, 8.0),
         );
-        // The same two texels repeated across 32 px below.
         draw(
             &mut scene,
             &image,
@@ -1970,8 +1624,6 @@ mod tests {
         assert_eq!(pixels.at(1, 4), RED, "before the first texel's centre");
         assert_eq!(pixels.at(14, 4), BLUE, "past the last texel's centre");
         assert_eq!(pixels.at(28, 4), BLUE, "in the padded area");
-        // Between the centres the filter mixes the two: pixel 7's centre is
-        // 7.5 / 8 texels in, 0.4375 of the way from the first centre.
         let mid = pixels.at(7, 4);
         assert!(
             (i32::from(mid[0]) - 143).abs() <= 2 && (i32::from(mid[2]) - 112).abs() <= 2,
@@ -1984,8 +1636,6 @@ mod tests {
                 "pixel {x} repeats 16 px on: {first:?} vs {second:?}"
             );
         }
-        // Pixels 19 and 27 lie 0.0625 texels from the period's first and
-        // last centres: red and blue, with a sixteenth of their neighbour.
         let [r, _, b, _] = pixels.at(19, 12);
         assert!(
             r > 200 && b < 56,
@@ -1994,8 +1644,6 @@ mod tests {
         );
         let [r, _, b, _] = pixels.at(27, 12);
         assert!(b > 200 && r < 56, "blue ends it: {:?}", pixels.at(27, 12));
-        // Pixel 16's centre is 2.0625 texels in, 0.5625 of the way from the
-        // last texel's centre (blue) to the next period's first (red).
         let seam = pixels.at(16, 12);
         assert!(
             (i32::from(seam[0]) - 143).abs() <= 2 && (i32::from(seam[2]) - 112).abs() <= 2,
@@ -2008,7 +1656,6 @@ mod tests {
         );
     }
 
-    /// One blob drawn as two sizes is two uploads, each its own pixels.
     #[test]
     fn one_blob_at_two_sizes_is_two_uploads() {
         let mut rig = Rig::new(16, 16);
@@ -2057,8 +1704,6 @@ mod tests {
         assert_eq!(rig.bitmaps().entries.len(), 2);
     }
 
-    /// A nearest-neighbour draw and a smooth one of the same blob draw from
-    /// one upload, each with its own filter.
     #[test]
     fn one_upload_serves_a_nearest_neighbour_and_a_smooth_draw() {
         let mut rig = Rig::new(12, 6);
@@ -2089,14 +1734,11 @@ mod tests {
         );
     }
 
-    /// Past the budget, the bitmaps a render did not draw are released least
-    /// recently drawn first, and one drawn again is uploaded again.
     #[test]
     fn bitmaps_past_the_budget_are_released_and_upload_again_on_return() {
         let mut rig = Rig::new(8, 8);
         let red = bitmap(1, &[RED]);
         let blue = bitmap(1, &[BLUE]);
-        // One 1×1 upload's bytes.
         rig.bitmaps().budget = 4;
         let frame = |image: &ImageData| {
             let mut scene = DisplayList::new();
@@ -2113,8 +1755,6 @@ mod tests {
         assert_eq!(rig.render(&frame(&red)).at(4, 4), RED);
         assert_eq!(rig.bitmaps().bytes, 4);
 
-        // Red stays pinned through the renders after it, then goes; a
-        // render drawing no bitmap is not one of them.
         for _ in 1..PINNED_RENDERS {
             assert_eq!(rig.render(&frame(&blue)).at(4, 4), BLUE);
             let _ = rig.render(&DisplayList::new());
@@ -2134,7 +1774,6 @@ mod tests {
         }
         assert_eq!(rig.bitmaps().entries.len(), 1);
 
-        // A render drawing both keeps both, past the budget, for itself.
         let mut both = frame(&red);
         draw(
             &mut both,
@@ -2158,8 +1797,6 @@ mod tests {
         );
     }
 
-    /// A long bitmap draws its far end, padded past it, and is released like
-    /// any other.
     #[test]
     fn a_long_bitmap_draws_and_is_released() {
         let mut rig = Rig::new(16, 4);
@@ -2167,7 +1804,6 @@ mod tests {
         texels[1099] = BLUE;
         let image = bitmap(1100, &texels);
         let mut scene = DisplayList::new();
-        // The last eight texels at pixels 0..8, then the padded area.
         draw(
             &mut scene,
             &image,
@@ -2197,7 +1833,6 @@ mod tests {
         assert_eq!(rig.bitmaps().entries.len(), 1, "the long one went");
     }
 
-    /// A 1 × 1 bitmap of `texel` on a blob of its own, filling `rect`.
     fn swatch(scene: &mut DisplayList, texel: [u8; 4], rect: Rect) -> ImageData {
         let image = bitmap(1, &[texel]);
         draw(
@@ -2211,15 +1846,9 @@ mod tests {
         image
     }
 
-    /// Two targets on one stack, each on a thread of its own, draw bitmaps
-    /// of their own — a fresh one every frame, past a budget that releases
-    /// the old ones as they go — and one they both draw. Every frame of
-    /// each shows its own pixels: neither releases what the other is
-    /// drawing.
     #[test]
     fn two_targets_on_two_threads_draw_their_own_bitmaps() {
         let gpu = SharedGpu::private(SharedRaster::new);
-        // Room for three 1 × 1 uploads.
         gpu.raster.bitmaps().budget = 12;
         let common = bitmap(1, &[[0, 255, 0, 255]]);
         std::thread::scope(|scope| {
@@ -2255,10 +1884,6 @@ mod tests {
         );
     }
 
-    /// A bitmap stays pinned by every live target that drew it, counted in
-    /// that target's own renders, and a target that goes away pins nothing:
-    /// another target's renders release what only it drew, and draw on
-    /// from what they share.
     #[test]
     fn a_target_that_goes_away_releases_its_pins_and_nothing_else() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -2281,8 +1906,6 @@ mod tests {
             Affine::IDENTITY,
             Rect::new(0.0, 0.0, 8.0, 4.0),
         );
-        // The second target's renders, however many, release nothing the
-        // first drew in its last render.
         for _ in 0..2 * PINNED_RENDERS {
             assert_eq!(second.render(&theirs).at(1, 1), BLUE);
         }
@@ -2312,7 +1935,6 @@ mod tests {
         );
     }
 
-    /// The sampler [`filling`] draws with: bilinear, padded.
     fn padded() -> ImageSampler {
         ImageSampler {
             x_extend: Extend::Pad,
@@ -2322,7 +1944,6 @@ mod tests {
         }
     }
 
-    /// One padded bilinear draw of `image` filling an 8×8 target.
     fn filling(image: &ImageData) -> DisplayList {
         let mut scene = DisplayList::new();
         draw(
@@ -2336,7 +1957,6 @@ mod tests {
         scene
     }
 
-    /// A padded bilinear draw of `image` filling an 8×8 target.
     fn filling_ref(image: crate::paint::display_list::ImageRef) -> DisplayList {
         let mut scene = DisplayList::new();
         scene.fill_paint(
@@ -2352,7 +1972,6 @@ mod tests {
         scene
     }
 
-    /// Whether `image` has an upload.
     fn uploaded(rig: &Rig, image: &ImageData) -> bool {
         rig.bitmaps()
             .entries
@@ -2360,8 +1979,6 @@ mod tests {
             .any(|key| key.blob() == Some(image.data.id()))
     }
 
-    /// A lease holds an upload the release past the budget would otherwise
-    /// take, drawn recently or not; an unleased one goes as before.
     #[test]
     fn a_leased_upload_survives_a_release_past_the_budget_and_an_unleased_one_does_not() {
         let mut rig = Rig::new(8, 8);
@@ -2380,7 +1997,6 @@ mod tests {
         }
         assert!(uploaded(&rig, &red), "leased, so kept past every pin");
         assert!(!uploaded(&rig, &green), "unleased, so released");
-        // Drawn from the lease alone: the pixels it was lent are gone.
         let descriptor = ImageDescriptor::of(&red);
         drop(red);
         let scene = filling_ref(crate::paint::display_list::ImageRef::uploaded(descriptor));
@@ -2388,9 +2004,6 @@ mod tests {
         assert_eq!(rig.backend.lost(), 0);
     }
 
-    /// A lease of a bitmap with no upload holds nothing, a replacement that
-    /// names one keeps nothing for it, and a draw with no upload whose lent
-    /// pixels are gone is counted lost.
     #[test]
     fn a_lease_of_a_bitmap_with_no_upload_holds_nothing() {
         let mut rig = Rig::new(8, 8);
@@ -2426,7 +2039,6 @@ mod tests {
         assert_eq!(rig.backend.lost(), 1);
     }
 
-    /// Dropping the lease owner frees its uploads to be released.
     #[test]
     fn dropping_the_lease_owner_frees_its_uploads() {
         let mut rig = Rig::new(8, 8);
@@ -2447,8 +2059,6 @@ mod tests {
         assert_eq!(leases.uploads(), uploads + 1, "blue was one more upload");
     }
 
-    /// Replacing an owner's leases keeps what stays in the new set and lets
-    /// go of the rest.
     #[test]
     fn replacing_the_leases_keeps_what_stays() {
         let mut rig = Rig::new(8, 8);
@@ -2478,8 +2088,6 @@ mod tests {
         assert!(!uploaded(&rig, &green));
     }
 
-    /// A layer longer than `vello_gpu`'s default intermediate texture side
-    /// (4096) renders: the layer limit is the device's longest side.
     #[test]
     fn a_layer_taller_than_4096_px_renders() {
         let mut rig = Rig::new(8, 5000);
@@ -2546,7 +2154,6 @@ mod replay_tests {
         let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
         let stroke = Stroke::new(2.0).with_join(Join::Miter);
         scene.stroke(&stroke, Affine::translate((1.0, 1.0)), BLACK, None, &rect);
-        // Mitred corners, and the 8 px hole left unpainted.
         let pixels = render(&scene, 12, 12);
         for (x, y) in [(0, 0), (11, 0), (0, 11), (11, 11), (5, 1)] {
             assert_eq!(pixel(&pixels, 12, x, y), OPAQUE_BLACK, "({x}, {y})");
@@ -2571,7 +2178,6 @@ mod replay_tests {
         }
     }
 
-    /// A dashed stroke reaches the rasterizer already dashed.
     #[test]
     fn a_dashed_stroke_leaves_its_gaps_unpainted() {
         let mut scene = DisplayList::new();
@@ -2609,8 +2215,6 @@ mod replay_tests {
         assert_eq!(pixel(&pixels, 8, 6, 6), WHITE);
     }
 
-    /// A hard stop on a pixel edge splits the columns there: each pixel
-    /// takes the colour at its centre.
     #[test]
     fn a_hard_stop_on_a_pixel_edge_splits_the_columns_there() {
         let mut scene = DisplayList::new();
@@ -2627,12 +2231,8 @@ mod replay_tests {
         assert_eq!(pixel(&pixels, 20, 10, 0), OPAQUE_BLUE);
     }
 
-    /// Past its end line a gradient pads, repeats or reflects as its extend
-    /// says.
     #[test]
     fn a_gradient_extends_past_its_end_as_its_extend_says() {
-        // A 10 px period, red over its first half: pixel 12's centre is a
-        // quarter into the second period, pixel 17's three quarters.
         for (extend, at_12, at_17) in [
             (Extend::Pad, OPAQUE_BLUE, OPAQUE_BLUE),
             (Extend::Repeat, OPAQUE_RED, OPAQUE_BLUE),
@@ -2656,7 +2256,6 @@ mod replay_tests {
         }
     }
 
-    /// Every pixel of a conic gradient is painted, its centre's included.
     #[test]
     fn a_conic_gradient_paints_its_centre() {
         let mut scene = DisplayList::new();
@@ -2676,7 +2275,6 @@ mod replay_tests {
         }
     }
 
-    /// A layer blending over the root blends against the base colour.
     #[test]
     fn a_root_blend_reads_the_base_colour() {
         let mut scene = DisplayList::new();
@@ -2696,14 +2294,9 @@ mod replay_tests {
         );
         scene.pop_layer();
         assert!(scene.blends_at_root());
-        // |white − red| is cyan.
         assert_eq!(pixel(&render(&scene, 4, 4), 4, 1, 1), [0, 255, 255, 255]);
     }
 
-    /// A non-separable blend inside a rounded clip reads full coverage along
-    /// the clip's anti-aliased rim: desaturating white over white leaves
-    /// white everywhere, rim included, with no dark pixel (the
-    /// `backdrop-filter: grayscale()` pass `draw_backdrop` draws).
     #[test]
     fn a_saturation_blend_in_a_rounded_clip_leaves_the_rim_clean() {
         let shape = crate::kurbo::RoundedRect::new(2.0, 2.0, 62.0, 30.0, 13.5);
@@ -2739,11 +2332,6 @@ mod replay_tests {
         }
     }
 
-    /// A blend directly inside a rounded clip blends at full coverage with
-    /// what the clip holds and is cut once, by the clip: multiplying red into
-    /// blue gives black, and the rim is that black faded over the white page,
-    /// with no red or blue of the operands showing through. No layer stands
-    /// between the clip and the blend: the list isolates the clip.
     #[test]
     fn a_multiply_blend_in_a_rounded_clip_is_cut_after_it_blends() {
         let shape = crate::kurbo::RoundedRect::new(0.0, 0.0, 32.0, 32.0, 12.0);
@@ -2779,10 +2367,6 @@ mod replay_tests {
         assert!(partial > 0, "the rounded rim is anti-aliased");
     }
 
-    /// An inset shadow's shape: a clip holding a fill and a `DestOut` layer
-    /// that erases a hole from it. The erase reaches only what the clip
-    /// holds — the page painted before the clip shows through the hole —
-    /// because the list composites the clip as an isolated layer.
     #[test]
     fn a_destination_out_in_a_clip_erases_only_what_the_clip_holds() {
         const GREEN: [u8; 4] = [0, 255, 0, 255];

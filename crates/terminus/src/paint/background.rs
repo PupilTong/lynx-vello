@@ -148,7 +148,6 @@ pub(crate) fn paint(
     }
 }
 
-/// One `url(...)` layer, as a program op the painter resolves and encodes.
 #[expect(
     clippy::too_many_arguments,
     reason = "one layer's full resolved geometry, none of which the caller groups"
@@ -193,9 +192,6 @@ fn paint_raster_layer(
     }
 }
 
-/// One `url(...)` layer naming an SVG document: every visible tile is one
-/// vector draw, inside the `background-clip: text` sandwich when there is
-/// one.
 #[expect(
     clippy::too_many_arguments,
     reason = "one layer's full resolved geometry, none of which the caller groups"
@@ -232,8 +228,6 @@ fn paint_vector_layer(
     }
 }
 
-/// `background-color` under `background-clip: text`: the colour fills the
-/// glyph silhouettes rather than the box.
 fn paint_text_clipped_color(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -256,14 +250,6 @@ fn paint_text_clipped_color(
     sink.pop();
 }
 
-/// Opens the `background-clip: text` sandwich as program ops rather than
-/// inside one fragment, so an image fill can sit between the two pushes.
-///
-/// The op sequence is exactly what the inline sandwich encodes — a `SrcOver`
-/// group over the border shape, the glyph silhouettes, then a `SrcIn` group
-/// over the border box — but expressed so a fragment cut may legally land in
-/// the middle of it. Returns whether it opened; a caller that gets `true`
-/// owes two pops.
 fn open_text_clip_ops(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -301,19 +287,11 @@ fn open_text_clip_ops(
     true
 }
 
-/// What a replaced element draws into its content box.
 pub(crate) enum ReplacedContent<'a> {
-    /// The picture the element presents (`Document::set_picture`), drawn
-    /// as an image draw.
     Picture(crate::render::picture::PictureKey),
-    /// A vector image, drawn as a vector draw: an SVG document the element
-    /// presents by URL. An `svg` element's own subtree is not one: it is
-    /// drawn as paint items of its own (`crate::visual::svg`).
     Vector(&'a VectorImage),
 }
 
-/// Draws `content` into the element's content box, fitted against
-/// `natural`, the natural size the element has.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -349,10 +327,6 @@ pub(crate) fn paint_replaced_content(
     let Some(area) = image_area(&shape, destination) else {
         return;
     };
-    // The destination comes from the node's natural size and the brush scale
-    // from the decoded bitmap. The two may disagree — a store decoding at
-    // reduced scale, or a generation whose dimensions changed — and the image
-    // stretches, which is the same asymmetry the inline path had.
     sink.image(
         space,
         ImageDraw {
@@ -366,12 +340,6 @@ pub(crate) fn paint_replaced_content(
     );
 }
 
-/// The rectangle, in the fragment's own space, a replaced element's
-/// picture of `natural` size is drawn onto: its concrete object size fitted
-/// into the content box by `object-fit` and placed by `object-position`.
-/// `None` when the content box or the fitted size is empty, which draws
-/// nothing. What the picture is clipped to is the content box's shape
-/// ([`content_radii`]) cut to this rectangle ([`fill_plan`]).
 pub(crate) fn replaced_destination(
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -411,9 +379,6 @@ pub(crate) fn replaced_destination(
     ))
 }
 
-/// The corner radii of the fragment's content box: its border radii inset
-/// by the border and then by the padding, the shape
-/// [`BoxLevel::Content`] clips to.
 pub(crate) fn content_radii(fragment: &BoxFragment) -> CornerRadii {
     let padding = inner_radii(&fragment.radii, &fragment.border_widths);
     inner_radii(&padding, &fragment.padding_widths)
@@ -468,8 +433,6 @@ fn fitted_size(fit: ObjectFit, width: f64, height: f64, content: Rect) -> (f64, 
     }
 }
 
-/// One fully specified image layer (background or mask), ready to resolve
-/// and tile. `origin` is the positioning area; `clip` bounds every draw.
 pub(super) struct PatternLayer<'a> {
     pub image: &'a Image,
     pub position_x: &'a LengthPercentage,
@@ -551,9 +514,6 @@ pub(super) fn paint_pattern_layer(
         repeat_y: !matches!(layer.repeat.1, BackgroundRepeatKeyword::NoRepeat),
     };
 
-    // A raster layer becomes a program op, because its pixels are not
-    // reachable from here; a vector layer, because its texture is the
-    // painter's to bake. Gradients and solids still encode inline.
     if let Source::Raster(image, _) = &source {
         paint_raster_layer(
             sink,
@@ -569,8 +529,6 @@ pub(super) fn paint_pattern_layer(
         return;
     }
 
-    // A vector layer is a program op per visible tile, each a texture the
-    // painter bakes, rather than one repeating brush fill.
     if let Source::Vector(vector, _) = &source {
         paint_vector_layer(
             sink, space, style, fragment, layer, text_clip, &grid, vector,
@@ -612,10 +570,6 @@ pub(super) fn paint_pattern_layer(
             }
         },
     };
-    // One encoder for the sandwich, whatever the layer paints. A raster
-    // layer has to take this path — its pixels are late — and giving
-    // gradients and solids a second, inline copy would mean two encodings of
-    // one CSS feature that must stay byte-identical.
     let opened = open_text_clip_ops(sink, space, fragment, text_clip);
     if text_clip.is_some() && !opened {
         return;
@@ -666,13 +620,7 @@ fn image_url(url: &ComputedUrl) -> &str {
 }
 
 enum Source<'a> {
-    /// The image's name and its own intrinsic dimensions — never its pixels.
-    /// The dimensions come from the registry, which learned them from the
-    /// store's load report, so the whole tile grid resolves here without any
-    /// bitmap being reachable.
     Raster(std::sync::Arc<str>, (f64, f64)),
-    /// A parsed SVG document and its natural size, borrowed from the
-    /// registry's entry.
     Vector(&'a VectorImage, (f64, f64)),
     Gradient(&'a Gradient),
     Solid(Color),
@@ -707,8 +655,6 @@ fn image_quality(style: &ComputedValues) -> ImageQuality {
     }
 }
 
-/// The layer's resolved tile grid: first-tile origin, tile size, and
-/// per-axis repetition, all in item-local px.
 struct TileGrid {
     origin: Point,
     tile: Size,
@@ -731,9 +677,6 @@ impl TileGrid {
         Rect::new(x0, y0, x1, y1)
     }
 
-    /// The first visible tile's indices and the tile count per axis over
-    /// `bounds`, `(x_first, x_count, y_first, y_count)`, with the row count
-    /// cut so no more than `MAX_TILE_FILLS` tiles are drawn.
     fn span(&self, bounds: Rect) -> (f64, f64, f64, f64) {
         let (x_first, x_count) = tile_span(
             self.origin.x,
@@ -766,29 +709,14 @@ impl TileGrid {
     }
 }
 
-/// Which shape a clipped fill resolves to, decided without looking at what
-/// is being painted.
-///
-/// Every input is geometry: the clip shape and the rect to be covered. No
-/// branch reads a brush, a gradient or a pixel — which is what lets an image
-/// fill be described on one thread and encoded on another, with the pixels
-/// supplied only at encode time.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FillPlan {
-    /// Degenerate: a zero-area draw, or a clip the draw misses entirely.
-    /// Nothing is painted.
     None,
-    /// The draw covers the whole clip, so the clip shape is filled directly.
     Shape,
-    /// A rectangular clip the draw only partly covers: fill the
-    /// intersection, no layer needed.
     Rect(Rect),
-    /// A rounded clip the draw only partly covers: the fill needs a real
-    /// clip layer around it.
     Clipped(Rect),
 }
 
-/// The shape a fill of `draw` inside `clip` resolves to.
 pub(crate) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
     if draw.width() <= 0.0 || draw.height() <= 0.0 {
         return FillPlan::None;
@@ -812,8 +740,6 @@ pub(crate) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
     }
 }
 
-/// The [`ImageArea`] a raster fill of `draw` inside `clip` resolves to, or
-/// `None` when the plan paints nothing at all.
 fn image_area(clip: &BoxShape, draw: Rect) -> Option<ImageArea> {
     match fill_plan(clip, draw) {
         FillPlan::None => None,
@@ -917,10 +843,6 @@ fn fill_gradient_tiles(
     }
 }
 
-/// Whether a vector image has anything to draw.
-///
-/// An empty list produces no draw at all: there is nothing to bake. A
-/// degenerate viewport has no scale to draw at.
 fn is_drawable(vector: &VectorImage) -> bool {
     let (width, height) = vector.viewport();
     width > 0.0
@@ -930,13 +852,6 @@ fn is_drawable(vector: &VectorImage) -> bool {
         && !vector.scene().is_empty()
 }
 
-/// Emits one [`VectorDraw`] of `vector` per visible tile of `grid` inside
-/// `clip`, each over the tile's own share of the clip shape — the
-/// [`ImageArea`] a raster draw of that tile would fill, whose clip pair the
-/// encoder opens and closes inside one op — with the row count cut at
-/// `MAX_TILE_FILLS` by [`TileGrid::span`]. An image with nothing to draw
-/// emits nothing; the caller checks the same before it opens a
-/// `background-clip: text` sandwich around the tiles.
 fn fill_vector_tiles(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -964,8 +879,6 @@ fn fill_vector_tiles(
     }
 }
 
-/// The draw of `vector` onto `destination` — item-local, under `transform`
-/// — filling `area`.
 fn vector_draw(
     vector: &VectorImage,
     transform: Affine,
@@ -1185,30 +1098,8 @@ fn radial_gradient(
     Some(GradientBrush::Gradient { gradient, local })
 }
 
-/// The largest `f32` below 1: where a run of stops at the ramp's end is kept.
 const RAMP_END: f32 = 1.0 - f32::EPSILON / 2.0;
 
-/// Maps fixed-up stops onto the `[0, 1]` ramp the rasterizer samples, so
-/// that the colour past the last stop is the last stop's.
-///
-/// css-images-3 §3.4.2: "after the last color stop, the gradient line is the
-/// color of the last color stop." When two or more stops sit at the ramp's
-/// end (`red 100%, transparent 100%`, or a hard edge at the last stop of a
-/// re-mapped ramp), `Extend::Pad` reads the ramp's last sample for
-/// everything past it, and `vello_common` (`GradientLut::new`) gives each
-/// stop-to-stop range the samples below its end offset times the table
-/// length: the range ending at the first stop at 1 takes every sample up to
-/// the last, the ones after it take none, and the disc in `red 100%,
-/// transparent 100%` would pad red. Pulling that run to the largest offset
-/// below 1 leaves the last sample to the range `vello_common` appends from
-/// the last stop to 1, which holds the last stop's colour. A single stop at
-/// the end is left at 1, where its own range reaches the last sample; moving
-/// it would only make `vello_common` size its table for a range 2^-24 wide.
-///
-/// Offsets are clamped into `[0, 1]`, since a re-mapped offset can round
-/// just past an end and `vello_common` paints a gradient with an offset
-/// outside that range as its first stop's solid colour. A first stop above 0 needs nothing:
-/// `vello_common` holds its colour from 0 itself.
 fn ramp_stops(stops: &[(f64, Color)], offset: impl Fn(f64) -> f32) -> Vec<(f32, Color)> {
     let mut out: Vec<(f32, Color)> = stops
         .iter()
@@ -1875,8 +1766,6 @@ mod tests {
         VectorImage::parse_sealed(svg.as_bytes()).expect("a valid document")
     }
 
-    /// The tiles of `grid` inside `clip`, as the compose program records
-    /// them.
     fn compose_tiles(
         clip: &BoxShape,
         grid: &TileGrid,
@@ -1905,10 +1794,6 @@ mod tests {
         }
     }
 
-    /// A repeated vector background is one vector draw per visible tile —
-    /// a 100 px box under 25 px tiles records 16 — each over its own tile,
-    /// and no fragment at all: nothing of the picture lands in the frame's
-    /// own encoding.
     #[test]
     fn a_repeated_vector_background_records_one_draw_per_visible_tile() {
         let image = vector(r##"<rect width="100" height="100" fill="#ff0000"/>"##);
@@ -1933,9 +1818,6 @@ mod tests {
         assert_eq!(last.key, image.key());
     }
 
-    /// The tile cap still bounds the draws: 1 px tiles over a 200 px box
-    /// would be 40,000, and `MAX_TILE_FILLS` cuts the rows to the 81 whole
-    /// rows of 200 that fit under it.
     #[test]
     fn the_tile_cap_bounds_the_vector_draws() {
         let image = vector(r##"<rect width="100" height="100" fill="#ff0000"/>"##);
@@ -1945,9 +1827,6 @@ mod tests {
         assert_eq!(finished.program.len(), 200 * 81);
     }
 
-    /// A document with nothing drawable records no draw at all, not even
-    /// an op: there is nothing to bake, and on the monolithic walk nothing
-    /// to append.
     #[test]
     fn an_empty_vector_image_records_nothing() {
         let image = vector("");

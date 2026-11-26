@@ -104,9 +104,6 @@ fn negative_z_index_paints_below_in_flow_content() {
     assert_eq!(h.hit(50.0, 50.0), Some(flow));
 }
 
-/// A scroll container is no stacking context by itself, as on the web: a
-/// `z-index` inside it sorts against its siblings outside, so the content
-/// paints above a positioned sibling with a lower level.
 #[test]
 fn a_scroll_containers_z_index_content_sorts_in_the_enclosing_context() {
     let mut h = Harness::new(&format!(
@@ -124,13 +121,9 @@ fn a_scroll_containers_z_index_content_sorts_in_the_enclosing_context() {
     let above = h.el(root, "view.above");
     assert_eq!(h.element_order(), vec![root, scroller, above, content]);
     assert_eq!(h.hit(50.0, 50.0), Some(content));
-    // Sorted outside the scroller, still cut by its scrollport.
     assert_eq!(h.hit(150.0, 250.0), Some(root));
 }
 
-/// Content hoisted out of its scroller by `z-index` keeps the scroller's
-/// clip and scroll space: it is painted in the enclosing context but moves
-/// with the scroll offset and is cut by the scrollport.
 #[test]
 fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
     let mut h = Harness::new(&format!(
@@ -162,7 +155,6 @@ fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
         "the innermost space is the scroller's scroll node",
     );
 
-    // Below the scrollport's end before the scroll, inside it after.
     assert_eq!(h.hit(150.0, 225.0), Some(root));
     assert_eq!(h.hit(150.0, 120.0), Some(scroller));
     h.doc.dom.layout();
@@ -172,9 +164,6 @@ fn hoisted_scroll_content_keeps_its_scrollers_clip_and_space() {
     assert_eq!(h.hit(150.0, 120.0), Some(content));
 }
 
-/// A fixed box inside scroll content escapes the scroller's clip and scroll
-/// space for its containing block's, and with no stacking context in the
-/// way its `z-index` also lifts it over the scroller's later siblings.
 #[test]
 fn a_fixed_popup_in_scroll_content_overlays_the_scrollers_siblings() {
     let mut h = Harness::new(&format!(
@@ -281,9 +270,6 @@ fn static_flex_item_with_z_index_forms_a_context() {
     assert_eq!(h.hit(50.0, 50.0), Some(trapped));
 }
 
-/// A grid-lanes container's children are grid items (the fork's
-/// `Display::is_item_container` says so), so a non-positioned one's `z-index`
-/// applies and lifts it out of tree order.
 #[test]
 fn static_grid_lanes_item_with_z_index_forms_a_context() {
     let mut h = Harness::new(
@@ -297,14 +283,10 @@ fn static_grid_lanes_item_with_z_index_forms_a_context() {
     let lanes = h.el(root, "view.lanes");
     let first = h.el(lanes, "view.first");
     let second = h.el(lanes, "view.second");
-    // The two items occupy the same 100px of the one lane, so paint order is
-    // what decides which of them is on top.
     assert_eq!(h.element_order(), vec![root, lanes, second, first]);
     assert_eq!(h.hit(50.0, 50.0), Some(first));
 }
 
-/// Without a `z-index` the same two items paint in tree order, so the item
-/// after wins — the lift above is the `z-index`, not the display mode.
 #[test]
 fn grid_lanes_items_without_z_index_paint_in_tree_order() {
     let mut h = Harness::new(
@@ -322,8 +304,6 @@ fn grid_lanes_items_without_z_index_paint_in_tree_order() {
     assert_eq!(h.hit(50.0, 50.0), Some(second));
 }
 
-/// Hit testing reads the lanes pass's own placement: each point lands in the
-/// item the stacking pass put there, not in document order.
 #[test]
 fn hit_testing_finds_items_at_their_lane_positions() {
     let mut h = Harness::new(
@@ -346,7 +326,6 @@ fn hit_testing_finds_items_at_their_lane_positions() {
     assert_eq!(h.hit(10.0, 10.0), Some(items[0]));
     assert_eq!(h.hit(110.0, 10.0), Some(items[1]));
     assert_eq!(h.hit(10.0, 45.0), Some(items[2]));
-    // The gutter between the two lanes belongs to the container itself.
     assert_eq!(h.hit(100.0, 10.0), Some(lanes));
 }
 
@@ -646,8 +625,6 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     let text = h.doc.dom.create_text_node("hello", ());
     h.doc.dom.append_child(label, text);
     let paint = h.paint();
-    // The paragraph is the establishing element's item: a text node is
-    // content of the block, and generates nothing of its own.
     assert!(
         paint.items().iter().all(|item| item.node != text),
         "a text node paints no item of its own"
@@ -665,13 +642,6 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     );
 }
 
-/// A box hoisted out of a `<text>` (`position: absolute` under the static
-/// paragraph element) and a transformed atomic box after it inside the same
-/// paragraph paint in CSS2 Appendix E order: both sit in step 8 of the page's
-/// stacking context, in tree order, so the atom paints over the hoisted box.
-/// The text run before them is content of the paragraph and never a box, so
-/// it does not count toward the hoisted box's rank (user ruling, 2026-10-22;
-/// before, the run moved the hoisted box after the atom).
 #[test]
 fn a_box_hoisted_beside_text_runs_paints_in_tree_order_with_a_transformed_atom() {
     let mut h = Harness::new(
@@ -973,9 +943,6 @@ fn text_runs_are_clipped_by_their_element() {
     assert_eq!(h.hit(100.0, 10.0), Some(root));
 }
 
-/// The same for a block that is no stacking context: `overflow: clip` makes
-/// no scroll container, and the UA sheet gives every `text` exactly that, so
-/// an ordinary `<text>` paints its paragraph on the in-context path.
 #[test]
 fn text_runs_are_clipped_by_their_element_outside_a_stacking_context() {
     let mut h = Harness::new(
@@ -1157,8 +1124,6 @@ fn text_in_contents_hits_the_contents_element() {
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }",
     );
-    // The page itself is the paragraph: the definition upgrades the document
-    // element.
     h.doc.define_lynx_text("page");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
@@ -1167,9 +1132,6 @@ fn text_in_contents_hits_the_contents_element() {
     h.doc.dom.append_child(wrap, text);
     let paint = h.paint();
     let _ = (text, wrap);
-    // A `display: contents` element generates no box, so it cannot establish
-    // a paragraph: the text is content of the block above it, and the walk
-    // flattens straight through.
     assert!(
         paint
             .items()
@@ -1293,11 +1255,6 @@ fn contents_order_interleave_paints_and_survives_hidden_siblings() {
     let _ = hidden;
 }
 
-/// A removal drops its own node out of the retained frame's answers and
-/// leaves the rest of the frame answering. The replacement built on the freed
-/// node's storage is not in that frame at all, so it only appears once the
-/// next render puts it there — it can never be mistaken for its predecessor,
-/// because it carries a different id.
 #[test]
 fn a_removal_drops_only_its_own_node_from_the_retained_frame() {
     let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
@@ -1625,8 +1582,6 @@ fn group_effect_contexts_get_render_layers() {
     for trigger in [
         "opacity: 0.5;",
         "filter: grayscale(1);",
-        // filter-effects-2 §2.1: the filtered backdrop is painted inside the
-        // element's own effect layer, so `backdrop-filter` needs a group.
         "backdrop-filter: blur(4px);",
         "clip-path: circle(40px);",
     ] {
@@ -1748,18 +1703,6 @@ fn leaf_group_contexts_close_their_layer() {
     assert!(!layers[0].items.contains(&item_index(&paint, over)));
 }
 
-// ---------------------------------------------------------------------------
-// Buffer reuse
-//
-// The builder fills buffers reclaimed from the frame the painter last retired
-// and a working set carried across frames, so the second build of a document
-// runs against warm storage where the first ran against empty storage. These
-// pin the property that makes that admissible: the storage a build starts from
-// is not an input to what it produces.
-// ---------------------------------------------------------------------------
-
-/// Every field of a `PaintOrder` an observer could distinguish, with floats
-/// compared by bit pattern so a path that turned `-0.0` into `0.0` would fail.
 fn fingerprint(paint: &PaintOrder) -> String {
     use std::fmt::Write as _;
 
@@ -1820,11 +1763,6 @@ fn radii_bits(radii: &crate::visual::CornerRadii) -> [u32; 8] {
     ]
 }
 
-/// Every shape the build's buffer discipline has to survive: nested stacking
-/// contexts, a group effect, negative and positive stack levels, an escaping
-/// absolute inside a scrolled clipper, nested pseudo-contexts, a rotated
-/// context (so the build interns a world matrix), reordered siblings, and a
-/// `display: none` sibling among them.
 fn reuse_harness() -> (Harness, NodeId) {
     let mut h = Harness::new(&format!(
         "{PAGE}
@@ -1854,14 +1792,10 @@ fn reuse_harness() -> (Harness, NodeId) {
     h.el(nested, "view.box.rel.turn");
     h.el(root, "view.box.under");
     h.el(root, "view.box.over");
-    // `scroll_to` clamps against the last committed layout, so a fixture that
-    // scrolls before laying out silently scrolls nothing.
     h.doc.dom.layout();
     (h, scroller)
 }
 
-/// Scrolls the fixture's container and fails if the offset did not move,
-/// which would quietly turn every reuse round into the same build.
 fn scroll_to(document: &mut crate::tree::document::Document<()>, scroller: NodeId, offset: f32) {
     let applied = document.scroll_to(scroller, euclid::default::Vector2D::new(0.0, offset));
     assert_eq!(
@@ -1870,12 +1804,6 @@ fn scroll_to(document: &mut crate::tree::document::Document<()>, scroller: NodeI
     );
 }
 
-/// Invalidates the retained frame with a mutation that leaves every table's
-/// size unchanged, so a reuse round rebuilds without growing anything.
-///
-/// A scroll no longer serves: a composable scroll deliberately invalidates
-/// nothing. A background flip does — color reaches only the encode, never
-/// the tables, so a round at the same state fingerprints identically.
 fn nudge(document: &mut crate::tree::document::Document<()>, scroller: NodeId, alternate: bool) {
     let color = if alternate { "navy" } else { "teal" };
     document.set_inline_style(scroller, &format!("background-color: {color}"));
@@ -1885,7 +1813,6 @@ fn nudge(document: &mut crate::tree::document::Document<()>, scroller: NodeId, a
     );
 }
 
-/// The fingerprint of the frame a document currently retains.
 fn retained_fingerprint(document: &crate::tree::document::Document<()>) -> String {
     let painter = document.painter.borrow();
     fingerprint(
@@ -1900,12 +1827,6 @@ fn retained_fingerprint(document: &crate::tree::document::Document<()>) -> Strin
 fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     let (mut h, scroller) = reuse_harness();
 
-    // Only `FramePainter::paint` retires a frame into the spare buffers, so the
-    // rounds below render rather than build: a loop of bare builds would
-    // exercise the working scratch and never the frame tables, which are
-    // the buffers carrying the node ids, clip links and layer ranges this
-    // fingerprint checks. A composable scroll invalidates nothing any more,
-    // so the rounds alternate a background nudge instead.
     nudge(&mut h.doc.dom, scroller, false);
     h.doc.dom.render();
     let cold = retained_fingerprint(&h.doc.dom);
@@ -1938,9 +1859,6 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
 fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
     let (mut h, scroller) = reuse_harness();
     h.doc.dom.render();
-    // A hub-shaped holder: always holds the latest committed frame, releasing
-    // the previous one only when the next commit replaces it — exactly the
-    // publish flow, under which immediate reclamation can never succeed.
     let mut published = h.doc.dom.committed_frame();
     for round in [true, false, true, false] {
         nudge(&mut h.doc.dom, scroller, round);
@@ -1962,10 +1880,6 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     h.doc.dom.render();
     let cold = h.doc.dom.scene(&crate::render::image::NoImages).clone();
 
-    // A repaint of an unchanged document is refused, so each round flips the
-    // nudge and flips it back. The second render of each pair sees the
-    // recycled buffers and must land on the same composed encoding as the
-    // first — at the same scrolled offset, which stays applied throughout.
     for _ in 0..3 {
         nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
@@ -1998,10 +1912,6 @@ fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
         h.doc.dom.paint_storage_capacities(),
         "a settled page must reuse every buffer instead of growing a new one",
     );
-    // Indices 4 and 12 are the retained and spare animation-slot tables, 5
-    // and 13 the `content-visibility: auto` ones and 6 and 14 the snap-point
-    // ones, which this fixture — animating nothing, skipping nothing and
-    // snapping nothing — never fills.
     assert!(
         settled
             .iter()
@@ -2015,16 +1925,6 @@ fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
          reallocation that moved capacity between two of them is visible",
     );
 }
-
-// ---------------------------------------------------------------------------
-// Culling is invisible to hit testing
-//
-// The painter discards items that cannot put ink where the scene is looked at.
-// That decision lives in the painter's scratch, never in the retained frame,
-// which is what keeps a programmatic hit outside the viewport — and an event
-// arriving between a scroll and its repaint — answering from the geometry the
-// frame was built with.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_box_outside_the_viewport_still_answers_hit_queries() {
@@ -2066,9 +1966,6 @@ fn culling_does_not_change_the_retained_frame() {
     );
 }
 
-/// A document whose root runs `animation`, with `extra` CSS alongside,
-/// advanced past the pending promotion so the animation is `Running` at the
-/// second commit — the state the exporter requires.
 fn animated_document(animation_css: &str) -> crate::tree::document::Document<()> {
     let mut document: crate::tree::document::Document<()> =
         crate::tree::document::Document::new(crate::tree::document::tests::device(), "page", ());
@@ -2077,10 +1974,6 @@ fn animated_document(animation_css: &str) -> crate::tree::document::Document<()>
         crate::style::engine::StylesheetOrigin::Author,
     );
     document.render();
-    // The render's flush creates the animation, and the first tick is the
-    // frame it starts on: taking that tick at zero puts the animation's origin
-    // on the timeline's, which is what the sampled assertions below read
-    // against.
     document.advance_animations(0.0);
     let tick = document.advance_animations(0.25);
     assert!(tick.needs_next_frame, "the fixture animation must be live");
@@ -2139,8 +2032,6 @@ fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
     document.set_attribute(mover, "class", "mover");
     document.append_child(page, mover);
     document.render();
-    // Starts the animation on the timeline's origin, as `animated_document`
-    // does — the sampled positions below are read against it.
     document.advance_animations(0.0);
     let tick = document.advance_animations(0.30);
     assert!(tick.needs_next_frame, "the slide must be live");
@@ -2153,9 +2044,6 @@ fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
     );
     assert!(!frame.needs_main_ticks());
 
-    // Sampled at 0.5s the element sits at x = 50; the frame was baked at
-    // the 0.30s commit (x = 30), so the hit must follow the sample, not
-    // the bake.
     let sampled_hit = frame
         .hit(
             euclid::default::Point2D::new(70.0, 25.0),
@@ -2175,7 +2063,6 @@ fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
         )
         .expect("the page is behind");
     assert_eq!(vacated.node, page, "the vacated position falls through");
-    // At the commit instant the delta is the identity: the baked position.
     let at_commit = frame
         .hit(
             euclid::default::Point2D::new(35.0, 25.0),
@@ -2202,9 +2089,6 @@ fn an_inexportable_animation_keeps_main_thread_ticks() {
     assert!(!frame.has_live_curves());
 }
 
-/// An animated scroll container exports: its own clip and its content's
-/// scroll translation are nodes of the same space tree as its animation, so
-/// the delta composes around them.
 #[test]
 fn an_animated_scroll_container_exports_its_curve() {
     let document = animated_document(
@@ -2220,8 +2104,6 @@ fn an_animated_scroll_container_exports_its_curve() {
     );
 }
 
-/// A page-sized wrapper running `animation`, with content `height` px tall
-/// overflowing it: over the budget, if at all, by `content_size` alone.
 fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
     let mut h = Harness::new(&format!(
         "page {{ display: flex; flex-direction: column; width: 800px; height: 600px;
@@ -2244,7 +2126,6 @@ fn tall_wrapper(height: u16, animation: &str) -> std::sync::Arc<crate::visual::C
 
 #[test]
 fn a_transform_curve_over_the_extent_budget_is_not_exported() {
-    // 800 × 1400 is 2.3 viewports of 800 × 600; 800 × 2000 is 3.3.
     let within = tall_wrapper(1400, "slide");
     assert!(
         within.has_exported_curves(),
@@ -2253,7 +2134,6 @@ fn a_transform_curve_over_the_extent_budget_is_not_exported() {
     let over = tall_wrapper(2000, "slide");
     assert!(!over.has_exported_curves(), "over it the slide is refused");
     assert!(over.needs_main_ticks(), "and ticks on the main thread");
-    // A matrix curve has no reach; the budget is all that bounds it.
     assert!(tall_wrapper(1400, "warp").has_exported_curves());
     assert!(!tall_wrapper(2000, "warp").has_exported_curves());
 }
@@ -2269,8 +2149,6 @@ fn an_opacity_curve_is_exempt_from_the_extent_budget() {
     assert!(!frame.needs_main_ticks());
 }
 
-/// Two animated elements, started on the timeline's origin and committed a
-/// quarter second in.
 fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
     let mut h = Harness::new(&format!(
         "page {{ display: flex; width: 800px; height: 600px; }}
@@ -2293,13 +2171,6 @@ fn two_animated(first: &str, second: &str) -> std::sync::Arc<crate::visual::Comm
     document.commit()
 }
 
-/// web-animations-1: an `opacity` or `transform` animation makes its element
-/// a stacking context — and an `opacity` one a group — for as long as it is
-/// current, whether or not its curve exports. A second animation on a
-/// non-composite property makes the exporter refuse; an anchored delay
-/// exports, with or without a backwards fill. The fade still reads 1 at the
-/// commit, so no committed style stacks the card. Paint order is the same in
-/// every case, so nothing reorders at the handover.
 #[test]
 fn an_animation_stacks_its_element_whether_or_not_it_exports() {
     for (keyframes, grouped) in [("fade", true), ("slide", false)] {
@@ -2358,12 +2229,6 @@ fn an_animation_stacks_its_element_whether_or_not_it_exports() {
     }
 }
 
-/// web-animations-1: a current transform animation makes its element the
-/// containing block of a fixed descendant during a delay too, where the
-/// committed transform is `none`. Layout places the box against the card,
-/// and paint and hit testing clip it with the card's `overflow`, so a box
-/// placed outside the card is hidden until the animation ends and it
-/// escapes to the viewport.
 #[test]
 fn a_delayed_transform_animation_clips_its_fixed_descendant() {
     let mut h = Harness::new(&format!(
@@ -2398,8 +2263,6 @@ fn a_delayed_transform_animation_clips_its_fixed_descendant() {
     assert_eq!(h.hit(205.0, 45.0), Some(root));
 }
 
-/// One element's exported fade does not free the main thread of another
-/// element's inexportable animation.
 #[test]
 fn an_exported_curve_beside_an_inexportable_animation_keeps_main_thread_ticks() {
     let frame = two_animated("fade 1s linear infinite", "recolor 1s linear infinite");
@@ -2407,8 +2270,6 @@ fn an_exported_curve_beside_an_inexportable_animation_keeps_main_thread_ticks() 
     assert!(frame.needs_main_ticks(), "the recolor still ticks");
 }
 
-/// A frame hands its animations back at the earliest curve end — not the
-/// latest, nor the first slot's — and at exactly that instant.
 #[test]
 fn the_earliest_curve_end_is_the_handback_instant() {
     let frame = two_animated("fade 5s linear 1", "fade 0.5s linear 1");
@@ -2425,8 +2286,6 @@ fn the_earliest_curve_end_is_the_handback_instant() {
     assert!(frame.animation_boundary_passed(short));
 }
 
-/// One element's curve hands back at its first animation's end: the
-/// earlier of two finite animations'.
 #[test]
 fn a_curve_hands_back_at_its_first_animations_end() {
     let frame = two_animated("fade 2s linear 1, fade2 0.25s linear 2", "fade 1s linear 1");
@@ -2439,10 +2298,6 @@ fn a_curve_hands_back_at_its_first_animations_end() {
     assert!(frame.animation_boundary_passed(0.5));
 }
 
-/// A fade of 2.5 iterations of 0.7 s anchored at 1.163 s, committed at
-/// 1.2 s, so its end is no binary fraction: the instant before the curve's
-/// end still samples the fade, as the main thread's tick there does, and the
-/// main thread's tick at the end finds it over.
 #[test]
 fn a_curve_ends_where_the_main_thread_finds_its_animation_over() {
     let fade = |ticks: &[f64]| {
@@ -2485,8 +2340,6 @@ fn a_curve_ends_where_the_main_thread_finds_its_animation_over() {
     assert_eq!(after.doc.value(card, "opacity"), "1", "over at the end");
 }
 
-/// An easing overshooting 1 samples an opacity past 1, which stylo leaves
-/// unclamped; the compositor clamps it as paint clamps the committed one.
 #[test]
 fn an_overshooting_opacity_never_composes_past_one() {
     let frame = two_animated(
@@ -2514,9 +2367,6 @@ fn an_overshooting_opacity_never_composes_past_one() {
     assert!(overshot, "the easing overshoots");
 }
 
-/// A curve culling leaves out of the program is exported but not live: the
-/// frame composes once, and still hands the animation back at its end. An
-/// opacity animation forces a group, which is left out with its content.
 #[test]
 fn a_frame_whose_curves_are_all_culled_has_no_live_curves() {
     for keyframes in [
@@ -2556,9 +2406,6 @@ fn a_frame_whose_curves_are_all_culled_has_no_live_curves() {
     }
 }
 
-/// A transparent mover draws nothing, so the program names no curve, yet
-/// its hit area moves with the curve: hit tests sample the instant whenever
-/// a curve is exported.
 #[test]
 fn an_inkless_mover_is_hit_where_its_curve_carries_it() {
     let mut h = Harness::new(
@@ -2583,14 +2430,10 @@ fn an_inkless_mover_is_hit_where_its_curve_carries_it() {
             .hit(Point2D::new(x, 50.0), &|_| None, Some(now))
             .map(|target| target.node)
     };
-    // Committed at x = 60; at t = 0.9 the slide puts it at x = 540.
     assert_eq!(hit(580.0, 0.9), Some(hotspot), "hit where it moved to");
     assert_ne!(hit(80.0, 0.9), Some(hotspot), "not where it was committed");
 }
 
-/// A curve on content culling discards — a moving dot inside a clipped row
-/// the list's encode window never reaches — is exported but never sampled
-/// per frame: composition samples only the slots its program names.
 #[test]
 fn a_compose_samples_only_the_curves_its_program_encodes() {
     let mut h = Harness::new(
@@ -2624,9 +2467,6 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
     frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
 }
 
-/// The same for a scroll container that is no stacking context: it takes
-/// its slot and scroll node on the in-context path, inside the card's
-/// animation node, so the card's slide still exports.
 #[test]
 fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
     let mut document: crate::tree::document::Document<()> =
@@ -2662,9 +2502,6 @@ fn an_in_context_scroll_container_inside_an_animated_card_exports_the_curve() {
     );
 }
 
-/// 200 rows fading in and up, each an opacity group: a row the list's window
-/// does not encode opens no group, so exactly the encoded rows' curves
-/// compose.
 #[test]
 fn only_the_rows_a_list_window_encodes_compose_their_curves() {
     let mut h = Harness::new(
@@ -2706,8 +2543,6 @@ fn only_the_rows_a_list_window_encodes_compose_their_curves() {
     );
 }
 
-/// An element's own box and clip ride its box space — inside its own sticky
-/// node, outside its own scroll node — and its content its content space.
 #[test]
 fn a_box_and_its_clip_ride_the_box_space_and_its_content_the_content_space() {
     use crate::visual::{Space, SpaceKind};
@@ -2782,11 +2617,6 @@ fn a_box_and_its_clip_ride_the_box_space_and_its_content_the_content_space() {
     );
 }
 
-/// `scroll(self)` on an animated scroller binds the scroller's own slot,
-/// which the build allocates after the element's animation slot: a composed
-/// offset fades it, and a `contain-bounce` stretch past either end clamps the
-/// progress to the scroll range, where a fade with no fill still has an
-/// effect.
 #[test]
 fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
     use crate::visual::curves::Timeline;
@@ -2839,15 +2669,6 @@ fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
     assert_eq!(alpha(-80.0), Some(1.0));
 }
 
-/// On a circular axis (`max` 1000, period 1200) the painter samples a
-/// scroll progress timeline through the seam at the offset's
-/// representative nearer the range, as the main thread does: 50px before
-/// the period's end reads −50, the start, and 50px past `max` reads
-/// itself, the end; the seam's midpoint keeps the offset, and an offset off
-/// the circle is wrapped first. A view progress timeline reads the offset
-/// as it stands in the period: the card's cover range `[-200, 100]` is
-/// behind every offset past `max`, where the card's own copy is off the
-/// scrollport.
 #[test]
 fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
     use crate::visual::{ScrollOffsets, ScrollSlot};
@@ -2900,13 +2721,6 @@ fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
     }
 }
 
-/// While a circular scroller's scrollport straddles the seam, the seam copy
-/// of its content samples a view progress timeline again with the offset
-/// one period back — the copy shows the card there — while a scroll
-/// progress timeline keeps the container's one sample: at 1150 of a period
-/// of 1200 the card's copy stands 50px before the start, halfway through
-/// its cover range `[-200, 100]`, and the scroller's own `scroll(self)`
-/// fade reads the start in both passes. At 500 nothing straddles.
 #[test]
 fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
     use crate::visual::ScrollSlot;
@@ -2979,10 +2793,6 @@ fn a_seam_pass_resamples_the_view_timelines_riding_its_slot() {
     );
 }
 
-/// A circular scroller whose scrollport straddles the seam is hit through
-/// both copies of its content: the end of the scrolling area at the offset
-/// itself, and its start one period back below it. An offset off the
-/// circle is normalized first.
 #[test]
 fn a_straddling_circular_scroller_hits_the_copy_under_the_point() {
     use crate::visual::ScrollSlot;
@@ -3021,10 +2831,6 @@ fn a_straddling_circular_scroller_hits_the_copy_under_the_point() {
     assert_eq!(hit(0.0, 150.0), Some(first));
 }
 
-/// An animation on an inactive timeline is not current, so it animates
-/// nothing, as the driver's bits count it: beside a clock fade, a slide on a
-/// `scroll()` whose scroller cannot scroll yet exports no transform track,
-/// and stays in the curve contributing nothing.
 #[test]
 fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
     let mut h = Harness::new(
@@ -3066,12 +2872,6 @@ fn an_animation_on_an_inactive_timeline_animates_nothing_in_the_export() {
     );
 }
 
-/// A scroll-driven transform's reach eases in the direction its binding
-/// samples: after `animation-direction: normal, normal` becomes `normal,
-/// reverse`, stylo's `return;` deviation leaves the second clone `normal`
-/// while its binding reads `reverse`, easing through the `to` keyframe's
-/// overshooting function — and every delta a sweep over the scroll range
-/// composes stays inside the reach.
 #[test]
 fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
     use stylo::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
@@ -3152,12 +2952,6 @@ fn a_scroll_driven_reach_eases_in_the_bindings_direction() {
     }
 }
 
-/// A scroll timeline's effect is representable at every offset only where
-/// the commit had none, or where it keeps one over the whole scroll range:
-/// `view()` over its `entry` range (80 px to 160 px of 300 px) without a
-/// fill exports when committed before the range and refuses inside it;
-/// `both` exports anywhere; `scroll()` without a fill has an effect at every
-/// offset of its range, the limit included, and exports.
 #[test]
 fn a_scroll_timeline_exports_only_where_every_offset_is_representable() {
     let exports = |animation: &str, offset: f32| {
@@ -3198,9 +2992,6 @@ fn a_scroll_timeline_exports_only_where_every_offset_is_representable() {
     );
 }
 
-/// 200 rows in a list, each styled `animation`, committed with the list
-/// scrolled to `offset` after `ticks`: the frame, and which items its walk
-/// encodes.
 fn rising_rows(
     animation: &str,
     offset: f32,
@@ -3233,11 +3024,6 @@ fn rising_rows(
     (frame, encoded)
 }
 
-/// A curve's reach reads no time, so a row on a scroll timeline is culled
-/// through its keyframes exactly as the same row on the document timeline:
-/// committed at the same progress and offset — a quarter, 1850 px of a
-/// 7400 px range — the two frames encode the same items, compose the same
-/// curves and pull the viewport back alike.
 #[test]
 fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
     let (timed, timed_encoded) =
@@ -3275,9 +3061,6 @@ fn a_scroll_driven_mover_is_culled_like_a_time_mover() {
     }
 }
 
-/// A `transform` transition's reach runs from its `from` to its `to`, so it
-/// culls: 200 rows sliding up by a transition encode only the rows that can
-/// meet the list's window, as a keyframes curve would.
 #[test]
 fn a_transform_transition_bounds_the_encode_of_its_rows() {
     let mut h = Harness::new(
@@ -3327,9 +3110,6 @@ fn a_transform_transition_bounds_the_encode_of_its_rows() {
     );
 }
 
-/// With a reach, a `transform` transition exports inside a composited group:
-/// a card sliding by a transition inside a fading group exports beside the
-/// group's own fade.
 #[test]
 fn a_transform_transition_exports_inside_a_fading_group() {
     let mut h = Harness::new(
@@ -3364,9 +3144,6 @@ fn a_transform_transition_exports_inside_a_fading_group() {
     assert!(!frame.needs_main_ticks());
 }
 
-/// A paused scroll-driven animation holds its sample on the painter as the
-/// main thread holds it: its curve reads no slot, and a composed offset
-/// leaves it at the value of the offset it was created at.
 #[test]
 fn a_paused_scroll_driven_animation_holds_on_the_painter() {
     use crate::visual::ScrollOffsets;
@@ -3411,13 +3188,6 @@ fn a_paused_scroll_driven_animation_holds_on_the_painter() {
     );
 }
 
-/// The `animates` side effects follow the keyframes an animation has, not
-/// its `@keyframes` rule. A 400px scroller over 600px, the 200px subject
-/// defining `--foo` and 600px: with its only `transform` keyframes, on
-/// `entry`, ignored — on the document timeline, or attached to an empty
-/// range — the subject is no stacking context and no containing block for
-/// its fixed child; placed on its view timeline, it is both, and ignoring
-/// them again undoes both.
 #[test]
 fn ignored_range_keyframes_have_no_side_effects() {
     let mut doc = Doc::with_css(
@@ -3470,12 +3240,6 @@ fn ignored_range_keyframes_have_no_side_effects() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The top layer (css-position-4 §3, `tree::top_layer`).
-
-/// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
-/// reduced to what these tests read: both boxes need a display
-/// `display_mode` supports.
 const TOP_LAYER_UA: &str = "
     dialog { display: flex; position: absolute; }
     dialog.modal { position: fixed; }
@@ -3554,9 +3318,6 @@ fn top_layer_entries_paint_in_insertion_order_and_a_readd_moves_to_the_top() {
     assert_eq!(h.hit(25.0, 25.0), Some(second_in_tree));
 }
 
-/// css-position-4 §3.1: a top-layer element is a sibling of the root's
-/// stacking context, so none of its ancestors' effects, clips or
-/// transforms reach it.
 #[test]
 fn a_top_layer_element_escapes_its_ancestors_group_clip_and_transform() {
     let mut h = top_layer_harness(
@@ -3604,7 +3365,6 @@ fn the_inert_floor_is_set_only_while_an_entry_blocks_the_document() {
 
     h.doc.dom.add_to_top_layer(dialog, false);
     assert_eq!(h.paint().inert_floor(), None, "a non-blocking entry");
-    // The backdrop covers the viewport and reports its element.
     assert_eq!(h.hit(50.0, 50.0), Some(dialog));
 
     h.doc.dom.add_to_top_layer(dialog, true);
@@ -3619,7 +3379,6 @@ fn the_inert_floor_is_set_only_while_an_entry_blocks_the_document() {
     assert_eq!(h.hit(110.0, 110.0), Some(child));
     assert_eq!(h.hit(150.0, 150.0), Some(dialog));
 
-    // With no backdrop box, the document below the floor is still inert.
     h.doc.add_css("dialog::backdrop { display: none; }");
     let paint = h.paint();
     assert_eq!(backdrop_index(&paint, dialog), None);
@@ -3674,9 +3433,6 @@ fn a_backdrop_with_pointer_events_none_passes_hits_to_nothing_below_the_floor() 
     );
 }
 
-/// Removing a top-layer element from the document takes it out of the top
-/// layer and frees its backdrop (HTML's removing steps), wherever in the
-/// removed subtree it was.
 #[test]
 fn removing_a_top_layer_element_drops_its_entry_and_frees_its_backdrop() {
     let mut h = top_layer_harness(".dialog { width: 50px; height: 50px; }");
@@ -3706,13 +3462,10 @@ fn removing_a_top_layer_element_drops_its_entry_and_frees_its_backdrop() {
     );
     assert_eq!(h.doc.dom.backdrop_origin(backdrop), None);
     assert_eq!(h.paint().inert_floor(), None);
-    // Reinsertion does not restore membership.
     h.doc.dom.append_child(root, wrapper);
     assert!(!h.doc.dom.in_top_layer(dialog));
 }
 
-/// A touch inside a scrolling modal dialog scrolls the dialog, and the
-/// chain ends there: nothing behind it is reachable.
 #[test]
 fn a_scrolling_modal_dialog_chains_to_nothing_behind_it() {
     let mut h = top_layer_harness(
@@ -3746,8 +3499,6 @@ fn a_scrolling_modal_dialog_chains_to_nothing_behind_it() {
     assert_eq!(outside.scroll, None, "a backdrop hit scrolls nothing");
 }
 
-/// A top-layer element inside a scrolled scroller stays where the viewport
-/// places it: no ancestor scroll offset reaches it, in paint or in hits.
 #[test]
 fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
     let mut h = top_layer_harness(

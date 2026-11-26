@@ -12,11 +12,8 @@
 
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
-/// UI Events' value for a key no other value describes, for both `key` and
-/// `code`.
 const UNIDENTIFIED: &str = "Unidentified";
 
-/// The `KeyboardEvent.key` a winit logical key reports.
 pub(crate) fn key_value(key: &Key) -> &str {
     match key {
         Key::Character(text) => text.as_str(),
@@ -26,7 +23,6 @@ pub(crate) fn key_value(key: &Key) -> &str {
     }
 }
 
-/// The `KeyboardEvent.code` a winit physical key reports.
 pub(crate) fn code_value(key: PhysicalKey) -> &'static str {
     match key {
         PhysicalKey::Code(code) => key_code_value(code),
@@ -51,7 +47,6 @@ fn named_key_value(key: NamedKey) -> &'static str {
         NamedKey::Shift => "Shift",
         NamedKey::Symbol => "Symbol",
         NamedKey::SymbolLock => "SymbolLock",
-        // The Command key: winit's `Super`, a browser's `Meta`.
         NamedKey::Meta | NamedKey::Super => "Meta",
         NamedKey::Hyper => "Hyper",
         NamedKey::Enter => "Enter",

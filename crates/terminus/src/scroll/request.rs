@@ -56,65 +56,29 @@ use smallvec::SmallVec;
 
 use crate::tree::document::{Document, NodeId};
 
-/// How a programmatic scroll moves the container: CSSOM-View's
-/// `ScrollBehavior` (§4) once `auto` is resolved. There is no
-/// `scroll-behavior` property here for `auto` to read, so the caller names
-/// one of the two outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollBehavior {
-    /// §3.1's instant scroll: the position is the target from the moment of
-    /// the request.
     Instant,
-    /// §3.1's smooth scroll: the painter moves the position to the target
-    /// over time, on a curve of its own choosing.
     Smooth,
 }
 
-/// One pending programmatic scroll of one container.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollRequest {
-    /// Orders this request against every other one of the document, and so
-    /// against the serial a painter's post names.
     pub serial: NonZeroU64,
-    /// Where the container is to end, as its scroll box admits it
-    /// ([`ScrollBox::admit`](super::ScrollBox::admit)): clamped to its
-    /// scroll range, or on a circular axis normalized into `[0, period)`.
     pub target: Vector2D<f32>,
     pub behavior: ScrollBehavior,
-    /// Whether the painter is to leave the request undone while a pointer
-    /// holds the container ([`Document::scroll_to_yielding`]).
     pub yields_to_pointer: bool,
 }
 
-/// One pending change of one container's auto-scroll: Lynx's
-/// `autoScroll({rate, start, autoStop})`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoScrollRequest {
-    /// Orders this change against every scroll request of the document and
-    /// against the serial a painter's post names; drawn from the counter
-    /// [`ScrollRequest::serial`] is.
     pub serial: NonZeroU64,
-    /// How fast the axis's offset is to change, in CSS px per second: toward
-    /// the end edge when positive, toward the start edge when negative, and
-    /// zero to end the container's auto-scroll where it stands.
     pub rate: f32,
-    /// Whether the axis is x rather than y.
     pub horizontal: bool,
-    /// Whether the auto-scroll ends for good at the edge it moves toward.
-    /// Otherwise it stays at that edge and goes on when the scroll range
-    /// grows.
     pub stop_at_edge: bool,
 }
 
 impl<T> Document<T> {
-    /// Changes `id`'s auto-scroll: at `rate` CSS px per second along the x
-    /// axis when `horizontal`, else y, or none at all when `rate` is zero;
-    /// see the module documentation and [`AutoScrollRequest`].
-    ///
-    /// A node that is no scroll container records nothing. A second change
-    /// for the same container replaces the first: the newest one says what
-    /// the container's auto-scroll is. The document needs a commit, because
-    /// the change travels in the frame.
     pub fn auto_scroll(&mut self, id: NodeId, rate: f32, horizontal: bool, stop_at_edge: bool) {
         debug_assert!(rate.is_finite(), "an auto-scroll rate must be finite");
         if self.scroll_box(id).is_none() {
@@ -142,7 +106,6 @@ impl<T> Document<T> {
         self.note_visual_mutation();
     }
 
-    /// `id`'s pending auto-scroll change, if it has one.
     #[must_use]
     pub fn pending_auto_scroll(&self, id: NodeId) -> Option<AutoScrollRequest> {
         self.layout_state()
@@ -152,10 +115,6 @@ impl<T> Document<T> {
             .map(|(_, request)| *request)
     }
 
-    /// Records that the painter has handled `id`'s requests up to `serial`:
-    /// the pending auto-scroll change ends when its serial is not newer.
-    /// Commits nothing, as [`Self::acknowledge_scroll_request`] commits
-    /// nothing. One test for a document with none pending.
     pub fn acknowledge_auto_scroll(&mut self, id: NodeId, serial: NonZeroU64) {
         let requests = &mut self.layout_state_mut().auto_scroll_requests;
         if !requests.is_empty() {
@@ -163,20 +122,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Scrolls `id` to `offset` as a script-facing request with `behavior`,
-    /// and returns the target as the scroll box admits it
-    /// ([`ScrollBox::admit`](super::ScrollBox::admit)); see the module
-    /// documentation.
-    ///
-    /// A node that is no scroll container records nothing and answers zero,
-    /// as [`Self::scroll_to`] does. A second request for the same container
-    /// replaces the first, which is CSSOM-View §3.1's abort of the ongoing
-    /// smooth scroll. Either way the document needs a commit, because the
-    /// request travels in the frame.
-    ///
-    /// An instant request that moves the container records it for
-    /// [`Self::take_instant_scrolls`], so the host can fire CSSOM-View's
-    /// `scroll` and `scrollend` for a scroll the document performed itself.
     pub fn scroll_to_with(
         &mut self,
         id: NodeId,
@@ -187,18 +132,6 @@ impl<T> Document<T> {
             .unwrap_or_default()
     }
 
-    /// Asks the painter to scroll `id` to `offset` with `behavior` unless a
-    /// pointer holds the container when the request reaches it, in which
-    /// case nothing moves: a scroll no script asked for at that moment — a
-    /// timer's, such as an `x-swiper`'s autoplay turn — must not move
-    /// content under a finger. Answers whether a request was recorded.
-    ///
-    /// Only the painter knows whether it carried the request out, so the
-    /// document moves no offset of its own for one, whatever its behavior:
-    /// the offset comes back through the painter's posts, as a smooth
-    /// scroll's does. It replaces a pending request of its own kind and
-    /// gives way to a pending [`Self::scroll_to_with`] one, which a script
-    /// did ask for: then nothing is recorded.
     pub fn scroll_to_yielding(
         &mut self,
         id: NodeId,
@@ -208,12 +141,6 @@ impl<T> Document<T> {
         self.request_scroll(id, offset, behavior, true).is_some()
     }
 
-    /// The one request path behind [`Self::scroll_to_with`],
-    /// [`Self::scroll_to_yielding`] and the render's own positioning
-    /// (`scroll-initial-target`). `yields_to_pointer` is the yielding
-    /// request's rule. Every instant move performed here is recorded for the
-    /// host's scroll events ([`Self::take_instant_scrolls`]), whoever asked
-    /// for it; a yielding request never performs here.
     pub(crate) fn request_scroll(
         &mut self,
         id: NodeId,
@@ -258,31 +185,15 @@ impl<T> Document<T> {
         Some(target)
     }
 
-    /// The containers an instant scroll request moved since the last call —
-    /// a [`Self::scroll_to_with`], or the render's own move to a
-    /// `scroll-initial-target` — each once with the offset it had before the
-    /// first of those moves (so the host can report the change), in the
-    /// order they first moved, and forgets them. The host fires `scroll` at
-    /// each, in the task that scrolled; its `scrollend` follows when the
-    /// painter, which carries the request out, posts the container at rest. A smooth one is the
-    /// painter's to move, and the host learns its offsets, and its end, from
-    /// the painter's posts alone.
-    ///
-    /// No allocation while a container or two moved, and none at all when
-    /// nothing did.
     pub fn take_instant_scrolls(&mut self) -> SmallVec<[(NodeId, Vector2D<f32>); 2]> {
         std::mem::take(&mut self.layout_state_mut().instant_scrolls)
     }
 
-    /// Whether [`Self::take_instant_scrolls`] has anything to answer: one
-    /// length check.
     #[must_use]
     pub fn has_instant_scrolls(&self) -> bool {
         !self.layout_state().instant_scrolls.is_empty()
     }
 
-    /// The serial of `id`'s pending request, if it has one: the least serial
-    /// a painter's post for `id` must name to be adopted.
     #[must_use]
     pub fn pending_scroll_request(&self, id: NodeId) -> Option<NonZeroU64> {
         self.layout_state()
@@ -291,11 +202,6 @@ impl<T> Document<T> {
             .map(|request| request.serial)
     }
 
-    /// Records that the painter has handled `id`'s requests up to `serial`:
-    /// the pending one ends when its serial is not newer. Changes no offset
-    /// and commits nothing — the frame that stops carrying the request is
-    /// whichever commit comes next for other reasons, and the painter, which
-    /// handles a serial once, ignores it until then.
     pub fn acknowledge_scroll_request(&mut self, id: NodeId, serial: NonZeroU64) {
         let requests = &mut self.layout_state_mut().scroll_requests;
         if requests
@@ -306,9 +212,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Drops every pending request and auto-scroll change whose container
-    /// `keep` rejects: the paint build found no scroll container there to
-    /// carry it.
     pub(crate) fn retain_scroll_requests(&mut self, keep: impl Fn(NodeId) -> bool) {
         let state = self.layout_state_mut();
         if !state.scroll_requests.is_empty() {
@@ -327,7 +230,6 @@ mod tests {
     use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
-    /// A 100px column scroller (max offset 0,300) in a page, and the scroller.
     fn scroller() -> (Document<()>, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -394,12 +296,6 @@ mod tests {
         assert_eq!(request.target, Vector2D::new(0.0, 100.0));
     }
 
-    /// On a circular axis the target stands anywhere in the period: the
-    /// 100px scroller over 400px of content (`max` 300, period 400) keeps a
-    /// target of 350, whose scrollport straddles the seam, and normalizes
-    /// one before the start. The build re-admits it against the period it
-    /// built: content shrunk to 200px (`max` 100, period 200) moves 350 to
-    /// 150, past the new `max` and still inside the new period.
     #[test]
     fn a_circular_target_stands_anywhere_in_the_period_and_the_build_keeps_it_there() {
         let circular = || {
@@ -491,10 +387,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(scroller), None);
     }
 
-    /// A request that yields to a pointer is the painter's to carry out or
-    /// not, so the document moves no offset for it, an instant one included;
-    /// the frame carries it marked. It replaces one of its own kind and
-    /// gives way to a request a script made, in either order.
     #[test]
     fn a_yielding_request_moves_no_offset_and_gives_way_to_a_scripts() {
         let (mut document, scroller) = scroller();
@@ -518,7 +410,6 @@ mod tests {
         assert!(second.serial > first.serial, "its own kind is replaced");
         assert!(second.yields_to_pointer);
 
-        // A script's request replaces it, and is not replaced by the next.
         document.scroll_to_with(scroller, Vector2D::new(0.0, 200.0), ScrollBehavior::Smooth);
         assert!(!document.scroll_to_yielding(
             scroller,
@@ -536,9 +427,6 @@ mod tests {
         );
     }
 
-    /// An auto-scroll change moves no offset, needs a commit, and rides in
-    /// the frame beside the slots, where the slot's own request stays free
-    /// for a scroll made in the same turn.
     #[test]
     fn an_auto_scroll_change_travels_beside_the_slots_with_a_scroll_request() {
         let (mut document, scroller) = scroller();
@@ -610,7 +498,6 @@ mod tests {
         assert_eq!(document.pending_auto_scroll(root), None);
         assert!(!document.needs_render());
 
-        // Dropped at the build once its container stops scrolling.
         document.auto_scroll(scroller, 60.0, false, true);
         document.set_inline_style(scroller, "overflow: visible");
         let frame = document.commit();

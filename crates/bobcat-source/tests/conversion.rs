@@ -5,8 +5,6 @@
 use bobcat_source::native::{ConvertError, convert};
 use bobcat_source::web::css_property::{CssPropertyId, token_types};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -33,9 +31,6 @@ fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
     web_page_renaming(native, &[(entry, "root")])
 }
 
-/// `native` converted to a web bundle, with each `(from, to)` Lepus chunk
-/// renamed — the entry to `root`, and any other to a name a `.web.bundle`
-/// compiler writes.
 fn web_page_renaming(native: &[u8], renames: &[(&str, &str)]) -> Vec<u8> {
     let mut bytes = convert(native).unwrap();
     let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
@@ -157,9 +152,6 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
         sections["library__main-thread"]["content"],
         "globalThis.mainThread = true;"
     );
-    // A named CSS section travels as the `CustomSectionsStyleInfo` section
-    // (label 7), as web-core's encoder writes it since lynx-stack#4138, and
-    // not as JSON.
     assert!(sections.get("library:CSS").is_none(), "{sections}");
     assert_eq!(
         decoded
@@ -210,7 +202,6 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
     assert_eq!(variable.value_text(), "#123456");
 }
 
-/// The section labels of a web bundle, in order.
 fn web_labels(bytes: &[u8]) -> Vec<u32> {
     let mut labels = Vec::new();
     let mut offset = 12;
@@ -224,9 +215,6 @@ fn web_labels(bytes: &[u8]) -> Vec<u32> {
     labels
 }
 
-/// Like web-core's encoder, the converter writes `CustomSectionsStyleInfo`
-/// after the manifest and only when a CSS custom section exists, so a bundle
-/// without one stays loadable by a runtime that does not know label 7.
 #[test]
 fn the_custom_sections_style_info_section_is_written_only_for_css_sections() {
     use bobcat_source::web::SectionLabel;
@@ -289,8 +277,6 @@ fn rejects_a_nonempty_root_program_as_code_cache() {
 
 #[test]
 fn latest_compiler_empty_root_is_accepted_only_as_an_exact_inert_program() {
-    // Actual tasm 0.0.53 output for engine 4.1.0, debugInfoOutside:true and
-    // absent lepusCode, as used by the reactlynx-test-fixtures workspace.
     let empty = [
         9, 204, 1, 176, 202, 3, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 0, 194, 40,
         94, 1, 0,
@@ -580,7 +566,6 @@ fn rejects_overlapping_custom_payloads() {
         CustomSection::source("a", "same"),
         CustomSection::source("b", "same"),
     ]);
-    // count; each header is string(name), empty table, start, end.
     let second_start = 4 + (4 + 1 + 1 + 4 + 8) + (4 + 1 + 1 + 4);
     let first_end = u32::from_le_bytes(content[18..22].try_into().unwrap());
     content[second_start..second_start + 4].copy_from_slice(&0_u32.to_le_bytes());
@@ -623,10 +608,10 @@ fn native_keyframes_and_font_faces_share_the_web_rule_model() {
     string(&mut fragment, "50%");
     u32_value(&mut fragment, 1);
     css_declaration(&mut fragment, CssPropertyId::Opacity, "0.5", None);
-    fragment.push(1); // Typed font-face trailer.
-    u32_value(&mut fragment, 1); // One family.
-    u32_value(&mut fragment, 1); // One rule.
-    u32_value(&mut fragment, 2); // Two descriptors.
+    fragment.push(1);
+    u32_value(&mut fragment, 1);
+    u32_value(&mut fragment, 1);
+    u32_value(&mut fragment, 2);
     string(&mut fragment, "font-family");
     string(&mut fragment, "Example");
     string(&mut fragment, "src");
@@ -636,8 +621,6 @@ fn native_keyframes_and_font_faces_share_the_web_rule_model() {
         &fragment,
     )])]);
     let decoded = bobcat_source::web::decode(&convert(&bytes).unwrap()).unwrap();
-    // The fragment in the bundle's `StyleInfo` under its native id, and the
-    // named section in `CustomSectionsStyleInfo` under css id 0: one model.
     let style = decoded.style_info.unwrap();
     let named = &decoded.custom_sections_style_info["library:CSS"];
     for rules in [
@@ -679,14 +662,6 @@ fn legacy_lepus_is_rejected_as_bytecode() {
     ));
 }
 
-/// A named Lepus chunk is a script resource of its own, registered verbatim
-/// and loaded on demand through the host, and `__LoadLepusChunk` runs it
-/// again on every call.
-///
-/// The chunk is a `.web.bundle`'s, named as a web compiler names one: a
-/// `.lynx.bundle` carries its main-thread sources as `*__main-thread` custom
-/// sections, which are MTS *sections* — the export-default module
-/// `lynx.loadScript` loads — rather than chunks.
 #[tokio::test]
 async fn named_lepus_chunks_load_and_run_on_every_call() {
     use std::sync::{Arc, mpsc};
@@ -698,10 +673,6 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             let _ = self.0.send(());
         }
     }
-    // A chunk shares `globalThis` and the runtime and PAPI bindings
-    // `MTS_CHUNK_PREAMBLE` gives the entry — as the parameters of the function
-    // body the host compiled it as — but not the entry's lexical scope, and
-    // not its own `var`s, which are local to each call.
     let native = native_bundle(vec![custom_section(vec![
         CustomSection::source(
             "entry__main-thread",
@@ -767,8 +738,6 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             page.view_sources(SCREEN, "en-US"),
         )
         .unwrap();
-    // Boot's first flush waits for a painter to bind the view, and this waits
-    // for `ScriptFinished` past it.
     let mut painter =
         bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
             .await
@@ -783,8 +752,6 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             match event {
                 bobcat_core::EngineEvent::ScriptFinished => return,
                 bobcat_core::EngineEvent::StartupFailed(error) => panic!("{error}"),
-                // The entry's checks are its throws, and a throw is not the
-                // boot's failure but this.
                 bobcat_core::EngineEvent::ScriptRunError(error)
                 | bobcat_core::EngineEvent::Panicked(error) => panic!("{error}"),
                 bobcat_core::EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
@@ -827,7 +794,6 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
         for web in [false, true] {
             let page = default_page(&native, web);
             let mut sources = page.view_sources(SCREEN, "en-US");
-            // Isolate explicit named-sheet loading from ordinary boot styles.
             sources.style_sheets.clear();
             let resources = Resources::new(ResourcesConfig::default(), || {});
             page.register_with(&resources);

@@ -67,44 +67,22 @@ use bobcat_source::{BundleInstaller, PageSource};
 use prime_radiant::{Image, Screenshots};
 use url::Url;
 
-/// The viewport upstream's Playwright project uses, and the one every case was
-/// written against.
 const VIEWPORT: (f32, f32) = (393.0, 727.0);
-/// Time a card is given to boot its background thread.
 const BOOT_DEADLINE: Duration = Duration::from_secs(30);
-/// Time to keep pumping after boot, so a `useEffect` patch, a lazy child and
-/// an image read all land before the capture.
 const SETTLE: Duration = Duration::from_millis(500);
-/// Cards that reach the state their case is about from a timer of their own,
-/// and how many further [`SETTLE`]s their first screen waits for: a first
-/// screen taken near that timer could be either side of it. Two wait 500 ms
-/// after mounting, and upstream waits a second for them; one sets its text at
-/// 1 s, and upstream waits 1.5 s.
 const LATE: &[(&str, u32)] = &[
     ("api-boundingclientrect-lynx-view-relative", 1),
     ("api-getJSModule", 1),
     ("basic-element-text-maxline-with-setData", 2),
 ];
-/// Cards whose first screen is never still, so it is not pinned: each holds an
-/// `x-swiper` that autoplays every second from boot, and a capture taken then
-/// lands on whichever item it has reached. Upstream takes no screenshot of them;
-/// their frames after the script, once the autoplay swiper has stopped at its
-/// last item, are pinned.
 const RESTLESS: &[&str] = &[
     "basic-element-x-swiper-bindchange",
     "basic-element-x-swiper-bindscrollend",
     "basic-element-x-swiper-bindscrollstart",
 ];
-/// How long a card may go on changing before the suite refuses to pin it.
 const STABLE_DEADLINE: Duration = Duration::from_secs(10);
-/// How long one frame waits for the view to service it. The wait is this
-/// host's own, taken between posting a frame and drawing it, with the view
-/// pumped throughout.
 const FRAME_DEADLINE: Duration = Duration::from_secs(10);
-/// Turns between two capture attempts, each a 5 ms sleep apart.
 const STABLE_TICKS: usize = 20;
-/// The same, for a frame a [`Step::QuickCapture`] asked to be taken inside a
-/// short quiet spell.
 const QUICK_STABLE_TICKS: usize = 2;
 
 fn repository() -> PathBuf {
@@ -119,19 +97,6 @@ fn corpus() -> PathBuf {
     repository().join("packages/web-core-e2e-fixtures/dist")
 }
 
-/// Mounts the vendored bitmaps and fonts where a card's own runtime-relative
-/// `src` resolves to them.
-///
-/// Most cards `import` their asset, and the build bakes an absolute `file:`
-/// URL for it. A few instead write the path as a plain string —
-/// `src='../../../resources/lynx-logo.jpeg'` — which the engine resolves
-/// against the template's URL at runtime, so no build step can see it.
-/// Upstream serves the package root, with the card's bundle at `/<case>.web.bundle`,
-/// so that string climbs past the root and lands on `/resources/lynx-logo.jpeg`.
-/// Registering the same four files under `app:///resources/` reproduces that
-/// exactly, and a card naming an asset that upstream does not serve either —
-/// `basic-performance-image-100` asks for `placeholder.png` — still finds
-/// nothing, which is the behaviour under test.
 fn mount_resources(resources: &Resources) {
     let directory = repository().join("packages/web-core-e2e-fixtures/resources");
     for entry in std::fs::read_dir(&directory)
@@ -147,16 +112,6 @@ fn mount_resources(resources: &Resources) {
     }
 }
 
-/// Mounts the bundles a card names by a rooted `/dist/…` path.
-///
-/// Upstream serves its whole build output at `/dist/`, and some cards reach
-/// into it at runtime: a lazy card imports
-/// `/dist/config-lazy-component-….web.bundle`, a frame card sets
-/// `src='/dist/api-frame-inner.web.bundle'`. Against the card's own URL those
-/// are `app:///dist/…`. The lazy containers are built into `dist/containers/`
-/// here, and `api-frame-inner` is a card of the corpus; both go where
-/// upstream has them. `basic-lazy-component-fail` asks for
-/// `/dist/nonexistent.web.bundle`, which stays missing on purpose.
 fn mount_bundles(resources: &Resources) {
     let dist = corpus();
     let mut bundles = vec![dist.join("api-frame-inner.web.bundle")];
@@ -178,13 +133,9 @@ fn mount_bundles(resources: &Resources) {
     }
 }
 
-/// Initial page data, as upstream's shell hands it to every card.
 const INIT_DATA: &str = r#"{"mockData":"mockData"}"#;
-/// Initial global properties, likewise.
 const GLOBAL_PROPS: &str = r#"{"backgroundColor":"pink"}"#;
 
-/// `.injected-style-rules { background: green }`, the single rule upstream's
-/// shell injects for `api-inject-style-rules`.
 fn injected_style_rules() -> PreparsedStyleSheet {
     PreparsedStyleSheet {
         rules: vec![PreparsedRule::Style {
@@ -198,20 +149,9 @@ fn injected_style_rules() -> PreparsedStyleSheet {
     }
 }
 
-/// `NativeModules.CustomModule.getColor(data, callback)` and
-/// `NativeModules.bridge.call('getColor', data, callback)`, answered the way
-/// upstream's shell answers both: the callback gets `data.color`.
-///
-/// Web core routes the two through one host hook, `onNativeModulesCall`,
-/// with `bridge` built in. Here a module is whatever the embedder registers
-/// under a name, so the shell's hook is two of them.
 struct ColorModule {
     name: &'static str,
     method: &'static str,
-    /// How long the answer is withheld. Upstream's shell installs its hook
-    /// 2.5 s late for `api-nativemodules-call-delay`, so the card's call
-    /// waits that long for a reply; an embedder module that answers that
-    /// much later is the same sequence seen from the card.
     answers_after: Duration,
 }
 
@@ -228,8 +168,6 @@ impl NativeModule for ColorModule {
         let arguments: serde_json::Value =
             serde_json::from_str(&call.arguments).expect("a module call's arguments are JSON");
         let arguments = arguments.as_array().map_or(&[][..], Vec::as_slice);
-        // `bridge.call` names the method in its first argument, and the
-        // shell answers `getColor` alone.
         if self.method == "call"
             && arguments.first().and_then(|name| name.as_str()) != Some("getColor")
         {
@@ -248,7 +186,6 @@ impl NativeModule for ColorModule {
     }
 }
 
-/// The native modules upstream's shell gives every card.
 fn shell_modules(case: &str) -> Vec<Box<dyn NativeModule>> {
     let answers_after = if case == "api-nativemodules-call-delay" {
         Duration::from_millis(2500)
@@ -269,13 +206,6 @@ fn shell_modules(case: &str) -> Vec<Box<dyn NativeModule>> {
     ]
 }
 
-/// The screen a card is told it is on.
-///
-/// The viewport's own, except for the one card upstream's shell hands a
-/// `browserConfig` to: `api-createLynxView-browserConfig` prints
-/// `SystemInfo.pixelWidth` and `pixelHeight` and expects the configured
-/// 1234 and 5678, which here is the screen the host names in
-/// `ViewSources::screen`.
 fn screen(case: &str) -> ScreenMetrics {
     let (width, height) = VIEWPORT;
     if case == "api-createLynxView-browserConfig" {
@@ -290,15 +220,6 @@ fn screen(case: &str) -> ScreenMetrics {
 }
 
 fn screenshots() -> Screenshots {
-    // A budget, not a tolerance for being wrong: two runs of the same card on
-    // the same engine differ by a handful of glyph pixels — 4 on
-    // `config-css-inheritance-true`, 11 on `basic-performance-text-200`, each
-    // an isolated pixel inside a text row — because the rasterizer is not bit
-    // deterministic between runs. Without a budget those cards could not hold
-    // a golden at all; with one this size, a real change still fails, since
-    // the smallest of them moves whole glyphs or boxes. The nondeterminism
-    // itself is worth fixing in the engine; until it is, this is what lets the
-    // suite mean something.
     prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
         .with_options(prime_radiant::CompareOptions::default().with_max_diff_pixels(64))
 }
@@ -307,144 +228,57 @@ fn golden_path(name: &str) -> PathBuf {
     screenshots().path(&["web-core-e2e", name])
 }
 
-/// One thing the suite does to a running card, between two frames.
-///
-/// Each is something upstream's Playwright spec does to the page, restated in
-/// the only terms an embedder of this engine has: an input event at a point
-/// of the viewport, or a call on the view. There is no locator — upstream's
-/// `page.locator('#target').click()` lands on the centre of that element's
-/// box, and the script here says where that is.
 #[derive(Clone, Copy, Debug)]
 enum Step {
-    /// A finger put down and lifted at this viewport point, which is what the
-    /// engine synthesizes `tap` from.
     Tap(f32, f32),
-    /// A finger put down at the first viewport point, dragged to the second
-    /// and lifted there: upstream's `swipe`.
     Drag((f32, f32), (f32, f32)),
-    /// A wheel turn over this viewport point, by this many CSS pixels on each
-    /// axis: upstream's `locator.hover()` followed by `mouse.wheel(dx, dy)`.
     Wheel((f32, f32), (f32, f32)),
-    /// A finger put down at the first viewport point and dragged to the
-    /// second, and kept there: upstream's `dragAndHold`. A [`Step::Release`]
-    /// lifts it.
     Hold((f32, f32), (f32, f32)),
-    /// The held finger lifted at this viewport point.
     Release(f32, f32),
-    /// The capture after this frame's steps compares two captures a couple of
-    /// turns apart rather than [`STABLE_TICKS`]: for a screen that is quiet
-    /// only for a short spell between changes it makes on its own, such as a
-    /// swiper turning every second.
     QuickCapture,
-    /// A key pressed and released: upstream's `keyboard.press`. The W3C
-    /// `key` and `code` strings, then whether Shift is held for both.
     Press(&'static str, &'static str, bool),
-    /// A key put down and held: upstream's `keyboard.down`.
     KeyDown(&'static str, &'static str),
-    /// A held key let go: upstream's `keyboard.up`.
     KeyUp(&'static str, &'static str),
-    /// The mouse moved to this viewport point with no button held:
-    /// upstream's `locator.hover()`.
     MouseOver(f32, f32),
-    /// The primary mouse button pressed at this viewport point: upstream's
-    /// `mouse.down()` where the pointer is.
     MouseDown(f32, f32),
-    /// The primary mouse button released at this viewport point: upstream's
-    /// `mouse.up()`.
     MouseUp(f32, f32),
-    /// The primary mouse button pressed at the first viewport point, the
-    /// mouse moved to the second with it held and released there: a text
-    /// selection drag, standing in for upstream's `selectText` and
-    /// `setBaseAndExtent`.
     MouseDrag((f32, f32), (f32, f32)),
-    /// Upstream's `locator.fill(text)` on the field that has focus: its whole
-    /// value selected, then replaced by `text` with one `insertText`, which
-    /// is what Chromium does. The host's editing commands, so a step before
-    /// this one gives the field focus.
     Fill(&'static str),
-    /// Upstream's `setSelectionRange(start, end)` on the field that has
-    /// focus, in UTF-16 units: the host's editing command.
     Select(usize, usize),
-    /// The host's `updateData`, with the default processor: JSON text.
     UpdateData(&'static str),
-    /// The host's `updateGlobalProps`: JSON text.
     UpdateGlobalProps(&'static str),
-    /// The host's `reload`. Upstream calls it with no argument, which reloads
-    /// with the data the view already has; here the host names that data, so
-    /// it is [`INIT_DATA`] again.
     Reload,
-    /// The host's `sendGlobalEvent`: the event's name, then its argument list
-    /// as JSON text.
     SendGlobalEvent(&'static str, &'static str),
-    /// Starts the card again from nothing. Upstream opens some cards in
-    /// several tests, each on a fresh page; the frames after this step are
-    /// the next of those tests.
     Fresh,
-    /// Lets this many milliseconds pass. The settle before every capture
-    /// already covers a spec's short `wait`; this is for a card that does
-    /// something on a timer of its own, later than that.
     Wait(u64),
-    /// Waits until the card has logged this exact line, and fails the frame
-    /// if it never does. Several cases are about a callback running at all,
-    /// and their only evidence is a `console` line — a frame captured after
-    /// one says the picture is what the card looks like *once that happened*.
     Logged(&'static str),
-    /// Waits until the card has logged a line that begins with this text, and
-    /// fails the frame if it never does: [`Step::Logged`] for a line whose
-    /// tail differs from run to run, such as a logged event's `timestamp`.
     LoggedStart(&'static str),
-    /// Waits until the card has logged a line that contains every one of
-    /// these fragments, in any order, and fails the frame if it never does:
-    /// for an event whose element fields differ from card to card.
     LoggedWith(&'static [&'static str]),
 }
 
-/// A frame the suite pins after a card's first screen: what is done to the
-/// card to reach it, and the name its golden carries.
 struct Frame {
-    /// The golden is `<case>.<label>.png`.
     label: &'static str,
     steps: &'static [Step],
 }
 
-/// Cards whose case is about two views in one group, and the card booted
-/// first, into the same group: upstream's shell opens both in one page.
 const COMPANIONS: &[(&str, &str)] = &[("api-getSharedData", "api-setSharedData")];
 
-/// How long a [`Step::Logged`] line may take to arrive.
 const LOGGED_DEADLINE: Duration = Duration::from_secs(5);
 
-/// One booted card, kept running so it can be driven past its first screen.
-///
-/// Field order is drop order: the painter lets go of the view before the view
-/// ends, and the view ends before its group does.
 struct Card {
     case: String,
     painter: Painter,
     view: LynxView<ViewResources>,
-    /// The card booted before this one in the same group, for a case that is
-    /// about two views sharing one ([`COMPANIONS`]). Its group is this card's.
     companion: Option<Box<Card>>,
-    /// The card's own group, or `None` when it shares its companion's.
     group: Option<LynxGroup>,
     _resources: Resources,
-    /// Every `console` line the card has written, oldest first.
     logged: Vec<String>,
-    /// The lines of [`Self::logged`] a [`Step::Logged`] has already matched,
-    /// so a line a card writes once per tap is waited for once per tap. A set
-    /// rather than a count: two lines written by two threads are waited for in
-    /// whichever order they arrived.
     heard: BTreeSet<usize>,
-    /// Everything else the view reported, for the reader of a dump.
     events: Vec<String>,
-    /// How many turns apart the next capture's two captures are: [`STABLE_TICKS`],
-    /// or [`QUICK_STABLE_TICKS`] after a [`Step::QuickCapture`], for that one
-    /// capture.
     stable_ticks: usize,
 }
 
 impl Card {
-    /// Boots a card and lets its first screen settle.
     async fn boot(case: &str) -> Self {
         let companion = match COMPANIONS.iter().find(|(card, _)| *card == case) {
             Some((_, first)) => Some(Box::new(Box::pin(Self::boot(first)).await)),
@@ -458,21 +292,10 @@ impl Card {
             )
         });
         let input = Url::parse(&format!("app:///{case}.web.bundle")).unwrap();
-        // Booted as an embedder boots it: the view is created from the
-        // bundle's scanned section table while the bundle itself is decoded
-        // and registered in the background, its first loads waiting for that.
         let page = PageSource::defer(&input, bytes).expect("scan the compiled card");
-        // The fetcher resolves against the view's own base, which is the
-        // card's URL — the contract `ResourcesConfig::base_url` states.
-        // Without it a card that writes a relative `src` as a plain string
-        // gets `relative URL without a base` and paints nothing, which looks
-        // exactly like a bitmap that failed to decode.
         let resources = Resources::new(
             ResourcesConfig {
                 base_url: Some(input.clone()),
-                // Without an installer every `lynx.fetchBundle` fails, and a
-                // lazy card shows its fallback for ever — the picture of a
-                // load that failed, for a card about one that succeeds.
                 container_installer: Some(Arc::new(BundleInstaller)),
                 ..ResourcesConfig::default()
             },
@@ -484,21 +307,9 @@ impl Card {
 
         let (width, height) = VIEWPORT;
         let mut sources = page.view_sources(screen(case), "en-US");
-        // The page data every card was written against. Upstream's shell sets
-        // these on the host element before it loads any card
-        // (`shell-project/index.ts`), so `useInitData().mockData` is
-        // `'mockData'` and `lynx.__globalProps.backgroundColor` is `'pink'`
-        // throughout the corpus. Leaving them unset does not make a card test
-        // less — it makes it test nothing: `api-initdata` paints its "no
-        // data" branch and passes a golden of the wrong input.
         sources.init_data = Some(INIT_DATA.to_owned());
         sources.global_props = Some(GLOBAL_PROPS.to_owned());
         if case == "api-inject-style-rules" {
-            // The one card upstream's shell gives an extra author sheet to.
-            // Web core takes it as `injectStyleRules`, a list of rule texts;
-            // here the same thing is an author stylesheet the host registers
-            // and names in `ViewSources::style_sheets`, which is the engine's
-            // whole surface for it.
             let url = resources
                 .register_style_sheet("app:///injected.css", Arc::new(injected_style_rules()))
                 .expect("register the injected sheet");
@@ -558,7 +369,6 @@ impl Card {
         card
     }
 
-    /// The group this card's view was built in.
     fn group(&self) -> &LynxGroup {
         match (&self.group, &self.companion) {
             (Some(group), _) => group,
@@ -567,8 +377,6 @@ impl Card {
         }
     }
 
-    /// One turn of the view: everything it reported is logged. Says whether
-    /// it reported that it finished booting.
     fn pump(&mut self) -> bool {
         let mut booted = false;
         for event in self.view.pump() {
@@ -582,9 +390,6 @@ impl Card {
                     eprintln!("[{level}] [{source:?}] {message}");
                     self.logged.push(message);
                 }
-                // A card that reports an error still has a screen, and whether
-                // that screen is right is what the reader judged, so nothing
-                // here fails the test on its own.
                 other => {
                     eprintln!("[event] {other:?}");
                     self.events.push(format!("{other:?}"));
@@ -594,23 +399,6 @@ impl Card {
         booted
     }
 
-    /// One turn of the view and one frame of the painter. Says whether the
-    /// view reported that it finished booting during it.
-    ///
-    /// A frame, not only a `pump`: an offscreen painter's `draw` returns at
-    /// once because there is no window to present to, so a `pump` settle
-    /// never publishes a clock and every card's animation timeline stays
-    /// pinned at zero. Posting a frame is the offscreen turn — it reads the
-    /// clock, services the gestures and composes — so a card whose screen
-    /// depends on time (a CSS animation, a transition, a scroll-driven
-    /// sample) is a thing this suite can judge at all.
-    ///
-    /// The frame is posted, waited for and drawn as three calls, and the view
-    /// is pumped while the post is outstanding: a job of the card that waits
-    /// on its host in the middle of a frame — a lazy bundle adopting its
-    /// stylesheet — is answered by that pump, and the post is serviced
-    /// behind it. A post the view has not serviced by [`FRAME_DEADLINE`] is
-    /// drawn from what the view had published.
     fn turn(&mut self) -> bool {
         let mut booted = self.pump();
         let posted = self.painter.post_frame().unwrap();
@@ -623,8 +411,6 @@ impl Card {
         booted
     }
 
-    /// Keeps turning for [`SETTLE`], so a `useEffect` patch, a lazy child, an
-    /// image read and the reply to an event all land before a capture.
     async fn settle(&mut self) {
         let until = Instant::now() + SETTLE;
         while Instant::now() < until {
@@ -633,14 +419,6 @@ impl Card {
         }
     }
 
-    /// Captures the frame the card has stopped changing on.
-    ///
-    /// A fixed settle is not enough on its own: a font that resolves or an
-    /// image that decodes after it leaves the capture showing one state on
-    /// one run and another on the next, which in a golden suite is a test
-    /// that fails for no reason anybody can read. So captures are taken until
-    /// two in a row are identical, and a card that never stops changing says
-    /// so rather than pinning whichever frame it happened to be on.
     async fn frame(&mut self) -> Result<Image, String> {
         let stable_by = Instant::now() + STABLE_DEADLINE;
         let mut previous: Option<Vec<u8>> = None;
@@ -667,7 +445,6 @@ impl Card {
         }
     }
 
-    /// Does one thing to the card. An `Err` says what the card did not do.
     async fn apply(&mut self, step: Step) -> Result<(), String> {
         let refused = |call: &str, error: EngineError| format!("{call} was refused: {error}");
         match step {
@@ -741,8 +518,6 @@ impl Card {
                 .send_global_event(name, arguments.to_owned())
                 .map_err(|error| refused("sendGlobalEvent", error))?,
             Step::Fresh => {
-                // The new card is up before the old one is let go of, so two
-                // views overlap for a moment; neither knows of the other.
                 let case = self.case.clone();
                 *self = Self::boot(&case).await;
             }
@@ -766,8 +541,6 @@ impl Card {
         Ok(())
     }
 
-    /// The points a finger's moves pass through from `from` to `to`: four,
-    /// so the sequence travels the way a finger does rather than jumping.
     fn along(from: (f32, f32), to: (f32, f32)) -> impl Iterator<Item = (f32, f32)> {
         const MOVES: u8 = 4;
         (1..=MOVES).map(move |step| {
@@ -776,14 +549,12 @@ impl Card {
         })
     }
 
-    /// Hands the view one input event, then turns it once.
     async fn input(&mut self, event: InputEvent) {
         self.painter.dispatch_input(event);
         self.turn();
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    /// The mouse steps: upstream's `mouse` calls and its text selection.
     async fn mouse(&mut self, step: Step) {
         match step {
             Step::MouseOver(x, y) => {
@@ -814,14 +585,12 @@ impl Card {
         }
     }
 
-    /// Hands the view one editing command, then turns it once.
     fn edit(&mut self, command: Command) -> Result<(), EngineError> {
         self.view.edit(command)?;
         self.turn();
         Ok(())
     }
 
-    /// One key event, with Shift held or not and no other modifier.
     async fn key(&mut self, phase: KeyPhase, key: &str, code: &str, shift: bool) {
         let modifiers = Modifiers {
             shift,
@@ -831,8 +600,6 @@ impl Card {
             .await;
     }
 
-    /// Waits until the card logs a line `matches` accepts that no earlier
-    /// wait took, and says which line was waited for when it never comes.
     async fn hear(&mut self, what: &str, matches: impl Fn(&str) -> bool) -> Result<(), String> {
         let deadline = Instant::now() + LOGGED_DEADLINE;
         loop {
@@ -851,13 +618,10 @@ impl Card {
     }
 }
 
-/// The golden name of a card's first screen is the card's own; a later frame
-/// appends its label.
 fn golden_name(case: &str, label: Option<&str>) -> String {
     label.map_or_else(|| case.to_owned(), |label| format!("{case}.{label}"))
 }
 
-/// The frames a card's script pins after its first screen.
 fn script(case: &str) -> &'static [Frame] {
     DRIVEN
         .iter()
@@ -865,9 +629,6 @@ fn script(case: &str) -> &'static [Frame] {
         .map_or(&[], |(_, frames)| frames)
 }
 
-/// Every frame of a card, in order, each under its golden name: the first
-/// screen (unless the card is [`RESTLESS`]), then one per [`Frame`] of its
-/// script. Stops at the first step the card does not answer, and says which.
 async fn frames(card: &mut Card) -> (Vec<(String, Image)>, Result<(), String>) {
     let case = card.case.clone();
     let mut taken = Vec::new();
@@ -898,8 +659,6 @@ async fn frames(card: &mut Card) -> (Vec<(String, Image)>, Result<(), String>) {
     }
 }
 
-/// Renders a card, drives it through its script, and holds every frame to the
-/// rendering that was judged right.
 async fn renders_as_judged(case: &str) {
     let mut card = Card::boot(case).await;
     let (taken, outcome) = frames(&mut card).await;
@@ -920,7 +679,6 @@ async fn renders_as_judged(case: &str) {
 
 macro_rules! verified {
     ($($name:ident => $case:literal,)*) => {
-        /// Cards whose rendering has been read against the case and judged right.
         const VERIFIED: &[&str] = &[$($case,)*];
         $(
             #[tokio::test]
@@ -933,16 +691,12 @@ macro_rules! verified {
 
 macro_rules! pending {
     ($($case:literal => $reason:literal,)*) => {
-        /// Cards nobody has judged yet, each with what stands in the way.
         const PENDING: &[(&str, &str)] = &[$(($case, $reason),)*];
     };
 }
 
 macro_rules! driven {
     ($($case:literal => [$($label:literal: [$($step:expr),* $(,)?]),* $(,)?],)*) => {
-        /// Cards with something to do after the first screen, and the frames
-        /// that pins. A script says what upstream's spec drives; whether the
-        /// frames it reaches are right is for `verified!` and `pending!` to say.
         const DRIVEN: &[(&str, &[Frame])] = &[
             $(($case, &[$(Frame { label: $label, steps: &[$($step),*] }),*]),)*
         ];
@@ -953,12 +707,6 @@ include!("web_core_e2e/verified.rs");
 include!("web_core_e2e/pending.rs");
 include!("web_core_e2e/driven.rs");
 
-/// The golden directory holds the frames of verified cards and nothing else.
-///
-/// A pending case must have no golden — neither of its first screen nor of
-/// any frame its script reaches: a picture of a rendering nobody has judged
-/// would be read as a decision by whoever comes next. The same goes for a
-/// picture no card owns any more.
 #[test]
 fn no_pending_case_has_a_golden() {
     let judged: BTreeSet<String> = VERIFIED
@@ -993,8 +741,6 @@ fn no_pending_case_has_a_golden() {
     );
 }
 
-/// Every card in the corpus is in one of the two lists, nothing names a card
-/// that is gone, and every script belongs to a listed card.
 #[test]
 fn unlisted_cases_are_an_error() {
     let dist = corpus();
@@ -1045,13 +791,6 @@ fn unlisted_cases_are_an_error() {
     }
 }
 
-/// Writes current renderings somewhere to look at, which is how a batch gets
-/// read before anything is accepted. Never writes a golden.
-///
-/// Every frame of every card goes to `<dir>/<golden name>.png`, and what the
-/// card logged and reported to `<dir>/<case>.log` — a case whose evidence is a
-/// `console` line is read from there. `WEB_CORE_E2E_ONLY` narrows the run to
-/// the cards whose name contains one of its comma-separated parts.
 #[tokio::test]
 #[ignore = "review aid: WEB_CORE_E2E_DUMP=<dir> cargo test -- --ignored dump_every_rendering"]
 async fn dump_every_rendering() {

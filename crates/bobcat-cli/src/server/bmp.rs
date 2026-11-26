@@ -15,11 +15,6 @@ const BI_BITFIELDS: u32 = 3;
 const LCS_S_RGB: u32 = 0x7352_4742;
 const PIXELS_PER_METER: i32 = 2835;
 
-/// Encodes RGBA pixels as a top-down 32-bit BMP with an explicit alpha mask.
-///
-/// A `BITMAPV4HEADER` with `BI_BITFIELDS` is the only widely decodable BMP
-/// variant that preserves alpha: readers drop the fourth channel of a plain
-/// `BI_RGB` 32-bit bitmap.
 pub(crate) fn encode(screenshot: &Screenshot) -> Result<Vec<u8>, BmpError> {
     let width = screenshot.size.width as usize;
     let height = screenshot.size.height as usize;
@@ -53,7 +48,6 @@ pub(crate) fn encode(screenshot: &Screenshot) -> Result<Vec<u8>, BmpError> {
 
     output.extend_from_slice(&INFO_HEADER_LEN.to_le_bytes());
     output.extend_from_slice(&width.to_le_bytes());
-    // A negative height marks the rows as top-down, matching the presented frame.
     output.extend_from_slice(&(-height).to_le_bytes());
     output.extend_from_slice(&1_u16.to_le_bytes());
     output.extend_from_slice(&32_u16.to_le_bytes());

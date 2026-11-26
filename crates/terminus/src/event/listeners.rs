@@ -81,46 +81,25 @@ use smallvec::SmallVec;
 use super::EventSteps;
 use crate::tree::document::{Document, NodeId};
 
-/// One registrant's opaque identity, allocated by the host. A realm in
-/// `bobcat-core`; this crate compares it and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListenerKey(pub u64);
 
-/// Which passes one registration runs in: the standard's `capture` flag
-/// split into its two values, plus Lynx's global registration, which hears
-/// an event of its name wherever on the page the event is fired.
-///
-/// A registration holds at least one kind; an empty set is a removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ListenerKinds(u8);
 
 impl ListenerKinds {
-    /// A bubble-pass registration: `addEventListener(type, f)`, and Lynx's
-    /// `bind`/`catch` forms. Runs at the target and, for a bubbling event,
-    /// at every ancestor on the bubble pass.
     pub const PATH_BUBBLE: Self = Self(1);
-    /// A capture-pass registration: `addEventListener(type, f, true)`, and
-    /// Lynx's `capture-bind`/`capture-catch`. Runs at every node on the
-    /// capture pass, whether the event bubbles or not.
     pub const PATH_CAPTURE: Self = Self(1 << 1);
-    /// Lynx's `global-bindEvent`: heard for every event of the name whose
-    /// path passes through the root of the registering node's tree — the
-    /// document node for a node in the document tree, so every connected
-    /// path; the shadow root for a node in a shadow tree
-    /// ([`Document::global_registrants_on_path`]).
     pub const GLOBAL: Self = Self(1 << 2);
 
     const PATH: u8 = Self::PATH_BUBBLE.0 | Self::PATH_CAPTURE.0;
     const ALL: u8 = Self::PATH | Self::GLOBAL.0;
 
-    /// No kind: the set an add treats as a removal.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
     }
 
-    /// The set the low three bits of `bits` name, in the constants' order;
-    /// higher bits are ignored. The form a host receives from script.
     #[must_use]
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits & Self::ALL)
@@ -136,19 +115,16 @@ impl ListenerKinds {
         self.0 == 0
     }
 
-    /// Whether every kind of `other` is in this set.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
-    /// Whether this set runs on an event path, in either pass.
     #[must_use]
     pub const fn on_path(self) -> bool {
         self.0 & Self::PATH != 0
     }
 
-    /// Whether this set holds [`Self::GLOBAL`].
     #[must_use]
     pub const fn global(self) -> bool {
         self.0 & Self::GLOBAL.0 != 0
@@ -163,26 +139,16 @@ impl BitOr for ListenerKinds {
     }
 }
 
-/// What one change did to a name's registration count — the number of
-/// registrations of any kind, by any registrant, on any node, that hold it —
-/// and whether that count crossed zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationChange {
-    /// The count stayed above zero, or stayed at zero.
     Unchanged,
-    /// The count went from zero to one: the first registration of the name
-    /// was added.
     FirstAdded,
-    /// The count went from one to zero: the last registration of the name
-    /// was removed.
     LastRemoved,
 }
 
-/// A name's index into [`Listeners::names`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct NameId(u32);
 
-/// One registration on one node.
 #[derive(Debug, Clone, Copy)]
 struct Registration {
     name: NameId,
@@ -190,11 +156,6 @@ struct Registration {
     kinds: ListenerKinds,
 }
 
-/// How many registrations hold a path kind, how many of those hold
-/// [`ListenerKinds::PATH_CAPTURE`], and how many hold
-/// [`ListenerKinds::GLOBAL`]. A registration holding both a path kind and
-/// the global one counts in both; every registration counts in `path` or
-/// `global`, so both zero means none. `capture` never exceeds `path`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Counts {
     path: u32,
@@ -220,30 +181,22 @@ impl Counts {
     }
 }
 
-/// A name's spelling and its document-wide counts.
 #[derive(Debug)]
 struct NameSlot {
     spelling: Arc<str>,
     counts: Counts,
 }
 
-/// The table; see the module doc for its shape and why it is a side table.
 #[derive(Debug, Default)]
 pub(crate) struct Listeners {
     by_target: FxHashMap<NodeId, SmallVec<[Registration; 2]>>,
-    /// Per name, the node and registrant of every registration holding
-    /// [`ListenerKinds::GLOBAL`], in the order they were made.
     global_rows: FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
     by_name: FxHashMap<Arc<str>, NameId>,
     names: Vec<NameSlot>,
-    /// The names whose last registration [`Self::forget_node`] removed,
-    /// waiting for [`Document::take_pending_last_removals`]. Holds a name
-    /// only while no registration holds it, so each name at most once.
     pending_last_removals: SmallVec<[(Arc<str>, RegistrationChange); 2]>,
 }
 
 impl Listeners {
-    /// Whether no node carries a registration: the free path's one test.
     pub(crate) fn is_empty(&self) -> bool {
         self.by_target.is_empty()
     }
@@ -270,21 +223,16 @@ impl Listeners {
         id
     }
 
-    /// Counts `kinds` in for `name`.
     fn count_in(&mut self, id: NameId, kinds: ListenerKinds) {
         self.names[id.0 as usize].counts.add(kinds);
     }
 
-    /// Counts `kinds` out for `name`, answering whether the name is now
-    /// unheard.
     fn count_out(names: &mut [NameSlot], id: NameId, kinds: ListenerKinds) -> bool {
         let counts = &mut names[id.0 as usize].counts;
         counts.subtract(kinds);
         counts.is_zero()
     }
 
-    /// Files `key`'s global registration of `id` on `node` at the end of the
-    /// name's global rows.
     fn global_in(
         global_rows: &mut FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
         id: NameId,
@@ -294,8 +242,6 @@ impl Listeners {
         global_rows.entry(id).or_default().push((node, key));
     }
 
-    /// Takes `key`'s global registration of `id` on `node` out of the name's
-    /// global rows; the name's entry leaves with its last.
     fn global_out(
         global_rows: &mut FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
         id: NameId,
@@ -310,8 +256,6 @@ impl Listeners {
         }
     }
 
-    /// Drops every registration on `node` — the node is being freed — and
-    /// queues each name whose last registration that removed.
     pub(crate) fn forget_node(&mut self, node: NodeId) {
         let Some(rows) = self.by_target.remove(&node) else {
             return;
@@ -328,14 +272,6 @@ impl Listeners {
         }
     }
 
-    /// Visits, in capture order and each once, the registrants holding a
-    /// registration of name `id` that runs on one of `steps`, until `visit`
-    /// answers `false`.
-    ///
-    /// The capture pass names every node of the path once, so one probe per
-    /// node covers both passes: a capture registration runs on that node's
-    /// capture step, and a bubble registration on its bubble step, which the
-    /// node has when it is an at-target entry or the event bubbles.
     fn visit_on_path(
         &self,
         steps: &EventSteps,
@@ -366,23 +302,6 @@ impl Listeners {
 }
 
 impl<T> Document<T> {
-    /// Records that `key` listens for `name` on `node` in the passes `kinds`
-    /// names, and answers what that did to whether `name` is heard.
-    ///
-    /// One registration per (node, name, registrant): a second add for the
-    /// same three **replaces** the kinds, so a registrant that adds a global
-    /// form beside a bubble one reports the union again rather than a second
-    /// registration, and the counts move by the difference. An empty `kinds`
-    /// is [`Self::remove_listener`]. A node that is not live registers
-    /// nothing, which is what keeps a freed node's id out of the table: its
-    /// rows left with it ([`Self::take_pending_last_removals`]).
-    ///
-    /// [`RegistrationChange::FirstAdded`] when this is the name's first
-    /// registration, unless the name's last one went with a freed node since
-    /// the last [`Self::take_pending_last_removals`]: that waiting last
-    /// removal is withdrawn instead and the answer is
-    /// [`RegistrationChange::Unchanged`], because the host was never told the
-    /// last registration was removed.
     pub fn add_listener(
         &mut self,
         node: NodeId,
@@ -436,10 +355,6 @@ impl<T> Document<T> {
         RegistrationChange::FirstAdded
     }
 
-    /// Drops `key`'s registration for `name` on `node`, whatever its kinds,
-    /// and answers [`RegistrationChange::LastRemoved`] when it was the name's
-    /// last. Removing what is not registered is
-    /// [`RegistrationChange::Unchanged`].
     pub fn remove_listener(
         &mut self,
         node: NodeId,
@@ -471,12 +386,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Drops every registration `key` holds — the registrant is going away —
-    /// and answers the names whose last registration that removed, each once.
-    ///
-    /// Scans the whole table: a registrant's rows are indexed by name, not by
-    /// node, and a realm goes away rarely enough that a per-registrant node
-    /// index would be paid for on every add to save work here.
     pub fn remove_listeners_of(&mut self, key: ListenerKey) -> SmallVec<[Arc<str>; 4]> {
         let Listeners {
             by_target,
@@ -504,33 +413,10 @@ impl<T> Document<T> {
         last_removed
     }
 
-    /// The names whose last registration a freed node removed since the last
-    /// call, each name once, in the order it happened.
-    ///
-    /// A node freed by a removal ([`Self::drop_element`],
-    /// [`Self::drop_subtree`]) takes its registrations with it, in the
-    /// document's one free path, and a name whose last registration that was
-    /// reaches zero there with no caller to return the change to. A last
-    /// removal an add undid before this call is not here and that add
-    /// reported [`RegistrationChange::Unchanged`] (see [`Self::add_listener`]),
-    /// so applying these after the changes the calls returned leaves a host
-    /// with the table's set of heard names. Every entry is
-    /// [`RegistrationChange::LastRemoved`] today; the pair names the change so
-    /// a host forwards it unchanged. Empty and allocation-free when no freed
-    /// node held a registration.
-    ///
-    /// A host drains this after every mutation batch it runs, before it next
-    /// trusts its own copy of the set.
     pub fn take_pending_last_removals(&mut self) -> SmallVec<[(Arc<str>, RegistrationChange); 2]> {
         std::mem::take(&mut self.listeners.pending_last_removals)
     }
 
-    /// Whether any registrant registered for `name` on `node`, in any kind:
-    /// a component's question before it produces an event only a listener
-    /// on itself would hear. One name lookup and one node probe.
-    ///
-    /// Reads the table as it is now, so a registration a realm made earlier
-    /// in the same turn is already visible.
     #[must_use]
     pub fn has_listener(&self, node: NodeId, name: &str) -> bool {
         let table = &self.listeners;
@@ -543,43 +429,18 @@ impl<T> Document<T> {
             .is_some_and(|rows| rows.iter().any(|row| row.name == id))
     }
 
-    /// Whether anything hears `name`: a registration of any kind by any
-    /// registrant on any node, or a definition that observes it
-    /// ([`Self::observes_event`]). One name lookup and one set lookup — the
-    /// whole cost of an event nothing hears, which a host checks before it
-    /// builds a path or an [`EventWalk`](super::EventWalk) at all.
     #[must_use]
     pub fn hears(&self, name: &str) -> bool {
         let table = &self.listeners;
         table.id(name).is_some_and(|id| !table.counts(id).is_zero()) || self.observes_event(name)
     }
 
-    /// Whether any registration of any kind, by any registrant, on any node
-    /// holds `name`: the set whose membership changes [`RegistrationChange`]
-    /// reports, as the name's registration count crosses zero.
-    ///
-    /// [`Self::hears`] without the definitions. A host that keeps its own
-    /// router's name set as the union of this answer and a set of its own —
-    /// the names a *live* element of an observing definition wants, which is
-    /// narrower than the per-definition set [`Self::hears`] reads — asks
-    /// this. One name lookup.
     #[must_use]
     pub fn has_listeners_for(&self, name: &str) -> bool {
         let table = &self.listeners;
         table.id(name).is_some_and(|id| !table.counts(id).is_zero())
     }
 
-    /// The registrants a dispatch of `name` over `steps` reaches through a
-    /// path registration, each once, in the order the capture pass first
-    /// meets them (root inward).
-    ///
-    /// A capture registration counts on its node's capture step and a bubble
-    /// registration on its node's bubble step, so for an event that does not
-    /// bubble an ancestor's bubble registration is not reached — the target's
-    /// is, since the target keeps its bubble turn. Global registrations are
-    /// not path registrations; [`Self::global_registrants_on_path`] answers
-    /// those. One
-    /// name lookup, then one probe per node of the path, most of which miss.
     #[must_use]
     pub fn listeners_on_path(&self, steps: &EventSteps, name: &str) -> SmallVec<[ListenerKey; 2]> {
         let table = &self.listeners;
@@ -597,26 +458,6 @@ impl<T> Document<T> {
         reached
     }
 
-    /// Whether an event of `name` fired at `target` would reach any
-    /// registration: a component's gate before it produces an event that
-    /// someone other than itself may hear.
-    ///
-    /// No registration of the name is one lookup and `false`; a global
-    /// registration anywhere is `true`, since a global registration hears
-    /// the name on any path. A target that is not live reaches nothing.
-    ///
-    /// An event that neither bubbles nor is composed, of a name no capture
-    /// registration holds, is then answered from the target's own rows, one
-    /// node probe: such an event's path runs a bubble registration only on
-    /// the target, since every other node of it is an ancestor (or a slot)
-    /// with no bubble step, and a path that stays non-composed names the
-    /// target as the target at every step. The path a composed event takes
-    /// out of a shadow tree gives each host it reaches a bubble step of its
-    /// own, at target, so a composed event is not answered this way.
-    ///
-    /// Otherwise the path is built and probed as [`Self::listeners_on_path`]
-    /// probes it, stopping at the first hit. Definitions are not consulted:
-    /// a component asks this about script listeners.
     #[must_use]
     pub fn would_reach_listener(
         &self,
@@ -651,20 +492,6 @@ impl<T> Document<T> {
         reached
     }
 
-    /// The registrants a dispatch of `name` over `steps` reaches through a
-    /// global registration, each once, in the order their first such
-    /// registration was made.
-    ///
-    /// A global registration is reached when the root of the registering
-    /// node's tree — DOM's *root* of the node, not its shadow-including root
-    /// — is a node of the path: the document node for a node in the document
-    /// tree, which every connected composed path ends at, so such a
-    /// registration hears its name on every connected path and on no path
-    /// of a detached tree; the shadow root for a node in a shadow tree, so it
-    /// hears only the events whose path passes through that shadow root; the
-    /// topmost ancestor for a node in a detached tree. This is the scope a
-    /// listener on that root would have. One name lookup, then one root walk
-    /// per global row of the name and one scan of the path for it.
     #[must_use]
     pub fn global_registrants_on_path(
         &self,
@@ -692,10 +519,6 @@ impl<T> Document<T> {
         reached
     }
 
-    /// The registrants holding a global registration for `name`, whatever
-    /// tree its node is in, each once, in the order their first such
-    /// registration was made: [`Self::global_registrants_on_path`] without
-    /// the path. One name lookup and one scan of the name's global rows.
     #[must_use]
     pub fn global_registrants(&self, name: &str) -> SmallVec<[ListenerKey; 2]> {
         let table = &self.listeners;

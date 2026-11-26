@@ -18,26 +18,17 @@ use seldon::text::FontBlob;
 use super::*;
 use crate::style::engine::StylesheetOrigin;
 
-/// The embedder's UA rule for an editing host, as `bobcat-core` writes it.
 const HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
                          { white-space: pre-wrap; }";
 
-/// The block container an engine sheet writes, which an author sheet cannot;
-/// a UA sheet stands in for the engine's own here.
 const FLOW_RULE: &str = ".flow { display: block; }";
 
-/// A value with a surrogate pair, a CJK character, a hard break and a
-/// combining mark: `a b 😀 中 \n c d e ◌́`, bytes 0..15, UTF-16 units 0..10.
 const MIXED: &str = "ab😀中\ncde\u{301}";
 
-/// Which paragraph a host's text is laid out in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-    /// A Lynx `<text>`: its own Lynx paragraph.
     Text,
-    /// A flex `view`: the anonymous block box around its loose text.
     View,
-    /// An engine `display: block` box: its own inline formatting context.
     Block,
 }
 
@@ -73,8 +64,6 @@ fn document() -> Document<()> {
     doc
 }
 
-/// A focused host of `kind`, `width` wide, holding one text node per entry
-/// of `texts`, laid out.
 fn host_in(kind: Kind, texts: &[&str], width: f32) -> (Document<()>, NodeId) {
     let mut doc = document();
     let host = kind.create(&mut doc);
@@ -92,7 +81,6 @@ fn host_in(kind: Kind, texts: &[&str], width: f32) -> (Document<()>, NodeId) {
     (doc, host)
 }
 
-/// The measured size of the paragraph `host`'s text is laid out in.
 fn paragraph_size(doc: &Document<()>, host: NodeId) -> (f32, f32) {
     let node = doc
         .paragraph_node_of(host)
@@ -135,8 +123,6 @@ fn kinds(outcome: &EditOutcome) -> Vec<(&'static str, &'static str, Option<&str>
 fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect<f32> {
     Rect::new(Point2D::new(x, y), Size2D::new(width, height))
 }
-
-// --- Editing hosts -------------------------------------------------------
 
 #[test]
 fn contenteditable_values_decide_the_editing_host() {
@@ -193,17 +179,12 @@ fn the_ua_rule_keeps_the_hosts_display_and_defaults_its_white_space() {
         );
         assert_ne!(doc.paragraph_node_of(host), Some(host), "an anonymous box");
     }
-    // `pre-wrap` keeps both spaces, four Ahem squares, for every value but
-    // `false` (the `i` flag: `FALSE` is `false`); an author's `normal`
-    // collapses them.
     let widths: Vec<f32> = hosts
         .iter()
         .map(|&host| paragraph_size(&doc, host).0)
         .collect();
     assert_eq!(widths, [40.0, 40.0, 30.0, 30.0, 30.0]);
 }
-
-// --- Focus -----------------------------------------------------------------
 
 #[test]
 fn focus_moves_between_hosts_with_the_four_events_in_order() {
@@ -308,8 +289,6 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
     assert_eq!(doc.focused(), None);
 }
 
-// --- Commands --------------------------------------------------------------
-
 #[test]
 fn focus_places_the_caret_at_the_start_and_insert_types_there() {
     for kind in KINDS {
@@ -336,7 +315,7 @@ fn insert_replaces_a_selection_and_a_line_break_has_no_data() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");
         let (mut doc, _) = host_in(kind, &[MIXED], 200.0);
-        select(&mut doc, 2..5); // the emoji and 中
+        select(&mut doc, 2..5);
         let outcome = doc.apply_editing(Command::InsertLineBreak);
         assert_eq!(
             kinds(&outcome),
@@ -355,8 +334,6 @@ fn delete_backward_takes_a_code_point_an_emoji_or_a_line_break() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");
         let (mut doc, _) = host_in(kind, &[MIXED], 200.0);
-        // After the combining mark: only the mark goes, as parley's backdelete
-        // (and Chromium's backspace) does.
         select(&mut doc, 10..10);
         let outcome = doc.apply_editing(Command::DeleteBackward);
         assert_eq!(
@@ -368,16 +345,13 @@ fn delete_backward_takes_a_code_point_an_emoji_or_a_line_break() {
         );
         assert_eq!(value(&doc), "ab😀中\ncde");
         assert_eq!(selection(&doc), 9..9);
-        // After the emoji: both of its UTF-16 units.
         select(&mut doc, 4..4);
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         assert_eq!(value(&doc), "ab中\ncde");
         assert_eq!(selection(&doc), 2..2);
-        // After the line break: the break, joining the lines.
         select(&mut doc, 4..4);
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         assert_eq!(value(&doc), "ab中cde");
-        // At the start: nothing to delete, no event.
         select(&mut doc, 0..0);
         let outcome = doc.apply_editing(Command::DeleteBackward);
         assert!(!outcome.applied);
@@ -390,7 +364,7 @@ fn delete_forward_takes_a_whole_cluster() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");
         let (mut doc, _) = host_in(kind, &[MIXED], 200.0);
-        select(&mut doc, 2..2); // before the emoji
+        select(&mut doc, 2..2);
         let outcome = doc.apply_editing(Command::DeleteForward);
         assert_eq!(
             kinds(&outcome)[0],
@@ -398,7 +372,6 @@ fn delete_forward_takes_a_whole_cluster() {
         );
         assert_eq!(value(&doc), "ab中\ncde\u{301}");
         assert_eq!(selection(&doc), 2..2);
-        // Over the hard break.
         select(&mut doc, 3..3);
         assert!(doc.apply_editing(Command::DeleteForward).applied);
         assert_eq!(value(&doc), "ab中cde\u{301}");
@@ -415,19 +388,16 @@ fn word_deletion_stops_at_word_boundaries() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");
         let (mut doc, _) = host_in(kind, &["hello brave world"], 300.0);
-        select(&mut doc, 11..11); // after "brave"
+        select(&mut doc, 11..11);
         let outcome = doc.apply_editing(Command::DeleteWordBackward);
         assert_eq!(kinds(&outcome)[0].1, "deleteWordBackward");
         assert_eq!(value(&doc), "hello  world");
         assert_eq!(selection(&doc), 6..6);
-        // Forward from between the two spaces, the space is a word segment of
-        // its own (parley's `next_logical_word`), then the word.
         let outcome = doc.apply_editing(Command::DeleteWordForward);
         assert_eq!(kinds(&outcome)[0].1, "deleteWordForward");
         assert_eq!(value(&doc), "hello world");
         assert!(doc.apply_editing(Command::DeleteWordForward).applied);
         assert_eq!(value(&doc), "hello ");
-        // A range selection is deleted whole, whatever the granularity.
         select(&mut doc, 1..3);
         assert!(doc.apply_editing(Command::DeleteWordBackward).applied);
         assert_eq!(value(&doc), "hlo ");
@@ -454,12 +424,9 @@ fn moves_follow_clusters_words_lines_and_the_ends() {
         };
         assert_eq!(step(&mut doc, Character, Forward, false), 1..1);
         assert_eq!(step(&mut doc, Character, Forward, false), 2..2);
-        // Over the surrogate pair in one step.
         assert_eq!(step(&mut doc, Character, Forward, false), 4..4);
         assert_eq!(step(&mut doc, Character, Backward, true), 2..4);
-        // Without `extend`, a range collapses to its start.
         assert_eq!(step(&mut doc, Character, Backward, false), 2..2);
-        // Down a line keeps the horizontal position (two Ahem squares in).
         select(&mut doc, 1..1);
         assert_eq!(step(&mut doc, Line, Forward, false), 7..7);
         assert_eq!(step(&mut doc, Line, Backward, false), 1..1);
@@ -482,12 +449,10 @@ fn select_all_and_set_selection_clamp_to_the_value() {
         let (mut doc, _) = host_in(kind, &[MIXED], 200.0);
         assert!(doc.apply_editing(Command::SelectAll).applied);
         assert_eq!(selection(&doc), 0..10);
-        // Inside the surrogate pair: rounded down to its start.
         select(&mut doc, 3..3);
         assert_eq!(selection(&doc), 2..2);
         select(&mut doc, 4..99);
         assert_eq!(selection(&doc), 4..10);
-        // A backward selection keeps its anchor; the state reports start ≤ end.
         select(&mut doc, Range { start: 6, end: 1 });
         assert_eq!(selection(&doc), 1..6);
     }
@@ -497,8 +462,6 @@ fn select_all_and_set_selection_clamp_to_the_value() {
 fn pointer_commands_place_and_extend_by_cluster_word_and_line() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");
-        // Two lines of Ahem squares, the host's content box 5px right and 3px
-        // down of its border box.
         let (mut doc, _) = host_in(kind, &["one two\nthree"], 200.0);
         let at = |x: f32, y: f32| Point2D::new(x + 5.0, y + 3.0);
         assert!(
@@ -709,7 +672,6 @@ fn edits_inside_a_composition_report_is_composing() {
         assert!(outcome.events.iter().all(|event| event.is_composing));
         assert_eq!(value(&doc), "abxy");
         assert_eq!(state(&doc).composition, Some(2..4));
-        // Typing during a composition ends it first.
         let typed = doc.apply_editing(Command::Insert("!".to_owned()));
         assert_eq!(
             kinds(&typed),
@@ -723,8 +685,6 @@ fn edits_inside_a_composition_report_is_composing() {
         assert_eq!(state(&doc).composition, None);
     }
 }
-
-// --- Content model -------------------------------------------------------
 
 #[test]
 fn the_first_edit_normalizes_the_host_to_one_text_node() {
@@ -819,8 +779,6 @@ fn a_prepared_edit_whose_value_moved_commits_nothing() {
     }
 }
 
-// --- TextInputState and the layout -----------------------------------------
-
 #[test]
 fn the_input_state_reports_value_offsets_and_geometry() {
     for kind in KINDS {
@@ -838,8 +796,6 @@ fn the_input_state_reports_value_offsets_and_geometry() {
         assert_eq!(input.value, "abc\ndef");
         let bounds = doc.bounding_client_rect(host).unwrap();
         assert_eq!(input.editable_bounds, bounds);
-        // After "d" on the second line: one square in, one line down, inside
-        // the 5px/3px padding.
         let origin = bounds.origin;
         assert_eq!(
             input.caret,
@@ -850,8 +806,6 @@ fn the_input_state_reports_value_offsets_and_geometry() {
         doc.set_attribute(host, "inputmode", "bogus");
         assert_eq!(state(&doc).input_mode, InputMode::Default);
 
-        // The input type is the host's `type`, read with `<input type>`'s
-        // keywords; anything else is text.
         for (value, expected) in [
             ("password", InputType::Password),
             ("EMAIL", InputType::Email),
@@ -885,20 +839,15 @@ fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_sele
         assert_eq!(input.value, "h😀llo");
         assert_eq!(input.selection, 3..3);
         assert_eq!(input.composition, None);
-        // One text node now, as the first edit leaves it.
         let texts = doc.get(host).unwrap().child_ids().len();
         assert_eq!(texts, 1);
-        // Inside the pair rounds down; past the end clamps.
         doc.set_host_value(host, "h😀llo", 2..99);
         assert_eq!(state(&doc).selection, 1..6);
-        // The paragraph is stale until the next pass and edits still apply.
         assert!(doc.apply_editing(Command::Insert("!".to_owned())).applied);
         assert_eq!(value(&doc), "h!");
         doc.layout();
         assert_eq!(selection(&doc), 2..2);
 
-        // A host that is not focused only takes the text, and no event is
-        // owed.
         let other = doc.create_element("view", ());
         doc.append_child(doc.document_element().id(), other);
         doc.set_host_value(other, "plain", 0..0);
@@ -912,9 +861,6 @@ fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_sele
     }
 }
 
-/// A host keeps its selection while it is not focused, as a browser's text
-/// control keeps `selectionStart`/`selectionEnd` across a blur, and the
-/// next focus restores it.
 #[test]
 fn a_host_keeps_its_selection_while_it_is_not_focused() {
     for kind in KINDS {
@@ -934,8 +880,6 @@ fn a_host_keeps_its_selection_while_it_is_not_focused() {
         doc.layout();
         assert_eq!(selection(&doc), 1..3, "placed in the paragraph");
 
-        // Moving focus to another host retains this one's selection too,
-        // and a host never focused has none, so it starts at 0.
         let other = kind.create(&mut doc);
         doc.set_attribute(other, "contenteditable", "");
         doc.append_child(doc.document_element().id(), other);
@@ -948,8 +892,6 @@ fn a_host_keeps_its_selection_while_it_is_not_focused() {
         assert_eq!(selection(&doc), 0..0);
         assert_eq!(doc.host_selection(host), Some(1..3));
 
-        // A script's write while the host is not focused leaves the
-        // selection it passes (UTF-16, rounded down inside a pair, clamped).
         doc.set_host_value(host, "h😀llo", 2..99);
         assert_eq!(doc.host_selection(host), Some(1..6));
         assert!(doc.focus(host));
@@ -959,9 +901,6 @@ fn a_host_keeps_its_selection_while_it_is_not_focused() {
         assert!(doc.blur());
         doc.take_focus_events();
 
-        // A value shortened under a retained selection clamps it, never
-        // inside a surrogate pair: bytes 5..8 of "h😀llo" become byte 2
-        // (the pair's start in "ab😀") and the end.
         let text = doc.get(host).unwrap().first_child().unwrap().id();
         doc.set_text_node_data(text, "ab😀");
         assert_eq!(doc.host_selection(host), Some(2..4));
@@ -973,8 +912,6 @@ fn a_host_keeps_its_selection_while_it_is_not_focused() {
     }
 }
 
-/// The fixup rule's silent unfocus retains the selection, a host that stops
-/// being an editing host keeps it, and freeing the host drops it.
 #[test]
 fn a_retained_selection_outlives_editing_but_not_the_node() {
     let (mut doc, host) = host_in(Kind::View, &["hello"], 200.0);
@@ -1013,8 +950,6 @@ fn composition_bounds_have_one_box_per_utf16_unit() {
         let bounds = &input.composition_bounds;
         assert_eq!(bounds.len(), 4);
         let origin = doc.bounding_client_rect(host).unwrap().origin;
-        // The emoji's fallback face sets the line's height, so only the inline
-        // axis is Ahem's to assert.
         assert_eq!(bounds[0].min_x(), origin.x + 5.0 + 20.0);
         assert_eq!(bounds[0].width(), 10.0);
         assert!(bounds.iter().all(|bound| bound.height() > 0.0));
@@ -1061,12 +996,6 @@ fn an_empty_host_shows_a_caret_one_line_tall() {
     }
 }
 
-/// A host that establishes its own paragraph keeps one empty line of its
-/// strut when it is empty, so its caret is that line's: at the content
-/// origin, as tall as the line box. With `line-height: normal` that is
-/// Ahem's 10px em, where the fallback for a host with no paragraph (the
-/// flex `view`, whose loose text has no anonymous box while it has none)
-/// takes `normal` as 1.2em.
 #[test]
 fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
     for kind in KINDS {
@@ -1094,8 +1023,6 @@ fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
                 rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0),
                 "{kind:?}"
             );
-            // The host is that line tall: its padding box is the line and
-            // the padding around it.
             assert_eq!(
                 doc.bounding_client_rect(host).unwrap().size.height,
                 16.0,
@@ -1105,10 +1032,6 @@ fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
     }
 }
 
-/// An element given the line by `set_has_line_if_empty` — a text control's
-/// editor whose editing is turned off — keeps one empty line of its strut
-/// when it is not an editing host; without it, an empty `contenteditable=
-/// "false"` element, like every other empty paragraph, lays out no line.
 #[test]
 fn an_element_with_a_line_if_empty_is_one_line_tall_without_being_a_host() {
     for kind in [Kind::Text, Kind::Block] {
@@ -1127,7 +1050,6 @@ fn an_element_with_a_line_if_empty_is_one_line_tall_without_being_a_host() {
         assert_eq!(doc.paragraph_line_count(element), Some(1), "{kind:?}");
         assert_eq!(height(&doc), 16.0, "{kind:?}: the line and the padding");
 
-        // An editing host has the line whatever the bit says.
         doc.set_attribute(element, "contenteditable", "");
         doc.layout();
         assert_eq!(height(&doc), 16.0, "{kind:?}: a host");
@@ -1140,9 +1062,6 @@ fn an_element_with_a_line_if_empty_is_one_line_tall_without_being_a_host() {
     }
 }
 
-/// The empty line of an empty host's own paragraph holds no value text:
-/// every pointer and move command over it lands at offset 0, and typing
-/// into it and deleting back to empty leaves the line in place.
 #[test]
 fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
     use Direction::{Backward, Forward};
@@ -1151,8 +1070,6 @@ fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
         eprintln!("kind {kind:?}");
         let (mut doc, host) = host_in(kind, &[], 200.0);
         assert!(doc.editable_paragraph(host).is_some());
-        // Left of, on and right of where parley 0.12's substitute space for
-        // empty text sat; parley 0.13 shapes none.
         for x in [1.0, 6.0, 13.0, 40.0] {
             for command in [
                 Command::SelectFromPoint {
@@ -1196,10 +1113,6 @@ fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
     }
 }
 
-/// The empty line of an empty host's own paragraph is zero wide, so
-/// `text-align` puts its caret where it puts a zero-wide line: at the start,
-/// the exact centre or the end of the 190px content box, as a browser places
-/// the caret of an empty centred or right-aligned `<input>`.
 #[test]
 fn an_empty_host_s_caret_follows_text_align_exactly() {
     for kind in [Kind::Text, Kind::Block] {
@@ -1237,8 +1150,6 @@ fn an_empty_host_s_caret_follows_text_align_exactly() {
 
 #[test]
 fn a_paragraph_that_does_not_show_the_value_refuses_edits_but_takes_selections() {
-    // Generated `content` replaces the children of a paragraph's own
-    // element; a flex `view` lays out no paragraph of its own.
     for kind in [Kind::Text, Kind::Block] {
         eprintln!("kind {kind:?}");
         let (mut doc, host) = host_in(kind, &["ab"], 200.0);
@@ -1246,7 +1157,6 @@ fn a_paragraph_that_does_not_show_the_value_refuses_edits_but_takes_selections()
         doc.add_class(host, "generated");
         doc.layout();
         assert!(!doc.editable_paragraph(host).unwrap().shows_value);
-        // The selection was placed in the paragraph; it has no value offsets.
         assert_eq!(selection(&doc), 2..2, "collapsed at the value's end");
         for command in [
             Command::Insert("x".to_owned()),
@@ -1303,9 +1213,6 @@ fn a_tab_is_shown_as_a_space_and_edits_stay_aligned() {
 
 #[test]
 fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
-    // `a 😀 space b`: UTF-16 units 0..5, one disc each in the layout but the
-    // emoji's, which stands for two units. Ahem has a disc glyph, so every
-    // mask is one 10px square.
     for kind in KINDS {
         eprintln!("kind {kind:?}");
         let (mut doc, host) = host_in(kind, &["a\u{1F600} b"], 200.0);
@@ -1318,8 +1225,6 @@ fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
         assert_eq!(paragraph_size(&doc, host), (40.0, 10.0));
         let origin = doc.bounding_client_rect(host).unwrap().origin;
 
-        // From after `a`, one character move steps over the emoji's mask:
-        // both of its units.
         select(&mut doc, 1..1);
         assert!(
             doc.apply_editing(Command::Move {
@@ -1329,7 +1234,6 @@ fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
             })
             .applied
         );
-        // After the emoji: two masks in.
         doc.layout();
         doc.layout();
         let input = state(&doc);
@@ -1340,7 +1244,6 @@ fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
             rect(origin.x + 5.0 + 20.0, origin.y + 3.0, 1.0, 10.0)
         );
 
-        // Typing lands in the value, unmasked, and the caret moves one mask.
         assert!(doc.apply_editing(Command::Insert("x".to_owned())).applied);
         doc.layout();
         let input = state(&doc);
@@ -1351,8 +1254,6 @@ fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
             rect(origin.x + 5.0 + 30.0, origin.y + 3.0, 1.0, 10.0)
         );
 
-        // Deleting backward twice takes the `x`, then both units of the
-        // emoji behind its one mask.
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         doc.layout();
@@ -1363,7 +1264,6 @@ fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
             input.caret,
             rect(origin.x + 5.0 + 10.0, origin.y + 3.0, 1.0, 10.0)
         );
-        // A character move steps over one mask: the space, one unit.
         assert!(
             doc.apply_editing(Command::Move {
                 granularity: Granularity::Character,
@@ -1382,10 +1282,6 @@ fn a_carriage_return_is_shaped_as_a_space_and_edits_stay_aligned() {
         eprintln!("kind {kind:?}");
         let (mut doc, host) = host_in(kind, &["a\r\nb"], 200.0);
         assert!(doc.editable_paragraph(host).unwrap().shows_value);
-        // Two lines: "a" plus the CR's space, then "b". A `<text>` hangs
-        // every line-end space, as native Lynx does; `pre-wrap` in the
-        // inline formatting context hangs it only conditionally before the
-        // forced break, so it is measured there.
         let width = if kind == Kind::Text { 10.0 } else { 20.0 };
         assert_eq!(paragraph_size(&doc, host), (width, 20.0));
         select(&mut doc, 4..4);
@@ -1407,7 +1303,6 @@ fn an_empty_composition_outside_a_composition_deletes_the_selection() {
             text: String::new(),
             selection: 0..0,
         });
-        // Blink's third case: no composition event, `DeleteSelection`'s pair.
         assert_eq!(
             kinds(&outcome),
             [
@@ -1418,7 +1313,6 @@ fn an_empty_composition_outside_a_composition_deletes_the_selection() {
         assert_eq!(value(&doc), "ad");
         assert_eq!(selection(&doc), 1..1);
         assert_eq!(state(&doc).composition, None);
-        // A collapsed selection: nothing to delete.
         assert!(
             !doc.apply_editing(Command::SetComposition {
                 text: String::new(),
@@ -1429,12 +1323,6 @@ fn an_empty_composition_outside_a_composition_deletes_the_selection() {
     }
 }
 
-// --- The paragraph of a host ---------------------------------------------
-
-/// Under an author `white-space: normal` the paragraph collapses what the
-/// value keeps: `"a  b"` shows `"a b"`. The value keeps both spaces, a caret
-/// in the value lands on the one space the run emitted, and a caret read
-/// back from the layout is the span's start.
 #[test]
 fn a_collapsed_run_keeps_the_value_and_maps_the_caret_onto_its_emitted_byte() {
     for kind in [Kind::View, Kind::Block] {
@@ -1453,10 +1341,7 @@ fn a_collapsed_run_keeps_the_value_and_maps_the_caret_onto_its_emitted_byte() {
         assert!(shown.shows_value);
         let origin = doc.bounding_client_rect(host).unwrap().origin;
         let caret_at = |x: f32| rect(origin.x + 5.0 + x, origin.y + 3.0, 1.0, 10.0);
-        // After `b`: three squares in.
         assert_eq!(state(&doc).caret, caret_at(30.0));
-        // Between the two spaces, and after both: on the emitted space, and
-        // after it.
         select(&mut doc, 2..2);
         assert_eq!(state(&doc).caret, caret_at(10.0));
         doc.layout();
@@ -1466,11 +1351,9 @@ fn a_collapsed_run_keeps_the_value_and_maps_the_caret_onto_its_emitted_byte() {
         doc.layout();
         assert_eq!(state(&doc).caret, caret_at(20.0));
         assert_eq!(selection(&doc), 3..3);
-        // A deletion before `b` takes one of the value's spaces.
         assert!(doc.apply_editing(Command::DeleteBackward).applied);
         assert_eq!(value(&doc), "a b");
         assert_eq!(selection(&doc), 2..2);
-        // Moving over the collapsed span crosses both units in one step.
         doc.set_text_node_data(doc.get(host).unwrap().child_ids()[0], "a  b");
         select(&mut doc, 1..1);
         doc.layout();
@@ -1486,9 +1369,6 @@ fn a_collapsed_run_keeps_the_value_and_maps_the_caret_onto_its_emitted_byte() {
     }
 }
 
-/// A host whose text no paragraph holds — empty, or white space a flex
-/// container does not render (css-flexbox-1 §4) — is edited on value
-/// offsets alone, its caret at the content box's origin, one line tall.
 #[test]
 fn a_host_with_no_paragraph_is_edited_on_value_offsets() {
     let (mut doc, host) = host_in(Kind::View, &[], 200.0);
@@ -1536,7 +1416,6 @@ fn a_host_with_no_paragraph_is_edited_on_value_offsets() {
         .applied
     );
     assert_eq!(selection(&doc), 1..1, "every point is the value's end");
-    // Text that renders brings the paragraph back.
     assert!(doc.apply_editing(Command::Insert("ab".to_owned())).applied);
     doc.layout();
     assert!(doc.paragraph_node_of(host).is_some());
@@ -1546,9 +1425,6 @@ fn a_host_with_no_paragraph_is_edited_on_value_offsets() {
     );
 }
 
-/// The anonymous box is laid out inside its host like any flex item, so
-/// where it sits — here at the end of the main axis — moves the caret and
-/// the points a pointer command reads.
 #[test]
 fn the_anonymous_box_s_place_in_its_host_moves_the_caret() {
     let (mut doc, host) = host_in(Kind::View, &["ab"], 200.0);
@@ -1578,10 +1454,6 @@ fn the_anonymous_box_s_place_in_its_host_moves_the_caret() {
     assert_eq!(selection(&doc), 2..2);
 }
 
-/// HTML's focusable areas are rendered: a `display: none` host, or one
-/// inside a `display: none` element, cannot be focused, and a focused host
-/// that stops being rendered loses focus at the next layout pass with no
-/// event (the fixup rule).
 #[test]
 fn a_host_that_is_not_rendered_cannot_hold_focus() {
     for kind in KINDS {
@@ -1614,9 +1486,6 @@ fn a_host_that_is_not_rendered_cannot_hold_focus() {
     }
 }
 
-/// A Lynx `<text>` keeps its truncation: past a `text-maxlength` cut the
-/// value has no place in the layout, so a command that must measure there
-/// is refused while value-offset commands still apply.
 #[test]
 fn a_truncated_text_refuses_to_measure_past_its_cut() {
     let (mut doc, host) = host_in(Kind::Text, &["abcdef"], 200.0);
@@ -1649,14 +1518,9 @@ fn a_truncated_text_refuses_to_measure_past_its_cut() {
     assert_eq!(selection(&doc), 6..6);
 }
 
-/// `paragraph_kind` and `paragraph_line_count` over each host's paragraph:
-/// a `<text>`'s Lynx paragraph, an inline formatting context otherwise; a
-/// soft wrap and a hard break each start a line, and only the Lynx
-/// paragraph shows the empty line after a trailing break.
 #[test]
 fn each_host_s_paragraph_reports_its_kind_and_its_lines() {
     for kind in KINDS {
-        // 4 squares per 40px line: "aa aa" wraps at its space, "\n" breaks.
         let (mut doc, host) = host_in(kind, &["aa aa\nb"], 40.0);
         let paragraph = doc.paragraph_node_of(host).unwrap();
         let expected = if kind == Kind::Text {
@@ -1687,10 +1551,6 @@ fn each_host_s_paragraph_reports_its_kind_and_its_lines() {
     assert_eq!(doc.paragraph_line_count(host), None);
 }
 
-// --- The document's selection and `selectionchange` ------------------------
-
-/// Takes the document's `selectionchange` flag, answering whether it was
-/// set, and checks the take cleared it.
 fn took_selectionchange(doc: &mut Document<()>) -> bool {
     let taken = doc.take_selectionchange();
     assert!(
@@ -1700,15 +1560,11 @@ fn took_selectionchange(doc: &mut Document<()>) -> bool {
     taken
 }
 
-/// `selection()`'s anchor and focus, which a test of a move compares.
 fn anchor_focus(doc: &Document<()>) -> (u32, u32) {
     let selection = doc.selection().expect("a focused host has a selection");
     (selection.anchor, selection.focus)
 }
 
-/// A session starting is a change of the document's selection, which the
-/// flag records once until it is taken; focusing the focused host is no
-/// change.
 #[test]
 fn focus_sets_the_selectionchange_flag_once() {
     for kind in KINDS {
@@ -1739,10 +1595,6 @@ fn focus_sets_the_selectionchange_flag_once() {
     }
 }
 
-/// A caret move that extends the selection changes it, and the document's
-/// selection keeps its two boundary points apart in UTF-16 units: a
-/// forward extension has `anchor < focus`, a backward one `focus < anchor`,
-/// and the surrogate pair counts two.
 #[test]
 fn a_caret_move_sets_selectionchange_and_the_selection_keeps_its_direction() {
     let extend = |doc: &mut Document<()>, direction| {
@@ -1778,9 +1630,6 @@ fn a_caret_move_sets_selectionchange_and_the_selection_keeps_its_direction() {
     }
 }
 
-/// A `SetSelection` to the range already held changes nothing, whether the
-/// session holds it as value offsets or, after a layout pass, in the
-/// paragraph; another range, or the same one in the other direction, does.
 #[test]
 fn a_set_selection_to_the_held_range_does_not_set_selectionchange() {
     for kind in KINDS {
@@ -1809,10 +1658,6 @@ fn a_set_selection_to_the_held_range_does_not_set_selectionchange() {
     }
 }
 
-/// The element layer's value write to the focused host changes the
-/// document's selection when it changes the value or the offsets; the same
-/// value and the same offsets again change nothing, and a write to a host
-/// that is not focused never does.
 #[test]
 fn a_value_write_sets_selectionchange_only_when_it_changes_something() {
     for kind in KINDS {
@@ -1820,7 +1665,6 @@ fn a_value_write_sets_selectionchange_only_when_it_changes_something() {
         let (mut doc, host) = host_in(kind, &["hello"], 200.0);
         took_selectionchange(&mut doc);
 
-        // Held in the paragraph: not compared, so the write counts.
         doc.set_host_value(host, "hello", 1..2);
         assert!(took_selectionchange(&mut doc));
         doc.set_host_value(host, "hello", 1..2);
@@ -1841,9 +1685,6 @@ fn a_value_write_sets_selectionchange_only_when_it_changes_something() {
     }
 }
 
-/// A session ending ends the document's selection, whether a blur ends it
-/// or the fixup rule does (the host stops being an editing host), and
-/// either sets the flag.
 #[test]
 fn a_blur_or_the_fixup_rule_ends_the_document_selection() {
     for kind in KINDS {
@@ -1874,18 +1715,10 @@ fn a_blur_or_the_fixup_rule_ends_the_document_selection() {
     }
 }
 
-// --- Read-only selection of a selectable element ---------------------------
-
-/// The embedder's rule for a `raw-text` carrier inside a Lynx text, as
-/// `bobcat-core` writes it: its `text` attribute is generated content, and
-/// the element itself generates no box.
 const RAW_TEXT_RULE: &str = "raw-text { display: contents; content: attr(text); }";
 
-/// U+FFFC, an atomic inline box in a selection text.
 const ATOM: char = '\u{FFFC}';
 
-/// [`document`] with `inline-text` defined as a Lynx text element and the
-/// `raw-text` rule.
 fn selectable_document() -> Document<()> {
     let mut doc = document();
     crate::test_common::define_lynx_text(&mut doc, "inline-text");
@@ -1893,13 +1726,6 @@ fn selectable_document() -> Document<()> {
     doc
 }
 
-/// A selectable Lynx text — `user-select: text`, as the embedder's UA sheet
-/// gives a `text-selection` text — 200px wide with no padding, holding
-/// `"ab"`, a `raw-text` carrier generating `"cd"`, an `inline-text` holding
-/// `"ef"`, an inline `view` 10px square and `"gh"`: the selection text
-/// `"abcdef\u{FFFC}gh"`, nine source units, each 10px wide on one line.
-/// Laid out, not selected. Answers the document, the root and the nested
-/// `inline-text`.
 fn selectable_root() -> (Document<()>, NodeId, NodeId) {
     let mut doc = selectable_document();
     let root = doc.create_element("text", ());
@@ -1923,7 +1749,6 @@ fn selectable_root() -> (Document<()>, NodeId, NodeId) {
     (doc, root, nested)
 }
 
-/// A point on the root's one line, `x` CSS px from its border-box origin.
 fn on_line(x: f32) -> Point2D<f32> {
     Point2D::new(x, 5.0)
 }
@@ -1938,9 +1763,6 @@ fn select_from(doc: &mut Document<()>, x: f32, extend: bool) {
     );
 }
 
-/// Only a selectable element that is in the document, rendered and has a
-/// paragraph of its own takes a session; a nested scope is passed over for
-/// the paragraph around it.
 #[test]
 fn begin_selection_needs_a_rendered_selectable_paragraph() {
     let (mut doc, root, nested) = selectable_root();
@@ -1993,8 +1815,6 @@ fn begin_selection_needs_a_rendered_selectable_paragraph() {
     );
 }
 
-/// Beginning a selection blurs a focused editing host, with its events and
-/// its selection retained, and the document's selection moves to the root.
 #[test]
 fn begin_selection_blurs_a_focused_host() {
     let (mut doc, root, _) = selectable_root();
@@ -2039,9 +1859,6 @@ fn begin_selection_blurs_a_focused_host() {
     );
 }
 
-/// A press and a drag select over the root's source units: generated text
-/// counts its own units, the nested scope's text its own, and the atom one
-/// unit, U+FFFC in the selected text and none in a text content offset.
 #[test]
 fn pointer_selection_reads_source_units_and_the_selected_text() {
     let (mut doc, root, _) = selectable_root();
@@ -2049,7 +1866,6 @@ fn pointer_selection_reads_source_units_and_the_selected_text() {
     doc.layout();
     took_selectionchange(&mut doc);
 
-    // Between `a` and `b`, then extended to just after the atom.
     select_from(&mut doc, 12.0, false);
     assert!(took_selectionchange(&mut doc));
     assert_eq!(anchor_focus(&doc), (1, 1));
@@ -2062,7 +1878,6 @@ fn pointer_selection_reads_source_units_and_the_selected_text() {
         Some(format!("bcdef{ATOM}")),
         "the generated `cd`, the nested `ef` and the atom"
     );
-    // Back over the generated text: a backward selection.
     select_from(&mut doc, 8.0, false);
     select_from(&mut doc, 32.0, true);
     select_from(&mut doc, 88.0, false);
@@ -2080,7 +1895,6 @@ fn pointer_selection_reads_source_units_and_the_selected_text() {
     assert_eq!(doc.selected_text(page), None, "not the selection host");
 }
 
-/// A double press's word selection works over a root's paragraph.
 #[test]
 fn a_word_selects_in_a_selectable_root() {
     let mut doc = selectable_document();
@@ -2104,9 +1918,6 @@ fn a_word_selects_in_a_selectable_root() {
     assert_eq!(doc.selected_text(root).as_deref(), Some("hello world"));
 }
 
-/// A selectable root is read only: every command that would change a value
-/// or compose text is refused, the text is unchanged and the selection
-/// with it.
 #[test]
 fn a_selectable_root_refuses_edits_and_compositions() {
     let (mut doc, root, _) = selectable_root();
@@ -2156,7 +1967,6 @@ fn a_selectable_root_refuses_edits_and_compositions() {
         Some("ab")
     );
 
-    // A move and an offset selection still apply.
     assert!(
         doc.apply_editing(Command::Move {
             granularity: Granularity::Character,
@@ -2170,8 +1980,6 @@ fn a_selectable_root_refuses_edits_and_compositions() {
     assert_eq!(doc.selected_text(root).as_deref(), Some("gh"));
 }
 
-/// The held selection follows a relayout, the flag untouched, and a layout
-/// pass places offsets the session holds as such.
 #[test]
 fn a_layout_pass_keeps_a_root_s_selection() {
     let (mut doc, root, _) = selectable_root();
@@ -2186,7 +1994,6 @@ fn a_layout_pass_keeps_a_root_s_selection() {
         "placed in the paragraph"
     );
 
-    // Rebroken over two lines: the same units.
     doc.set_inline_style_property(root, "width", "40px");
     doc.layout();
     assert_eq!(anchor_focus(&doc), (2, 5));
@@ -2195,8 +2002,6 @@ fn a_layout_pass_keeps_a_root_s_selection() {
     assert_eq!(doc.selection_host(), Some(root));
 }
 
-/// `clear_selection` ends a root's session and nothing else; beginning a
-/// selection in the root that holds it changes nothing.
 #[test]
 fn clear_and_repeated_begin_selection_set_the_flag_only_on_change() {
     let (mut doc, root, _) = selectable_root();
@@ -2229,9 +2034,6 @@ fn clear_and_repeated_begin_selection_set_the_flag_only_on_change() {
     assert!(!took_selectionchange(&mut doc));
 }
 
-/// A root's session ends with the flag and no event when the root leaves
-/// the document, computes `user-select: none` or stops being rendered;
-/// focusing an editing host replaces it.
 #[test]
 fn a_root_s_session_ends_with_its_root() {
     let (mut doc, root, _) = selectable_root();
@@ -2292,11 +2094,6 @@ fn a_root_s_session_ends_with_its_root() {
     );
 }
 
-/// css-ui-4's used value: the nearest ancestor-or-self whose computed
-/// `user-select` is not `auto` decides, `none` under `none`, and the
-/// root's `auto` is `text`, a browser's default. `contain` and `all` select
-/// as `text` does, within the one paragraph. A freed root ends its session
-/// with the flag.
 #[test]
 fn the_used_user_select_decides_and_a_freed_root_ends_its_session() {
     let mut doc = selectable_document();

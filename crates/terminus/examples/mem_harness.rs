@@ -62,9 +62,6 @@ const CSS: &str = r#"
     .badge { width: 24px; height: 24px; background-color: rgb(255, 80, 80); }
 "#;
 
-/// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
-/// element ([`terminus::link::CustomElement::is_lynx_text`]), so each label lays out as
-/// a Lynx paragraph.
 struct TextKind;
 
 impl terminus::link::CustomElement<()> for TextKind {
@@ -143,18 +140,11 @@ fn main() {
     census(&doc);
 }
 
-/// Node counts by kind, and what the one-node-type-for-all-kinds layout costs.
-///
-/// This prices bytes, not loads. Every element-only field is inline on every
-/// node because that is what made the styling hot paths fast — the A/B that put
-/// `StylingData` inline moved `noop_commit` by 13% — so a byte total here is an
-/// input to that trade, never a verdict on it.
 fn census(doc: &Document<()>) {
     let mut counts = [0usize; 4];
     let (document, element, text, shadow) = (0, 1, 2, 3);
 
     let mut stack = vec![doc.document_element().id()];
-    // The document node parents the document element, so start one above it.
     if let Some(root) = doc.document_element().parent_id() {
         stack = vec![root];
     }

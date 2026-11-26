@@ -408,8 +408,6 @@ pub(super) struct TestStyle {
     pub(super) min_size: Size<StyleSize>,
     pub(super) max_size: Size<MaxSize>,
     pub(super) aspect_ratio: AspectRatio,
-    /// The natural size a host reports for replaced content, which containers
-    /// read through `CoreStyle::natural_size`.
     pub(super) natural_size: Size<Option<f32>>,
     pub(super) margin: Edges<Margin>,
     pub(super) padding: Edges<NonNegativeLengthPercentage>,
@@ -519,9 +517,6 @@ impl CoreStyle for TestStyle {
         self.display
     }
 
-    /// The mock host keeps position options in its own table
-    /// (`TestTree::position_options`), not in a `position-try-fallbacks`
-    /// value, so every style lets the absolute pass ask it.
     fn has_position_try_fallbacks(&self) -> bool {
         true
     }
@@ -582,11 +577,6 @@ impl CoreStyle for TestStyle {
         self.container_type
     }
 
-    /// The same fold [`CoreStyle::containment`]'s own default performs: this
-    /// style carries `contain` and `container-type` separately, and every
-    /// algorithm reads only what the fold produces. `content-visibility` is
-    /// not modelled here — the harness sets `skips_contents` directly — so the
-    /// fold sees `visible`, which leaves the authored bits alone.
     fn containment(&self) -> Contain {
         effective_containment(
             self.containment,
@@ -1107,7 +1097,6 @@ pub(super) struct TestSourceNode {
     pub(super) measure: TestMeasure,
 }
 
-/// Per-node write presence and measurement traces used by tests.
 #[derive(Debug, Default)]
 pub(super) struct TestSessionNode {
     pub(super) static_position: Cell<Option<Point<f32>>>,
@@ -1120,11 +1109,9 @@ pub(super) struct TestSessionNode {
 pub(super) struct TestState {
     slots: Vec<LayoutSlot>,
     cache_enabled: bool,
-    /// Every `set_anchor_outcome`, in call order.
     anchor_outcomes: Vec<(TestId, AnchorOutcome)>,
 }
 
-/// Immutable test tree with separately borrowed layout state.
 #[derive(Debug)]
 pub(super) struct TestTree {
     pub(super) nodes: Vec<TestSourceNode>,
@@ -1135,32 +1122,14 @@ pub(super) struct TestTree {
     pub(super) static_position_writes: Cell<usize>,
     pub(super) leaf_measure_calls: Cell<usize>,
     pub(super) record_measure_inputs: Cell<bool>,
-    /// The anchors every box's `anchor-size()` sees, by name: the target
-    /// lookup is the host's (`terminus`'s), so this host answers any query. Their
-    /// border boxes sit at the containing block's origin.
     pub(super) anchors: Vec<(&'static str, Size<f32>)>,
-    /// Anchors with a position, in the containing block generator's
-    /// padding-box coordinates; looked up before `anchors`.
     pub(super) anchor_rects: Vec<(&'static str, Rect<f32>)>,
-    /// The name every absolutely positioned box's default anchor has, under
-    /// every option (`position-anchor` is the host's). As in `terminus`, a box
-    /// has a default anchor exactly when `anchor_rect` answers for it: a
-    /// name with no rectangle here is no default anchor.
     pub(super) default_anchor: Option<&'static str>,
-    /// Per option index, a different default anchor name (or none).
     pub(super) option_default_anchors: Vec<(usize, Option<&'static str>)>,
-    /// Names whose nearest scroll container is the default anchor's.
     pub(super) scrolls_with_default: Vec<&'static str>,
-    /// Position options per node: the fallbacks, option 1 onwards.
     pub(super) position_options: Vec<(TestId, Vec<TestStyle>)>,
-    /// Last successful position option per node.
     pub(super) last_successful: Vec<(TestId, usize)>,
-    /// Boxes hoisted to a containing block other than their parent:
-    /// `(containing block, box, via)`, in tree order. The host's job in
-    /// production (`terminus`'s `layout::hoisted`); here the test names them.
     pub(super) hoisted: Vec<(TestId, TestId, usize)>,
-    /// Every box written by an absolute pass, in write order, own children
-    /// and hoisted ones alike.
     pub(super) out_of_flow_writes: RefCell<Vec<TestId>>,
 }
 
@@ -1188,7 +1157,6 @@ impl Default for TestTree {
     }
 }
 
-/// The `Copy` node id used by the protocol.
 #[derive(Clone, Copy)]
 pub(super) struct TestRef {
     index: TestId,
@@ -1268,8 +1236,6 @@ impl LayoutTree for TestTree {
             .collect()
     }
 
-    /// The sum of the locations from the box's parent up to, not including,
-    /// the containing block.
     fn hoisted_parent_offset(
         &self,
         state: &TestState,
@@ -1370,10 +1336,6 @@ impl LayoutTree for TestTree {
         }
 
         if source.style.skips_contents {
-            // The two halves of a skipped box: the hide sweep answers to the
-            // box tree and runs on every committing call, outside the cache;
-            // the size is a pure function of style and input, so it is cached
-            // like any algorithm's output.
             hide_skipped_contents(self, state, node, input);
             let size = |tree: &Self, _state: &mut TestState, node: TestRef, input| {
                 compute_skipped_contents_size(&tree.style(node), input)
@@ -1461,7 +1423,6 @@ impl TestTree {
             .map(|(_, options)| options)
     }
 
-    /// The outcomes `set_anchor_outcome` recorded for `id`, oldest first.
     pub(super) fn anchor_outcomes(&self, id: TestId) -> Vec<AnchorOutcome> {
         self.state
             .borrow()
@@ -1524,8 +1485,6 @@ impl TestTree {
         })
     }
 
-    /// A leaf of one fixed size with both baselines, as a paragraph reports
-    /// them: from its content box's top edge.
     pub(super) fn push_baseline_leaf(
         &mut self,
         style: TestStyle,
@@ -1654,7 +1613,6 @@ impl TestTree {
         })
     }
 
-    /// Adds a `display: contents` node whose children flatten into its parent.
     pub(super) fn push_contents(&mut self, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Leaf,

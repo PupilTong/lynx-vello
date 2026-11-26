@@ -13,7 +13,6 @@ use super::{
     PageConfig, Videos, Viewport, new_document,
 };
 
-/// A document on a phone-shaped viewport with the default page config.
 pub(in crate::main) fn document() -> LynxDocument {
     with_config(PageConfig::default())
 }
@@ -22,8 +21,6 @@ pub(in crate::main) fn with_config(config: PageConfig) -> LynxDocument {
     with_component_events(config).0
 }
 
-/// The same document, plus the queue its components leave the events they
-/// owe script in — what the runtime holds the other end of.
 pub(in crate::main) fn with_component_events(
     config: PageConfig,
 ) -> (LynxDocument, ComponentEvents) {
@@ -31,9 +28,6 @@ pub(in crate::main) fn with_component_events(
     (document, events)
 }
 
-/// The same document, plus the queue its components leave events in and the
-/// record of the sources its `image` and `svg` elements name — both of which
-/// the runtime holds the other end of.
 pub(in crate::main) fn with_image_sources(
     config: PageConfig,
 ) -> (LynxDocument, ComponentEvents, ImageSources) {
@@ -53,9 +47,6 @@ pub(in crate::main) fn with_image_sources(
     )
 }
 
-/// The default document, plus the queue its components leave events in and
-/// the record of its `video` elements — both of which the runtime holds the
-/// other end of.
 pub(in crate::main) fn with_videos() -> (LynxDocument, ComponentEvents, Videos) {
     let events = ComponentEvents::default();
     let videos = Videos::default();
@@ -73,8 +64,6 @@ pub(in crate::main) fn with_videos() -> (LynxDocument, ComponentEvents, Videos) 
     )
 }
 
-/// The default document, plus the autoplay timers its swipers keep — what
-/// the runtime holds the other end of.
 pub(in crate::main) fn with_autoplays() -> (LynxDocument, Autoplays) {
     let autoplays = Autoplays::default();
     (
@@ -90,7 +79,6 @@ pub(in crate::main) fn with_autoplays() -> (LynxDocument, Autoplays) {
     )
 }
 
-/// Attaches `tag` under the page, with `style` as its inline style.
 pub(in crate::main) fn child(document: &mut LynxDocument, tag: &str, style: &str) -> NodeId {
     let page = document.document_element().id();
     element_under(document, page, tag, style)
@@ -127,8 +115,6 @@ pub(in crate::main) fn overflow(document: &LynxDocument, element: NodeId) -> (Ov
     (*style.get_overflow_x(), *style.get_overflow_y())
 }
 
-/// What a component queued on `events` since the last drain, each a
-/// [`ComponentDetail::Fields`] event at `node`, as `(name, pairs)`.
 pub(in crate::main) fn fields_heard(
     events: &ComponentEvents,
     node: NodeId,
@@ -150,8 +136,6 @@ pub(in crate::main) fn fields_heard(
         .collect()
 }
 
-/// Dispatches the touch event `name` at `target` as the runtime dispatches
-/// a routed one: bubbling and composed.
 pub(in crate::main) fn touched(document: &mut LynxDocument, target: NodeId, name: &'static str) {
     document.dispatch_element_event(target, name, &EventDetail::None, true, true, 0.0);
 }

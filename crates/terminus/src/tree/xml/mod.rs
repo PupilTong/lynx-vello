@@ -44,17 +44,8 @@ mod markup;
 
 pub(crate) use markup::{XmlItem, XmlMarkup, XmlNamespace};
 
-/// How deep the built markup goes in element nesting: the walk over
-/// `roxmltree`'s tree keeps no element deeper than this, with its subtree,
-/// so an [`XmlMarkup`] and a tree built from it are at most this deep. Code
-/// that recurses over a tree built from XML (`crate::svg`) bounds itself by
-/// the same constant. It does not bound `roxmltree`'s own parse, which runs
-/// before the walk.
 pub(crate) const MAX_NESTING: u32 = 256;
 
-/// Parses `bytes` as XML the way every XML parse in the crate does, and
-/// hands the tree to `read`: UTF-8 only, DTDs allowed. Element nesting is
-/// not bounded here (module docs).
 fn with_xml<R>(
     bytes: &[u8],
     read: impl FnOnce(&roxmltree::Document<'_>) -> Result<R, XmlError>,
@@ -71,15 +62,10 @@ fn with_xml<R>(
     read(&xml)
 }
 
-/// Why a document did not parse.
 #[derive(Debug)]
 pub(crate) enum XmlError {
-    /// The bytes are not UTF-8 (gzip-compressed `.svgz` included).
     NotUtf8,
-    /// The XML did not parse.
     Xml(roxmltree::Error),
-    /// The root element is in no namespace the tree has elements for, so
-    /// the document has no element the tree can hold.
     ForeignRoot,
 }
 

@@ -25,23 +25,14 @@ use super::monitors::MonitorEpoch;
 use crate::clock::ClockInstant;
 use crate::link::HostOutbox;
 
-/// The memory monitor's configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryConfig {
-    /// How often the monitor samples once it has started.
     pub report_interval: Duration,
-    /// How long after the monitor is turned on the first sample is taken.
     pub acquisition_delay: Duration,
-    /// The smallest change of the total, in bytes, that is reported: a
-    /// reading that moves the total by less since the last report is kept
-    /// and not reported. 0 reports every reading that changes a category.
     pub change_threshold: u64,
 }
 
 impl Default for MemoryConfig {
-    /// Lynx's `memory_report_interval_sec` (20 minutes),
-    /// `memory_acquisition_delay_second` (2 s) and
-    /// `memory_change_threshold_mb` (0) defaults (`lynx_env.cc`).
     fn default() -> Self {
         Self {
             report_interval: Duration::from_mins(20),
@@ -51,37 +42,20 @@ impl Default for MemoryConfig {
     }
 }
 
-/// What a [`MemoryItem`] measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryCategory {
-    /// The `QuickJS` runtime the view's main-thread realm runs in, read on
-    /// `bobcat-main`. Lynx's category is its own main-thread engine's heap,
-    /// one per view or group; this engine's runtime is shared by every realm
-    /// on the thread — every view of the group, and their `ShadowRealm`
-    /// children — so the reading covers all of them, and its detail says so
-    /// (`sharedRuntime: "thread"`).
     MainThreadScriptingEngine,
-    /// The `QuickJS` runtime of `bobcat-workers`, read by the view's BTS
-    /// worker. Shared the same way: every worker realm of the group runs on
-    /// it, so the reading covers all of them.
     BackgroundThreadScriptingEngine,
-    /// The document's elements: their count times the size of one arena
-    /// node, as Lynx's `ReportElementMemoryInfo` sums `sizeof` of each
-    /// element.
     LynxTasmElement,
 }
 
 impl MemoryCategory {
-    /// Every category, in the order an entry lists them.
     pub(crate) const ALL: [Self; 3] = [
         Self::MainThreadScriptingEngine,
         Self::BackgroundThreadScriptingEngine,
         Self::LynxTasmElement,
     ];
 
-    /// The category's name: Lynx's `kCategoryMTSEngine`,
-    /// `kCategoryBTSEngine` and `kCategoryTasmElement`
-    /// (`memory_record.h`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -91,27 +65,20 @@ impl MemoryCategory {
         }
     }
 
-    /// The category's position in [`Self::ALL`], which lists the variants
-    /// in declaration order.
     pub(crate) const fn index(self) -> usize {
         self as usize
     }
 }
 
-/// One category's reading: Lynx's `MemoryRecord`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryItem {
     pub category: MemoryCategory,
     pub size_bytes: u64,
-    /// How many instances the reading covers.
     pub instance_count: u32,
-    /// What else the reading says, as Lynx's string map.
     pub detail: Vec<(Arc<str>, Arc<str>)>,
 }
 
 impl MemoryItem {
-    /// A scripting engine's reading: `malloc_size` as the size, and the
-    /// runtime's other counters as the detail.
     pub(crate) fn scripting_engine(category: MemoryCategory, usage: &MemoryUsage) -> Self {
         let counters = [
             ("memory_used_size", usage.memory_used_size),
@@ -136,7 +103,6 @@ impl MemoryItem {
         }
     }
 
-    /// The document's reading: Lynx's `ReportElementMemoryInfo` detail.
     pub(crate) fn elements(footprint: &MemoryFootprint) -> Self {
         Self {
             category: MemoryCategory::LynxTasmElement,
@@ -156,32 +122,19 @@ impl MemoryItem {
     }
 }
 
-/// Lynx's `memory` entry: every category's latest reading, and their sum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryEntry {
-    /// The sum of the items' sizes.
     pub size_bytes: u64,
-    /// One reading per category read so far, in [`MemoryCategory`] order.
     pub items: Vec<MemoryItem>,
 }
 
 impl MemoryEntry {
-    /// The reading of `category`, if it has been read.
     #[must_use]
     pub fn item(&self, category: MemoryCategory) -> Option<&MemoryItem> {
         self.items.iter().find(|item| item.category == category)
     }
 }
 
-/// The memory monitor's samples, as a task of the view on `bobcat-main`
-/// ([`super::MonitorTask::MemorySamples`]), until the view ends or the
-/// monitor's configuration is no longer the one of `epoch`.
-///
-/// The first sample is taken `acquisition_delay` after the start, and one
-/// more every `report_interval` after that; a deadline the task woke past is
-/// followed one interval after the wake rather than at once. Each sample is
-/// `sample`, which queues the page's job that reads the main thread's
-/// categories and asks the view's BTS for its own.
 pub(crate) async fn serve_memory_samples(
     host: HostOutbox,
     epoch: u64,

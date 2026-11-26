@@ -67,56 +67,31 @@ use crate::script::ScriptError;
 use crate::timers::TimerState;
 use crate::view::ScriptSource;
 
-/// Which child of an owner's realm a module load or a future settle is for,
-/// handed out in construction order and never reused, so a load that arrives
-/// for a released child finds nothing rather than a newer one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ChildKey(u64);
 
 impl ChildKey {
-    /// The key's own number, which [`super::RealmId::listener_key`] files a
-    /// child under.
     pub(super) fn number(self) -> u64 {
         self.0
     }
 
-    /// The key whose [`Self::number`] is `number`.
     pub(super) fn from_number(number: u64) -> Self {
         Self(number)
     }
 }
 
-/// One `ShadowRealm` child: its realm, the two tables its core members
-/// write to, and what its owner's host modules keep for it.
 pub(crate) struct ChildRealm {
-    /// Declared first, so the realm — and every host function holding a
-    /// clone of either table, or a handle on `state` — goes before the
-    /// tables and the state do.
     engine: ScriptEngine,
     key: ChildKey,
     timers: Rc<TimerState>,
     futures: Rc<FutureTable>,
     canvases: Rc<CanvasTable>,
-    /// Set once the child is to be released; the epilogue's last step drops
-    /// it. Shared, so that whatever retires a child can say so without
-    /// borrowing the list.
     retired: Rc<Cell<bool>>,
-    /// The module loads and future settles spawned for this child and not
-    /// yet delivered: a child waiting on one is still needed, whoever refers
-    /// to it.
     in_flight: Cell<u32>,
-    /// What the owner's [`ChildHostModules`] keep for this child — an MTS
-    /// child's workers — or `None` for an owner that names none and for a
-    /// child whose furnishing failed. Dropped after `engine`.
     state: Option<Box<dyn ChildHostState>>,
 }
 
-/// Every `ShadowRealm` child of one owner's realm, grandchildren included,
-/// in construction order.
 pub(crate) struct ChildRealms {
-    /// In key order, which is construction order. Shared, so an operation
-    /// holds its child while the list is free for the child's code to push
-    /// to; only [`Self::release_unneeded`] takes one out.
     live: RefCell<Vec<Rc<ChildRealm>>>,
     next: Cell<u64>,
 }
@@ -125,45 +100,29 @@ impl ChildRealms {
     pub(crate) fn new() -> Self {
         Self {
             live: RefCell::new(Vec::new()),
-            // From 1: 0 is the owner's own realm's number
-            // ([`super::RealmId::listener_key`]).
             next: Cell::new(1),
         }
     }
 
-    /// How many children are live, for a test.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.live.borrow().len()
     }
 
-    /// Whether this realm has no child to service, which is what decides
-    /// whether the owner's own rejections are read beside theirs.
     pub(crate) fn is_empty(&self) -> bool {
         self.live.borrow().is_empty()
     }
 
-    /// The key the next child is kept under, handed out before the child is
-    /// furnished, so that what its host modules record of it names it.
     fn allocate(&self) -> ChildKey {
-        // Sixty-four bits do not run out, so a key is never reused.
         let id = self.next.get();
         self.next.set(id.saturating_add(1));
         ChildKey(id)
     }
 
-    /// Every live child's key, in construction order.
     pub(crate) fn keys(&self) -> Vec<ChildKey> {
         self.live.borrow().iter().map(|child| child.key).collect()
     }
 
-    /// Runs `operation` on the child under `key`; `None` is a child that is
-    /// gone.
-    ///
-    /// The child stays in the list: the list is borrowed only to clone the
-    /// child's handle out, and the operation runs with it released, so what
-    /// the child's code does to the list — a grandchild constructed, another
-    /// operation on this same child from inside this one — finds it free.
     fn with_child<T>(&self, key: ChildKey, operation: impl FnOnce(&ChildRealm) -> T) -> Option<T> {
         let child = {
             let live = self.live.borrow();
@@ -173,8 +132,6 @@ impl ChildRealms {
         Some(operation(&child))
     }
 
-    /// Keeps a new child [`adopt`] furnished where its key sorts, under the
-    /// key [`Self::allocate`] gave it.
     fn keep(&self, child: ChildRealm) {
         let mut live = self.live.borrow_mut();
         let index = live
@@ -183,13 +140,9 @@ impl ChildRealms {
         live.insert(index, Rc::new(child));
     }
 
-    /// Runs every child's due timers, in construction order, and answers
-    /// with what their callbacks threw; `None` when no child had one due.
     pub(crate) fn run_due_timers(&self, js: &mut ScriptRuntime) -> Option<Vec<ScriptError>> {
         let mut failures: Option<Vec<ScriptError>> = None;
         for key in self.keys() {
-            // Asked as its turn comes, since an earlier child's callback can
-            // arm one in it: a child with none has nothing due.
             if !self.has_armed_timer(key) {
                 continue;
             }
@@ -203,15 +156,12 @@ impl ChildRealms {
         failures
     }
 
-    /// Whether the child under `key` is live and has a timer armed.
     fn has_armed_timer(&self, key: ChildKey) -> bool {
         let live = self.live.borrow();
         live.binary_search_by_key(&key, |child| child.key)
             .is_ok_and(|index| live[index].timers.is_armed())
     }
 
-    /// Every module request a child's code left, each counted as in flight
-    /// for its child until [`Self::complete_module`] delivers it.
     pub(crate) fn take_module_requests(&self) -> Vec<(ChildKey, String)> {
         let mut requests = Vec::new();
         for child in self.live.borrow().iter() {
@@ -223,8 +173,6 @@ impl ChildRealms {
         requests
     }
 
-    /// Every future a `.then` in a child asked to settle, each counted as in
-    /// flight for its child until [`Self::deliver_future`] delivers it.
     pub(crate) fn take_settle_requests(&self) -> Vec<(ChildKey, u32, HostFuture)> {
         let mut requests = Vec::new();
         for child in self.live.borrow().iter() {
@@ -236,8 +184,6 @@ impl ChildRealms {
         requests
     }
 
-    /// Completes one module request of the child under `key`; `None` is a
-    /// child that is gone, which drops the answer.
     pub(crate) fn complete_module(
         &self,
         js: &mut ScriptRuntime,
@@ -251,8 +197,6 @@ impl ChildRealms {
         })
     }
 
-    /// Hands one settled future to the child under `key`; `None` is a child
-    /// that is gone, which drops the outcome.
     pub(crate) fn deliver_future(
         &self,
         js: &mut ScriptRuntime,
@@ -266,14 +210,6 @@ impl ChildRealms {
         })
     }
 
-    /// Calls an export of a module the child under `key` has loaded, the way
-    /// [`ScriptEngine::call_module_export`] calls one of the owner's: the
-    /// checkpoint that ends the call is the child's, so what the call left
-    /// unhandled is the child's failure. `None` is a child that is gone,
-    /// which drops the call.
-    ///
-    /// For what the host hands one particular child rather than its owner —
-    /// an event of a worker that child created.
     pub(crate) fn call_module_export(
         &self,
         js: &mut ScriptRuntime,
@@ -286,10 +222,6 @@ impl ChildRealms {
         })
     }
 
-    /// [`Self::call_module_export`] without the checkpoint: the child's
-    /// [`ScriptEngine::call_module_export_before_operation`], whose queued
-    /// jobs a later [`Self::checkpoint_after_calls`] drains. `None` is a
-    /// child that is gone, which drops the call.
     pub(crate) fn call_module_export_before_operation(
         &self,
         js: &mut ScriptRuntime,
@@ -304,10 +236,6 @@ impl ChildRealms {
         })
     }
 
-    /// [`Self::call_module_export`] from inside a JavaScript call: the
-    /// child's [`ScriptEngine::call_module_export_nested`], with no
-    /// checkpoint. `None` is a child that is gone, which drops the call. The
-    /// child may be the one whose own call is further up the stack.
     pub(crate) fn call_module_export_nested(
         &self,
         key: ChildKey,
@@ -319,8 +247,6 @@ impl ChildRealms {
         })
     }
 
-    /// The child's [`ScriptEngine::checkpoint_after_calls`]; `None` is a
-    /// child that is gone.
     pub(crate) fn checkpoint_after_calls(
         &self,
         js: &mut ScriptRuntime,
@@ -329,9 +255,6 @@ impl ChildRealms {
         self.with_child(key, |child| child.engine.checkpoint_after_calls(js))
     }
 
-    /// One rejection per child that left any unhandled, in construction
-    /// order: the entry that ran the child's code checkpointed for its own
-    /// realm, which leaves a child's rejections queued for the child.
     pub(crate) fn take_unhandled_rejections(&self, js: &mut ScriptRuntime) -> Vec<ScriptError> {
         let mut failures = Vec::new();
         for key in self.keys() {
@@ -345,26 +268,18 @@ impl ChildRealms {
         failures
     }
 
-    /// Drops every rejection the children left unhandled, for an entry of
-    /// their owner that has already reported its failure. No JavaScript
-    /// runs.
     pub(crate) fn discard_rejections(&self, js: &mut ScriptRuntime) {
-        // Never borrowed across anything that runs JavaScript, and this runs
-        // none, so the list is free here.
         for child in self.live.borrow().iter() {
             child.engine.discard_own_rejections(js);
         }
     }
 
-    /// Each child's [`CanvasTable::settle_drawn`], in construction order.
     pub(crate) fn settle_drawn_canvases(&self) {
-        // Settling runs no JavaScript, so the list stays borrowed throughout.
         for child in self.live.borrow().iter() {
             child.canvases.settle_drawn();
         }
     }
 
-    /// The earliest timer deadline any child has armed.
     pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
         self.live
             .borrow()
@@ -373,16 +288,6 @@ impl ChildRealms {
             .min()
     }
 
-    /// Frees every child nothing needs any more: retired, or referred to by
-    /// nothing of another realm with no timer armed, nothing in flight and
-    /// nothing its host state keeps it for. Answers with how many were freed.
-    ///
-    /// Run by the epilogue, and by the MTS realm right after it dispatches a
-    /// `frame`'s disconnection, so the child that disposal retired goes in
-    /// that entry; always outside every JavaScript call:
-    /// freeing a realm collects the whole runtime. One child's release can leave
-    /// another unreferenced — a grandchild only its `ShadowRealm` held — so
-    /// this repeats until nothing more goes.
     pub(crate) fn release_unneeded(&self) -> usize {
         let mut released = 0usize;
         loop {
@@ -399,25 +304,17 @@ impl ChildRealms {
                 return released;
             }
             released = released.saturating_add(freed.len());
-            // Each is the last handle on its child: an operation's clone
-            // lives only as long as the operation, and this runs outside
-            // every JavaScript call, so no operation is in progress.
             debug_assert!(freed.iter().all(|child| Rc::strong_count(child) == 1));
-            // Outside the borrow: freeing a context runs finalizers, and
-            // nothing they reach may find the list borrowed.
             drop(freed);
         }
     }
 }
 
 impl ChildRealm {
-    /// One load or settle for this child has been delivered.
     fn landed(&self) {
         self.in_flight.set(self.in_flight.get().saturating_sub(1));
     }
 
-    /// Whether nothing needs this child any more. A retired child is freed
-    /// whatever this answers.
     fn unneeded(&self) -> bool {
         self.in_flight.get() == 0
             && !self.engine.is_referenced_across_realms()
@@ -426,26 +323,7 @@ impl ChildRealm {
     }
 }
 
-/// The host modules an owner's `ShadowRealm` children get beyond the core,
-/// installed into every child — grandchildren included — right after it.
-///
-/// `key` is the key the child will be kept under, allocated before this
-/// runs, so that whatever the modules record about the child names it.
-/// `retired` is the child's own release flag, the one [`ChildRealms`] keeps
-/// it under: setting it is how a member of the child's says the child is to
-/// be freed by the next epilogue's release step, whoever still refers to it.
-///
-/// What it answers is what the modules keep for this child, which the child
-/// holds and drops with itself, after its realm.
-///
-/// Whatever implements this is held by every realm's hook for the owner's
-/// life, so it must hold nothing that holds an engine of the owner's.
 pub(crate) trait ChildHostModules {
-    /// The realm a new child is to its view's performance records — what
-    /// its pipelines, its load and its fetches are opened as — allocated
-    /// before its core is installed and handed to [`Self::install`]. A
-    /// `<frame>` card's realm is one of its own, as a nested card is its
-    /// own `LynxTemplateRender` in native.
     fn allocate_opener(&self) -> OpenerId;
 
     fn install(
@@ -457,67 +335,31 @@ pub(crate) trait ChildHostModules {
     ) -> Result<Box<dyn ChildHostState>, ScriptError>;
 }
 
-/// What an owner's [`ChildHostModules`] keep for one child, for as long as
-/// the child lives: held by the child, and dropped with it, after its realm,
-/// so whatever it holds ends with the child.
 pub(crate) trait ChildHostState {
-    /// Whether the child is still needed for this state's sake, whoever
-    /// refers to it. An MTS child with a worker of its own still running is:
-    /// what that worker says is delivered to the child, and freeing the child
-    /// would end the worker in the middle of whatever it was answering — a
-    /// card's background thread acknowledging its disposal. A retired child
-    /// is freed all the same.
     fn is_busy(&self) -> bool;
 }
 
-/// What every `new ShadowRealm()` in one owner's realms is furnished from:
-/// the list it joins, what its core members reach the host through, the
-/// realm its fetches are timed as unless its modules name one of its own,
-/// and the owner's [`ChildHostModules`], if it has any.
-///
-/// The list is held weakly: a strong one would be a cycle no drop ends — the
-/// list holds the child's engine, the engine holds this hook, and the hook
-/// would hold the list.
 pub(crate) struct ShadowRealmHook {
     pub(crate) children: Weak<ChildRealms>,
     pub(crate) host: HostOutbox,
     pub(crate) thread: JsThreadHandle,
     pub(crate) source: ScriptSource,
-    /// The constructing realm's own: what a child of a realm whose owner
-    /// names no [`ChildHostModules`] — a worker's — is timed as.
     pub(crate) opener: Opener,
     pub(crate) child_hosts: Option<Rc<dyn ChildHostModules>>,
-    /// What every child's canvases have of a document: its owner's.
     pub(crate) canvas_host: CanvasHost,
 }
 
-/// Installs the `ShadowRealm` constructor on `engine`, every construction
-/// furnished by `hook`.
 pub(crate) fn install(engine: &mut ScriptEngine, hook: ShadowRealmHook) -> Result<(), ScriptError> {
     engine.install_shadow_realm(move |child| adopt(&hook, child))
 }
 
-/// Furnishes one fresh child and keeps it: its key, module loading, then the
-/// realm core with its own tables and the `ShadowRealm` constructor of its
-/// own, then the owner's [`ChildHostModules`] over the child's key and
-/// `retired` flag, then the list.
-///
-/// A child whose furnishing failed is kept retired and refused: the
-/// construction throws, and the release step frees the realm. Only a list
-/// that is already gone — an owner whose realm is being released, where no
-/// JavaScript runs — lets the child go here.
 fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String> {
     let children = hook
         .children
         .upgrade()
         .ok_or("the realm is being released")?;
     engine.enable_module_loading();
-    // Before the modules are installed, which record what the child starts
-    // under it. Nothing between here and the list runs JavaScript, so no
-    // other child is kept in between.
     let key = children.allocate();
-    // First, so the members that retire the child and the list that frees
-    // it read one flag.
     let retired = Rc::new(Cell::new(false));
     let mut state = None;
     let own_opener = hook
@@ -543,9 +385,6 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         }
         Ok(tables)
     });
-    // A child the hook could not furnish is kept all the same, retired:
-    // the hook runs inside a JavaScript call, where no realm is freed, and
-    // the epilogue's release step frees it.
     let (tables, refused) = match installed {
         Ok(tables) => (tables, None),
         Err(error) => {

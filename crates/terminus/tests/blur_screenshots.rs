@@ -34,22 +34,12 @@ mod screenshot;
 const SCREEN_WIDTH: f32 = 393.0;
 const SCREEN_HEIGHT: f32 = 727.0;
 
-/// Column origins of the 3-wide grid, in CSS px.
 const LEFT: [u32; 3] = [12, 139, 266];
-/// Row origins of the 5-tall grid, in CSS px.
 const TOP: [u32; 5] = [12, 152, 292, 432, 572];
 
-/// The subject every geometry cell blurs: a 64×64 box centred in its cell, so
-/// a 3σ margin of up to 25 px fits inside the cell and anything larger is
-/// visibly *allowed* to leave it. Nothing clips a cell — that is the point.
 const SUBJECT: &str =
     "display: flex; position: absolute; left: 26px; top: 32px; width: 64px; height: 64px";
 
-/// One grid cell: a white card at (`row`, `col`) holding `inner`.
-///
-/// The card is deliberately opaque white rather than transparent: a blur over
-/// white is where an unpremultiplied filter shows its dark halo, so every one
-/// of these cells is also a halo check.
 fn cell(row: usize, col: usize, inner: &str) -> String {
     format!(
         r#"<div style="display: flex; position: absolute; left: {left}px; top: {top}px; width: 115px; height: 128px; background-color: #ffffff">{inner}</div>"#,
@@ -58,29 +48,16 @@ fn cell(row: usize, col: usize, inner: &str) -> String {
     )
 }
 
-/// The 64×64 subject box carrying `extra` declarations.
 fn subject(extra: &str) -> String {
     format!(r#"<div style="{SUBJECT}; {extra}"></div>"#)
 }
 
-/// The page the cells sit on. `position: relative` so every cell's absolute
-/// placement resolves against it, and `font-family: Roboto` so text cells
-/// inherit the one vendored face.
 fn page(body: &str) -> String {
     format!(
         r#"<div style="display: flex; position: relative; width: 393px; height: 727px; background-color: #e5e7eb; font-family: Roboto; color: #111827">{body}</div>"#
     )
 }
 
-/// Page 1 — geometry and the group.
-///
-/// | | c0 | c1 | c2 |
-/// | --- | --- | --- | --- |
-/// | r0 | solid box, `blur(4px)` | rounded 16px box, 6px border + background, `blur(4px)` | linear-gradient background, `blur(6px)` |
-/// | r1 | `blur(16px)` — the decimated path | `blur(1px)` — undecimated, kernel radius ≤ 3 | no filter — control for r0c0 |
-/// | r2 | `blur(3px)` + `opacity: 0.5` | `blur(3px)` + `clip-path: circle(40%)` | `blur(3px)` + `border-radius: 50%` |
-/// | r3 | `blur(3px)` under an `overflow: hidden` parent smaller than the ink | `blur(3px)` + `mask-image` gradient | nested: parent `blur(3px)` ⊃ child `blur(3px)` |
-/// | r4 | `blur(3px)` on a border-only box (no background) | white box, `blur(6px)`, on white — the halo check | `blur(3px)` on a box with a `box-shadow` |
 #[test]
 fn blur_shapes_matrix_matches_reference() {
     let body = [
@@ -121,9 +98,6 @@ fn blur_shapes_matrix_matches_reference() {
             2,
             &subject("background-color: #0d9488; filter: blur(3px); border-radius: 50%"),
         ),
-        // The one cell whose blurred output *is* clipped, and the only one:
-        // the clip belongs to an ancestor, outside the group, so it cuts the
-        // baked texture where it is drawn; the content lies wholly inside it.
         cell(
             3,
             0,
@@ -153,10 +127,6 @@ fn blur_shapes_matrix_matches_reference() {
             0,
             &subject("border: 6px solid #b45309; box-sizing: border-box; filter: blur(3px)"),
         ),
-        // White on white. The cell is blank rather than ringed because the
-        // blur chain filters premultiplied colour: filtering unpremultiplied
-        // colour averages the colour of the fully transparent margin into the
-        // square's edge, and a dark halo appears.
         cell(4, 1, &subject("background-color: #ffffff; filter: blur(6px)")),
         cell(
             4,
@@ -175,9 +145,6 @@ fn blur_shapes_matrix_matches_reference() {
     screenshot::assert_golden(&["filter-blur", "shapes"], &actual);
 }
 
-/// The two-colour subject the chain cells share: a red box with a blue child,
-/// so a colour pass applied before the blur and one applied after it are
-/// distinguishable, and so is the order of the list.
 fn two_colour(extra: &str) -> String {
     format!(
         r#"<div style="{SUBJECT}; background-color: #dc2626; {extra}">
@@ -186,22 +153,12 @@ fn two_colour(extra: &str) -> String {
     )
 }
 
-/// One line of Roboto, positioned in its cell.
 fn line(size: u32, extra: &str, text: &str) -> String {
     format!(
         r#"<div class="text-block" style="display: flex; position: absolute; left: 8px; top: 48px; width: 99px; font-size: {size}px; {extra}">{text}</div>"#
     )
 }
 
-/// Page 2 — text, filter chains, and σ folding.
-///
-/// | | c0 | c1 | c2 |
-/// | --- | --- | --- | --- |
-/// | r0 | Roboto text `blur(2px)` on a coloured background | text `blur(2px)` + `text-shadow` | text, no filter — control |
-/// | r1 | `blur(3px)` on a subtree: nested box **and** a text run in one group | `grayscale(1) blur(3px)` | `blur(3px) grayscale(1)` |
-/// | r2 | red box + blue child, no filter — control for r1c1/r1c2 | `blur(3px) brightness(0.6)` | `brightness(0.6)` — control |
-/// | r3 | `blur(3px) blur(4px)` — two blurs fold by variance | `blur(5px)` — the reference the fold must match | `grayscale(1)` — control |
-/// | r4 | one 24 px line across the page at `blur(2px)`: the legibility check | | |
 #[test]
 fn blur_text_and_chains_matrix_matches_reference() {
     let body = [
@@ -225,8 +182,6 @@ fn blur_text_and_chains_matrix_matches_reference() {
             ),
         ),
         cell(0, 2, &line(17, "", "Crisp")),
-        // The group is the whole subtree: one bake holds the wrapper's
-        // background, the nested box, and the glyph run together.
         cell(
             1,
             0,
@@ -242,8 +197,6 @@ fn blur_text_and_chains_matrix_matches_reference() {
         cell(2, 0, &two_colour("")),
         cell(2, 1, &two_colour("filter: blur(3px) brightness(0.6)")),
         cell(2, 2, &two_colour("filter: brightness(0.6)")),
-        // 3² + 4² = 5², so r3c0 and r3c1 must be the same picture. A fold that
-        // stopped working would show as the left cell being sharper.
         cell(
             3,
             0,
@@ -270,26 +223,6 @@ fn blur_text_and_chains_matrix_matches_reference() {
     screenshot::assert_golden(&["filter-blur", "text-and-chains"], &actual);
 }
 
-/// Page 3 — transforms.
-///
-/// σ is authored in the element's own CSS px and baked in *device* px, so a
-/// transform between the two scales it. Every band here is a blurred subject
-/// beside the same subject unfiltered, because the scaling is a relationship
-/// rather than a picture: a golden of a blurred rotated box alone could only
-/// regress into "different".
-///
-/// | band | left (blurred) | right (control) |
-/// | --- | --- | --- |
-/// | 0 | `rotate(30deg)` + `blur(4px)` | `rotate(30deg)` |
-/// | 1 | `scale(2)` on a 32 px box + `blur(2px)` | `scale(2)` on a 32 px box |
-/// | 2 | `scaleX(3)` on a 48 px box + `blur(3px)` — the isotropic approximation | `scaleX(3)` |
-/// | 3 | `scale(0.5)` + `blur(4px)` — σ shrinks with the group | `scale(0.5)` |
-/// | 4 | `scale(2)` on a 32 px box + `blur(2px)` | *no transform*, `blur(4px)` |
-///
-/// Band 4 is the sharpest statement of the rule: 2 px of σ under a 2× scale
-/// and 4 px of σ under none are the same blur, so the two halves have to be
-/// the same picture. They would diverge the moment σ stopped being scaled
-/// into device space.
 #[test]
 fn blur_transforms_matrix_matches_reference() {
     const FRAGMENT: &str = r#"
@@ -326,21 +259,6 @@ fn blur_transforms_matrix_matches_reference() {
     screenshot::assert_golden(&["filter-blur", "transforms"], &actual);
 }
 
-/// Page 4 — a replaced element inside a bake, and the page's own four edges.
-///
-/// The image band draws the 8×8 checker at 110×80 under `object-fit: contain`,
-/// which letterboxes it to 80×80 and leaves *transparent* bands inside the
-/// element's own box. So the blurred copy is a halo check over transparency
-/// the content produced, not over the bake's margin — a different way to get
-/// the premultiply wrong. `image-rendering: pixelated` keeps the source's
-/// 8×8 structure crisp in the control, so the blur is unmistakable beside it.
-///
-/// The four purple boxes straddle the page's top, left, right and bottom
-/// edges under `blur(6px)`. Their 18 px of ink is baked *outside* the
-/// viewport and composed back in, so every visible edge is a smooth gradient.
-/// Inflating a group's bounds after the viewport intersection rather than
-/// before would cut that margin off and leave a hard edge exactly at the
-/// page boundary — which is what this page exists to catch.
 #[test]
 fn blur_edges_and_replaced_content_matches_reference() {
     const CSS: &str = "
@@ -397,8 +315,6 @@ fn blur_edges_and_replaced_content_matches_reference() {
     screenshot::assert_golden(&["filter-blur", "edges-and-replaced"], &actual);
 }
 
-/// The same four-quadrant checker `tests/screenshots.rs` draws, so a reader
-/// comparing the two goldens is looking at one bitmap.
 fn checker(width: u32, height: u32) -> (u32, u32, Vec<u8>) {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
@@ -422,13 +338,6 @@ fn checker(width: u32, height: u32) -> (u32, u32, Vec<u8>) {
     (width, height, rgba)
 }
 
-/// The board every `backdrop-filter` cell filters: a white card with a
-/// crimson left half and an amber bar across it, so every subject sits over
-/// one vertical seam, one horizontal seam and two hues.
-///
-/// The card paints its own opaque white, so every cell filters the same
-/// ground whatever the capture is cleared to. The two hues are what makes a
-/// colour pass in a chain legible beside a blur.
 fn board(row: usize, col: usize, inner: &str) -> String {
     format!(
         r#"<div style="display: flex; position: absolute; left: {left}px; top: {top}px; width: 115px; height: 128px; background-color: #ffffff">
@@ -441,25 +350,8 @@ fn board(row: usize, col: usize, inner: &str) -> String {
     )
 }
 
-/// Page 5 — `backdrop-filter` geometry.
-///
-/// Every cell is the same board with one subject over its seams, so a reader
-/// compares what is *inside* the subject against the same board beside it.
-/// Nothing here paints a background of its own unless the cell says so: what
-/// is drawn is the element's own backdrop, filtered.
-///
-/// | | c0 | c1 | c2 |
-/// | --- | --- | --- | --- |
-/// | r0 | `blur(6px)` | `blur(6px)` + `border-radius: 24px` | no filter — control |
-/// | r1 | `blur(2px)` | `blur(12px)` — the decimated path | `blur(6px)` on a circle |
-/// | r2 | frosted card: `blur(8px)` + a translucent white background | the same card unfiltered — control | `blur(6px)` + `opacity: 0.6` |
-/// | r3 | `blur(6px)` under `rotate(20deg)`, ringed so the crop is legible | the same ring unfiltered — control | `blur(4px) brightness(0.7)` — a chain |
-/// | r4 | `brightness(0.5)` alone — the σ = 0 bake | `grayscale(1) blur(4px)` | a box **inside** an `opacity: 0.5` wrapper: its backdrop stops at the wrapper |
 #[test]
 fn backdrop_shapes_matrix_matches_reference() {
-    // The rotated pair carries a ring so the crop's own shape is visible:
-    // the blur inside it is bounded by a rotated rectangle, which is the one
-    // place the axis-aligned bake rect and the drawn shape differ.
     const RING: &str = "border: 2px solid #1d4ed8; box-sizing: border-box; \
                         transform: rotate(20deg)";
     let subject = |extra: &str| -> String {
@@ -509,10 +401,6 @@ fn backdrop_shapes_matrix_matches_reference() {
         board(3, 2, &subject("backdrop-filter: blur(4px) brightness(0.7)")),
         board(4, 0, &subject("backdrop-filter: brightness(0.5)")),
         board(4, 1, &subject("backdrop-filter: grayscale(1) blur(4px)")),
-        // The wrapper is a Backdrop Root, so the board behind it is *not* in
-        // the subject's backdrop. What the subject filters is the wrapper's
-        // own teal bar and nothing else, and the wrapper's own `opacity`
-        // fades backdrop and subject together.
         board(
             4,
             2,
@@ -533,23 +421,6 @@ fn backdrop_shapes_matrix_matches_reference() {
     screenshot::assert_golden(&["backdrop-filter", "shapes"], &actual);
 }
 
-/// Page 6 — a frosted card over text, and the crop's own edges.
-///
-/// The top band is the shape the property exists for: a translucent card with
-/// `backdrop-filter: blur()` over body text, beside the identical card with
-/// no filter. Underneath it, four statements about the crop:
-///
-/// - **Nesting.** The small box inside the frosted card filters the card's *filtered* backdrop,
-///   because the card is not a Backdrop Root and its filtered image is painted inside its own
-///   group.
-/// - **Later siblings.** The amber bar is painted *after* the card, so it crosses it with a hard
-///   edge — it is in front of the backdrop, not in it.
-/// - **Straddling a seam.** The middle band's two subjects sit astride a navy/white edge, one
-///   square and one rounded with a colour pass after the blur.
-/// - **The page's own edges.** The last card hangs off the page's left edge and the last box off
-///   its bottom-right corner. Their crops run outside the viewport, where the commit culled
-///   everything; the mirror edge mode is what keeps the visible part from darkening toward the
-///   boundary.
 #[test]
 fn backdrop_card_and_edges_matches_reference() {
     const FRAGMENT: &str = r#"

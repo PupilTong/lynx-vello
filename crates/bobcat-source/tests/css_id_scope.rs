@@ -32,8 +32,6 @@ use url::Url;
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(100.0, 100.0, 1.0);
 
-/// `property: <the value's tokens>`, as web-core's tokenizer splits
-/// `rgb(…)`: a function token, its arguments, and the closing parenthesis.
 fn rgb(property: &str, arguments: &str) -> ParsedDeclaration {
     let token = |token_type, value: &str| ValueToken {
         token_type,
@@ -71,9 +69,6 @@ fn rule(components: &[(SimpleSelectorKind, &str)], declaration: ParsedDeclaratio
     }
 }
 
-/// Fragment 0: `.g { background-color: rgb(0,0,255) }`.
-/// Fragment 1: `.basic { color: rgb(255,0,0) }`, `.a .b { color: rgb(1,1,1) }`.
-/// Fragment 2: `.basic { color: rgb(0,128,0) }`, `.a .b { color: rgb(2,2,2) }`.
 fn style_info() -> StyleInfo {
     use SimpleSelectorKind::{Class, Combinator};
     let scoped = |basic: &str, descendant: &str| StyleSheet {
@@ -104,8 +99,6 @@ fn style_info() -> StyleInfo {
     }
 }
 
-/// The card: every check runs inside `renderPage`, between explicit flushes,
-/// and throws on the first wrong value.
 const CARD: &str = r"
 globalThis.processData = (data) => data;
 globalThis.updatePage = () => {};
@@ -177,8 +170,6 @@ fn push_section(bytes: &mut Vec<u8>, label: SectionLabel, content: &[u8]) {
     bytes.extend_from_slice(content);
 }
 
-/// A `.web.bundle` whose `lepusCode.root` is `script` and whose `StyleInfo`
-/// is `style_info`.
 fn bundle(style_info: &StyleInfo, script: &str) -> Vec<u8> {
     let mut lepus = Vec::new();
     lepus.extend_from_slice(&1u32.to_le_bytes());
@@ -225,7 +216,6 @@ async fn css_id_selects_the_fragment_an_element_matches() {
             page.view_sources(SCREEN, "en-US"),
         )
         .expect("a view");
-    // Boot's first flush waits for a painter to bind the view.
     let mut painter = Painter::new(DrawTarget::Offscreen, 100.0, 100.0, 1.0)
         .await
         .expect("an offscreen painter");

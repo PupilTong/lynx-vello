@@ -380,9 +380,6 @@ fn filter_grammar() {
 
 #[test]
 fn backdrop_filter_grammar() {
-    // filter-effects-2. Lynx itself has no `backdrop-filter` (docs/tracking/
-    // css-visual.md); this is a W3C value-add and reuses the `filter` value
-    // grammar exactly, so the computed values match one for one.
     assert!(property_is_supported("backdrop-filter"));
     assert_eq!(computed("backdrop-filter: none", "backdrop-filter"), "none");
     assert_eq!(
@@ -402,7 +399,6 @@ fn backdrop_filter_grammar() {
         "blur(4px) brightness(0.5)",
         "multi-function chains are valid per filter-effects-2"
     );
-    // The initial value is `none`, and the two properties are independent.
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
     doc.set_inline(el, "filter: blur(2px)");
@@ -421,6 +417,5 @@ fn backdrop_filter_grammar() {
             "`{invalid}` must be rejected"
         );
     }
-    // `-webkit-backdrop-filter` is not part of the exposed surface.
     assert!(!property_is_supported("-webkit-backdrop-filter"));
 }

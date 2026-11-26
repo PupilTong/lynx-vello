@@ -43,117 +43,72 @@ use super::offsets::{
 use super::{ByteSelection, EditableParagraph, Session};
 use crate::tree::document::{Document, NodeId};
 
-/// One editing command, applied to the selection host: the focused editing
-/// host, or a selectable element selected without focus, which refuses
-/// every command that would change a value or compose text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// `ImeSetComposition`: replaces the composition — or, when none is
-    /// active, the selection — with `text` and makes it the composition.
-    /// `selection` is the selection afterwards, in UTF-16 units relative to
-    /// the start of `text`. Empty `text` cancels an active composition,
-    /// removing its text; with no composition it deletes a range selection
-    /// (`deleteContentBackward`, no composition event) and places the
-    /// selection relative to where the range began, as Blink does.
     SetComposition {
         text: String,
         selection: Range<usize>,
     },
-    /// `ImeCommitText`: replaces the composition — or the selection — with
-    /// `text` and ends the composition. The caret lands `relative_cursor`
-    /// UTF-16 units after the end of the inserted text (Blink's convention:
-    /// `0` is just after it, negative values move back into it and before).
-    CommitText { text: String, relative_cursor: i32 },
-    /// `ImeFinishComposingText`: keeps the composition's text as written
-    /// and ends the composition. Without `keep_selection` the caret moves
-    /// to the end of the former composition.
-    FinishComposition { keep_selection: bool },
-    /// `SetCompositionFromExistingText` (Android `setComposingRegion`):
-    /// marks committed text as the composition, in UTF-16 units. An empty
-    /// range finishes an active composition and keeps the selection.
-    SetCompositionFromExistingText { range: Range<usize> },
-    /// `DeleteSurroundingText`: deletes `before` UTF-16 units before the
-    /// selection and `after` after it, leaving the selected text in place.
-    /// Refused when either end would split a surrogate pair.
-    DeleteSurrounding { before: usize, after: usize },
-    /// `ExtendSelectionAndDelete`: widens the selection by `before` and
-    /// `after` UTF-16 units, then deletes it. Refused when either end would
-    /// split a surrogate pair.
-    ExtendSelectionAndDelete { before: usize, after: usize },
-    /// `SetEditableSelectionOffsets`: the selection, in UTF-16 units, anchor
-    /// at `range.start`. An offset inside a surrogate pair moves to the start
-    /// of its character; one past the end moves to the end.
-    SetSelection { range: Range<usize> },
-    /// Places the caret at `point` (host border-box CSS px), or with
-    /// `extend` moves only the selection's focus there — at the granularity
-    /// the selection was made with, so a drag after a double-click extends
-    /// by words.
+    CommitText {
+        text: String,
+        relative_cursor: i32,
+    },
+    FinishComposition {
+        keep_selection: bool,
+    },
+    SetCompositionFromExistingText {
+        range: Range<usize>,
+    },
+    DeleteSurrounding {
+        before: usize,
+        after: usize,
+    },
+    ExtendSelectionAndDelete {
+        before: usize,
+        after: usize,
+    },
+    SetSelection {
+        range: Range<usize>,
+    },
     SelectFromPoint {
         point: euclid::default::Point2D<f32>,
         extend: bool,
     },
-    /// Selects the word at `point` (a double-click).
     SelectWordAtPoint {
         point: euclid::default::Point2D<f32>,
     },
-    /// Selects the visual line at `point` (a triple-click).
     SelectLineAtPoint {
         point: euclid::default::Point2D<f32>,
     },
-    /// Inserts text in place of the selection (`insertText`). An active
-    /// composition is finished first.
     Insert(String),
-    /// Inserts `"\n"` in place of the selection (`insertLineBreak`).
     InsertLineBreak,
-    /// Deletes the selection, or the character before the caret: the whole
-    /// grapheme cluster for an emoji or a line break, the last code point of
-    /// the cluster otherwise (`deleteContentBackward`).
     DeleteBackward,
-    /// Deletes the selection, or the grapheme cluster after the caret
-    /// (`deleteContentForward`).
     DeleteForward,
-    /// Deletes the selection, or back to the previous word boundary
-    /// (`deleteWordBackward`).
     DeleteWordBackward,
-    /// Deletes the selection, or up to the next word boundary
-    /// (`deleteWordForward`).
     DeleteWordForward,
-    /// Moves the selection's focus; with `extend` the anchor stays, without
-    /// it the selection collapses at the new position.
     Move {
         granularity: Granularity,
         direction: Direction,
         extend: bool,
     },
-    /// Selects the whole value.
     SelectAll,
 }
 
-/// How far a [`Command::Move`] goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Granularity {
-    /// One grapheme cluster, in visual order (the arrow keys).
     Character,
-    /// To the next word boundary, in visual order.
     Word,
-    /// To the start or end of the visual line (Home/End).
     LineBoundary,
-    /// One visual line up or down, keeping the horizontal position.
     Line,
-    /// To the start or end of the value.
     Document,
 }
 
-/// Which way a [`Command::Move`] goes: `Backward` is left or up, `Forward`
-/// right or down. For `Character` and `Word` the movement is visual, which
-/// is logical order in left-to-right text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Backward,
     Forward,
 }
 
-/// Which event an [`EditEvent`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditEventKind {
     BeforeInput,
@@ -164,7 +119,6 @@ pub enum EditEventKind {
 }
 
 impl EditEventKind {
-    /// The event's type string.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -177,17 +131,11 @@ impl EditEventKind {
     }
 }
 
-/// One event a command owes script, at the editing host. Every one of them
-/// bubbles and is composed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditEvent {
     pub kind: EditEventKind,
-    /// `InputEvent.inputType` (Input Events Level 2); empty for the
-    /// composition events, which have none.
     pub input_type: &'static str,
-    /// `InputEvent.data` or `CompositionEvent.data`.
     pub data: Option<String>,
-    /// `InputEvent.isComposing`; `false` for the composition events.
     pub is_composing: bool,
 }
 
@@ -224,19 +172,9 @@ const DELETE_CONTENT_FORWARD: &str = "deleteContentForward";
 const DELETE_WORD_BACKWARD: &str = "deleteWordBackward";
 const DELETE_WORD_FORWARD: &str = "deleteWordForward";
 
-/// What a command did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EditOutcome {
-    /// Whether the command was carried out. `false` when nothing is focused,
-    /// when the command had nothing to act on, and when it was refused: a
-    /// value change on a read-only host (one with an element child), any
-    /// command but `SetSelection` and `SelectAll` over a paragraph that is
-    /// not built from the value alone, a command that must measure past a
-    /// truncation cut, a surrogate pair split, or a commit whose value moved
-    /// after it was prepared.
     pub applied: bool,
-    /// The events the embedder dispatches at the host, in order. The value
-    /// changed between the last `beforeinput` and the first `input`.
     pub events: Vec<EditEvent>,
 }
 
@@ -249,25 +187,16 @@ impl EditOutcome {
     }
 }
 
-/// The selection a prepared edit leaves.
 #[derive(Clone, Copy, Debug)]
 enum SelectionAfter {
-    /// Byte offsets into the value after the change.
     Bytes(ByteSelection),
-    /// A parley selection over the current layout, which a command that
-    /// changes no value can keep — with its word or line granularity and its
-    /// remembered horizontal position.
     Layout(Selection),
 }
 
-/// A command's complete effect, computed but not applied
-/// ([`Document::prepare_editing`]).
 #[derive(Clone, Debug)]
 pub struct PreparedEdit {
     host: NodeId,
-    /// The value the edit was computed against.
     base: String,
-    /// Replacements in `base`'s byte offsets, ascending and disjoint.
     changes: Vec<(Range<usize>, String)>,
     selection: SelectionAfter,
     composition: Option<Range<usize>>,
@@ -276,32 +205,26 @@ pub struct PreparedEdit {
 }
 
 impl PreparedEdit {
-    /// The host the edit applies to.
     #[must_use]
     pub const fn host(&self) -> NodeId {
         self.host
     }
 
-    /// Every event the edit owes, in dispatch order.
     #[must_use]
     pub fn events(&self) -> &[EditEvent] {
         &self.events
     }
 
-    /// How many of [`Self::events`] are dispatched before the commit; the
-    /// rest follow it.
     #[must_use]
     pub const fn commit_index(&self) -> usize {
         self.commit_index
     }
 
-    /// Whether committing changes the host's value.
     #[must_use]
     pub fn changes_value(&self) -> bool {
         !self.changes.is_empty()
     }
 
-    /// An edit that changes only the selection or the composition.
     fn select(
         host: NodeId,
         base: String,
@@ -321,7 +244,6 @@ impl PreparedEdit {
 }
 
 impl Command {
-    /// Whether the command measures the layout, and so needs a current one.
     const fn reads_layout(&self) -> bool {
         matches!(
             self,
@@ -337,16 +259,11 @@ impl Command {
     }
 }
 
-/// What every command is computed from.
 struct Context {
     host: NodeId,
     value: String,
     session: Session,
-    /// Whether the value may change: the session is a focused editing
-    /// host's, and the host has no element child.
     writable: bool,
-    /// The selection as value bytes, read once from wherever the session
-    /// holds it.
     selection: ByteSelection,
 }
 
@@ -371,9 +288,6 @@ impl Context {
             .and_then(|range| self.value.get(range.clone()))
     }
 
-    /// One change of `range` to `text`, leaving `selection` (byte offsets in
-    /// the new value) and `composition`, with `events` around it: the change
-    /// lands before the first `input`.
     fn replace(
         self,
         range: Range<usize>,
@@ -397,9 +311,6 @@ impl Context {
         }
     }
 
-    /// A deletion of `range` (bytes) outside any composition logic: a
-    /// `beforeinput`/`input` pair of `input_type`, the caret collapsed at the
-    /// range's start, and an active composition carried through it.
     fn delete(self, range: Range<usize>, input_type: &'static str) -> Option<PreparedEdit> {
         if range.is_empty() {
             return None;
@@ -414,7 +325,6 @@ impl Context {
     }
 }
 
-/// `beforeinput` and `input` of one input type.
 fn input_pair(input_type: &'static str, data: Option<&str>, composing: bool) -> Vec<EditEvent> {
     vec![
         EditEvent::input(EditEventKind::BeforeInput, input_type, data, composing),
@@ -422,8 +332,6 @@ fn input_pair(input_type: &'static str, data: Option<&str>, composing: bool) -> 
     ]
 }
 
-/// `offset` in the value after `changes`, which are ascending and disjoint;
-/// an offset inside a replaced range moves to the replacement's start.
 fn map_offset(offset: usize, changes: &[(Range<usize>, String)]) -> usize {
     let mut shifted = offset;
     for (range, text) in changes {
@@ -438,13 +346,11 @@ fn map_offset(offset: usize, changes: &[(Range<usize>, String)]) -> usize {
     shifted
 }
 
-/// `range` after `changes`, or `None` when nothing of it is left.
 fn map_range(range: &Range<usize>, changes: &[(Range<usize>, String)]) -> Option<Range<usize>> {
     let mapped = map_offset(range.start, changes)..map_offset(range.end, changes);
     (!mapped.is_empty()).then_some(mapped)
 }
 
-/// `changes` applied to `base`.
 fn apply_changes(base: &str, changes: &[(Range<usize>, String)]) -> String {
     let mut value = String::with_capacity(base.len());
     let mut at = 0;
@@ -458,15 +364,6 @@ fn apply_changes(base: &str, changes: &[(Range<usize>, String)]) -> String {
 }
 
 impl<T: Sync> Document<T> {
-    /// Computes what `command` would do to the selection host without
-    /// doing it. `None` when there is no selection host or the command has
-    /// nothing to act on or is refused. A selectable element selected
-    /// without focus ([`Self::begin_selection`]) takes the commands that
-    /// place and move the selection, over its selection text
-    /// ([`Self::session_text`]), and refuses every one that would change a
-    /// value or compose text.
-    ///
-    /// Commands that measure the layout run a layout pass first.
     pub fn prepare_editing(&mut self, command: Command) -> Option<PreparedEdit> {
         self.editing.session.as_ref()?;
         if command.reads_layout() {
@@ -476,9 +373,6 @@ impl<T: Sync> Document<T> {
         let host = session.host;
         let value = self.session_text(&session);
         let paragraph = self.session_paragraph(&session);
-        // A paragraph built from more than the value — generated `content`,
-        // an element child's text — has no offsets in the value: only the
-        // commands that work on value offsets alone apply over it.
         let trusted = paragraph
             .as_ref()
             .is_none_or(|paragraph| paragraph.shows_value);
@@ -553,17 +447,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Applies a prepared edit: writes the value, places the selection and
-    /// the composition, and answers with the edit's events. Applies nothing
-    /// when the host is no longer the selection host or its selection text
-    /// changed since the edit was prepared.
-    ///
-    /// An edit that changes the value, or leaves a selection other than the
-    /// one held (`selection_differs`), sets the document's
-    /// `selectionchange` flag ([`Self::has_pending_selectionchange`]); one
-    /// that leaves the same offsets — a `SetSelection` to the range already
-    /// selected — does not, as the Selection API fires `selectionchange`
-    /// only when the selection changes.
     pub fn commit_editing(&mut self, edit: PreparedEdit) -> EditOutcome
     where
         T: Default,
@@ -580,9 +463,6 @@ impl<T: Sync> Document<T> {
             return EditOutcome::refused();
         }
         let changes_selection = !edit.changes.is_empty() || {
-            // The held selection as value offsets is read only where the
-            // comparison needs it: offsets after, against a selection held
-            // in the paragraph. Read before anything is written.
             let held = match (edit.selection, session.pending) {
                 (SelectionAfter::Bytes(_), None) => {
                     session.bytes(self.session_paragraph(session).as_ref(), &edit.base)
@@ -618,8 +498,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// [`Self::prepare_editing`] then [`Self::commit_editing`]: the whole
-    /// command, for an embedder that has nothing to dispatch in between.
     pub fn apply_editing(&mut self, command: Command) -> EditOutcome
     where
         T: Default,
@@ -630,24 +508,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Replaces `host`'s value as a script's write to a form control's
-    /// value does (`HTMLInputElement.value`): no event is owed, and when
-    /// `host` is the focused host its composition ends and its selection
-    /// becomes `selection`, in UTF-16 units of the new value (an offset
-    /// inside a surrogate pair rounds down to its character's start, one
-    /// past the end clamps, as [`Command::SetSelection`] reads them). A
-    /// host that is not focused retains `selection` instead
-    /// ([`Self::host_selection`]), for its next [`Self::focus`] to restore,
-    /// as a browser's text control keeps the selection a value write left.
-    ///
-    /// The value is written as exactly one text node, the normalization the
-    /// first edit performs, and only when it differs from the current one.
-    /// `host` need not be an editing host: an element layer that turns
-    /// editing off (a read-only field) still owns the text it shows.
-    ///
-    /// The element layer over this kernel (`x-input`, `x-textarea`) is the
-    /// caller: it writes a script's value, and the value its own filters
-    /// leave after an edit.
     pub fn set_host_value(&mut self, host: NodeId, value: &str, selection: Range<usize>)
     where
         T: Default,
@@ -673,11 +533,6 @@ impl<T: Sync> Document<T> {
             .session
             .as_mut()
             .expect("the focused host has a session");
-        // The focused host's write changes the document's selection when it
-        // changes the value or the offsets. A selection held in the
-        // paragraph (`pending` is `None`) counts as changed: that form is
-        // not compared here, and a write that places the selection again is
-        // taken as a change of it.
         if value_changes || session.pending != Some(selection) {
             self.editing.selectionchange_pending = true;
         }
@@ -686,7 +541,6 @@ impl<T: Sync> Document<T> {
         self.note_visual_mutation();
     }
 
-    /// Writes `value` into `host` as exactly one text node.
     fn write_host_value(&mut self, host: NodeId, value: String)
     where
         T: Default,
@@ -718,17 +572,6 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// Whether committing `after` changes the session's selection: the
-/// document's `selectionchange` flag's test for an edit that changes no
-/// value ([`Document::commit_editing`]).
-///
-/// - Offsets after (`Bytes`) differ unless they equal `held`, the selection the session holds as
-///   value offsets: its pending offsets, or, while it is held in the paragraph, what the paragraph
-///   reads back ([`Session::bytes`]). `None` — a paragraph that cannot read it back — differs.
-/// - A parley selection after (`Layout`) differs unless the session holds one in the paragraph too
-///   (`pending` is `None`) with the same anchor and focus, each by byte index and affinity.
-///   [`Selection`] has no `PartialEq`, so the two cursors are compared field by field; the
-///   remembered horizontal position and the granularity are not offsets and are not compared.
 fn selection_differs(
     session: &Session,
     after: &SelectionAfter,
@@ -746,17 +589,12 @@ fn selection_differs(
     }
 }
 
-/// A selection the layout shows only up to a truncation cut: refused when
-/// either end lies at or past it, where the display layout shows the tail.
 fn shown(paragraph: &EditableParagraph<'_>, selection: Selection) -> Option<Selection> {
     let cut = paragraph.map.cut_byte();
     let past = |cursor: Cursor| paragraph.map.truncated() && cursor.index() >= cut;
     (!past(selection.anchor()) && !past(selection.focus())).then_some(selection)
 }
 
-/// The session's selection as a parley value over `paragraph`'s layout,
-/// for a command that measures from it: `None` when its pending offsets are
-/// not shown there.
 fn current_in(context: &Context, paragraph: &EditableParagraph<'_>) -> Option<Selection> {
     match context.session.pending {
         None => Some(context.session.selection),
@@ -772,9 +610,6 @@ fn select_at_point(
 ) -> Option<PreparedEdit> {
     let composition = context.composition();
     let Some(paragraph) = paragraph else {
-        // No paragraph: a host that establishes none and is empty, or whose
-        // white space renders nothing. Every point is at the end of the
-        // value.
         let end = context.value.len();
         return Some(PreparedEdit::select(
             context.host,
@@ -808,8 +643,6 @@ fn move_selection(
     let forward = direction == Direction::Forward;
     let composition = context.composition();
     if granularity == Granularity::Document {
-        // The value's ends are value offsets: no layout needed, and none
-        // past a truncation cut is asked.
         let selection = context.selection();
         let end = if forward { context.value.len() } else { 0 };
         let anchor = if extend { selection.anchor } else { end };
@@ -853,9 +686,6 @@ fn move_selection(
     };
     let mut selection = step(&current);
     if granularity == Granularity::Character {
-        // A cluster with no source unit — an inline box's edge — is no
-        // character of the value: a step over it alone moved the caret in
-        // the layout and not in the value, so it steps on.
         let unit = |selection: &Selection| paragraph.map.byte_to_unit(selection.focus().index());
         let mut from = current;
         for _ in 0..MAX_EDGE_STEPS {
@@ -876,13 +706,8 @@ fn move_selection(
     ))
 }
 
-/// How many edge clusters one character step walks over at most: an inline
-/// box's start and end edges, nested a few deep, before the next character.
 const MAX_EDGE_STEPS: usize = 8;
 
-/// A move with no paragraph to measure in — a host that establishes none and
-/// is empty, or whose white space renders nothing: one code point for a
-/// character, the value's ends for every other granularity.
 fn move_in_value(
     context: &Context,
     granularity: Granularity,
@@ -920,10 +745,6 @@ fn move_in_value(
     }
 }
 
-/// The deletions that ask the layout where a cluster or a word ends:
-/// parley's `PlainEditorDriver::{backdelete, delete, backdelete_word,
-/// delete_word}`, against the host's value instead of an editor buffer,
-/// every layout byte read back through the paragraph's source map.
 fn delete_by_layout(
     context: Context,
     paragraph: Option<&EditableParagraph<'_>>,
@@ -946,7 +767,6 @@ fn delete_by_layout(
     let caret = selection.focus;
     let value = &context.value;
     let Some(paragraph) = paragraph else {
-        // No paragraph: one code point, or to the value's end for a word.
         let range = match command {
             Command::DeleteBackward => value[..caret]
                 .char_indices()
@@ -967,8 +787,6 @@ fn delete_by_layout(
     let focus = shown(paragraph, current_in(&context, paragraph)?)?.focus();
     let range = match command {
         Command::DeleteBackward => {
-            // Upstream cluster: the whole of it for a line break or an
-            // emoji, its last code point otherwise.
             let cluster = focus.logical_clusters(layout)[0]?;
             let start = if cluster.is_hard_line_break() || cluster.is_emoji() {
                 paragraph.value_byte(value, cluster.text_range().start)?
@@ -999,7 +817,6 @@ fn delete_by_layout(
     context.delete(range, input_type)
 }
 
-/// `SetEditableSelectionOffsets`: value offsets alone.
 fn set_selection(context: Context, range: &Range<usize>) -> PreparedEdit {
     let anchor = byte_of_unit_floor(&context.value, range.start);
     let focus = byte_of_unit_floor(&context.value, range.end);
@@ -1040,7 +857,6 @@ fn set_composition(context: Context, text: &str, selection: &Range<usize>) -> Op
         let Some(range) = composition else {
             return delete_selection_for_empty_composition(context, selection);
         };
-        // Cancelling: the composition's text goes, and the composition ends.
         let mut events = vec![
             EditEvent::input(
                 EditEventKind::BeforeInput,
@@ -1100,14 +916,6 @@ fn set_composition(context: Context, text: &str, selection: &Range<usize>) -> Op
     ))
 }
 
-/// `SetComposition` with empty text and no composition, Blink's third
-/// case (`InputMethodController::SetComposition`, for IMEs such as
-/// IBus-Anthy): a range selection is deleted with no composition event, by
-/// `DeleteSelection`'s `beforeinput`/`input` pair of `deleteContentBackward`
-/// (`TypingCommand::GetInputType` for `kDeleteSelection`), and the selection
-/// is then set `selection` UTF-16 units from where the deleted range began,
-/// as `SetEditableSelectionOffsets` does. A collapsed selection changes
-/// nothing.
 fn delete_selection_for_empty_composition(
     context: Context,
     selection: &Range<usize>,

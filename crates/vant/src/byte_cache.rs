@@ -31,61 +31,38 @@ use crate::CachePolicy;
 use crate::http::{Plan, StoredResponse, plan};
 use crate::platform::{Meta, Response, Store};
 
-/// How often a hit's recency reaches the Store. The artifact tier
-/// ([`crate::artifact`]) follows the same rule through [`touch_due`].
 const TOUCH_INTERVAL: Duration = Duration::from_hours(24);
 
-/// Whether a hit at `now` on an entry whose recency the Store last recorded
-/// at `persisted` is due a [`Store::touch`]: at most once per
-/// [`TOUCH_INTERVAL`], so a hot entry costs no write per hit.
 pub(crate) fn touch_due(persisted: SystemTime, now: SystemTime) -> bool {
     now.duration_since(persisted)
         .is_ok_and(|elapsed| elapsed >= TOUCH_INTERVAL)
 }
 
-/// The index's view of one stored response.
 #[derive(Clone, Debug)]
 pub struct Entry {
-    /// The entry as the Store keeps it, with `last_used` as this tier last
-    /// saw it used.
     pub meta: Meta,
-    /// The media type the body was labelled with when it was stored.
     pub media_type: Option<String>,
     pub response: StoredResponse,
 }
 
-/// How a body read from the Store is handed over.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Read {
-    /// Read into memory the caller owns.
     #[default]
     Owned,
-    /// Mapped read-only where the Store supports it ([`Store::map_body`]),
-    /// for bytes the caller retains; read as [`Owned`](Self::Owned) where
-    /// it does not.
     Mapped,
 }
 
-/// What a request should do, given what the tier holds for it.
 #[derive(Clone, Debug)]
 pub enum Lookup {
-    /// Serve these stored bytes without a request.
     UseStored(Entry, Bytes),
-    /// Make a request.
     Fetch {
-        /// The conditional headers a revalidation adds to the request.
         conditional: Option<HeaderMap>,
-        /// Whether a `304` answer refreshes the stored entry
-        /// ([`ByteCache::refreshed`]).
         revalidating: bool,
-        /// Whether the answer may be stored ([`ByteCache::store`]).
         store: bool,
     },
-    /// `only-if-cached` with nothing stored: the request cannot be served.
     Unavailable,
 }
 
-/// A byte-budgeted cache of HTTP responses over a [`Store`].
 pub struct ByteCache<S: Store> {
     store: S,
     budget: u64,
@@ -100,8 +77,6 @@ struct Index {
 
 struct Slot {
     entry: Entry,
-    /// The `last_used` the Store last recorded, which rate-limits
-    /// [`Store::touch`].
     persisted: SystemTime,
 }
 
@@ -117,10 +92,6 @@ impl<S: Store> std::fmt::Debug for ByteCache<S> {
 }
 
 impl<S: Store> ByteCache<S> {
-    /// Opens the tier over `store`: indexes every entry [`Store::scan`]
-    /// finds, deletes those whose record does not parse, and trims to the
-    /// budget, which is `budget_bytes` or the Store's quota when that is
-    /// smaller. A scan that fails opens an empty tier.
     #[must_use]
     pub fn open(store: S, budget_bytes: u64) -> Self {
         let budget = store
@@ -159,7 +130,6 @@ impl<S: Store> ByteCache<S> {
         cache
     }
 
-    /// The Store the tier is built on.
     #[must_use]
     pub fn store_ref(&self) -> &S {
         &self.store
@@ -185,17 +155,11 @@ impl<S: Store> ByteCache<S> {
         self.index().slots.is_empty()
     }
 
-    /// The index's entry for `key`, without reading the Store.
     #[must_use]
     pub fn entry(&self, key: &str) -> Option<Entry> {
         self.index().slots.get(key).map(|slot| slot.entry.clone())
     }
 
-    /// Decides how a request for `key` with `policy` is served at `now`.
-    ///
-    /// A stored answer is read back and verified before it is offered; one
-    /// that does not verify is deleted and the request is planned as if
-    /// nothing were stored.
     #[must_use]
     pub fn lookup(&self, key: &str, policy: CachePolicy, now: SystemTime, read: Read) -> Lookup {
         let mut index = self.index();
@@ -216,10 +180,6 @@ impl<S: Store> ByteCache<S> {
         }
     }
 
-    /// Stores `response` under `key` as fetched at `now`, replacing any
-    /// existing entry, and evicts least-recently-used entries until the
-    /// budget holds. `false` when the response may not be stored, is larger
-    /// than the whole budget, or the Store failed to write it.
     pub fn store(
         &self,
         key: &str,
@@ -262,10 +222,6 @@ impl<S: Store> ByteCache<S> {
         true
     }
 
-    /// The `304` path: refreshes `key`'s record with the headers the `304`
-    /// carried, marks it used at `now`, and reads the body back. `None` when
-    /// nothing is stored for `key` or the body no longer verifies, in which
-    /// case the entry is gone and the caller fetches again.
     #[must_use]
     pub fn refreshed(
         &self,
@@ -280,16 +236,12 @@ impl<S: Store> ByteCache<S> {
         slot.entry.meta.record = response.to_record(slot.entry.media_type.as_deref());
         slot.entry.meta.last_used = now;
         slot.entry.response = response;
-        // Best effort: a record that failed to persist still serves this
-        // process, and the stale one on the Store only costs a revalidation.
         if self.store.put_meta(&slot.entry.meta).is_ok() {
             slot.persisted = now;
         }
         self.read_hit(&mut index, key, now, read)
     }
 
-    /// `key`'s body mapped read-only, when it is stored and the Store maps
-    /// bodies. A mapping that does not verify drops the entry.
     #[must_use]
     pub fn map_body(&self, key: &str) -> Option<Bytes> {
         let mut index = self.index();
@@ -303,13 +255,11 @@ impl<S: Store> ByteCache<S> {
         }
     }
 
-    /// Forgets `key` and deletes it from the Store.
     pub fn remove(&self, key: &str) {
         let mut index = self.index();
         self.drop_entry(&mut index, key);
     }
 
-    /// Forgets every entry and deletes each from the Store.
     pub fn clear(&self) {
         let mut index = self.index();
         for key in index.slots.keys() {
@@ -339,13 +289,10 @@ impl<S: Store> ByteCache<S> {
         }
     }
 
-    /// The answer for a request whose stored entry turned out unusable.
     fn lookup_without_entry(policy: CachePolicy, now: SystemTime) -> Lookup {
         Self::from_plan(plan(policy, None, now))
     }
 
-    /// Reads and verifies `key`'s body, marking the entry used at `now`.
-    /// An entry that does not verify is dropped.
     fn read_hit(
         &self,
         index: &mut Index,
@@ -366,8 +313,6 @@ impl<S: Store> ByteCache<S> {
         Some((slot.entry.clone(), bytes))
     }
 
-    /// `key`'s body from the Store, or `None` when it is missing, belongs to
-    /// another key, or is not `len` bytes long.
     fn read_body(&self, key: &str, len: u64, read: Read) -> Option<Bytes> {
         if read == Read::Mapped
             && let Some(bytes) = self.store.map_body(key)
@@ -384,8 +329,6 @@ impl<S: Store> ByteCache<S> {
         }
     }
 
-    /// Whether a mapped body is `key`'s: a mapping carries no [`Meta`], so
-    /// the key is checked against the Store's record of it.
     fn verified_mapping(&self, key: &str, len: u64, bytes: &Bytes) -> bool {
         bytes.len() as u64 == len
             && matches!(
@@ -504,7 +447,6 @@ mod tests {
             Read::Owned,
         )));
 
-        // A fresh open rebuilds the index from the Store.
         drop(cache);
         let reopened = ByteCache::open(store, 1024);
         assert_eq!(reopened.len(), 1);
@@ -519,7 +461,6 @@ mod tests {
         let store = MemStore::default();
         let cache = ByteCache::open(store.clone(), 1024);
         assert!(cache.store("https://a.test/one", None, &response(FRESH, b"one"), at(0)));
-        // The Store now answers `one` with an entry that is another key's.
         let mut other = cache.entry("https://a.test/one").unwrap().meta;
         other.key = "https://a.test/two".to_owned();
         store.forge("https://a.test/one", other, b"two");
@@ -551,7 +492,6 @@ mod tests {
         assert!(!store.holds("b"));
         assert_eq!(reopened.used_bytes(), 6);
 
-        // A body that vanished after open reads as a miss and drops the entry.
         store.delete("a").unwrap();
         assert!(is_plain_fetch(&reopened.lookup(
             "a",
@@ -561,7 +501,6 @@ mod tests {
         )));
         assert!(reopened.entry("a").is_none());
 
-        // So does a body whose length disagrees with its record.
         let meta = reopened.entry("c").unwrap().meta;
         store.forge("c", meta, b"c");
         assert!(matches!(
@@ -717,7 +656,6 @@ mod tests {
         assert_eq!(entry.meta.last_used, at(50));
         hit(cache.lookup("k", CachePolicy::Default, at(600), Read::Owned));
 
-        // The refreshed record is what a later open reads.
         let reopened = ByteCache::open(store, 1024);
         let entry = reopened.entry("k").unwrap();
         assert_eq!(
@@ -809,14 +747,12 @@ mod tests {
         );
         assert!(cache.map_body("missing").is_none());
 
-        // A mapping filed under another key's record is a miss.
         let mut other = cache.entry("k").unwrap().meta;
         other.key = "elsewhere".to_owned();
         store.forge("k", other, b"body");
         assert!(cache.map_body("k").is_none());
         assert!(cache.is_empty());
 
-        // Without mapping support a mapped read falls back to an owned one.
         let plain = ByteCache::open(MemStore::default(), 1024);
         assert!(plain.store("k", None, &response(FRESH, b"body"), at(0)));
         assert!(plain.map_body("k").is_none());

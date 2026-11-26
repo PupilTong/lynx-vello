@@ -140,24 +140,10 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Runs the screenshot server on IPv4 and IPv6 unspecified addresses.
-/// Requests remain concurrent at the HTTP layer; capture crosses one bounded
-/// queue to the thread that owns the non-`Send` Bobcat view handle.
 pub async fn serve(port: &str) -> Result<(), ServerError> {
     serve_with_native_modules(port, Vec::new).await
 }
 
-/// Runs the screenshot server with embedder-provided native modules.
-///
-/// The factory moves to the capture thread and runs once for each new view.
-/// Its modules stay on that thread, so they may own thread-local state such
-/// as `Rc`s. The view receives the modules in the order the factory returns
-/// them, including any ES modules to import before the background entry.
-///
-/// # Errors
-///
-/// Returns the same startup, I/O, and shutdown errors as [`serve`]. A view
-/// that rejects its modules fails its capture through the usual HTTP path.
 pub async fn serve_with_native_modules(
     port: &str,
     mut create_modules: impl FnMut() -> Vec<Box<dyn NativeModule>> + Send + 'static,
@@ -170,16 +156,6 @@ pub async fn serve_with_native_modules(
     .await
 }
 
-/// Runs the screenshot server with per-view resources and native modules.
-///
-/// The factory receives the resource scope containing the decoded page and
-/// its startup sources. It can wrap the scope's fetcher to supply external
-/// frames and share their producer with a native module. The resulting
-/// fetcher and modules are constructed and serviced on the capture thread.
-///
-/// # Errors
-///
-/// Returns the same startup, I/O, and shutdown errors as [`serve`].
 pub async fn serve_with_view_factory<B, F>(
     port: &str,
     create_view: impl FnMut(Resources, &mut ViewSources) -> CaptureView<B> + Send + 'static,
@@ -189,10 +165,6 @@ where
     F: ResourceFetcher + 'static,
 {
     let port = parse_port(port)?;
-    // The platform's fonts are discovered once per process, and the first
-    // capture's layout would otherwise do it on the Lynx main thread, inside
-    // that request's deadline. Started here so it overlaps binding and the
-    // capture thread's startup; a capture that arrives first waits for it.
     tokio::task::spawn_blocking(bobcat_core::preload_system_fonts);
     let screenshot_store = ScreenshotStore::from_env()?;
     let (ipv4_listener, ipv6_listener) = bind_listeners(port)?;
@@ -370,8 +342,6 @@ async fn capture_form(
     if zip && form.source.is_empty() {
         return Err(ApiError::bad_request("ZIP upload must not be empty."));
     }
-    // Nothing here forwards page data to the view yet, so a non-empty value
-    // is refused rather than silently dropped.
     for (name, value) in [
         ("globalProps", &form.global_props),
         ("initData", &form.init_data),
@@ -622,7 +592,6 @@ mod tests {
             )
             .await
             .unwrap();
-            // Same handoff as screenshot_remote, without a public network dependency.
             form.source = b"downloaded source bytes".to_vec();
             let store = ScreenshotStore::in_memory();
             let response = capture_form(

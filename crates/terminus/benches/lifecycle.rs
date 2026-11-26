@@ -81,14 +81,10 @@ const PAGE_CSS: &str = "page { display: linear; }
      row { display: linear; width: 40px; height: 12px; }
      leaf { width: 8px; height: 8px; }";
 
-/// The subtree every benchmark works on: a root, `ROWS` rows, `LEAVES` leaves
-/// under each — 1 + 64 + 256 nodes, a list cell's worth.
 const ROWS: usize = 64;
 const LEAVES: usize = 4;
 const SUBTREE: usize = 1 + ROWS + ROWS * LEAVES;
 
-/// How many such subtrees the page carries beside the one under test, so the
-/// removal path runs against a page-sized tree rather than an empty one.
 const NEIGHBOURS: usize = 15;
 
 fn page() -> Document<()> {
@@ -97,8 +93,6 @@ fn page() -> Document<()> {
     doc
 }
 
-/// Builds one subtree under `parent`; returns its nodes in creation order,
-/// root first, which is the order a finalizer delivers handle deaths in.
 fn subtree(doc: &mut Document<()>, parent: NodeId) -> Vec<NodeId> {
     let mut ids = Vec::with_capacity(SUBTREE);
     let root = doc.create_element("cell", ());
@@ -117,7 +111,6 @@ fn subtree(doc: &mut Document<()>, parent: NodeId) -> Vec<NodeId> {
     ids
 }
 
-/// A laid-out page of `NEIGHBOURS + 1` subtrees; returns the last one's ids.
 fn populated_page() -> (Document<()>, Vec<NodeId>) {
     let mut doc = page();
     let page_root = doc.document_element().id();
@@ -129,7 +122,6 @@ fn populated_page() -> (Document<()>, Vec<NodeId>) {
     (doc, last)
 }
 
-/// The same page with the subtree under test already detached.
 fn page_with_detached_subtree() -> (Document<()>, Vec<NodeId>) {
     let (mut doc, ids) = populated_page();
     doc.remove_element(ids[0]);
@@ -184,7 +176,6 @@ fn drop_subtree_floor(bencher: divan::Bencher) {
         });
 }
 
-/// One finalizer's worth: a leaf still linked to a live parent.
 #[divan::bench]
 fn drop_element_one_node(bencher: divan::Bencher) {
     bencher
@@ -195,8 +186,6 @@ fn drop_element_one_node(bencher: divan::Bencher) {
         });
 }
 
-/// A laid-out page whose document element holds `width` leaf children;
-/// returns the page and those children in order.
 fn wide_page(width: usize) -> (Document<()>, Vec<NodeId>) {
     let mut doc = page();
     let page_root = doc.document_element().id();
@@ -211,8 +200,6 @@ fn wide_page(width: usize) -> (Document<()>, Vec<NodeId>) {
     (doc, children)
 }
 
-/// Inserts a fresh node before `reference` (after the last child when
-/// `None`) and removes it again.
 fn bench_insert(
     bencher: divan::Bencher,
     width: usize,
@@ -245,9 +232,6 @@ fn insert_middle(bencher: divan::Bencher, width: usize) {
     });
 }
 
-/// The last child moved before the first: one removal at the end and one
-/// insertion at the front. Repeating it rotates the list, which keeps its
-/// width.
 #[divan::bench(args = [256, 4_096])]
 fn move_last_to_front(bencher: divan::Bencher, width: usize) {
     let (mut doc, _) = wide_page(width);

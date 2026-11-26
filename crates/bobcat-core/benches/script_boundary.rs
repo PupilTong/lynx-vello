@@ -17,14 +17,8 @@ fn main() {
     divan::main();
 }
 
-/// Rows in a list-shaped tree. Large enough that per-element costs dominate
-/// the fixed cost of entering the realm, small enough to stay a screenful of
-/// plausible content.
 const ROWS: usize = 200;
 
-/// The boot every case starts from: a page, a container, and `ROWS` rows each
-/// holding a label, with every element retained on the JavaScript side the way
-/// a mounted `ReactLynx` component's fibers retain theirs.
 fn snapshot_source(rows: usize) -> String {
     format!(
         r"
@@ -59,11 +53,6 @@ fn snapshot_source(rows: usize) -> String {
     )
 }
 
-/// A realm's whole boot over an entry that renders nothing: the runtime and
-/// the realm opened, the host members installed, the built-in modules read
-/// into the realm and evaluated, the document created, the MTS initialized,
-/// and the entry imported and flushed: the work a view does before its own
-/// code runs, with none of that code in it.
 #[divan::bench]
 fn boot_realm_over_empty_entry(bencher: divan::Bencher) {
     bencher.bench_local(|| {
@@ -73,16 +62,6 @@ fn boot_realm_over_empty_entry(bencher: divan::Bencher) {
     });
 }
 
-/// The first render: `ROWS` rows created, styled, attributed and appended,
-/// then committed through style and layout.
-///
-/// It now also includes building the document, because the boot module is what
-/// creates one: the harness stages the ingredients and opens the realm, and the
-/// `new Document()` in the boot this case runs is where the UA cascade, the
-/// style pool and the author sheets are taken on. That work used to sit in the
-/// harness's own setup, outside the timed region, so this case's baseline steps
-/// once at the commit that moved it — what it measures afterwards is the same
-/// first render plus a fixed per-boot cost.
 #[divan::bench]
 fn snapshot_first_render(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -94,11 +73,6 @@ fn snapshot_first_render(bencher: divan::Bencher) {
         });
 }
 
-/// Re-applying a complete inline-style record to every row.
-///
-/// This is the shape a `ReactLynx` re-render produces for a style prop that
-/// changed: one whole record per element, replacing the block rather than
-/// mutating it.
 #[divan::bench]
 fn restyle_every_row(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -125,8 +99,6 @@ fn restyle_every_row(bencher: divan::Bencher) {
         });
 }
 
-/// Writing one attribute on every row: the narrowest possible host call, at
-/// list scale.
 #[divan::bench]
 fn set_one_attribute_on_every_row(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -148,10 +120,6 @@ fn set_one_attribute_on_every_row(bencher: divan::Bencher) {
         });
 }
 
-/// Reading a string back out of every row.
-///
-/// This is the host-to-script string direction — the one a returned
-/// `HostValue::String` takes on its way into the realm — at list scale.
 #[divan::bench]
 fn read_one_string_from_every_row(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -181,8 +149,6 @@ fn read_one_string_from_every_row(bencher: divan::Bencher) {
         });
 }
 
-/// A booted list with a listener on the container and one on the page, and
-/// the deepest label an event dispatch targets.
 fn listening_harness() -> (ScriptHarness, u64) {
     let mut harness = ScriptHarness::new();
     harness.boot(&snapshot_source(ROWS));
@@ -193,9 +159,6 @@ fn listening_harness() -> (ScriptHarness, u64) {
         __AddEventListener(page, 'tap', () => { seen += 1; }, { capture: true });
         ",
     );
-    // The label inside the last row: the deepest node in this shape, so the
-    // path is as long as it gets. Named by position rather than by id, so the
-    // case does not depend on the order the PAPI issued handles in.
     let page = harness.page();
     let list = harness.child(page, 0).expect("the boot appended the list");
     let last_row = harness.child_count(list) - 1;
@@ -208,7 +171,6 @@ fn listening_harness() -> (ScriptHarness, u64) {
     (harness, label)
 }
 
-/// One event walked to two listeners along a full-depth path.
 #[divan::bench]
 fn dispatch_to_listeners(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("tap");
@@ -219,13 +181,6 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
         });
 }
 
-/// The same target for an event name nothing listens to.
-///
-/// The painting side answers this from its own listener-name replica — a
-/// pass resync and a set lookup, no lock — so the realistic cost is what
-/// `has_listeners` measures here. The dispatch below covers a stale replica:
-/// the host's own listener table answers that nothing hears the name, so no
-/// path is built and nothing crosses into the realm.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
@@ -237,18 +192,6 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
         });
 }
 
-/// Registering a listener on every row, then unmounting every row.
-///
-/// A list update that discards its cells does exactly this, in this order:
-/// `__RemoveElement` detaches the cell, and the collector then calls
-/// `dropElement` for the handle it takes, whose free path takes the row's
-/// registrations out of the host's listener table — each registration was
-/// one `listenerOpened` crossing when it was added. The removal is not
-/// decoration: a
-/// connected element cannot be dropped, because its handle cannot be
-/// collected while its parent's holds it. Each iteration gets its own booted
-/// realm, because a drop is final — the ids the previous one used name
-/// nothing.
 #[divan::bench]
 fn register_then_drop_row_listeners(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -282,12 +225,6 @@ fn register_then_drop_row_listeners(bencher: divan::Bencher) {
         });
 }
 
-/// One plain attribute written on one row, then a flush with `ReactLynx`'s
-/// options object and no pipeline: the shape of an update nothing times.
-///
-/// The gate for "no cost when nothing observes": this flush reads one
-/// `bool` of the realm, two lengths of the slot, and nothing of the
-/// performance registry, so it must not move when timing is added.
 #[divan::bench]
 fn flush_one_attribute_update(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
@@ -308,10 +245,6 @@ fn flush_one_attribute_update(bencher: divan::Bencher) {
         });
 }
 
-/// The same update observed end to end on the main thread's side: a
-/// pipeline opened through `lynx.performance`, a `__lynx_timing_flag`
-/// attribute, and a flush handed the pipeline's options, which times its
-/// commit and binds the record.
 #[divan::bench]
 fn flush_one_update_with_timing_flag(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);

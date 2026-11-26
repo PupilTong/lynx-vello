@@ -92,135 +92,6 @@
 //! matches every element in `terminus`, and the `raw-text` rules are selector rules
 //! on the tag name, which a definition does not touch.
 
-/// `text`'s own defaults, from `web-elements`' `x-text.css`.
-///
-/// `color: initial` is why Lynx text does not wear an ancestor's color. Native
-/// Lynx runs with inheritance off unless the page turns it on; web-core runs
-/// on the browser's always-on inheritance and buys the same result by
-/// resetting `color` at every text root, which is the parity this engine
-/// committed to (`docs/tracking/deviations.md`). A nested run opts back in
-/// with `inherit`, and that carries a Lynx text gradient exactly as it carries
-/// a solid color — the fork's `color` holds either, and the glyph painter
-/// reads whichever it finds. The reset therefore also stops an ancestor's
-/// gradient at the text root, where web-core stops it with the same
-/// declaration. A page whose config says `enableCSSInheritance: true` gets
-/// [`CSS_INHERITANCE_RULES`] after these rules, which overrides the reset for
-/// a `text` inside a `view`.
-///
-/// A `text` renders text: anything else written directly inside one generates
-/// no box, and the tags that are content opt back in. `wrapper` dissolves,
-/// `view` and `image` stay atomic boxes in the flattened paragraph.
-/// `raw-text` opts back in from
-/// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
-/// lives.
-/// `attr(... number)` accepts numeric attributes without evaluating CSS
-/// expressions. Non-inherited integer registrations reject fractional counts;
-/// invalid or absent limits are unlimited.
-/// `--lynx-tail-color-convert` carries the `tail-color-convert` boolean the
-/// same way: zero, its initial value, leaves the truncation marker in the
-/// colour of the run the cut landed in, which is native Lynx's default.
-///
-/// `text-overflow` is an attribute as well as a property on native Lynx —
-/// `TextElement::ProcessAttributeForNormalLayoutMode` caches the attribute onto
-/// `kPropertyIDTextOverflow` (`core/renderer/dom/fiber/text_element.cc:176-182`)
-/// — and web-core observes it nowhere, so a 2026-09-16 ruling follows native
-/// here (`docs/tracking/deviations.md`). It is a selector rule rather than a
-/// presentational hint because it needs no parsing of its own: native's enum
-/// reader accepts the two literals and nothing else, so two UA rules keyed on
-/// those literals say the whole thing. Plain declarations, so author CSS still
-/// outranks the attribute the way it outranks every other UA rule.
-///
-/// A `text`'s paragraph keeps its text verbatim, as every native Lynx backend
-/// does: no CSS
-/// white-space processing (`core/renderer/dom/fiber/raw_text_element.cc:16-46`
-/// stores the text as written, and Android `BaseTextShadowNode.java:494-498`,
-/// iOS `LynxBaseTextShadowNode.m:240-249` and textra
-/// `text_layout_textra.cc:569-575` hand it to the platform engine unchanged).
-/// Spaces, tabs and newlines all stay; tabs stop every 20px as Android's
-/// `Layout` does; a newline that ends the text adds an empty last line, as
-/// Android's `StaticLayout` does; only `white-space: nowrap` stops the
-/// wrapping, and then nothing after the first newline shows — native parses
-/// no other `white-space` keyword, so `pre` and the rest wrap. Every Lynx
-/// paragraph does this; `<markdown>`'s shadow paragraphs are standard inline
-/// formatting contexts, not Lynx paragraphs, and keep css-text-3. This is a
-/// ruled deviation from web-core, whose `x-text` hands its text to the
-/// browser's CSS white-space processing.
-///
-/// An `inline-truncation` is content wherever it is written *directly* inside
-/// a `text`, and generates no box anywhere else — the same scope web-core's
-/// `:scope > inline-truncation` query honours. It carries
-/// `--lynx-inline-truncation` because `crates/terminus` names no Lynx tag: which
-/// subtree a paragraph takes its custom truncation content from is a
-/// computed-style fact there, exactly as the paragraph limits are.
-///
-/// # Why this sheet gives a text no `display`
-///
-/// A text tag — `text`, `inline-text`, `inline-truncation` — lays out as a
-/// Lynx paragraph, or a run of one, because of what the element is: [`define`]
-/// marks the three definitions as Lynx text elements
-/// ([`terminus::link::CustomElement::is_lynx_text`]), as an HTML `img` is replaced content
-/// whatever its `display` says. Its computed `display` keeps the author's value.
-/// `none` hides it, as it does in native Lynx and in web-core; every other
-/// value but `contents` leaves it a paragraph. That is native Lynx's shape: a
-/// text's inline-ness is structural (`TextElement::ConvertToInlineElement`,
-/// `core/renderer/dom/fiber/text_element.cc:196-205`), so native ignores
-/// `display: flex` on a text. `contents` on a text has no Lynx behaviour to
-/// follow: it is undefined behaviour (user ruling, 2026-10-17), which acts as
-/// computed only so that it does not crash. web-core lets the author's value
-/// take over the `x-text` host (`x-text { display: flex }` is author-origin,
-/// `x-text.css:7-13`) while its shadow tree keeps the text, so the host's box
-/// differs there (`docs/tracking/deviations.md`).
-///
-/// Until 2026-10-15 the sheet declared `display: -lynx-text !important`,
-/// which also outranked the author's `display: none`, and until 2026-10-17 a
-/// plain `display: -lynx-text`, which the stylo fork's style adjuster
-/// restored on the three tags under any author value but `none`. The value
-/// was removed on 2026-10-17. Without the `!important`, a UA rule that hides
-/// an element's children hides a `text` among them too, as a browser would:
-/// `list > *:not(list-item):not(wrapper)`, `x-swiper > :not(x-swiper-item,
-/// wrapper)`, `image > *` and `lynx-svg > *`. The rule for anything written
-/// directly inside a `text` therefore names the three text tags, and keeps
-/// its old specificity with `:where`, so the `wrapper`, `view` and `image`
-/// rules after it still outrank it. `inline-truncation` shows only directly
-/// inside a `text`, so the rule hiding it names every other parent.
-///
-/// # Why an inline `image` has no padding
-///
-/// `padding: 0 !important` on an `image` that is inline content of a paragraph
-/// is the one `!important` this sheet spends, and it buys
-/// web-core's geometry rather than a default. There, the authored host element
-/// has no box
-/// at all: `x-text > x-image` — and the `inline-text >`, `inline-truncation >`
-/// and `lynx-wrapper` variants of it — is `display: contents !important`
-/// (`x-text.css:69-82`), so the box on the line is the shadow `::part(img)`,
-/// which is built by inheriting a fixed list: `width`, `height`, `border`,
-/// `border-radius`, `background-color`, `vertical-align`, `object-fit`,
-/// `flex`, `align-self` and `margin` (`x-text.css:120-135`). `padding` is not
-/// on that list, and the one `padding: inherit` in web-elements belongs to
-/// `x-image[auto-size]::part(img)`, an attribute this engine does not
-/// implement. An author's `padding` on an inline image therefore reaches no
-/// box in the reference and must reach none here.
-///
-/// Native is split. `TextLayoutTextra::HandleInlineImageProps`
-/// (`core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc:448-537`)
-/// fills the placeholder's `ImageProps` from the specified width and height,
-/// the four margins, the border radius and `vertical-align`, and never reads
-/// `padding`; Android's `InlineImageSpan` and iOS's default shadow-node path
-/// read the same values and no padding either. Harmony, and iOS's
-/// layout-in-element path, instead measure the image as a starlight leaf, whose
-/// `ClampExactWidth` floors the border box at padding plus border
-/// (`core/renderer/starlight/layout/layout_object.cc:515-519`). The rule here
-/// follows web-core, which the larger part of native matches.
-///
-/// Here the authored `image` *is* the box, so nothing removes its padding for
-/// free: under the Lynx `box-sizing: border-box` default a
-/// `width: 22px; padding-left: 50px` image would floor its border box at 50 and
-/// advance the line by 50 where web-core advances by 22. A normal UA
-/// declaration cannot say so — it loses to the author's own `padding-left` —
-/// and web-core's erasure of the host box is itself `!important`, so no author
-/// CSS can undo it. `margin` is a different case and is *not* touched: the shadow
-/// part inherits it, so it reaches the line in both engines. Nor is a `view`,
-/// which web-core leaves as a real `inline-flex` box with its padding intact.
 pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
@@ -246,56 +117,6 @@ text, inline-text, inline-truncation { user-select: none; }
 text[text-selection]:not([text-selection="false" i]), text[text-selection]:not([text-selection="false" i]) :is(text, inline-text, inline-truncation) { user-select: auto; }
 "#;
 
-/// What `enableCSSInheritance: true` adds to the sheet, after [`UA_RULES`];
-/// [`super::ua_sheet`] writes it when the page config has the switch on and
-/// leaves it out otherwise.
-///
-/// It is web-core's rule for the same switch (lynx-stack #3907, `8d0b358bf`,
-/// `web-core/css/in_shadow.css`):
-/// `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, x-view >
-/// lynx-wrapper, x-view > lynx-wrapper > x-text)` over fourteen `inherit`
-/// declarations. The scope is that rule's and no wider: a `text` directly
-/// inside a `view`, a `wrapper` directly inside a `view`, and a `text`
-/// directly inside such a wrapper. A `text` under `page`, `scroll-view`,
-/// `list-item` or any other container keeps the reset, as it does there.
-/// Native Lynx's switch of the same name does something else — a list of
-/// properties that inherit through every element, where nothing inherits
-/// with it off — and this rule does not build that
-/// (`docs/tracking/deviations.md`).
-///
-/// # Which declarations are written
-///
-/// Two of the fourteen change a computed value in this engine:
-///
-/// - `color: inherit` replaces the `color: initial` [`UA_RULES`] gives every `text`. The fork's
-///   `color` holds a Lynx text gradient as its own value, so this one declaration inherits a view's
-///   gradient as well as its solid color.
-/// - `text-decoration: inherit`. The shorthand's longhands are not inherited properties, so under
-///   an underlined view a `text` computes `none` without it. `view > wrapper` is in the selector
-///   for this declaration: the wrapper has to hold the view's value for the `text` inside it to
-///   inherit it.
-///
-/// The other twelve are left out because none of them can change one:
-///
-/// - `--lynx-text-bg-color`, `background-clip` and `-webkit-background-clip` belong to web-core's
-///   lowering of a gradient `color` for a browser — transparent glyphs over a background image
-///   clipped to them, which `x-text.css` resets at the text root. This engine lowers no gradient
-///   that way, so there is no reset here for them to override.
-/// - `direction`, `font-family`, `font-size`, `font-style`, `font-weight`, `letter-spacing`,
-///   `line-height`, `text-align` and `text-shadow` are inherited properties, and no rule of this
-///   sheet sets one of them on a `text` or a `wrapper`. Each already reaches the `text` from the
-///   view with the switch off, as it does under web-core, where `x-text.css` resets none of them.
-///
-/// # Precedence
-///
-/// web-core's selector has the specificity of one attribute selector, since
-/// `:where()` adds none: above every web-elements default for `x-text`, and
-/// above no authored rule, each of whose selectors web-core extends with
-/// `:not([l-e-name])`. Here the rule is user-agent origin, so every authored
-/// declaration and every inline style outranks it whatever its selector, and
-/// its tag selectors outrank `text`'s `color: initial` on specificity. The
-/// selector list is not wrapped in `:where()` for that reason: at no
-/// specificity it would lose to the reset it exists to replace.
 pub(super) const CSS_INHERITANCE_RULES: &str = "\
 view > text, view > wrapper, view > wrapper > text { color: inherit; text-decoration: inherit; }
 ";
@@ -312,15 +133,8 @@ use super::scroll_container::object;
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
 use crate::main::record::write_record_field;
 
-/// The paragraph tag the component is defined on. A nested `text` is a run
-/// of its ancestor's paragraph and establishes none, so its method answers
-/// code 8.
 pub(super) const TEXT_TAG: &str = "text";
 
-/// Whether `node` is a live `text` element: the one tag a `layout` listener
-/// turns the paragraph's layout report on for
-/// ([`crate::main::layout_change`]). A nested `text` is one too, and reports
-/// nothing, since it establishes no paragraph.
 pub(crate) fn is_text(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
@@ -328,24 +142,16 @@ pub(crate) fn is_text(document: &LynxDocument, node: NodeId) -> bool {
         .is_some_and(|tag| tag == TEXT_TAG)
 }
 
-/// Installs the `text` component, and `inline-text` and `inline-truncation`
-/// beside it as Lynx text elements with no component behaviour. Must run
-/// before any element could carry the tags, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     document.define(TEXT_TAG, Box::new(Text));
     document.define(INLINE_TEXT_TAG, Box::new(TextRun));
     document.define(INLINE_TRUNCATION_TAG, Box::new(TextRun));
 }
 
-/// The nested run tag.
 const INLINE_TEXT_TAG: &str = "inline-text";
 
-/// The truncation marker tag, whose content replaces a cut paragraph's tail.
 const INLINE_TRUNCATION_TAG: &str = "inline-truncation";
 
-/// `inline-text` and `inline-truncation`: Lynx text elements, defined for
-/// that kind alone.
 struct TextRun;
 
 impl CustomElement<()> for TextRun {
@@ -354,7 +160,6 @@ impl CustomElement<()> for TextRun {
     }
 }
 
-/// The `text` component: the three UI methods (module documentation).
 struct Text;
 
 impl CustomElement<()> for Text {
@@ -381,40 +186,13 @@ impl CustomElement<()> for Text {
     }
 }
 
-/// Per text element, the last non-empty `selectionchange` record sent to it
-/// — its range and whether it was forward — which [`report_selection_changes`]
-/// compares the next record against, as web-core's `#lastSelectionSignature`.
-///
-/// A side table rather than a field of the element, because no element
-/// component holds it: `text` is stateless, and `inline-text` has no
-/// behaviour at all. It is the runtime's, one per document (`DocumentSlot`).
-/// An entry exists only for an element that was sent a non-empty record,
-/// and leaves when the element is sent the empty one, when nothing listens
-/// for the event on it any more, or when it is freed, so the table holds
-/// the one or two text elements the one selection lies in.
 #[derive(Default)]
 pub(crate) struct SelectionReports(FxHashMap<NodeId, (Range<u32>, bool)>);
 
-/// Whether `node` fires Lynx's `selectionchange`: a `text` or an
-/// `inline-text` (module documentation).
 fn reports_selection(node: &terminus::link::Node<()>) -> bool {
     matches!(node.tag_name(), Some(TEXT_TAG | INLINE_TEXT_TAG))
 }
 
-/// Called by the runtime after it fired the W3C `selectionchange` at the
-/// document node: queues the Lynx `selectionchange` on `events` at every
-/// `text` and `inline-text` whose record changed (module documentation).
-///
-/// The elements asked are the ones the record can have changed for: for a
-/// focused editing host, the `text` and `inline-text` ancestors of the
-/// host, the host included, through `parent_id` — a UA shadow tree's host
-/// is not crossed, so a text field's editor reports to no text outside it;
-/// for a selectable element, the element and every `text` and
-/// `inline-text` in its subtree, through `child_ids`; and every element
-/// `reports` holds, whose selection may have left it. An element
-/// nothing listens on is forgotten, as web-core forgets its signature when
-/// the event is unbound, so a listener added later starts from the empty
-/// record.
 pub(crate) fn report_selection_changes(
     document: &LynxDocument,
     reports: &mut SelectionReports,
@@ -445,7 +223,6 @@ pub(crate) fn report_selection_changes(
                 if reports_selection(node) {
                     candidates.push(id);
                 }
-                // Children in reverse, so the first is taken next: tree order.
                 stack.extend(node.child_ids().iter().rev().copied());
             }
         }
@@ -494,15 +271,6 @@ pub(crate) fn report_selection_changes(
     }
 }
 
-/// The document's selection as `element`'s `selectionchange` record: the
-/// range between its two boundary points as offsets into `element`'s text
-/// content, and whether it runs forward (anchor at or before focus); `None`,
-/// the empty record, when the selection is collapsed — web-core's
-/// `anchor !== focus` — or a boundary cannot be placed in `element`'s text.
-///
-/// For a focused editing host, `element` must be the host or around it, and
-/// each boundary is placed by [`text_offset`]. For a selectable element,
-/// `element` must be that element or inside it ([`selectable_offsets`]).
 fn text_selection_in(
     document: &LynxDocument,
     element: NodeId,
@@ -531,17 +299,6 @@ fn text_selection_in(
     ))
 }
 
-/// The two boundary points of a selectable element's selection — source
-/// units of its paragraph — as offsets into `element`'s text content, anchor
-/// first: every text and generated run counted, an atomic inline box
-/// counting none ([`terminus::link::Document::text_content_offset`]), which is
-/// web-core's `range.toString().length`.
-///
-/// `element` is the selectable element itself, or a `text` or `inline-text`
-/// inside it whose own source range ([`terminus::link::Document::inline_source_range`])
-/// holds both points, counted from the start of that range. `None` for an
-/// element outside the selectable element, one with no source range, or a
-/// point outside its range.
 fn selectable_offsets(
     document: &LynxDocument,
     element: NodeId,
@@ -570,18 +327,6 @@ fn selectable_offsets(
     ))
 }
 
-/// One boundary point — `unit` UTF-16 units into `host`'s value, which is
-/// its direct text children — as an offset into `root`'s text content:
-/// web-core's `range.selectNodeContents(root); range.setEnd(node, offset);
-/// range.toString().length`.
-///
-/// Walks `root`'s subtree in tree order, counting the UTF-16 length of every
-/// text node. A direct text child of `host` that holds the unit — it lies at
-/// or before the node's end — answers the count before it plus the unit;
-/// one that does not takes its length off the unit. A text node that is not
-/// a direct child of `host` only adds to the count. `None` when the walk
-/// ends with the unit not placed, where web-core's `setEnd` throws and its
-/// offset is `-1`.
 fn text_offset(document: &LynxDocument, root: NodeId, host: NodeId, unit: u32) -> Option<u32> {
     let mut remaining = unit;
     let mut count: u32 = 0;
@@ -603,45 +348,11 @@ fn text_offset(document: &LynxDocument, root: NodeId, host: NodeId, unit: u32) -
             count = count.saturating_add(length);
             continue;
         }
-        // Children in reverse, so the first is taken next: tree order.
         stack.extend(node.child_ids().iter().rev().copied());
     }
     None
 }
 
-/// `getTextBoundingRect({start, end})` on `text`, with `params` as the JSON
-/// text the realm serialized: the boxes the source range `[start, end)` of
-/// the paragraph occupies, one per line, in viewport CSS px.
-///
-/// - `params` must be a JSON object, and `start` and `end` JSON numbers, else code 4. Each is
-///   truncated toward zero, as iOS's `integerValue` and Android's `getInt` truncate
-///   (`LynxUIText.m:790-807`, `UIText.java:343-364`), and must then be non-negative, else code 4
-///   (iOS and Android). A missing one is code 4, iOS's answer; Android's `getInt` throws and its
-///   catch answers 1. `start > end` is code 4 too, which is Android's answer; iOS answers 1. A
-///   string is code 4, where iOS's `intValue` would read its digits. Offsets are UTF-16 units of
-///   the paragraph's source text, an inline image or view counting one, as both natives count them
-///   (an `NSString`, a Java `String`).
-/// - The boxes are [`terminus::link::Document::text_range_boxes`]: one per line the range shows
-///   content on, from the first selected cluster's inline start to the last one's inline end, with
-///   the line's top and height. That is iOS's reading (`enumerateEnclosingRectsForGlyphRange`,
-///   `LynxTextView.m:205-235`); Android widens every line but the first and the last to the full
-///   layout width (`AndroidText.java:438-475`). `start == end` is one zero-width box at the content
-///   box's origin, as tall as the line holding `start`, which is both natives' answer.
-/// - Each box moves from the paragraph's own space into the space of `boundingClientRect`: plus the
-///   element's [`terminus::link::Document::bounding_client_rect`] origin and its border and
-///   padding, the content box's offset in the border box, as iOS's `getMapFromRect:lineBox:` adds
-///   them (`LynxUIText.m:890-903`). `relativeTo` is not read, as `boundingClientRect` reads none of
-///   its params here.
-/// - `Ok(None)`, code 8, when nothing answers: the element has no box, establishes no paragraph (a
-///   nested `text`), `end` is past the source length, or the range shows no content (text past a
-///   truncation cut, the whitespace a soft wrap consumed). The natives answer 1, `UNKNOWN`, "Can
-///   not find text bounding rect"; the engine has no code 1, and 8, `OPERATION_ERROR`, is its code
-///   for a method that ran and found nothing to act on.
-///
-/// The data fields are the number of boxes and then `left`, `top`, `width`,
-/// `height` per box; `element-papi.ts` builds `{boundingRect, boxes}` from
-/// them. It reads the last completed layout and never flushes, as every UI
-/// method does here.
 fn text_bounding_rect(
     document: &LynxDocument,
     text: NodeId,
@@ -661,13 +372,6 @@ fn text_bounding_rect(
     Ok(Some(record))
 }
 
-/// The boxes the source range `[start, end)` of `text`'s paragraph
-/// occupies ([`terminus::link::Document::text_range_boxes`]), moved from the
-/// paragraph's own space into the space of `boundingClientRect`: plus the
-/// element's [`terminus::link::Document::bounding_client_rect`] origin and its border
-/// and padding (see [`text_bounding_rect`]). `None` when the element has no
-/// box or no paragraph, the range is past the source, or it shows no
-/// content. From the last completed layout.
 fn viewport_boxes(
     document: &LynxDocument,
     text: NodeId,
@@ -691,8 +395,6 @@ fn viewport_boxes(
     )
 }
 
-/// Writes the box count and then `left`, `top`, `width`, `height` per box:
-/// what `element-papi.ts` reads `getTextBoundingRect`'s `boxes` from.
 fn write_boxes(record: &mut String, boxes: &[terminus::link::Rect<f32>]) {
     write_record_field(record, &boxes.len().to_string());
     for rect in boxes {
@@ -707,12 +409,6 @@ fn write_boxes(record: &mut String, boxes: &[terminus::link::Rect<f32>]) {
     }
 }
 
-/// `getSelectedText()` on `text`: one record field, the selected text of
-/// the document's selection when it lies in this element
-/// ([`terminus::link::Document::selected_text`], an atomic inline box as U+FFFC, iOS's
-/// attachment character), and `""` when it is collapsed or elsewhere — a
-/// nested `text`, which establishes no paragraph, never holds it. No params
-/// are read (`UIText.java:417-427`, `LynxUIText.m:809-812`).
 fn selected_text(document: &LynxDocument, text: NodeId) -> String {
     let mut record = String::new();
     write_record_field(
@@ -722,34 +418,8 @@ fn selected_text(document: &LynxDocument, text: NodeId) -> String {
     record
 }
 
-/// Native Android's `RESPONSE_TOUCH_RADIUS`: the radius, in CSS px,
-/// `setTextSelection` answers for each handle.
 const HANDLE_RADIUS: f32 = 50.0;
 
-/// `setTextSelection({startX, startY, endX, endY, showStartHandle?,
-/// showEndHandle?})` on `text`, with `params` as the JSON text the realm
-/// serialized.
-///
-/// - `params` must be a JSON object and the four coordinates JSON numbers, CSS px from the
-///   element's border-box origin, else code 4. The two handle flags are not read: no handle is
-///   painted.
-/// - Any coordinate negative clears the document's selection when it lies in this element and
-///   answers success with no data, as both natives do.
-/// - Otherwise the selection is begun in this element
-///   ([`terminus::link::Document::begin_selection`], which blurs a focused editing host), its
-///   anchor placed at the start point and its focus extended to the end point
-///   ([`Command::SelectFromPoint`]). A selection that collapses is widened to one character:
-///   forward, or backward when forward cannot move (the text's end), native's `startIndex ==
-///   endIndex` rule. Code 8 when the element cannot hold the selection — its used `user-select` is
-///   `none` (no `text-selection`), it is not rendered, or it establishes no paragraph (a nested
-///   `text`) — or when the selected range shows no box.
-/// - The answer is [`text_bounding_rect`]'s fields over the selected range, then two handles, each
-///   `x`, `y` and radius: the first box's bottom-left and the last box's bottom-right, in viewport
-///   CSS px, with [`HANDLE_RADIUS`]. `element-papi.ts` builds `{boundingRect, boxes, handles}`.
-///
-/// Unlike every other UI method here this one lays out: the point commands
-/// measure against the current layout, so [`terminus::link::Document::apply_editing`]
-/// runs a pass before each of them, and the boxes answered are that pass's.
 fn set_text_selection(document: &mut LynxDocument, text: NodeId, params: &str) -> MethodOutcome {
     let Ok([start_x, start_y, end_x, end_y]) = selection_points(params) else {
         return MethodOutcome::Failed(MethodError::InvalidParams);
@@ -817,8 +487,6 @@ fn set_text_selection(document: &mut LynxDocument, text: NodeId, params: &str) -
     MethodOutcome::Data(record)
 }
 
-/// `startX`, `startY`, `endX` and `endY` of `setTextSelection`'s params, in
-/// that order: each a JSON number, else code 4.
 fn selection_points(params: &str) -> Result<[f32; 4], InvalidParams> {
     let params = object(params)?;
     let mut points = [0.0; 4];
@@ -837,10 +505,6 @@ fn selection_points(params: &str) -> Result<[f32; 4], InvalidParams> {
     Ok(points)
 }
 
-/// `start` or `end` of `getTextBoundingRect`'s params: a JSON number
-/// truncated toward zero, non-negative after truncation, else code 4. A
-/// count past `u32::MAX` saturates, which is past every paragraph's length
-/// and so answers code 8 for `end`.
 fn range_offset(params: &Map<String, Value>, key: &str) -> Result<u32, InvalidParams> {
     let offset = params
         .get(key)
@@ -860,7 +524,7 @@ fn range_offset(params: &Map<String, Value>, key: &str) -> Result<u32, InvalidPa
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Ahem and explicit line heights have exact metrics.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::stylo::color::AbsoluteColor;
     use terminus::link::stylo::values::computed::{ColorPropertyValue, Display};
@@ -873,8 +537,6 @@ mod tests {
     const TAIL_COLOR_CONVERT: &str = "tail-color-convert";
     const TEXT_OVERFLOW: &str = "text-overflow";
 
-    /// Writes or removes an attribute the way the runtime does — the DOM
-    /// mutation and nothing else. Stylo tracks the attribute dependency.
     fn set_limit(
         document: &mut LynxDocument,
         element: terminus::link::NodeId,
@@ -973,7 +635,6 @@ mod tests {
             set_limit(&mut document, text, MAX_LINES, Some(value));
             assert_height(&mut document, text, height);
         }
-        // Maxlength permits zero, but never truncates a fractional input.
         for (value, width) in [("1.9", 60.0), ("0", 0.0), ("-1", 60.0)] {
             set_limit(&mut document, text, MAX_CHARS, Some(value));
             document.layout();
@@ -1008,8 +669,6 @@ mod tests {
         assert_height(&mut document, text, 42.0);
     }
 
-    /// Only text's UA rule reads these attributes; the registered properties
-    /// also prevent a parent's limits from inheriting into a paragraph.
     #[test]
     fn registered_text_limits_do_not_inherit_from_the_parent() {
         let (mut document, text) = paragraph("abc def");
@@ -1034,17 +693,13 @@ mod tests {
         );
     }
 
-    /// The UA rules read only the supported attributes on the text tag.
     #[test]
     fn text_attribute_rules_are_scoped_to_text() {
         let mut document = document();
         let text = child(&mut document, "text", "");
-        // `text-overflow` is a UA selector rule rather than a hint, and
-        // `ellipsize-mode` is inert: neither may reach a declaration.
         for name in [TEXT_OVERFLOW, "ellipsize-mode", "text-maxline-x"] {
             set_limit(&mut document, text, name, Some("1"));
         }
-        // And the same three names on a tag whose UA rule does not read them.
         let view = child(&mut document, "view", "");
         for name in [MAX_LINES, MAX_CHARS, TAIL_COLOR_CONVERT] {
             set_limit(&mut document, view, name, Some("1"));
@@ -1151,8 +806,6 @@ mod tests {
         }
     }
 
-    /// The computed value of the registered property `name`, as CSS text. An
-    /// unset property reports its registered initial value.
     fn custom_value(
         document: &LynxDocument,
         element: terminus::link::NodeId,
@@ -1168,7 +821,6 @@ mod tests {
             .map_or_else(|| initial.to_owned(), |value| value.to_variable_value().css)
     }
 
-    /// A wide Ahem `text` at 20px whose run a `raw-text` carries, laid out.
     fn verbatim_paragraph(content: &str) -> (LynxDocument, terminus::link::NodeId) {
         const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
         let mut document = document();
@@ -1191,12 +843,6 @@ mod tests {
         (size.width, size.height)
     }
 
-    /// Every native backend hands a `text`'s string to its platform engine
-    /// unchanged (`raw_text_element.cc:16-46`, Android
-    /// `BaseTextShadowNode.java:494-498`, iOS `LynxBaseTextShadowNode.m:240-249`),
-    /// and so does every Lynx paragraph: leading spaces and space runs
-    /// stay, every newline breaks the line and the spaces after it stay,
-    /// trailing spaces hang.
     #[test]
     fn a_text_keeps_its_white_space_verbatim() {
         let (document, text) = verbatim_paragraph("  a   b  ");
@@ -1210,9 +856,6 @@ mod tests {
         );
     }
 
-    /// A nested run's own `white-space-collapse` is not read: native parses no
-    /// such property, so a nested `text` or `inline-text` run is kept verbatim
-    /// like the root's own, whatever it declares.
     #[test]
     fn a_nested_run_is_kept_verbatim_whatever_its_white_space() {
         let (mut document, text) = verbatim_paragraph("a");
@@ -1224,8 +867,6 @@ mod tests {
         assert_eq!(ink(&document, text), (7.0 * 20.0, 21.0));
     }
 
-    /// A `text` attribute's generated run is verbatim too: its newline is a
-    /// forced break, as the attribute form is on every native backend.
     #[test]
     fn a_text_attribute_s_newline_breaks_the_line() {
         let (mut document, text) = verbatim_paragraph("");
@@ -1234,7 +875,6 @@ mod tests {
         assert_eq!(ink(&document, text), (2.0 * 20.0, 2.0 * 21.0));
     }
 
-    /// One computed longhand of `element`, as CSS text.
     fn computed(
         document: &LynxDocument,
         element: terminus::link::NodeId,
@@ -1251,16 +891,8 @@ mod tests {
         style_of(document, element).computed_value_to_string(longhand)
     }
 
-    /// Native parses `white-space` as `normal` or `nowrap` and drops every
-    /// other keyword (`enum_handler.cc:76-89`), so on a `text` only `nowrap`
-    /// stops the wrapping and shows nothing after the first newline (Android
-    /// `TextRenderer.java:850-867`); `pre`, `pre-wrap`, `pre-line` and
-    /// `break-spaces` wrap at the box width with every line shown, as
-    /// `normal` does. Spaces and newlines are kept under every keyword.
     #[test]
     fn only_nowrap_stops_a_text_from_wrapping() {
-        // Fifteen `a`, a space, ten `b`, a newline, `cc`: at 400px (twenty
-        // em squares) the first line ends after the `a`s.
         const CONTENT: &str = "aaaaaaaaaaaaaaa bbbbbbbbbb\ncc";
         for (keyword, wrap_mode, collapse, expected) in [
             ("normal", "wrap", "collapse", (15.0 * 20.0, 3.0 * 21.0)),
@@ -1297,9 +929,6 @@ mod tests {
         }
     }
 
-    /// Changing `white-space` between `nowrap` and `pre` keeps
-    /// `text-wrap-mode: nowrap` and changes only the collapse half, which is
-    /// what tells them apart on a `text`: the paragraph is rebuilt either way.
     #[test]
     fn switching_nowrap_to_pre_shows_every_line_again() {
         let (mut document, text) = verbatim_paragraph("ab\ncdef");
@@ -1314,11 +943,6 @@ mod tests {
         }
     }
 
-    /// A newline that ends a `text`'s text adds an empty last line, as
-    /// Android's `StaticLayout` does and Lynx measures
-    /// (`TextRenderer.java:720`) — wrapped or not, written in a carrier or in
-    /// the `text` attribute. Under `nowrap` it adds nothing: the text already
-    /// ends at its first newline.
     #[test]
     fn a_newline_that_ends_a_text_adds_an_empty_line() {
         let (document, text) = verbatim_paragraph("ab\n");
@@ -1338,10 +962,6 @@ mod tests {
         assert_eq!(ink(&document, text), (2.0 * 20.0, 21.0));
     }
 
-    /// `tail-color-convert` is a native BOOL whose default is off, so only the
-    /// literal `true` — what `ReactLynx`'s `tail-color-convert={true}` reaches
-    /// the DOM as — selects the enabled rule. Anything else, a removal included,
-    /// leaves the rule unmatched and uses the registered initial 0.
     #[test]
     fn tail_color_convert_selects_only_the_literal_true() {
         let (mut document, text) = paragraph("abc def");
@@ -1387,17 +1007,11 @@ mod tests {
         }
     }
 
-    /// The width of the paragraph `text` establishes, after a layout.
     fn paragraph_width(document: &mut LynxDocument, text: terminus::link::NodeId) -> f32 {
         document.layout();
         document.text_block_size(text).expect("paragraph").width
     }
 
-    /// Native Lynx reads `text-overflow` off the element as well as out of
-    /// CSS (`text_element.cc:176-182`), and the UA sheet's two attribute rules
-    /// are how this engine honours that. Native's enum reader accepts the two
-    /// literals only, so every other value — a removal, a different case, an
-    /// empty string — leaves the initial `clip`.
     #[test]
     fn text_overflow_attribute_selects_the_ellipsis_path_through_the_ua_sheet() {
         let (mut document, text) = paragraph("abc def");
@@ -1430,8 +1044,6 @@ mod tests {
         }
     }
 
-    /// The attribute's rules are UA origin and plain, so a page's own CSS
-    /// overrides them exactly as it overrides the rest of the UA sheet.
     #[test]
     fn author_css_outranks_the_text_overflow_attribute() {
         let (mut document, text) = paragraph("abc def");
@@ -1496,9 +1108,6 @@ mod tests {
         }
     }
 
-    /// A Lynx `color` holds a gradient as readily as a solid, and the glyph
-    /// painter reads that whole value — so the reset and the opt-in have to
-    /// carry the gradient too, not just the solid it collapses to.
     #[test]
     fn the_color_reset_and_its_opt_in_carry_a_text_gradient() {
         const GRADIENT: &str = "color: linear-gradient(90deg, rgb(1, 2, 3), rgb(4, 5, 6))";
@@ -1528,11 +1137,6 @@ mod tests {
         );
     }
 
-    /// Custom truncation content is content only where web-core looks for it:
-    /// `XTextTruncation.ts` queries `:scope > inline-truncation`, so a marker
-    /// written directly inside a `text` becomes a text scope and one written
-    /// anywhere else — through a wrapper, or outside a paragraph entirely —
-    /// keeps the `display: none` the tag carries by default.
     #[test]
     fn an_inline_truncation_is_content_only_as_a_text_s_own_child() {
         let mut document = document();
@@ -1613,12 +1217,6 @@ mod tests {
         );
     }
 
-    /// A text tag — a block `text`, a nested run, an `inline-text`, a text's
-    /// own `inline-truncation` — keeps the author's `display` as its computed
-    /// value and lays out by its kind: `none` hides it, and every other value
-    /// but `contents`
-    /// (`a_text_with_display_contents_is_undefined_and_only_does_not_crash`)
-    /// leaves it a Lynx paragraph, or a text scope of the paragraph around it.
     #[test]
     fn an_author_display_hides_a_text_scope_only_with_none() {
         for (author, computed) in [
@@ -1671,15 +1269,6 @@ mod tests {
         }
     }
 
-    /// `<text style="display: contents">` is undefined behaviour, by the
-    /// user's ruling of 2026-10-17: Lynx gives a text no `contents` behaviour
-    /// to follow, and the engine handles the value only so that it does not
-    /// crash. What this test observes is **not a supported behaviour**, and
-    /// nothing may rely on it. Today `contents` acts as computed, as on every
-    /// element, before the element's kind is read
-    /// (`terminus::link::layout::style::display_mode`): the text generates no box and
-    /// establishes no paragraph, and its run is loose text of the `view`
-    /// around it.
     #[test]
     fn a_text_with_display_contents_is_undefined_and_only_does_not_crash() {
         let mut document = document();
@@ -1699,7 +1288,6 @@ mod tests {
         assert_eq!(document.text_block_size(text), None);
     }
 
-    /// Runs `getTextBoundingRect` (or `name`) on `text` with `params`.
     fn invoke(
         document: &mut LynxDocument,
         text: terminus::link::NodeId,
@@ -1709,8 +1297,6 @@ mod tests {
         document.invoke_element_method(text, terminus::link::MethodCall { name, params })
     }
 
-    /// The record `text_bounding_rect` answers: the count, then `left`,
-    /// `top`, `width`, `height` per box.
     fn boxes_record(boxes: &[[f32; 4]]) -> terminus::link::MethodOutcome {
         let mut record = String::new();
         crate::main::record::write_record_field(&mut record, &boxes.len().to_string());
@@ -1738,8 +1324,6 @@ mod tests {
         );
         append_run(&mut document, text, "abc def");
         document.layout();
-        // The content box starts at (20 + 2 + 5, 30 + 2 + 5) = (27, 37); the
-        // paragraph wraps after "abc ", 21px lines.
         assert_eq!(
             invoke(
                 &mut document,
@@ -1821,10 +1405,8 @@ mod tests {
             );
         }
         for params in [
-            // Past the source: "abc def" and the nested "gh" are nine units.
             r#"{"start":0,"end":10}"#,
             r#"{"start":1e12,"end":1e12}"#,
-            // The space the soft wrap consumed is on no line.
             r#"{"start":3,"end":4}"#,
         ] {
             assert_eq!(
@@ -1869,17 +1451,11 @@ mod tests {
         );
     }
 
-    // --- `selectionchange` ---------------------------------------------------
-
-    /// A text node `content` appended to `parent`: a DOM text child, which
-    /// an editing host's value is made of (a `raw-text` carrier is not).
     fn append_text(document: &mut LynxDocument, parent: terminus::link::NodeId, content: &str) {
         let node = document.create_text_node(content, ());
         document.append_child(parent, node);
     }
 
-    /// Focuses `host` and selects `anchor`..`focus` of its value, in UTF-16
-    /// units.
     fn select(
         document: &mut LynxDocument,
         host: terminus::link::NodeId,
@@ -1898,7 +1474,6 @@ mod tests {
         );
     }
 
-    /// The record of `element` for the document's selection now.
     fn record_of(
         document: &LynxDocument,
         element: terminus::link::NodeId,
@@ -1906,11 +1481,6 @@ mod tests {
         super::text_selection_in(document, element, document.selection()?)
     }
 
-    /// `<text contenteditable>before<inline-text>inline</inline-text>after</text>`:
-    /// the host's value is its direct text children, `beforeafter`, and a
-    /// boundary in `after` is placed after the `inline-text`'s six units in
-    /// the `text`'s content. The `inline-text` inside the host holds no
-    /// boundary, so its record is the empty one.
     #[test]
     fn a_text_s_selection_counts_its_whole_text_content() {
         let mut document = document();
@@ -1926,8 +1496,6 @@ mod tests {
         assert_eq!(record_of(&document, text), Some((1..4, true)));
         assert_eq!(record_of(&document, inline), None);
 
-        // Value unit 8 is the third unit of `after`, 6 + 6 + 2 = 14 into the
-        // content; 7 is 13.
         select(&mut document, text, 8, 7);
         assert_eq!(record_of(&document, text), Some((13..14, false)));
         assert_eq!(record_of(&document, inline), None);
@@ -1944,8 +1512,6 @@ mod tests {
         assert_eq!(record_of(&other, plain), Some((0..2, true)));
     }
 
-    /// A `text` around a host that is a nested `inline-text` counts the text
-    /// before the host, and the host reports its own offsets.
     #[test]
     fn an_inline_text_host_s_selection_counts_from_its_text() {
         let mut document = document();
@@ -1963,9 +1529,6 @@ mod tests {
         assert_eq!(record_of(&document, view), None, "outside the element");
     }
 
-    /// The Lynx `selectionchange` is queued only for a listened-to element,
-    /// only when its record changed, and the empty record only after a
-    /// non-empty one; an element nobody listens on any more is forgotten.
     #[test]
     fn selection_reports_are_deduped_and_the_empty_record_follows_a_selection() {
         use terminus::link::event::{ListenerKey, ListenerKinds};
@@ -2006,15 +1569,11 @@ mod tests {
         assert_eq!(report(&document, &mut reports), queued(None, true));
         assert_eq!(report(&document, &mut reports), [], "empty after empty");
 
-        // A collapsed selection is the empty record too, and is not sent to
-        // an element whose last record was empty.
         select(&mut document, text, 1, 1);
         assert_eq!(report(&document, &mut reports), []);
         select(&mut document, text, 1, 3);
         assert_eq!(report(&document, &mut reports), queued(Some(1..3), true));
 
-        // Unbound: forgotten, so a new listener starts from the empty
-        // record and hears the same range again.
         document.remove_listener(text, SELECTION_CHANGE, realm);
         assert!(document.blur());
         assert_eq!(report(&document, &mut reports), []);
@@ -2023,16 +1582,12 @@ mod tests {
         assert_eq!(report(&document, &mut reports), queued(Some(1..3), true));
     }
 
-    // --- read-only text selection --------------------------------------------
-
-    /// One record field `text`, as `getSelectedText` answers.
     fn text_record(text: &str) -> terminus::link::MethodOutcome {
         let mut record = String::new();
         crate::main::record::write_record_field(&mut record, text);
         terminus::link::MethodOutcome::Data(record)
     }
 
-    /// Selects `anchor`..`focus`, in source units, of the selectable `root`.
     fn select_in(
         document: &mut LynxDocument,
         root: terminus::link::NodeId,
@@ -2049,10 +1604,6 @@ mod tests {
         );
     }
 
-    /// `<text text-selection>ab<inline-text>cd</inline-text><view/>ef</text>`,
-    /// every run a `raw-text` carrier's generated text, laid out in 20px
-    /// Ahem: source units `ab` 0–1, `cd` 2–3, the atom 4, `ef` 5–6. Answers
-    /// the document, the `text` and the `inline-text`.
     fn selectable_paragraph(
         mut document: LynxDocument,
     ) -> (LynxDocument, terminus::link::NodeId, terminus::link::NodeId) {
@@ -2076,11 +1627,6 @@ mod tests {
         (document, text, inline)
     }
 
-    /// `text-selection` is `user-select` in the UA sheet: a `text` and the
-    /// text elements inside it compute `none`, or `auto` while the attribute
-    /// is present and not an ASCII case-insensitive `"false"`; a `view`
-    /// computes `auto` either way, and `terminus` resolves `auto` to the parent's
-    /// used value, `text` at the page.
     #[test]
     fn text_selection_maps_onto_user_select() {
         let mut document = document();
@@ -2127,15 +1673,10 @@ mod tests {
         }
     }
 
-    /// A selectable `text`'s record counts every text and generated run of
-    /// its content and no atom; an `inline-text` inside it reports offsets
-    /// into its own content while both points lie in its source range, and
-    /// the empty record otherwise.
     #[test]
     fn a_selectable_text_s_record_counts_its_text_content_and_no_atom() {
         let (mut document, text, inline) = selectable_paragraph(document());
 
-        // Unit 6 is past the atom: content offset 5.
         select_in(&mut document, text, 1, 6);
         assert_eq!(record_of(&document, text), Some((1..5, true)));
         assert_eq!(record_of(&document, inline), None, "unit 1 is outside cd");
@@ -2164,9 +1705,6 @@ mod tests {
         assert_eq!(record_of(&document, view), None, "outside the text");
     }
 
-    /// The Lynx `selectionchange` of a selection in a selectable `text`
-    /// reaches a listened-to `inline-text` inside it; the `text` itself,
-    /// which nothing listens on, hears nothing.
     #[test]
     fn a_selectable_text_reports_to_an_inline_text_inside_it() {
         use terminus::link::event::{ListenerKey, ListenerKinds};
@@ -2207,9 +1745,6 @@ mod tests {
         assert_eq!(report(&document), queued(None, true));
     }
 
-    /// `getSelectedText` answers one field: the selected text of a
-    /// selection in this element, an atom as U+FFFC, and `""` for a
-    /// collapsed selection, one elsewhere, none, or a nested `text`.
     #[test]
     fn get_selected_text_answers_the_selection_in_this_text() {
         let (mut document, text, _) = selectable_paragraph(document());
@@ -2254,8 +1789,6 @@ mod tests {
         );
     }
 
-    /// The record `setTextSelection` answers: [`boxes_record`]'s fields,
-    /// then `x`, `y` and the radius of each handle.
     fn selection_record(
         boxes: &[[f32; 4]],
         handles: [[f32; 2]; 2],
@@ -2271,11 +1804,6 @@ mod tests {
         terminus::link::MethodOutcome::Data(record)
     }
 
-    /// `setTextSelection` selects between two border-box points and answers
-    /// the boxes and handles in viewport coordinates; a collapsed hit is
-    /// widened by one character, forward, or backward at the end; a negative
-    /// coordinate clears this element's selection; bad params are code 4 and
-    /// an element that cannot hold the selection code 8.
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -2316,8 +1844,6 @@ mod tests {
                 .map(|selection| (selection.host, selection.anchor, selection.focus))
         };
 
-        // The content box is 7px into the border box and starts at (27, 37)
-        // in the viewport. 25px in is `b`'s left half, 85px `d`'s: units 1..4.
         assert_eq!(
             call(&mut document, text, [32.0, 17.0, 92.0, 17.0]),
             selection_record(&[[47.0, 37.0, 60.0, 21.0]], [[47.0, 58.0], [107.0, 58.0]]),
@@ -2328,22 +1854,17 @@ mod tests {
             text_record("bc ")
         );
 
-        // The same point twice is widened forward by one character.
         assert_eq!(
             call(&mut document, text, [32.0, 17.0, 32.0, 17.0]),
             selection_record(&[[47.0, 37.0, 20.0, 21.0]], [[47.0, 58.0], [67.0, 58.0]]),
         );
         assert_eq!(selected(&document), Some((text, 1, 2)));
-        // Past the last character there is no forward: widened backward,
-        // over the nested text's `h`.
         assert_eq!(
             call(&mut document, text, [207.0, 17.0, 207.0, 17.0]),
             selection_record(&[[187.0, 37.0, 20.0, 21.0]], [[187.0, 58.0], [207.0, 58.0]]),
         );
         assert_eq!(selected(&document), Some((text, 9, 8)));
 
-        // A negative coordinate clears the selection here, with no data,
-        // and leaves one elsewhere alone.
         assert_eq!(
             call(&mut document, text, [-1.0, 0.0, 10.0, 10.0]),
             terminus::link::MethodOutcome::Done

@@ -86,9 +86,6 @@ use crate::mime::ImageFormat;
 use crate::preprocess::{self, Payload};
 use crate::{FrameOf, Resources, Shared, SharedHandle};
 
-/// What a raster load hands back: the bitmap, what the bytes were, the
-/// bytes themselves when nothing else could restore them or when the image
-/// animates, and its frames when it has more than one.
 type LoadedImage<F> = (
     DecodedImage<F>,
     ImageFormat,
@@ -97,14 +94,12 @@ type LoadedImage<F> = (
     Option<ImageFrames>,
 );
 
-/// What a load job hands back: a decoded bitmap, or a parsed document.
 enum LoadOutcome<F> {
     Raster(LoadedImage<F>),
     Vector(Arc<VectorDocument>),
 }
 
 impl<F> LoadOutcome<F> {
-    /// The completion that reports this outcome for `source`.
     fn completion(self, source: Arc<str>, url: Url) -> Completion<F> {
         match self {
             Self::Raster((bitmap, format, header, encoded, frames)) => Completion::Loaded {
@@ -121,9 +116,6 @@ impl<F> LoadOutcome<F> {
     }
 }
 
-/// Parses `bytes`, a document of `kind` for `source`, with the engine's
-/// parser: the job half that takes the place of a decode for a document. A
-/// document that does not parse is the job's failure.
 fn parse(
     source: &Arc<str>,
     bytes: &[u8],
@@ -137,18 +129,12 @@ fn parse(
     }
 }
 
-/// The painter-thread half: the engine's residency over every source asked
-/// for, the playheads of the animated ones, and the queue its completions
-/// arrive on. `F` is the platform decoder's frame type.
 pub(crate) struct ImageState<F> {
     pub(crate) residency: ImageResidency<F>,
     pub(crate) animations: Animations<F>,
-    /// The painter is the only consumer, and drains without blocking.
     completions: tokio::sync::mpsc::UnboundedReceiver<Completion<F>>,
 }
 
-/// What a job sends back: a decode's answer is CPU pixels or a frame of the
-/// platform decoder's own type `F`.
 pub(crate) enum Completion<F> {
     Loaded {
         source: Arc<str>,
@@ -157,16 +143,12 @@ pub(crate) enum Completion<F> {
         format: ImageFormat,
         header: Option<ImageHeader>,
         encoded: Option<Bytes>,
-        /// The frames, when the image has more than one; `encoded` is then
-        /// always kept.
         frames: Option<ImageFrames>,
     },
-    /// A fetched document, parsed.
     ParsedDocument {
         source: Arc<str>,
         document: Arc<VectorDocument>,
     },
-    /// A document request's parse: the document, or why it did not parse.
     RequestedDocument {
         source: Arc<str>,
         parsed: Result<Arc<VectorDocument>, String>,
@@ -184,7 +166,6 @@ pub(crate) enum Completion<F> {
         source: Arc<str>,
         message: String,
     },
-    /// Frame `index` of an animated source decoded.
     Frame {
         source: Arc<str>,
         index: usize,
@@ -195,13 +176,10 @@ pub(crate) enum Completion<F> {
         index: usize,
         message: String,
     },
-    /// The timer an animated source armed for `due` fired.
     Due {
         source: Arc<str>,
         due: ClockInstant,
     },
-    /// The bytes a video's player is opened on were fetched, or failed to
-    /// be ([`crate::media`]).
     MediaSource {
         picture: PictureId,
         source: Result<vant::media::MediaSource, String>,
@@ -222,10 +200,6 @@ impl<F: Clone> ImageState<F> {
     }
 }
 
-/// Names `source` for `reports`: the residency answers at once if it
-/// already knows it as a bitmap or a failure, or joins a load in flight;
-/// otherwise the load starts here. A document parsed before is fetched and
-/// parsed again.
 pub(crate) fn request<P: Platform>(resources: &Resources<P>, source: &str, reports: &ImageReports) {
     let mut state = resources.local.borrow_mut();
     let Some(bound) = state.residency.request(source, reports) else {
@@ -245,11 +219,6 @@ pub(crate) fn request<P: Platform>(resources: &Resources<P>, source: &str, repor
     spawn_load(resources, Arc::from(source), url, bound);
 }
 
-/// Hands `bytes`, a document of `kind` a page wrote itself, to a parse of
-/// its own under `source`, the synthetic name the engine filed it as, whose
-/// outcome is reported to `reports`. Nothing is resolved or fetched, no
-/// entry is filed and none is consulted: every request is one parse and one
-/// report.
 pub(crate) fn request_document<P: Platform>(
     resources: &Resources<P>,
     source: &str,
@@ -266,13 +235,10 @@ pub(crate) fn request_document<P: Platform>(
     spawn_parse(resources, source, bytes, kind);
 }
 
-/// Applies every completion queued since the last turn.
 pub(crate) fn service<P: Platform>(resources: &Resources<P>) {
     let completions: Vec<Completion<FrameOf<P>>> = {
         let mut state = resources.local.borrow_mut();
         let mut drained = Vec::new();
-        // Empty and disconnected both end the drain: a scope whose senders
-        // are all gone has nothing more to report.
         while let Ok(completion) = state.completions.try_recv() {
             drained.push(completion);
         }
@@ -282,8 +248,6 @@ pub(crate) fn service<P: Platform>(resources: &Resources<P>) {
     for completion in completions {
         apply(resources, completion);
     }
-    // A completion may have freed an animated source's decode, or brought
-    // the frame its window lacked.
     if any {
         let mut jobs = Vec::new();
         {
@@ -299,7 +263,6 @@ pub(crate) fn service<P: Platform>(resources: &Resources<P>) {
     }
 }
 
-/// Starts what the animated sources asked for.
 fn start<P: Platform>(resources: &Resources<P>, jobs: Vec<Job>) {
     for job in jobs {
         match job {
@@ -399,11 +362,6 @@ fn apply<P: Platform>(resources: &Resources<P>, completion: Completion<FrameOf<P
     }
 }
 
-/// Records `view`'s working set: the bitmaps of every view's set, and the
-/// first frames of the sources its `Id` pictures play, are never evicted;
-/// the URL playhead of an animated source runs while some view's set
-/// includes its URL, and an `Id` picture's playhead while some view's set
-/// includes the picture.
 pub(crate) fn retain<P: Platform>(
     resources: &Resources<P>,
     view: ViewKey,
@@ -427,9 +385,6 @@ pub(crate) fn retain<P: Platform>(
     }
 }
 
-/// What a frame drawing the `Id` picture `picture` at `hint` draws: the
-/// newest frame its playhead published, after advancing it to the present.
-/// A picture this store plays nothing for is `None`.
 pub(crate) fn describe_picture<P: Platform>(
     resources: &Resources<P>,
     picture: PictureId,
@@ -452,9 +407,6 @@ pub(crate) fn describe_picture<P: Platform>(
     image
 }
 
-/// A frame draws the `Id` picture `picture` and has neither a frame to take
-/// nor a texture: the frame its playhead shows is published again once its
-/// pixels are at hand.
 pub(crate) fn want_picture<P: Platform>(
     resources: &Resources<P>,
     picture: PictureId,
@@ -473,8 +425,6 @@ pub(crate) fn want_picture<P: Platform>(
     start(resources, jobs);
 }
 
-/// Takes the newest frame of the `Id` picture `picture`'s slot, if it has
-/// not been taken.
 pub(crate) fn take_frame<P: Platform>(
     resources: &Resources<P>,
     picture: PictureId,
@@ -482,11 +432,6 @@ pub(crate) fn take_frame<P: Platform>(
     resources.local.borrow().animations.take_frame(picture)
 }
 
-/// Serves one playback request of `view`'s, whose loops are reported to
-/// `reports`. Every request wakes the host when it changed what a picture
-/// shows or will show, so the picture is described again: its frame is
-/// published there and its timer armed. A video's open and commands are
-/// [`crate::media`]'s, and so is an end of a picture it opened.
 pub(crate) fn playback<P: Platform>(
     resources: &Resources<P>,
     view: ViewKey,
@@ -547,8 +492,6 @@ pub(crate) fn playback<P: Platform>(
     }
 }
 
-/// Tells the decoder no more frames of each of `stopped` are asked for, so
-/// what it kept open for them can go.
 pub(crate) fn forget_frames<P: Platform>(
     resources: &Resources<P>,
     stopped: impl IntoIterator<Item = Bytes>,
@@ -558,9 +501,6 @@ pub(crate) fn forget_frames<P: Platform>(
     }
 }
 
-/// What a frame drawing `source` at `hint` draws, without a restore: the
-/// resident bitmap, or the descriptor of the one the tier dropped. Starts
-/// the refinement the residency plans.
 pub(crate) fn describe<P: Platform>(
     resources: &Resources<P>,
     source: &str,
@@ -598,19 +538,12 @@ pub(crate) fn describe<P: Platform>(
     Some(image)
 }
 
-/// Drops `sources`' bitmaps from the tier, or an animated source's frame
-/// shown from its window: the painter's rasterizer holds the uploads its
-/// frame draws them from.
 pub(crate) fn release<P: Platform>(resources: &Resources<P>, sources: &[Arc<str>]) {
     let mut state = resources.local.borrow_mut();
     let sources = state.animations.release(sources);
     state.residency.release(&sources);
 }
 
-/// A frame draws `source` at `hint` from neither the tier's bitmap nor an
-/// upload: starts the restore the residency plans, a refinement job off this
-/// thread whose completion wakes the host. Nothing when one is in flight
-/// already, or there is nothing to restore.
 pub(crate) fn want<P: Platform>(resources: &Resources<P>, source: &str, hint: ImageSizeHint) {
     let source: Arc<str> = Arc::from(source);
     let source = &source;
@@ -634,24 +567,20 @@ pub(crate) fn want<P: Platform>(resources: &Resources<P>, source: &str, hint: Im
     start(resources, jobs);
 }
 
-/// What a load's transport-and-preprocess step hands on.
 #[cfg(not(target_arch = "wasm32"))]
 enum Prepared {
-    /// Encoded raster bytes, for the decode.
     Raster {
         format: ImageFormat,
         header: Option<ImageHeader>,
         bytes: Bytes,
-        /// Whether another tier can hand these bytes back, so the entry need
-        /// not keep them.
         restorable: bool,
     },
-    /// A document, for the engine's parser rather than the decoder.
-    Document { bytes: Bytes, kind: DocumentKind },
+    Document {
+        bytes: Bytes,
+        kind: DocumentKind,
+    },
 }
 
-/// The blocking half of a load: fetch the bytes and run them through the
-/// preprocessing pipeline. Runs on a blocking-pool thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn prepare<P: Platform>(shared: &Shared<P>, source: &str, url: &Url) -> Result<Prepared, String> {
     let fetched = shared
@@ -686,10 +615,6 @@ fn prepare<P: Platform>(shared: &Shared<P>, source: &str, url: &Url) -> Result<P
     })
 }
 
-/// The job behind a request: prepare on the pool, take a decode permit, then
-/// decode on the pool. The permit is held from before the decode closure is
-/// submitted until it returns, so a decode that has to wait holds no thread.
-/// A document is parsed in the decode's place, under the same permit.
 #[cfg(not(target_arch = "wasm32"))]
 async fn load<P: Platform>(
     shared: &SharedHandle<P>,
@@ -740,10 +665,6 @@ async fn load<P: Platform>(
     )))
 }
 
-/// The parse a document takes in place of a decode: a decode permit, taken
-/// before the closure is submitted and held until it returns, then the
-/// engine's parser on the blocking pool. A parse that panicked is the
-/// job's failure, as a decode's is.
 #[cfg(not(target_arch = "wasm32"))]
 async fn parse_job(
     handle: &tokio::runtime::Handle,
@@ -761,7 +682,6 @@ async fn parse_job(
     .await?
 }
 
-/// One decode permit, taken before any decode closure is submitted.
 #[cfg(not(target_arch = "wasm32"))]
 async fn acquire_decode(
     permits: &Arc<tokio::sync::Semaphore>,
@@ -783,9 +703,6 @@ fn spawn_load<P: Platform>(
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
     resources.executor.spawn(async move {
-        // The completion is sent here, in the task, outside every unwinding
-        // region: a panicking closure is a `JoinError` this maps, not a
-        // second completion.
         let completion = match load(&shared, &handle, &permits, &source, &url, bound).await {
             Ok(outcome) => outcome.completion(source, url),
             Err(message) => Completion::Failed { source, message },
@@ -794,8 +711,6 @@ fn spawn_load<P: Platform>(
     });
 }
 
-/// Starts the parse of a document the page handed over: [`parse_job`] as a
-/// task of its own, with no transport and no preprocessing in front of it.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_parse<P: Platform>(
     resources: &Resources<P>,
@@ -812,8 +727,6 @@ fn spawn_parse<P: Platform>(
     });
 }
 
-/// Starts the parse of a document the page handed over, in a local task on
-/// the Render Worker, as a fetched document's parse runs in its load's.
 #[cfg(target_arch = "wasm32")]
 fn spawn_parse<P: Platform>(
     resources: &Resources<P>,
@@ -868,8 +781,6 @@ async fn load_async<P: Platform>(
             source, preprocessed.media_type
         ));
     };
-    // An SVG document is parsed here, in this task, with the engine's
-    // parser: it never reaches the browser's image decoder.
     if format == ImageFormat::Svg {
         return parse(source, &preprocessed.bytes, DocumentKind::Svg).map(LoadOutcome::Vector);
     }
@@ -886,9 +797,6 @@ async fn load_async<P: Platform>(
     )))
 }
 
-/// The refinement job, which is also a wanted source's restore: recover the
-/// bytes if the entry did not keep them, take a decode permit, decode at the
-/// drawn size.
 #[cfg(not(target_arch = "wasm32"))]
 async fn refine<P: Platform>(
     shared: &SharedHandle<P>,
@@ -927,12 +835,7 @@ fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinem
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
     let target = refinement.target;
-    // Only a task is enqueued here; the painter creates no thread, and this
-    // call is made from inside its adoption.
     resources.executor.spawn(async move {
-        // A refinement that fails leaves the `Loaded` entry loaded: its arm
-        // in `apply` clears `refining`, and marks a restore that failed as
-        // having nothing to draw.
         let completion = match refine(&shared, &handle, &permits, refinement).await {
             Ok(bitmap) => Completion::Refined {
                 source,
@@ -981,8 +884,6 @@ fn spawn_refine<P: Platform>(resources: &Resources<P>, source: Arc<str>, refinem
     });
 }
 
-/// The decode of an animated source's frame other than the first: a decode
-/// permit, then the platform decoder at the frame's index on the pool.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_frame<P: Platform>(resources: &Resources<P>, source: Arc<str>, decode: FrameDecode) {
     let shared = SharedHandle::clone(&resources.shared);
@@ -1017,8 +918,6 @@ fn spawn_frame<P: Platform>(resources: &Resources<P>, source: Arc<str>, decode: 
     });
 }
 
-/// The decode of an animated source's frame other than the first, in a
-/// local task on the Render Worker.
 #[cfg(target_arch = "wasm32")]
 fn spawn_frame<P: Platform>(resources: &Resources<P>, source: Arc<str>, decode: FrameDecode) {
     let shared = SharedHandle::clone(&resources.shared);
@@ -1048,9 +947,6 @@ fn spawn_frame<P: Platform>(resources: &Resources<P>, source: Arc<str>, decode: 
     });
 }
 
-/// Wakes the host `wait` from now, when the animated `source`'s next frame
-/// is `due`: a task on the executor's timer, so neither the painter nor the
-/// document keeps a timer of its own for it.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_timer<P: Platform>(
     resources: &Resources<P>,
@@ -1065,8 +961,6 @@ fn spawn_timer<P: Platform>(
     });
 }
 
-/// Wakes the host `wait` from now, when the animated `source`'s next frame
-/// is `due`: a local task on the Render Worker awaiting its `setTimeout`.
 #[cfg(target_arch = "wasm32")]
 fn spawn_timer<P: Platform>(
     resources: &Resources<P>,
@@ -1081,9 +975,6 @@ fn spawn_timer<P: Platform>(
     });
 }
 
-/// Encoded bytes for a refinement whose bytes were not kept: the byte tier
-/// or the file, through the background job's transport seam on a
-/// blocking-pool thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn restore_for_job<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
     shared
@@ -1097,9 +988,6 @@ fn restore_for_job<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, 
         .map_err(|failure| failure.to_string())
 }
 
-/// Encoded bytes for an image whose bytes were not kept, in the browser:
-/// only what the registry or a `data:` URL hands back without a request,
-/// since the browser's transport answers nothing synchronously.
 #[cfg(target_arch = "wasm32")]
 fn restore_bytes<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, String> {
     shared
@@ -1116,9 +1004,6 @@ fn restore_bytes<P: Platform>(shared: &Shared<P>, url: &Url) -> Result<Bytes, St
         .map_err(|failure| failure.to_string())
 }
 
-/// The executor's seams, pinned where the test can reach the decoder and the
-/// transport: how many decodes may run at once, what a panicking closure
-/// reports, and what a drop of the last `Resources` leaves behind.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod job_tests {
     use std::sync::Arc;
@@ -1131,8 +1016,6 @@ mod job_tests {
     use crate::decode::Bitmap;
     use crate::{Resources, ResourcesConfig};
 
-    /// A 1x1 RGBA PNG: enough for preprocessing to call it an image, while a
-    /// hooked decoder answers for the platform one.
     fn tiny_png() -> Vec<u8> {
         let mut bytes = Vec::new();
         {
@@ -1145,7 +1028,6 @@ mod job_tests {
         bytes
     }
 
-    /// What a hooked decode hands back, with `source` as the image's own size.
     fn pixel(width: u32, height: u32, source: (u32, u32)) -> Bitmap {
         Bitmap {
             width,
@@ -1164,8 +1046,6 @@ mod job_tests {
         }
     }
 
-    /// Services turns until `done` holds, or the deadline says the job never
-    /// arrived.
     fn settle(resources: &Resources, what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -1199,9 +1079,6 @@ mod job_tests {
                 let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                 max.fetch_max(now, Ordering::SeqCst);
                 calls.fetch_add(1, Ordering::SeqCst);
-                // A window wide enough for a second decode to be seen, and
-                // one that never waits on another decode: with one permit no
-                // rendezvous could ever complete.
                 std::thread::sleep(Duration::from_millis(50));
                 live.fetch_sub(1, Ordering::SeqCst);
                 Ok(pixel(1, 1, (1, 1)))
@@ -1228,11 +1105,6 @@ mod job_tests {
         );
     }
 
-    /// An SVG document is parsed in the decode's place: it never reaches the
-    /// decoder, but its parse waits for a decode permit like a decode does,
-    /// so nothing reports while the only permit is held, and the parsed
-    /// document reports once it is let go. The same holds for a document a
-    /// page handed over, which has nothing to fetch.
     #[test]
     fn an_svg_is_parsed_under_a_decode_permit_without_the_decoder() {
         const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#;
@@ -1269,8 +1141,6 @@ mod job_tests {
             DocumentKind::Svg,
             &reports,
         );
-        // Long enough for the fetch and the preprocessing to finish: the
-        // parse is what waits.
         std::thread::sleep(Duration::from_millis(200));
         super::service(&resources);
         assert!(
@@ -1373,8 +1243,6 @@ mod job_tests {
             }),
             || {},
         );
-        // The initial decode is asked for the bound; a refinement is asked
-        // for the drawn size, and that one panics.
         resources
             .shared
             .set_decode_hook(Arc::new(|_bytes, _format, _header, max| {
@@ -1393,7 +1261,6 @@ mod job_tests {
         });
         assert!(matches!(events.as_slice(), [ImageEvent::Loaded { .. }]));
 
-        // Drawn eight times smaller: a refinement starts and its decode panics.
         assert!(
             super::describe(&resources, "app:///big.png", ImageSizeHint::new(125, 125))
                 .is_some_and(|image| image.pixels.is_some()),
@@ -1415,8 +1282,6 @@ mod job_tests {
         );
     }
 
-    /// Loads `source` from a registered PNG through the hooked decoder and
-    /// services turns until the load is reported.
     fn load(resources: &Resources, source: &str) {
         let (reports, inbox) = ImageInbox::new();
         resources
@@ -1428,12 +1293,6 @@ mod job_tests {
         });
     }
 
-    /// A source whose bitmap the tier dropped and that a frame wants is
-    /// restored by a job, on a pool thread and never on the thread that
-    /// wanted it; one restore runs however often it is wanted while in
-    /// flight; its completion wakes the host and is applied in a turn,
-    /// after which the source is described with pixels again; and nothing
-    /// of it is reported to the document.
     #[test]
     fn a_wanted_source_is_restored_once_off_the_calling_thread_and_wakes_the_host() {
         let wakeups = Arc::new(AtomicUsize::new(0));
@@ -1478,8 +1337,6 @@ mod job_tests {
             "a released bitmap is described without its pixels"
         );
 
-        // The restore is held inside its decode while the frame wants the
-        // source again and again.
         open.store(false, Ordering::SeqCst);
         let wakeups_before = wakeups.load(Ordering::SeqCst);
         for _ in 0..3 {
@@ -1518,9 +1375,6 @@ mod job_tests {
         );
     }
 
-    /// A restore that fails leaves the source with nothing to draw: it is
-    /// described as nothing from then on, wanting it again starts nothing,
-    /// and the document is told nothing.
     #[test]
     fn a_failed_restore_leaves_the_source_with_nothing_to_draw() {
         let resources = Resources::new(
@@ -1561,9 +1415,6 @@ mod job_tests {
         assert!(inbox.drain().is_empty());
     }
 
-    /// Regression: one view's frame used to replace the scope's pinned set,
-    /// so a second view's `retain` unpinned the first view's bitmaps while
-    /// its painter still drew them.
     #[test]
     fn two_views_of_one_scope_keep_both_working_sets_pinned() {
         let resources = Resources::new(
@@ -1611,7 +1462,6 @@ mod job_tests {
         assert!(resources.is_resident("app:///b.png"));
     }
 
-    /// The gate a test holds a blocking closure at.
     struct Gate {
         entered: Arc<AtomicBool>,
         open: Arc<AtomicBool>,
@@ -1649,9 +1499,6 @@ mod job_tests {
         }
     }
 
-    /// Drops the last `Resources` with a blocking closure held at a gate,
-    /// and reports how long the drop took and whether the wakeup moved after
-    /// it returned.
     fn drop_with_a_job_in_flight() -> Duration {
         let wakeups = Arc::new(AtomicUsize::new(0));
         let resources = Resources::new(
@@ -1708,9 +1555,6 @@ mod job_tests {
         );
     }
 
-    /// What makes "no wakeup after the drop returns" a guarantee rather than
-    /// a race: the completion runs on the driver thread and the drop joins
-    /// it, so a wakeup already running finishes first.
     #[test]
     fn the_drop_waits_for_a_wakeup_already_running_on_the_driver() {
         let entered = Arc::new(AtomicBool::new(false));
@@ -1725,8 +1569,6 @@ mod job_tests {
                 let wakeups = Arc::clone(&wakeups);
                 move || {
                     entered.store(true, Ordering::SeqCst);
-                    // A slow embedder: the count moves only at the end, so a
-                    // drop that did not wait would read it before it moved.
                     std::thread::sleep(Duration::from_millis(400));
                     wakeups.fetch_add(1, Ordering::SeqCst);
                 }

@@ -38,26 +38,14 @@ pub use platform::{
     PartsOf, Platform, Request, Response, Store, StoreError, Threaded, Tier, Volatility,
 };
 
-/// What a load may do with the caches on its way.
-///
-/// The fetcher's own vocabulary: every load names one, the byte tier turns it
-/// into an RFC 9111 plan ([`plan`](crate::http::plan)), and the browser transport maps it
-/// onto a `fetch` request's cache mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CachePolicy {
-    /// Ordinary freshness rules: a fresh stored response answers, a stale one
-    /// is revalidated.
     #[default]
     Default,
-    /// Fetch, and store nothing.
     NoStore,
-    /// Fetch unconditionally, ignoring what is stored.
     Reload,
-    /// Revalidate whatever is stored before using it.
     NoCache,
-    /// Use a stored response however stale, and fetch only without one.
     ForceCache,
-    /// Use a stored response however stale, and fail without one.
     OnlyIfCached,
 }

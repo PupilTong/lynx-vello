@@ -38,8 +38,6 @@ use stylo_dom::ElementState;
 
 use crate::tree::node::{ChildrenIter, Node};
 
-/// The namespace an element is in: HTML's, or SVG's for an element
-/// [`Node::in_svg_namespace`] marks ([`crate::svg`]).
 fn element_namespace(
     svg: bool,
 ) -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
@@ -53,24 +51,8 @@ fn element_namespace(
     }
 }
 
-/// The HTML namespace, which every element but an SVG one is in.
 const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 
-/// The key an element's animation state is filed under, or `None` when the
-/// element owns no animation state at all.
-///
-/// Every read of the document's animation map goes through here, and the node
-/// bit is the reason. Stylo asks `has_animations` for every element on every
-/// match-and-cascade, and twice more per candidate through the style-sharing
-/// cache; the map behind it is one document-wide `RwLock`, so an unguarded
-/// lookup puts every Rayon worker on one cache line. Measured on the `css`
-/// benches, that cost documents with no animations at all 3-10x. Keeping the
-/// map unreachable except through this function is what stops that coming
-/// back.
-///
-/// [`OpaqueNode`] carries the bare arena slot with the generation stripped, so
-/// the document drops a freed slot's animations before the slot is reissued
-/// (`Document::free_node`).
 fn animation_key<T: Sync>(
     node: &Node<T>,
     pseudo_element: Option<PseudoElement>,
@@ -201,20 +183,10 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
         Self: 'b,
     {
         let shadow = self.shadow_data()?;
-        // The instance tree of an SVG `use` element takes no style rules of
-        // its own: stylo skips it for the document's (SVG 2 §5.6), and
-        // asserts that it has none (`containing_shadow_ignoring_svg_use`).
         (!shadow.svg_use_instance).then_some(&shadow.styles.data)
     }
 }
 
-// `implicit_scope_for_sheet_in_shadow_root` (and `TShadowRoot`'s
-// `implicit_scope_for_sheet`) stay at their `None` defaults: stylo only asks
-// them for a `StylistImplicitScopeRoot::Cached` root, which no sheet here
-// produces. Document sheets report no implicit `@scope` root (the document
-// element) and shadow sheets report `ImplicitScopeRoot::Constructed` (the
-// host), both resolved without a per-tree lookup
-// (`style::engine::ShadowStyleSheet`).
 impl<'a, T: Sync> TElement for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
@@ -277,14 +249,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         Node::has_part_attr(self)
     }
 
-    /// An element of a shadow tree with the `pseudo` attribute of a
-    /// placeholder is its host's `::placeholder`
-    /// (`Node::implemented_pseudo_element`). Stylo then collects its rules
-    /// as an element-backed pseudo-element's: the `::placeholder` rules of
-    /// every origin with the host as the originating element, the UA
-    /// sheet's and its own shadow tree's normal rules as the element it
-    /// also is, and `:host::placeholder` from its tree, and cascades them
-    /// under the pseudo-element's property restriction.
     fn implemented_pseudo_element(&self) -> Option<PseudoElement> {
         Node::implemented_pseudo_element(self)
     }
@@ -363,9 +327,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         self.set_dirty_descendants_bit(false);
     }
 
-    // Stylo calls these two only from the postorder step, which
-    // `RecalcStyle::needs_postorder_traversal()` turns off, so no node keeps
-    // a child counter.
     fn store_children_to_process(&self, _: isize) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
@@ -510,20 +471,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         element_namespace(self.in_svg_namespace())
     }
 
-    /// The content box this element last committed as a size query
-    /// container — what `cqw` and `cqh` resolve against
-    /// ([css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type)).
-    ///
-    /// Stylo asks only elements whose `container-type` is a size container
-    /// type, and picks the axes itself: both for `size`, the inline one for
-    /// `inline-size`. An axis this document has not recorded reads `None`,
-    /// which Stylo merges with the next container up and finally falls back
-    /// to the small viewport for — so an element that no layout has committed
-    /// resolves against the viewport rather than against zero.
-    ///
-    /// `display` is Gecko's, for the table parts whose principal box is not
-    /// the box that was laid out. This engine has no table box tree: the
-    /// element's own box is the one `layout::committed_box` recorded.
     fn query_container_size(&self, _display: &Display) -> Size2D<Option<Au>> {
         let size = Node::arenas(self).committed_box(Node::id(self)).container;
         Size2D::new(
@@ -568,9 +515,6 @@ impl<T: Sync> Element for &Node<T> {
         Node::implemented_pseudo_element(self).is_some()
     }
 
-    /// The host of the shadow tree the pseudo-element's element is in: the
-    /// originating element a `::placeholder` compound's left-hand side is
-    /// matched against (`Node::implemented_pseudo_element`).
     fn pseudo_element_originating_element(&self) -> Option<Self> {
         debug_assert!(self.is_pseudo_element());
         Element::containing_shadow_host(self)
@@ -609,8 +553,6 @@ impl<T: Sync> Element for &Node<T> {
         None
     }
 
-    /// False for an SVG element, so selectors match its local name and
-    /// its attribute names case-sensitively.
     fn is_html_element_in_html_document(&self) -> bool {
         Node::is_element(self) && !self.in_svg_namespace()
     }
@@ -654,10 +596,6 @@ impl<T: Sync> Element for &Node<T> {
         _context: &mut selectors::context::MatchingContext<Self::Impl>,
     ) -> bool {
         match pc {
-            // `:modal` and `:open` are state bits the embedder's `<dialog>`
-            // sets beside its top-layer entry (`tree::top_layer`);
-            // `:popover-open` is the one the popover algorithms keep
-            // (`tree::popover`).
             NonTSPseudoClass::Hover
             | NonTSPseudoClass::Active
             | NonTSPseudoClass::Focus

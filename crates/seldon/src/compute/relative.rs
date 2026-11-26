@@ -125,24 +125,9 @@ struct RelativeItem<N> {
     last_measure: Option<LayoutInput>,
     size_is_definite: Size<bool>,
     reuse_fixed_measurement: bool,
-    /// Per physical axis: every value this item's committed input carries on
-    /// the axis is imposed — by the item's own style, or by anchors against a
-    /// container box that does not move — rather than measured from the item,
-    /// so the input survives any change confined to the item's own subtree.
-    /// Becomes the commit input's `content_independent`.
     content_independent: Size<bool>,
-    /// Per axis: the item's own size/min/max values are pure lengths, or
-    /// percentages of a container axis that is itself content-independent.
     values_stable: Size<bool>,
-    /// No margin or padding percentage tracks a content-derived inline basis.
     edges_stable: bool,
-    /// The item's box reads no percentage basis
-    /// ([`CoreStyle::reads_percentage_basis`]) and probes no intrinsic size
-    /// in the block axis, so a definite container width found after the
-    /// first two passes changes nothing resolved here or by
-    /// `prepare_intrinsic_sizes`: `refresh_item_bases` keeps the item, and
-    /// `measure_item` may keep a measurement the new width still fits
-    /// ([`measurement_still_fits`]).
     inline_basis_free: bool,
 }
 super::util::impl_item_geometry!(RelativeItem);
@@ -183,14 +168,10 @@ where
 {
     let geometry =
         resolve_item_geometry_with_bases(style, size_percentage_basis, edge_inline_basis);
-    // Computed on commit passes only: a measurement pass commits nothing and
-    // would pay for an answer nobody reads.
     let (values_stable, edges_stable) = container_independent
         .map_or((Size::new(false, false), false), |container| {
             item_value_stability(style, geometry.aspect_ratio, container)
         });
-    // A block-axis intrinsic probe measures the item at the container's
-    // available width, which the third pass moves.
     let inline_basis_free = !geometry.intrinsic.needs_min_content(Axis::Vertical)
         && !geometry.intrinsic.needs_max_content(Axis::Vertical)
         && !style.reads_percentage_basis();
@@ -221,7 +202,6 @@ where
     }
 }
 
-/// Compact sorted lookup with duplicate-id last-wins semantics.
 #[derive(Debug)]
 struct IdLookup {
     entries: Vec<(i32, usize)>,
@@ -573,7 +553,6 @@ fn fit_content_available(
         | StyleSize::FitContent
         | StyleSize::Stretch
         | StyleSize::WebkitFillAvailable => available,
-        // An in-flow item: §5.1.1 resolves nothing for it.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
             unresolvable_fit_content_available(
                 value,
@@ -587,8 +566,6 @@ fn fit_content_available(
     }
 }
 
-/// The anchor arm of [`fit_content_available`], out of line so the hot
-/// function does not call itself.
 #[cold]
 #[inline(never)]
 fn unresolvable_fit_content_available(
@@ -847,18 +824,6 @@ where
     input
 }
 
-/// Whether a basis-free item's measurement under `previous` answers `input`
-/// too. Both fix the same sizes and modes and differ at most in the parent
-/// size, which a basis-free box never reads, and in the available width.
-///
-/// An auto width is a fit-content width — `clamp(min(max-content,
-/// max(min-content, available)))`, as every container algorithm and leaf
-/// sizes one — so a margin box narrower than the available width it was
-/// measured at (or measured at max-content) took its max-content width, or
-/// a maximum below the available width, and any other available width at
-/// least that wide gives the same width and so the same layout inside it.
-/// The block axis must match: nothing here proves an auto height stable
-/// under another available height.
 #[inline]
 fn measurement_still_fits(previous: &LayoutInput, input: &LayoutInput, outer_width: f32) -> bool {
     previous.goal == input.goal
@@ -1004,8 +969,6 @@ fn position_axis<N>(
     bounds
 }
 
-/// Whether the size this measurement imposes on the axis is one the item's
-/// own content cannot move.
 fn axis_is_content_independent<N>(
     item: &RelativeItem<N>,
     axis: Axis,
@@ -1014,17 +977,12 @@ fn axis_is_content_independent<N>(
     container_independent: Size<bool>,
 ) -> bool {
     if axis.size(input.known_dimensions).is_none() {
-        // Nothing imposed a size on the axis, so the item's own measurement
-        // is what decides it.
         return false;
     }
     if !item.edges_stable || !axis.size(item.values_stable) || axis_has_intrinsic_style(item, axis)
     {
         return false;
     }
-    // A two-sided constraint sizes the item from the span between its anchors
-    // inside the container's content box, so it stands only while that box
-    // does. Sibling anchors are another subtree's business, not this one's.
     constrained_border_size(axis.size(constraints), axis.sum(item.margin)).is_none()
         || axis.size(container_independent)
 }
@@ -1162,8 +1120,6 @@ fn refresh_item_bases<'tree, T>(
 {
     for item in items {
         if item.inline_basis_free {
-            // Nothing the item resolved reads the moved width basis but a
-            // percentage inset, which only a relative offset applies.
             if item.position == PositionProperty::Relative {
                 item.inset = super::util::resolve_insets(
                     tree.style(item.key.node).inset(),
@@ -1489,8 +1445,6 @@ where
     );
     let container_independent = container_content_independence(input, style_definite);
 
-    // Every axis is settled without the children — each one either definite
-    // or contained — so a measurement can answer from the box alone.
     let settled_without_children = Size::new(
         initial_outer.width.is_some() || contained.width().is_some(),
         initial_outer.height.is_some() || contained.height().is_some(),
@@ -1663,7 +1617,6 @@ where
         let order = u32::try_from(document_index).unwrap_or(u32::MAX);
         super::hide_child_at_order(tree, state, child, order);
     }
-    // With no out-of-flow box to lay out, the pass adds nothing.
     let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
         Size::ZERO
     } else {

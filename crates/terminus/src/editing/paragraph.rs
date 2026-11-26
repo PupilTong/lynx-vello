@@ -37,51 +37,26 @@ use crate::layout::paragraph::{establishes_paragraph, generated_content};
 use crate::layout::{StyleView, TextBrush};
 use crate::tree::document::{Document, NodeId};
 
-/// The committed paragraph a host's text is laid out in, as the editor
-/// reads it.
 pub(crate) struct EditableParagraph<'a> {
-    /// The node whose layout holds the paragraph: the host itself, or the
-    /// anonymous block box around its text.
     pub(crate) node: NodeId,
-    /// The display layout, in the paragraph's own coordinates (its node's
-    /// content-box top-left).
     pub(crate) layout: &'a Layout<TextBrush>,
-    /// The bridge between `layout`'s bytes and the paragraph's source units.
     pub(crate) map: OffsetMap<'a>,
-    /// The paragraph's origin in the host's border-box space.
     pub(crate) origin: Point2D<f32>,
-    /// Whether the paragraph's source units are the selection text's UTF-16
-    /// units. For an editing host, whether the paragraph is built from the
-    /// host's value and nothing else: every child of the host is a text
-    /// node, no generated `content` replaces them, and every run of the
-    /// paragraph is the host's own. For a selectable element selected
-    /// without focus, always: its selection text is the paragraph's source
-    /// text ([`Document::session_paragraph`]).
     pub(crate) shows_value: bool,
 }
 
 impl EditableParagraph<'_> {
-    /// The layout byte value byte `byte` sits at. `None` where the display
-    /// layout does not show it: at or past a truncation cut, or after the
-    /// first line of a `<text>` that shows only that one.
     pub(crate) fn layout_byte(&self, value: &str, byte: usize) -> Option<usize> {
         let unit = u32::try_from(unit_of_byte(value, byte)).ok()?;
         let at = self.map.unit_to_byte_or_end(unit)?;
         (!self.map.truncated() || at < self.map.cut_byte()).then_some(at)
     }
 
-    /// [`Self::layout_byte`], or the end of what the layout shows: where a
-    /// painted caret or a reported box goes for an offset the layout lacks.
     pub(crate) fn layout_byte_clamped(&self, value: &str, byte: usize) -> usize {
         self.layout_byte(value, byte)
             .unwrap_or_else(|| self.map.cut_byte())
     }
 
-    /// The value byte layout byte `byte` stands for: the start of the
-    /// value's character there. A byte inside a collapsed white-space span
-    /// reads as the span's start, one of an inline box's edges as the unit
-    /// after it. `None` at or past a truncation cut, whose tail is no value
-    /// text.
     pub(crate) fn value_byte(&self, value: &str, byte: usize) -> Option<usize> {
         if self.map.truncated() && byte >= self.map.cut_byte() {
             return None;
@@ -90,10 +65,6 @@ impl EditableParagraph<'_> {
         Some(byte_of_unit_floor(value, unit as usize))
     }
 
-    /// The value byte layout byte `byte` stands for as the *end* of a
-    /// range: everything before it, a collapsed span sitting at it
-    /// included. `None` past a truncation cut; the cut itself ends the last
-    /// visible cluster.
     pub(crate) fn value_end_byte(&self, value: &str, byte: usize) -> Option<usize> {
         if self.map.truncated() && byte > self.map.cut_byte() {
             return None;
@@ -102,8 +73,6 @@ impl EditableParagraph<'_> {
         Some(byte_of_unit_floor(value, unit as usize))
     }
 
-    /// `selection` (value bytes) placed in the layout; `None` when either
-    /// end is not shown there.
     pub(crate) fn place(&self, value: &str, selection: ByteSelection) -> Option<Selection> {
         let anchor = self.layout_byte(value, selection.anchor)?;
         let focus = self.layout_byte(value, selection.focus)?;
@@ -113,8 +82,6 @@ impl EditableParagraph<'_> {
         ))
     }
 
-    /// [`Self::place`], with an end the layout does not show moved to the
-    /// end of what it shows: for painting and geometry.
     pub(crate) fn place_clamped(&self, value: &str, selection: ByteSelection) -> Selection {
         Selection::new(
             Cursor::from_byte_index(
@@ -130,8 +97,6 @@ impl EditableParagraph<'_> {
         )
     }
 
-    /// A parley selection over the layout, read back as value bytes; `None`
-    /// when either end lies at or past a truncation cut.
     pub(crate) fn read(&self, value: &str, selection: &Selection) -> Option<ByteSelection> {
         Some(ByteSelection {
             anchor: self.value_byte(value, selection.anchor().index())?,
@@ -142,16 +107,6 @@ impl EditableParagraph<'_> {
 }
 
 impl<T> Document<T> {
-    /// The node whose committed paragraph lays `host`'s text out: `host`
-    /// when it establishes a paragraph itself (a Lynx text element, a block
-    /// container), else the anonymous block box of its first text child,
-    /// whose container is `host`. A host that establishes a paragraph has it
-    /// even when empty: one empty line of its strut. `None` when no committed
-    /// paragraph holds the text: a host that establishes none and has no
-    /// text, or text that is all white space (which a flex, grid or other
-    /// item container does not render, css-flexbox-1 §4), a host no pass has
-    /// laid out, an inline box or a `display: contents` host, whose text is
-    /// laid out by a paragraph around it.
     pub(crate) fn paragraph_node_of(&self, host: NodeId) -> Option<NodeId> {
         let node = self.get(host)?;
         let view = StyleView::try_of(node)?;
@@ -169,8 +124,6 @@ impl<T> Document<T> {
         self.committed_paragraph(anonymous).map(|_| anonymous)
     }
 
-    /// The committed paragraph `host`'s text is laid out in
-    /// ([`Self::paragraph_node_of`]), as the editor reads it.
     pub(crate) fn editable_paragraph(&self, host: NodeId) -> Option<EditableParagraph<'_>> {
         let node = self.paragraph_node_of(host)?;
         let view = self.committed_paragraph(node)?.editable()?;
@@ -186,10 +139,6 @@ impl<T> Document<T> {
         })
     }
 
-    /// The committed paragraph the session's selection is held over: the
-    /// host's ([`Self::editable_paragraph`]), which for a selectable element
-    /// selected without focus always shows the selection text, since that
-    /// text is the paragraph's own source text ([`Self::session_text`]).
     pub(crate) fn session_paragraph(
         &self,
         session: &super::Session,
@@ -201,16 +150,11 @@ impl<T> Document<T> {
         Some(paragraph)
     }
 
-    /// Where the content box of `node` — the host, or the anonymous box of
-    /// its text — sits in `host`'s border-box space.
     fn paragraph_origin(&self, host: NodeId, node: NodeId) -> Point2D<f32> {
         let inset = self.content_inset(node);
         if node == host {
             return inset.to_point();
         }
-        // An anonymous box is laid out inside its container, so the two
-        // client rects differ by its place there and by whatever the host
-        // scrolls by.
         match (
             self.bounding_client_rect(node),
             self.bounding_client_rect(host),
@@ -223,8 +167,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// The border and padding before `node`'s content box, from its last
-    /// committed layout.
     pub(crate) fn content_inset(&self, node: NodeId) -> Vector2D<f32> {
         self.rounded_layout(node)
             .map_or_else(Vector2D::zero, |layout| {

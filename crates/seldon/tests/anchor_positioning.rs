@@ -37,15 +37,10 @@ use stylo::values::generics::position::{
 };
 use support::*;
 
-// ---------------------------------------------------------------------------
-// Value builders.
-
 fn scoped(name: &str) -> TreeScoped<DashedIdent> {
     TreeScoped::with_default_level(DashedIdent(Atom::from(name)))
 }
 
-/// `anchor(<name> <side>[, <fallback>px])`; an empty name is the default
-/// anchor.
 fn anchor(name: &str, side: Side, fallback: Option<f32>) -> Inset {
     Inset::AnchorFunction(Box::new(GenericAnchorFunction {
         target_element: scoped(name),
@@ -54,7 +49,6 @@ fn anchor(name: &str, side: Side, fallback: Option<f32>) -> Inset {
     }))
 }
 
-/// `anchor(<name> <percent>%)`.
 fn anchor_percent(name: &str, percent: f32) -> Inset {
     Inset::AnchorFunction(Box::new(GenericAnchorFunction {
         target_element: scoped(name),
@@ -63,7 +57,6 @@ fn anchor_percent(name: &str, percent: f32) -> Inset {
     }))
 }
 
-/// `calc(anchor(<name> <side>) + <px>px)`, or with a percentage side.
 fn anchor_calc(name: &str, side: GenericAnchorSide<Box<CalcNode>>, plus: f32) -> Inset {
     let anchor = CalcNode::Anchor(Box::new(GenericAnchorFunction {
         target_element: scoped(name),
@@ -82,7 +75,6 @@ fn anchor_calc(name: &str, side: GenericAnchorSide<Box<CalcNode>>, plus: f32) ->
     ))
 }
 
-/// `calc(anchor(<name> <side>, <fallback>px) + 0px)`.
 fn anchor_calc_with_fallback(name: &str, side: Side, fallback: f32) -> Inset {
     let anchor = CalcNode::Anchor(Box::new(GenericAnchorFunction {
         target_element: scoped(name),
@@ -134,10 +126,6 @@ fn inset(top: f32, right: f32, bottom: f32, left: f32) -> Edges<Inset> {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Harness: one containing block (a flex container, which establishes it)
-// with one absolutely positioned leaf.
-
 fn absolute(width: f32, height: f32) -> TestStyle {
     TestStyle {
         position: PositionProperty::Absolute,
@@ -153,8 +141,6 @@ fn container(width: f32, height: f32) -> TestStyle {
     }
 }
 
-/// Lays out `target` (a leaf with `content` as its min- and max-content
-/// size) in a `cb`-sized containing block and returns its box.
 fn place_in(tree: &mut TestTree, cb: TestStyle, target: TestStyle, content: Size<f32>) -> TestId {
     let target = tree.push_leaf(target, content, None);
     let width = match cb.size.width {
@@ -211,11 +197,6 @@ fn outcome(tree: &TestTree, id: TestId) -> AnchorOutcome {
         .expect("an anchor-positioned box reports an outcome")
 }
 
-// ---------------------------------------------------------------------------
-// §3.1 position-area and §4.1 area-specific default alignment.
-
-/// WPT `position-area-align-justify.html`: a 300px containing block, a 100px
-/// anchor at (100, 100), a 10px box with `inset: 10px 15px 20px 25px`.
 #[test]
 fn position_area_aligns_toward_the_anchor_wpt_align_justify() {
     let cases = [
@@ -254,10 +235,6 @@ fn position_area_aligns_toward_the_anchor_wpt_align_justify() {
     }
 }
 
-/// WPT `position-area-basic.html`: `align-self`/`justify-self: stretch`
-/// fill the selected region of a 400px containing block around a
-/// 150×75 anchor at (100, 150); logical keywords resolve through
-/// `horizontal-tb ltr`.
 #[test]
 fn position_area_regions_wpt_basic() {
     let cases = [
@@ -347,7 +324,6 @@ fn position_area_regions_wpt_basic() {
 
 #[test]
 fn position_area_logical_keywords_follow_the_containing_block_direction() {
-    // `start end` in an rtl containing block: inline-end is the left.
     let mut tree = with_default_anchor("--anchor", rect(100.0, 150.0, 150.0, 75.0));
     let rtl = TestStyle {
         direction: direction::T::Rtl,
@@ -369,8 +345,6 @@ fn position_area_logical_keywords_follow_the_containing_block_direction() {
     assert_box(&tree.layout(id), (0.0, 0.0, 100.0, 150.0), "rtl start end");
 }
 
-/// §3.1.1: lines 1 and 4 extend to an anchor outside the containing block,
-/// so a track on that side can be empty.
 #[test]
 fn position_area_grid_extends_to_an_anchor_outside_the_containing_block() {
     let stretch = |position_area| TestStyle {
@@ -423,8 +397,6 @@ fn position_area_without_a_default_anchor_has_no_effect() {
     assert_eq!(reported.compensates, Size::new(false, false));
 }
 
-/// WPT `position-area-inset-one-side-auto.tentative.html`: with one `auto`
-/// inset on an axis, §4.1 aligns unsafely toward the non-`auto` one.
 #[test]
 fn one_auto_inset_aligns_unsafely_toward_the_other_wpt() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 100.0, 100.0));
@@ -443,7 +415,6 @@ fn one_auto_inset_aligns_unsafely_toward_the_other_wpt() {
         "top left, one-sided insets",
     );
 
-    // The mirrored single inset aligns toward the end edges.
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 100.0, 100.0));
     let layout = place(
         &mut tree,
@@ -454,8 +425,6 @@ fn one_auto_inset_aligns_unsafely_toward_the_other_wpt() {
             ..absolute(50.0, 50.0)
         },
     );
-    // Region: x [200, 200], y [200, 200]; right 10 and bottom 20 move the
-    // end edges to 190 and 180, and the IMCB is corrected to zero there.
     assert_box(
         &layout,
         (140.0, 130.0, 50.0, 50.0),
@@ -463,9 +432,6 @@ fn one_auto_inset_aligns_unsafely_toward_the_other_wpt() {
     );
 }
 
-/// WPT `auto-margins-position-area.html` against its reference: with
-/// `inset: 0; margin: auto 0 0 auto`, `position-area` (and `anchor-center`
-/// on its own axis) makes `auto` margins 0.
 #[test]
 fn position_area_and_anchor_center_zero_auto_margins_wpt() {
     let anchor_rect = rect(100.0, 100.0, 152.0, 77.0);
@@ -554,8 +520,6 @@ fn position_area_and_anchor_center_zero_auto_margins_wpt() {
     }
 }
 
-/// Percentages in the box's sizes resolve against the region (§3.1's note:
-/// "max-height: 100% will be relative to the position-area").
 #[test]
 fn percentages_resolve_against_the_position_area() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 100.0, 100.0));
@@ -569,12 +533,9 @@ fn percentages_resolve_against_the_position_area() {
             ..TestStyle::default()
         },
     );
-    // Region x [200, 400], y [200, 300]; §4.1 aligns toward the anchor.
     assert_box(&layout, (200.0, 200.0, 100.0, 50.0), "50% of the region");
 }
 
-/// A `position-area` region is laid out against even when an explicit
-/// alignment replaces §4.1's default.
 #[test]
 fn explicit_alignment_overrides_the_area_default() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 100.0, 100.0));
@@ -595,14 +556,9 @@ fn explicit_alignment_overrides_the_area_default() {
     );
 }
 
-/// css-position-4's scrollable containing block replaces the local one for a
-/// box with a default anchor.
 #[test]
 fn a_scrollable_containing_block_extends_the_position_area_grid() {
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 50.0, 50.0));
-    // A 300px scroll container whose in-flow content overflows to 600 wide
-    // and not below: the area is that overflow, never smaller than the
-    // padding box, so 600 by 300.
     let wide = tree.push_leaf(
         TestStyle {
             flex_shrink: nn(0.0),
@@ -637,11 +593,6 @@ fn a_scrollable_containing_block_extends_the_position_area_grid() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §3.2 anchor().
-
-/// WPT `anchor-inside-outside.html`: a 50px anchor at (150, 250) in a 400px
-/// containing block, 10px boxes.
 #[test]
 fn inside_and_outside_pick_the_side_relative_to_the_inset_wpt() {
     let cases = [
@@ -725,8 +676,6 @@ impl PhysicalEdge {
     }
 }
 
-/// WPT `anchor-position-001.html`: four insets on two named anchors size the
-/// box between them.
 #[test]
 fn insets_on_two_named_anchors_size_the_box_wpt_001() {
     let mut tree = TestTree::default();
@@ -754,7 +703,6 @@ fn insets_on_two_named_anchors_size_the_box_wpt_001() {
 #[test]
 fn start_end_self_and_percentages_resolve_by_direction() {
     let anchor_rect = rect(100.0, 40.0, 80.0, 20.0);
-    // (case, containing block rtl, box rtl, side, expected x)
     let cases = [
         (
             "start, ltr",
@@ -852,8 +800,6 @@ enum AnchorEdge {
     Percent(f32),
 }
 
-/// §3.2.1: a physical keyword resolves only in an inset on its own axis;
-/// otherwise the fallback, and without one the inset is `auto`.
 #[test]
 fn physical_sides_resolve_only_on_the_matching_axis() {
     let mut tree = TestTree::default();
@@ -871,7 +817,6 @@ fn physical_sides_resolve_only_on_the_matching_axis() {
             ..absolute(10.0, 10.0)
         },
     );
-    // top takes its fallback; left becomes `auto`, so the static position.
     assert_box(&layout, (0.0, 7.0, 10.0, 10.0), "mismatched axes");
 }
 
@@ -917,7 +862,6 @@ fn anchor_resolves_inside_math_functions() {
     );
     assert_box(&layout, (121.0, 65.0, 10.0, 10.0), "calc(anchor() + px)");
 
-    // An unresolvable one inside calc() takes its fallback there.
     let layout = place(
         &mut tree,
         Size::new(300.0, 100.0),
@@ -934,8 +878,6 @@ fn anchor_resolves_inside_math_functions() {
     assert_box(&layout, (0.0, 9.0, 10.0, 10.0), "calc fallback");
 }
 
-/// An `anchor()` on a box that is not absolutely positioned is
-/// unresolvable: a relatively positioned box takes the fallback.
 #[test]
 fn anchor_on_an_in_flow_box_takes_its_fallback() {
     let mut tree = TestTree::default();
@@ -983,15 +925,8 @@ fn anchor_size_without_a_name_reads_the_default_anchor() {
     assert_box(&layout, (0.0, 0.0, 70.0, 10.0), "anchor-size(width)");
 }
 
-// ---------------------------------------------------------------------------
-// §4.2 anchor-center.
-
-/// (case, insets, max-width, expected width, expected x)
 type CenterCase = (&'static str, Edges<Inset>, Option<f32>, f32, f32);
 
-/// WPT `anchor-center-htb-htb.html`: a 100px containing block, a 50px anchor
-/// at (40, 40), a box whose content wraps to whatever width it gets, with
-/// `justify-self: anchor-center` and various insets.
 #[test]
 fn anchor_center_sizes_in_the_imcb_and_shifts_to_stay_inside_wpt() {
     let cases: [CenterCase; 10] = [
@@ -1084,8 +1019,6 @@ fn anchor_center_sizes_in_the_imcb_and_shifts_to_stay_inside_wpt() {
     }
 }
 
-/// Text that wraps: as wide as it may be, between one word (10px) and one
-/// line (1000px).
 fn wrapping_text(input: LeafMeasureInput) -> LeafMetrics {
     let width = input
         .known_dimensions
@@ -1101,8 +1034,6 @@ fn wrapping_text(input: LeafMeasureInput) -> LeafMetrics {
     ))
 }
 
-/// WPT `anchor-center-no-default.html`: without a default anchor
-/// `anchor-center` is `center` and leaves `auto` insets alone.
 #[test]
 fn anchor_center_without_a_default_anchor_is_center() {
     let mut tree = TestTree::default();
@@ -1116,14 +1047,11 @@ fn anchor_center_without_a_default_anchor_is_center() {
             ..absolute(40.0, 20.0)
         },
     );
-    // Horizontal: both insets, centered. Vertical: one `auto` inset, so the
-    // top inset places it and alignment has no effect.
     assert_box(&layout, (80.0, 0.0, 40.0, 20.0), "center");
 }
 
 #[test]
 fn anchor_center_near_an_edge_shifts_within_the_containing_block() {
-    // Anchor center at x = 15: centered, a 40px box would start at -5.
     let mut tree = with_default_anchor("--a", rect(5.0, 0.0, 20.0, 20.0));
     let layout = place(
         &mut tree,
@@ -1148,9 +1076,6 @@ fn anchor_center_near_an_edge_shifts_within_the_containing_block() {
     );
     assert_box(&layout, (-5.0, 0.0, 40.0, 20.0), "unsafe anchor-center");
 }
-
-// ---------------------------------------------------------------------------
-// css-position-3 §4.3 self-alignment of absolutely positioned boxes.
 
 fn aligned(justify: AlignFlags, align_flags: AlignFlags, insets: Edges<Inset>) -> TestStyle {
     TestStyle {
@@ -1247,7 +1172,6 @@ fn non_stretch_alignment_fits_auto_sizes_to_content() {
         },
         Size::new(30.0, 10.0),
     );
-    // Horizontal: fit-content, centered; vertical: `normal`, stretched.
     assert_box(
         &tree.layout(id),
         (85.0, 0.0, 30.0, 100.0),
@@ -1293,13 +1217,9 @@ fn auto_margins_take_precedence_over_alignment() {
     assert_box(&layout, (160.0, 0.0, 40.0, 20.0), "margin-left: auto");
 }
 
-/// css-align-3 §4.4.1.2: default and `safe` alignment keep an overflowing
-/// box inside the overflow limit rect; `unsafe` honors the alignment.
 #[test]
 fn overflowing_alignment_is_safe_by_default() {
     let cases = [
-        // IMCB [0, 200]; a 250px box does not fit the limit rect either, so
-        // it start-aligns in it.
         (
             "default center, too big",
             AlignFlags::CENTER,
@@ -1321,7 +1241,6 @@ fn overflowing_alignment_is_safe_by_default() {
             250.0,
             0.0,
         ),
-        // IMCB [150, 200]; an 80px box covers it and stays in [0, 200].
         (
             "default start, overflowing",
             AlignFlags::START,
@@ -1391,8 +1310,6 @@ fn start_and_end_follow_the_containing_block_direction() {
     }
 }
 
-/// Lynx's `linear` and `relative` containers place an absolutely positioned
-/// child by its insets alone; `justify-self`/`align-self` do not move it.
 #[test]
 fn lynx_containers_ignore_authored_self_alignment() {
     for relative in [false, true] {
@@ -1416,12 +1333,6 @@ fn lynx_containers_ignore_authored_self_alignment() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// §6.5 position fallback.
-
-/// WPT `position-try-001.html`: a 40×15 box with 5px margins, placed right of
-/// `--a1`; the options are left of it, below, above, and right with another
-/// size.
 fn try_001(tree: &mut TestTree, cb_width: f32, anchor_rect: Rect<f32>) -> TestId {
     tree.anchor_rects = vec![("--a1", anchor_rect)];
     let base = TestStyle {
@@ -1481,7 +1392,6 @@ fn try_001(tree: &mut TestTree, cb_width: f32, anchor_rect: Rect<f32>) -> TestId
 
 #[test]
 fn the_first_fitting_option_wins_wpt_position_try_001() {
-    // (case, cb width, anchor, expected box, chosen, overflows)
     let cases = [
         (
             "wider cb: base fits",
@@ -1547,7 +1457,6 @@ fn the_first_fitting_option_wins_wpt_position_try_001() {
 
 #[test]
 fn the_last_successful_option_is_kept_while_it_fits() {
-    // Base would fit (wider cb), but --f4 was last successful and fits too.
     let mut tree = TestTree::default();
     tree.last_successful = vec![(0, 4)];
     let target = try_001(&mut tree, 195.0, rect(45.0, 20.0, 100.0, 30.0));
@@ -1555,8 +1464,6 @@ fn the_last_successful_option_is_kept_while_it_fits() {
     assert_box(&tree.layout(target), (150.0, 25.0, 35.0, 40.0), "kept --f4");
     assert_eq!(outcome(&tree, target).chosen, 4);
 
-    // Last successful --f1 no longer fits: the list is walked from the base,
-    // skipping --f1, and the base fits.
     let mut tree = TestTree::default();
     tree.last_successful = vec![(0, 1)];
     let target = try_001(&mut tree, 195.0, rect(45.0, 20.0, 100.0, 30.0));
@@ -1567,7 +1474,6 @@ fn the_last_successful_option_is_kept_while_it_fits() {
     );
     assert_eq!(outcome(&tree, target).chosen, 0);
 
-    // Nothing fits: the current (last successful) option stays.
     let mut tree = TestTree::default();
     tree.last_successful = vec![(0, 2)];
     let target = try_001(&mut tree, 185.0, rect(45.0, 20.0, 100.0, 30.0));
@@ -1580,8 +1486,6 @@ fn the_last_successful_option_is_kept_while_it_fits() {
     );
 }
 
-/// WPT `position-try-order-basic.html` (numbers adapted): `most-width` tries
-/// the option with the widest inset-modified containing block first.
 #[test]
 fn position_try_order_sorts_by_imcb_size() {
     let run = |order: PositionTryOrder| {
@@ -1633,12 +1537,9 @@ fn position_try_order_sorts_by_imcb_size() {
         (110.0, 2),
         "inline is horizontal"
     );
-    // Equal heights: the stable sort keeps list order.
     assert_eq!(run(PositionTryOrder::MostHeight), (300.0, 1), "stable");
 }
 
-/// §6.5: an option whose inset-modified containing block was negative and
-/// corrected to zero does not fit, even for a zero-size margin box.
 #[test]
 fn a_negative_imcb_never_fits() {
     let mut tree = TestTree::default();
@@ -1666,8 +1567,6 @@ fn a_negative_imcb_never_fits() {
     assert_eq!(outcome(&tree, target).chosen, 2);
 }
 
-/// A box with options claims no content independence: which option it is
-/// committed with depends on its own size.
 #[test]
 fn a_box_with_options_is_not_content_independent() {
     let mut tree = TestTree::default();
@@ -1676,7 +1575,6 @@ fn a_box_with_options_is_not_content_independent() {
     let input = tree.committed_input(target).expect("committed");
     assert_eq!(input.goal.independence(), Some(Size::new(false, false)));
 
-    // Without options the claim stands.
     let mut tree = with_default_anchor("--a", rect(100.0, 100.0, 100.0, 100.0));
     tree.enable_cache();
     let id = place_in(
@@ -1698,12 +1596,8 @@ fn trial_options_are_measured_and_only_the_winner_is_committed() {
     tree.enable_cache();
     let target = try_001(&mut tree, 190.0, rect(45.0, 20.0, 100.0, 30.0));
     let input = tree.committed_input(target).expect("committed");
-    // --f4's size is handed over as known dimensions.
     assert_eq!(input.known_dimensions, Size::new(Some(35.0), Some(40.0)));
 }
-
-// ---------------------------------------------------------------------------
-// The outcome (§3.3 compensation, §6.6).
 
 #[test]
 fn compensation_follows_the_three_conditions() {
@@ -1773,8 +1667,6 @@ fn compensation_follows_the_three_conditions() {
     );
     assert!(!other.default_anchor_missing);
 
-    // §6.6 `anchor-valid`: a named `anchor()` does not reference the default
-    // anchor, so a box without one is not missing it.
     let mut tree = TestTree::default();
     tree.anchor_rects = vec![("--b", rect(0.0, 0.0, 10.0, 10.0))];
     let id = place_in(
@@ -1807,7 +1699,6 @@ fn outcome_rectangles_are_in_padding_box_coordinates() {
     );
     let reported = outcome(&tree, id);
     assert_eq!(reported.imcb, rect(25.0, 10.0, 60.0, 70.0));
-    // End-aligned: the margin box's right/bottom edges on the IMCB's.
     assert_eq!(reported.margin_box, rect(69.0, 66.0, 16.0, 14.0));
     assert!(!reported.overflows);
 }
@@ -1827,15 +1718,9 @@ fn plain_absolute_boxes_report_nothing() {
     assert_eq!(tree.anchor_outcomes(id), []);
 }
 
-// ---------------------------------------------------------------------------
-// Grid: the grid area is the pre-modification containing block, the grid
-// container's padding box the original one.
-
 #[test]
 fn position_area_in_a_grid_area() {
     let mut tree = TestTree::default();
-    // Grid: padding 20, columns 200 / 300, rows 150 / 100 (WPT
-    // `grid-position-area-basic.html`); the anchor fills cell (2, 2).
     tree.anchor_rects = vec![("--foo", rect(220.0, 170.0, 300.0, 100.0))];
     tree.default_anchor = Some("--foo");
     let positioned = tree.push_leaf(
@@ -1858,13 +1743,6 @@ fn position_area_in_a_grid_area() {
         vec![positioned],
     );
     definite_layout(&tree, grid, 540.0, 290.0);
-    // Region (grid-area coordinates): x [500, 500], y [0, 150]; the box
-    // aligns toward the anchor (x start, y end). It overflows the empty
-    // column, and css-align-3 §4.4.1.2 keeps it inside the overflow limit
-    // rect — the grid container's padding box, x [-20, 520] in grid-area
-    // coordinates — so it ends at 520: x 490, plus the grid area's 20. (The
-    // WPT reference places a narrower box at 500 unshifted; with 20px of
-    // room it would not shift here either.)
     assert_box(
         &tree.layout(positioned),
         (510.0, 140.0, 30.0, 30.0),
@@ -1874,11 +1752,6 @@ fn position_area_in_a_grid_area() {
     assert_eq!(reported.imcb, rect(520.0, 20.0, 0.0, 150.0));
 }
 
-/// WPT `position-try-fallbacks-no-fit-after-fit.html`: the `flip-block`
-/// option (cascaded by the host: `top` ↔ `bottom`, `anchor(outside)` kept)
-/// fits first; after the containing block narrows so that nothing fits, the
-/// box is back on its base style, because the engine never records a last
-/// successful option itself — the host does, after layout (§6.5.1.1).
 #[test]
 fn nothing_fitting_after_a_fit_keeps_the_base_until_the_host_records_wpt() {
     let run = |width: f32, last_successful: Option<usize>| {
@@ -1915,13 +1788,10 @@ fn nothing_fitting_after_a_fit_keeps_the_base_until_the_host_records_wpt() {
     assert_eq!((y, fitted.chosen, fitted.overflows), (180.0, 1, false));
     let (y, narrowed) = run(380.0, None);
     assert_eq!((y, narrowed.chosen, narrowed.overflows), (300.0, 0, true));
-    // Had the host recorded flip-block, nothing fitting would keep it.
     let (y, recorded) = run(380.0, Some(1));
     assert_eq!((y, recorded.chosen, recorded.overflows), (180.0, 1, true));
 }
 
-/// WPT `position-area-in-position-try.html` in spirit: an option may change
-/// `position-area`, and (through the host) the default anchor.
 #[test]
 fn options_change_position_area_and_the_default_anchor() {
     let mut tree = TestTree::default();
@@ -1948,8 +1818,6 @@ fn options_change_position_area_and_the_default_anchor() {
     tree.position_options = vec![(target, vec![below, above_low])];
     let root = tree.push_flex(container(300.0, 300.0), vec![target]);
     definite_layout(&tree, root, 300.0, 300.0);
-    // Above `--near-top` there are 5px; below it a 300px box does not fit;
-    // above `--low` (option 2's default anchor) there are 200px.
     assert_box(
         &tree.layout(target),
         (110.0, 170.0, 30.0, 30.0),
@@ -1960,15 +1828,6 @@ fn options_change_position_area_and_the_default_anchor() {
     assert_eq!(reported.imcb, rect(100.0, 0.0, 50.0, 200.0));
 }
 
-// ---------------------------------------------------------------------------
-// Hoisted boxes: laid out by their containing block's absolute pass.
-
-/// A box whose containing block is not its parent — here `fixed` under a
-/// non-establishing wrapper — is laid out by the containing block's
-/// absolute pass in tree order with the block's own out-of-flow children:
-/// after the one before its wrapper, before the one after it. Its static
-/// position comes from the wrapper (recorded during the in-flow phase) and
-/// its layout goes back into the wrapper's coordinates.
 #[test]
 fn hoisted_boxes_interleave_with_own_out_of_flow_children_in_tree_order() {
     let mut tree = TestTree::default();
@@ -2005,7 +1864,5 @@ fn hoisted_boxes_interleave_with_own_out_of_flow_children_in_tree_order() {
         *tree.out_of_flow_writes.borrow(),
         vec![before, hoisted, after]
     );
-    // `left: 20px` against the containing block is 13px into the wrapper,
-    // which sits 7px in; the static `top` is the wrapper's content edge.
     assert_box(&tree.layout(hoisted), (13.0, 3.0, 10.0, 10.0), "hoisted");
 }

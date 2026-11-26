@@ -28,37 +28,22 @@ use super::TextContext;
 use super::paragraph::Direction;
 use crate::style::TextBrush;
 
-/// A font as a document resolves it before shaping: the CSS `font-*`
-/// properties with every keyword already turned into its number.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedFont {
-    /// The `font-family` list, in preference order. An empty list shapes
-    /// with the generic `sans-serif`.
     pub families: Vec<ResolvedFamily>,
-    /// The font size in CSS px.
     pub size: f32,
-    /// The `font-weight` number, 1 to 1000.
     pub weight: f32,
     pub style: ResolvedFontStyle,
-    /// The `font-stretch` as a ratio: 1 is `normal`, 0.5 `ultra-condensed`,
-    /// 2 `ultra-expanded`.
     pub stretch: f32,
 }
 
-/// One entry of a `font-family` list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedFamily {
-    /// A family name, matched as written, whatever it spells: a family
-    /// named `serif` is not the generic `serif`.
     Named(String),
     Generic(GenericFamily),
 }
 
 impl ResolvedFamily {
-    /// One `font-family` entry in CSS syntax: an unquoted generic keyword
-    /// is the generic family, a quoted name is the name without its quotes,
-    /// and text that does not parse as one entry is a name as written. A
-    /// list parses to its first entry.
     #[must_use]
     pub fn parse(css: &str) -> Self {
         match FontFamilyName::parse(css) {
@@ -70,7 +55,6 @@ impl ResolvedFamily {
 }
 
 impl From<&SingleFontFamily> for ResolvedFamily {
-    /// One entry of a `font-family` list as stylo parsed it.
     fn from(single: &SingleFontFamily) -> Self {
         match single {
             SingleFontFamily::FamilyName(name) => Self::Named(name.name.to_string()),
@@ -79,8 +63,6 @@ impl From<&SingleFontFamily> for ResolvedFamily {
     }
 }
 
-/// A stylo generic family as parley names it; `none`, the absence of a
-/// generic, is `sans-serif`.
 pub(in crate::text) const fn generic_family(value: GenericFontFamily) -> GenericFamily {
     match value {
         GenericFontFamily::None | GenericFontFamily::SansSerif => GenericFamily::SansSerif,
@@ -92,20 +74,15 @@ pub(in crate::text) const fn generic_family(value: GenericFontFamily) -> Generic
     }
 }
 
-/// The `font-style` value.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ResolvedFontStyle {
     #[default]
     Normal,
     Italic,
-    /// `oblique`, with its angle in degrees when the value names one; with
-    /// none, parley's default angle, 14 degrees.
     Oblique(Option<f32>),
 }
 
 impl From<FontStyle> for ResolvedFontStyle {
-    /// A computed `font-style`: `normal`, which is `oblique 0deg`, is
-    /// [`Self::Normal`], and any other oblique keeps its angle.
     fn from(style: FontStyle) -> Self {
         if style == FontStyle::NORMAL {
             Self::Normal
@@ -127,72 +104,42 @@ impl From<ResolvedFontStyle> for ParleyFontStyle {
     }
 }
 
-/// How [`shape_line`] lays its text out, beside the font.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LineOptions {
-    /// Px added after every character.
     pub letter_spacing: f32,
-    /// The bidi paragraph level: `None` takes the direction of the text's
-    /// first strong character, as parley does by default.
     pub direction: Option<Direction>,
 }
 
-/// One shaped line: its glyph runs and the metrics a caller places and
-/// anchors it by.
 #[derive(Clone, Debug, Default)]
 pub struct ShapedLine {
     pub runs: Vec<ShapedRun>,
-    /// The line's whole advance along the baseline, trailing whitespace
-    /// included.
     pub advance: f32,
-    /// How far the line's ink reaches above the baseline, as the fonts
-    /// report it.
     pub ascent: f32,
-    /// How far it reaches below.
     pub descent: f32,
-    /// The ascent and descent of the font that shaped the first glyph run,
-    /// in visual order; `None` when no glyph run was shaped, as for empty
-    /// text. [`font_metrics`] answers for a font without text.
     pub first_font: Option<FontMetrics>,
 }
 
-/// A font's ascent and descent at the size it is shaped at, in px, both
-/// positive away from the baseline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FontMetrics {
     pub ascent: f32,
     pub descent: f32,
 }
 
-/// A maximal sequence of glyphs from one font at one size.
 #[derive(Clone, Debug)]
 pub struct ShapedRun {
     pub font: parley::FontData,
-    /// The size the glyphs are scaled to, in px per em.
     pub size: f32,
-    /// The variation axis coordinates the font is instanced at.
     pub normalized_coords: Vec<i16>,
-    /// What the font lacks of the requested weight and style, which a draw
-    /// adds to the outlines.
     pub synthesis: Synthesis,
     pub glyphs: Vec<ShapedGlyph>,
 }
 
-/// The synthetic bold and oblique a run's font needs to match the requested
-/// weight and style, as parley's font selection reports it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Synthesis {
-    /// The requested weight is more than 200 above the font's own and the
-    /// font has no weight axis: the outlines are to be widened.
     pub embolden: bool,
-    /// The angle in degrees the outlines are to be slanted by, top to the
-    /// right, for an italic or oblique request the font cannot meet with a
-    /// face or an axis of its own.
     pub skew: Option<f32>,
 }
 
-/// One positioned glyph: its id in the run's font and its offset from the
-/// line's start on the baseline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapedGlyph {
     pub id: u32,
@@ -200,17 +147,6 @@ pub struct ShapedGlyph {
     pub y: f32,
 }
 
-/// Shapes `text` as one line under `font`, laid out as `options` says,
-/// through the fonts `context` knows.
-///
-/// The text is shaped as given, every space and tab included: parley's
-/// builder collapses no white space, so a caller that collapses it does so
-/// before shaping (as SVG's parse does). White space at the line's end stays
-/// inside the line, so the glyphs start at x = 0 in either direction. A
-/// newline still ends a line, so a caller that wants one line replaces
-/// newlines first.
-///
-/// Empty text shapes to an empty line without touching parley.
 #[must_use]
 pub fn shape_line(
     context: &mut TextContext,
@@ -221,8 +157,6 @@ pub fn shape_line(
     if text.is_empty() {
         return ShapedLine::default();
     }
-    // Shaped in the context's scratch layout, whose buffers the next shaping
-    // reuses: the line keeps its own glyph copies, not the layout.
     let locale = context.locale();
     let families = family_list(&font.families);
     let attributes = Attributes {
@@ -275,8 +209,6 @@ pub fn shape_line(
                     descent: metrics.descent,
                 });
             }
-            // `positioned_glyphs` would add the line's baseline to every
-            // `y`; the caller's baseline is where it places the line.
             let mut x = glyph_run.offset();
             let glyphs = glyph_run
                 .glyphs()
@@ -314,18 +246,11 @@ pub fn shape_line(
     line
 }
 
-/// The ascent and descent, at `font`'s size, of the font parley sets the
-/// letter `x` in under `font`: the first family of the list that has the
-/// letter. What a caller that needs the first available font's metrics
-/// reads when its own text shaped no glyph run. `None` when no font in
-/// `context` sets the letter.
 #[must_use]
 pub fn font_metrics(context: &mut TextContext, font: &ResolvedFont) -> Option<FontMetrics> {
     shape_line(context, "x", font, LineOptions::default()).first_font
 }
 
-/// The parley family list for `families`; an empty list is the default
-/// generic family.
 fn family_list(families: &[ResolvedFamily]) -> FontFamily<'_> {
     let mut names: Vec<FontFamilyName<'_>> = families
         .iter()
@@ -374,9 +299,6 @@ mod tests {
             .collect()
     }
 
-    /// Ahem's glyphs are one em squares, so three characters at 10 px are
-    /// three glyphs 10 px apart on a 30 px line, 8 px above the baseline
-    /// and 2 px below.
     #[test]
     fn a_line_of_ahem_advances_one_em_per_glyph() {
         let mut context = ahem_context();
@@ -414,10 +336,6 @@ mod tests {
         assert_eq!(line.first_font, None);
     }
 
-    /// A right-to-left line lays its runs out from the right: under an
-    /// explicit `rtl` level the leading space of `" a"` ends the line on
-    /// the left, where `ltr` puts it first. With no direction the text's
-    /// first strong character decides, and Latin is left to right.
     #[test]
     fn the_base_direction_orders_the_line() {
         let mut context = ahem_context();
@@ -444,9 +362,6 @@ mod tests {
         assert_eq!(rtl.advance, 20.0);
     }
 
-    /// Every space is shaped, and white space at the end of a right-to-left
-    /// line stays inside the line: the glyphs of `"a  "` start at x = 0, as
-    /// they do left to right.
     #[test]
     fn white_space_is_shaped_as_given_and_stays_inside_the_line() {
         let mut context = ahem_context();
@@ -468,8 +383,6 @@ mod tests {
         }
     }
 
-    /// The first run's font reports Ahem's ascent of 0.8 em and descent of
-    /// 0.2 em, and [`font_metrics`] answers the same with no text.
     #[test]
     fn the_first_fonts_metrics_are_reported_with_and_without_text() {
         let mut context = ahem_context();
@@ -493,9 +406,6 @@ mod tests {
         );
     }
 
-    /// Ahem has one regular face and no axes, so a bold request is
-    /// emboldened and an italic or oblique one slanted, by the angle an
-    /// oblique names and by parley's 14 degrees otherwise.
     #[test]
     fn synthesis_and_the_oblique_angle_are_carried() {
         let mut context = ahem_context();
@@ -528,9 +438,6 @@ mod tests {
         );
     }
 
-    /// Generic keywords stay generic, a quoted keyword is a name, and
-    /// anything else is a named family; no family resolves to the default
-    /// generic.
     #[test]
     fn family_names_parse_as_css_does() {
         assert_eq!(

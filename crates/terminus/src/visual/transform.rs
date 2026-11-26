@@ -19,7 +19,6 @@ use stylo::values::generics::transform::{
 
 use crate::kurbo::Affine;
 
-/// Perspective applied to direct child stacking contexts.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParentPerspective {
     pub depth: f32,
@@ -44,16 +43,11 @@ impl ParentPerspective {
     }
 }
 
-/// `matrix`'s translation when it is exactly
-/// `Transform3D::translation(x, y, 0.0)`: every other entry the identity's,
-/// compared by bits, so rebuilding it from the answer loses nothing — not a
-/// signed zero, not a NaN.
 pub(crate) fn as_translation(matrix: &Transform3D<f32>) -> Option<euclid::default::Vector2D<f32>> {
     let translation = Transform3D::translation(matrix.m41, matrix.m42, 0.0);
     same_bits(matrix, &translation).then(|| euclid::vec2(matrix.m41, matrix.m42))
 }
 
-/// Whether `a` and `b` are the same sixteen `f32`s, bit for bit.
 pub(crate) fn same_bits(a: &Transform3D<f32>, b: &Transform3D<f32>) -> bool {
     a.to_array().map(f32::to_bits) == b.to_array().map(f32::to_bits)
 }
@@ -69,21 +63,10 @@ pub(crate) fn flatten(mut matrix: Transform3D<f32>) -> Transform3D<f32> {
     matrix
 }
 
-/// A stacking-context root's matrix around its transform list: every other
-/// factor, all of which hold still between commits, so [`Self::with_list`]
-/// folds any list — the committed one at build, a sampled one at compose —
-/// in the same f32 order.
 #[derive(Debug, Clone)]
 pub(crate) struct ContextMatrix {
-    /// The border box `%` in a list resolves against; `transform-box` is
-    /// Gecko-only, so it is always this.
     reference: Rect<CSSPixelLength>,
-    /// The transform origin, resolved against the border box.
     origin: Point2D<f32>,
-    /// The factors applied after the list, in order: the motion-path
-    /// sample, the individual `scale`, `rotate` and `translate`, the origin
-    /// and the offset in the parent. Unfolded, so the committed world rounds
-    /// exactly as it did before curves shared the fold.
     after: [Transform3D<f32>; 6],
     perspective: Option<Transform3D<f32>>,
     origin_z: f32,
@@ -142,7 +125,6 @@ impl ContextMatrix {
         }
     }
 
-    /// The root's matrix with `list` as its transform, flattened.
     pub(crate) fn with_list(&self, list: &ComputedTransform) -> Transform3D<f32> {
         let mut matrix = Transform3D::translation(-self.origin.x, -self.origin.y, -self.origin_z)
             .then(&self.list_matrix(list).0);
@@ -155,16 +137,11 @@ impl ContextMatrix {
         flatten(matrix)
     }
 
-    /// `list`'s own matrix against the border box, and whether it holds a 3D
-    /// function.
     pub(crate) fn list_matrix(&self, list: &ComputedTransform) -> (Transform3D<f32>, bool) {
         list.to_transform_3d_matrix(Some(&self.reference))
             .expect("computed transform lists with a reference box always convert")
     }
 
-    /// Whether some interpolation toward or away from `list` can leave the
-    /// plane a 2D affine composes in: a list whose matrix carries a
-    /// perspective term, or any 3D function under the parent's perspective.
     #[expect(
         clippy::float_cmp,
         reason = "exactly the entries `Transform3D::is_2d` requires of a 2D matrix"
@@ -178,7 +155,6 @@ impl ContextMatrix {
             || matrix.m44 != 1.0
     }
 
-    /// The border box.
     pub(crate) fn reference_size(&self) -> Size2D<f32> {
         Size2D::new(
             self.reference.size.width.px(),
@@ -186,7 +162,6 @@ impl ContextMatrix {
         )
     }
 
-    /// The translation to the transform origin, in CSS px.
     pub(crate) fn origin(&self) -> Affine {
         Affine::translate((f64::from(self.origin.x), f64::from(self.origin.y)))
     }
@@ -194,7 +169,6 @@ impl ContextMatrix {
 
 #[cfg(test)]
 impl ContextMatrix {
-    /// A root at the origin with a zero-sized box and no other factor.
     pub(crate) fn identity() -> Self {
         Self {
             reference: Rect::zero(),
@@ -206,8 +180,6 @@ impl ContextMatrix {
     }
 }
 
-/// The 2D affine part of `matrix`: exactly it when `matrix` is 2D, and the
-/// part a planar composition reads otherwise.
 pub(crate) fn planar(matrix: &Transform3D<f32>) -> Affine {
     Affine::new([
         f64::from(matrix.m11),
@@ -257,8 +229,6 @@ mod tests {
 
     use super::as_translation;
 
-    /// A record's world is stored inline only when rebuilding it from the
-    /// translation gives back the same bits.
     #[test]
     fn only_an_exact_translation_is_stored_inline() {
         let moved = Transform3D::translation(3.5, -0.0, 0.0);

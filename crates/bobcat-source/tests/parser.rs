@@ -713,8 +713,6 @@ fn extracts_bare_sections_without_rewriting_their_contents() {
     assert_eq!(any_order.background_thread_script, Some("background-code"));
 }
 
-// Kept inline so this integration test remains self-contained while still
-// exercising a substantial, production-shaped card from lynx-stack.
 const MARKUP_CARD_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE lynx>
 <lynx engine-version="4.2">

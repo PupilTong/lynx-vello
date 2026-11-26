@@ -59,8 +59,6 @@ fn inset_anchor(name: &str, size: AnchorSizeKeyword, fallback: Option<f32>) -> I
     Inset::AnchorSizeFunction(function(name, size, fallback.map(inset_px)))
 }
 
-/// `calc(<percent>% - anchor-size(<name> height[, <fallback>px]))`, clamped
-/// the way a non-negative property clamps it.
 fn calc_minus_anchor(percent: f32, name: &str, fallback: Option<f32>) -> LengthPercentage {
     calc_minus_anchor_clamped(percent, name, fallback, AllowedNumericType::NonNegative)
 }
@@ -187,7 +185,6 @@ fn without_a_target_the_fallback_or_the_initial_value_applies() {
         Size::ZERO,
         None,
     );
-    // No fallback: `auto`, the box's content size.
     let initial = tree.push_leaf(
         absolute(TestStyle {
             size: Size::new(
@@ -216,7 +213,6 @@ fn without_a_target_the_fallback_or_the_initial_value_applies() {
     assert_size(tree.layout(fallback).size, Size::new(12.0, 8.0));
     let initial = tree.layout(initial);
     assert_size(initial.size, Size::new(7.0, 2.0));
-    // `left: auto` against `right: 5px`, with every margin `0`.
     assert_point(initial.location, Point::new(300.0 - 5.0 - 7.0, 0.0));
 }
 
@@ -299,8 +295,6 @@ fn a_calc_with_an_anchor_resolves_against_the_percentage_basis() {
     assert_size(tree.layout(resolved).size, Size::new(1.0, 140.0));
     assert_size(tree.layout(fallback).size, Size::new(1.0, 80.0));
     let invalid = tree.layout(invalid);
-    // `height: auto` from content (500), capped by `max-height: 100% - 60px`;
-    // `top: 10% - 60px` clamps at nothing — insets may be negative.
     assert_size(invalid.size, Size::new(1.0, 140.0));
     assert_point(invalid.location, Point::new(0.0, -40.0));
 }
@@ -375,8 +369,6 @@ fn content_sized_axes_with_anchored_limits_are_measured_and_clamped() {
         Size::new(15.0, 30.0),
     );
 
-    // A size measured from the box's own content moves with that content, so
-    // the committed input is not independent of it on that axis.
     let committed = tree.committed_input(min_width).expect("committed");
     assert_eq!(committed.goal.independence(), Some(Size::new(false, true)));
 }
@@ -469,16 +461,11 @@ fn a_changed_anchor_is_a_changed_input_not_a_stale_cache_hit() {
     definite_layout(&tree, root, 300.0, 200.0);
     assert_size(tree.layout(child).size, Size::new(40.0, 1.0));
 
-    // What a moved anchor does to a real host: the containing block's cache
-    // clears on the way up from the anchor, never the query box's own.
     tree.anchors = vec![("--a", Size::new(70.0, 30.0))];
     tree.clear_layout_cache(root);
     definite_layout(&tree, root, 300.0, 200.0);
     assert_size(tree.layout(child).size, Size::new(70.0, 1.0));
 }
-
-// Anchors exist in the tests below, but an in-flow box is not one §5.1.1
-// resolves for.
 
 #[test]
 fn flex_items_take_the_fallback_or_the_initial_value() {
@@ -604,8 +591,6 @@ fn grid_and_relative_items_take_the_fallback_or_the_initial_value() {
     assert_eq!(tree.layout(relative_item).size.width, 5.0);
 }
 
-/// The width an absolutely positioned wrapping flex box with a 150px and a
-/// 250px item takes in a 300px-wide containing block, under `style`.
 fn keyword_box_width(anchors: Vec<(&'static str, Size<f32>)>, style: TestStyle) -> f32 {
     let mut tree = TestTree::default();
     tree.anchors = anchors;
@@ -631,11 +616,6 @@ fn keyword_box_width(anchors: Vec<(&'static str, Size<f32>)>, style: TestStyle) 
     tree.layout(target).size.width
 }
 
-/// An anchored limit or margin on an axis sized by an intrinsic keyword
-/// changes only the limit: the keyword still picks the size, exactly as it
-/// does with the same limit written in pixels. (The items' min-content width
-/// is 250 and their max-content width 400; the wrapping box's `fit-content`
-/// width in 260px is css-sizing-3's `min(400, max(250, 260))`, 260.)
 #[test]
 fn an_anchored_axis_keeps_its_intrinsic_sizing_keyword() {
     let anchor = |width| vec![("--a", Size::new(width, 30.0))];

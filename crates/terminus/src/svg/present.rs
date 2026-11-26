@@ -77,20 +77,16 @@ use crate::tree::document::{Document, NodeId};
 use crate::visual::CornerRadii;
 use crate::visual::geometry::resolve_corner_radii;
 
-/// The outermost `svg` elements of a document and what each draws.
 #[derive(Debug, Default)]
 pub(crate) struct SvgRoots {
     entries: FxHashMap<NodeId, SvgRoot>,
-    /// Whether some entry waits for a record.
     dirty: bool,
 }
 
 #[derive(Debug, Default)]
 struct SvgRoot {
-    /// The last record, its text shaped; `None` before the first.
     recording: Option<Recording>,
     dirty: bool,
-    /// How many times the root was recorded.
     #[cfg(test)]
     records: u32,
 }
@@ -101,8 +97,6 @@ impl SvgRoots {
         self.entries.is_empty()
     }
 
-    /// Takes `id` out of the table, giving the table's storage back once it
-    /// is empty.
     fn remove(&mut self, id: NodeId) {
         if self.entries.remove(&id).is_some() && self.entries.is_empty() {
             *self = Self::default();
@@ -110,21 +104,13 @@ impl SvgRoots {
     }
 }
 
-/// Where an `svg` root's recording draws in its border box.
 #[derive(Debug)]
 pub(crate) struct RootPlacement {
-    /// The recording's viewport units to the root's border-box px.
     pub(crate) map: Affine,
-    /// The clips the drawing is cut to, outermost first, each a rectangle
-    /// with corner radii in border-box px: the content box's shape, the
-    /// destination rectangle, or both.
     pub(crate) clips: SmallVec<[(Rect, CornerRadii); 2]>,
 }
 
 impl<T> Document<T> {
-    /// Marks the outermost `svg` element around `id`, an SVG element or a
-    /// node under one, as owing a record, and answers it. Nothing, and
-    /// `None`, when `id` is under no `svg` element.
     pub(crate) fn note_svg_change(&mut self, id: NodeId) -> Option<NodeId> {
         let root = self.outermost_svg(id)?;
         let roots = &mut self.svg_roots;
@@ -134,23 +120,10 @@ impl<T> Document<T> {
         Some(root)
     }
 
-    /// Notes the style change of the SVG element `id` that a damage harvest
-    /// found, and answers whether it lies below its outermost `svg`: such
-    /// an element generates no box (the root is replaced content,
-    /// `super::root`), so its change is its root's new drawing and no
-    /// layout work. The root itself is a box, and keeps the harvest's
-    /// layout path.
     pub(crate) fn note_svg_restyle(&mut self, id: NodeId) -> bool {
         self.note_svg_change(id).is_some_and(|root| root != id)
     }
 
-    /// Notes the first style of the SVG element `id` that the style
-    /// harvest found. A first style carries no damage, so an outermost
-    /// `svg` styled again after an HTML ancestor left `display: none` is
-    /// marked here: a `class` or `style` write below it while it had no
-    /// style marked nothing. An element whose flat-tree parent is an SVG
-    /// element is not tested further: that parent's own display change, or
-    /// the insertion that brought the element in, marked the root.
     pub(crate) fn note_svg_first_style(&mut self, id: NodeId) {
         let outermost = self.get(id).is_some_and(|node| {
             !node
@@ -162,8 +135,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// The outermost `svg` element around `id`, an SVG element or a node
-    /// under one, along the flat tree.
     fn outermost_svg(&self, id: NodeId) -> Option<NodeId> {
         let mut top = None;
         let mut current = self.get(id);
@@ -182,8 +153,6 @@ impl<T> Document<T> {
         )
     }
 
-    /// Records every dirty root that is connected and styled, and shapes
-    /// its text. One `bool` test on a document with nothing to record.
     pub(crate) fn record_svg_roots(&mut self) {
         if !self.svg_roots.dirty {
             return;
@@ -217,8 +186,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Files `recording`, its text shaped, as what the outermost `svg`
-    /// element `id` draws, and clears its mark.
     pub(crate) fn keep_svg_recording(&mut self, id: NodeId, recording: Recording) {
         let entry = self.svg_roots.entries.entry(id).or_default();
         entry.recording = Some(recording);
@@ -229,14 +196,11 @@ impl<T> Document<T> {
         }
     }
 
-    /// Whether the document has an outermost `svg` element filed: the one
-    /// test a document without one pays where the plan meets a leaf box.
     #[inline]
     pub(crate) fn has_svg_roots(&self) -> bool {
         !self.svg_roots.is_empty()
     }
 
-    /// What the outermost `svg` element `id` draws, as last recorded.
     #[inline]
     pub(crate) fn svg_recording(&self, id: NodeId) -> Option<&Recording> {
         if self.svg_roots.is_empty() {
@@ -245,10 +209,6 @@ impl<T> Document<T> {
         self.svg_roots.entries.get(&id)?.recording.as_ref()
     }
 
-    /// Where `recording`, the outermost `svg` element `id`'s, draws in the
-    /// element's border box, or `None` when it draws nothing: an empty
-    /// recording or viewport, an empty content box or destination, or an
-    /// element with no style or layout.
     pub(crate) fn svg_root_placement(
         &self,
         id: NodeId,
@@ -285,7 +245,6 @@ impl<T> Document<T> {
         Some(RootPlacement { map, clips })
     }
 
-    /// How many times the outermost `svg` element `root` was recorded.
     #[cfg(test)]
     pub(crate) fn svg_records(&self, root: NodeId) -> u32 {
         self.svg_roots
@@ -294,8 +253,6 @@ impl<T> Document<T> {
             .map_or(0, |root| root.records)
     }
 
-    /// Takes a freed node out of the table. One test on a document with no
-    /// `svg` root.
     #[inline]
     pub(crate) fn forget_svg_root(&mut self, id: NodeId) {
         if !self.svg_roots.is_empty() {
@@ -320,8 +277,6 @@ mod tests {
       <rect id="r" width="10" height="10" fill="red"/>
     </svg>"#;
 
-    /// Builds `markup` under the document element of a page with the SVG
-    /// user-agent sheet, and answers its root.
     fn inline_root(doc: &mut Doc, markup: &str) -> NodeId {
         doc.dom.add_svg_user_agent_stylesheet();
         let markup = XmlMarkup::parse(markup.as_bytes(), Some(XmlNamespace::Svg))
@@ -329,13 +284,10 @@ mod tests {
         doc.dom.append_svg_markup(doc.root, &markup, || ())
     }
 
-    /// How many times `root` was recorded.
     fn records(doc: &Doc, root: NodeId) -> u32 {
         doc.dom.svg_records(root)
     }
 
-    /// Commits `doc` and answers how many times `root` has been recorded;
-    /// the frame draws no vector image.
     fn commit_records(doc: &mut Doc, root: NodeId) -> u32 {
         let frame = doc.dom.commit();
         assert!(!frame.draws_vectors(), "an inline root bakes no texture");
@@ -401,8 +353,6 @@ mod tests {
         assert_eq!(commit_records(&mut doc, svg), class);
     }
 
-    /// A change elsewhere on the page builds a new frame, which plans and
-    /// paints the root's recording again, but does not record it again.
     #[test]
     fn a_change_elsewhere_does_not_record_the_root_again() {
         let mut doc = Doc::with_css(&format!("{PAGE} view {{ width: 10px; height: 10px; }}"));
@@ -442,7 +392,6 @@ mod tests {
         );
     }
 
-    /// The fill colour of the first path `root` last recorded, as RGBA8.
     fn recorded_fill(doc: &Doc, root: NodeId) -> [u8; 4] {
         let recording = doc.dom.svg_recording(root).expect("recorded");
         let Some(crate::svg::recording::Item::Path {
@@ -460,9 +409,6 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-    /// A page whose `view#v` holds a root with one `rect#r.a`, committed
-    /// once; the rect is red, and blue once its `class` is `b` or its
-    /// `style` attribute says so. Answers the view, the root and the rect.
     fn hideable_page() -> (Doc, NodeId, NodeId, NodeId) {
         let mut doc = Doc::with_css(&format!(
             "{SVG_NS} {PAGE} svg|rect.a {{ fill: rgb(255, 0, 0); }} \
@@ -483,8 +429,6 @@ mod tests {
         (doc, view, root, rect)
     }
 
-    /// Hides the root's HTML ancestor, applies `write` to the rect, shows
-    /// the ancestor again, and asserts the root recorded the change.
     fn assert_shown_root_records(write: fn(&mut Doc, NodeId)) {
         let (mut doc, view, root, rect) = hideable_page();
         doc.dom.set_attribute(view, "style", "display: none");
@@ -499,9 +443,6 @@ mod tests {
         assert_eq!(recorded_fill(&doc, root), BLUE, "with the new fill");
     }
 
-    /// A root under a `display: none` HTML ancestor loses its style; the
-    /// flush that styles it again marks it, so a `class` or `style` write
-    /// made while it was hidden, which marks nothing by itself, is drawn.
     #[test]
     fn a_class_change_while_hidden_draws_once_shown() {
         assert_shown_root_records(|doc, rect| doc.dom.set_attribute(rect, "class", "b"));
@@ -514,9 +455,6 @@ mod tests {
         });
     }
 
-    /// Removes `removed` (the root or its HTML parent) from the document,
-    /// changes the rect's `class` while it is detached, inserts it again,
-    /// and asserts the root recorded the change.
     fn assert_inserted_root_records(removed: fn(NodeId, NodeId) -> NodeId) {
         let (mut doc, view, root, rect) = hideable_page();
         let removed = removed(view, root);
@@ -537,21 +475,16 @@ mod tests {
         assert_eq!(recorded_fill(&doc, root), BLUE, "with the new fill");
     }
 
-    /// Inserting an SVG element marks its root.
     #[test]
     fn a_class_change_while_detached_draws_once_inserted() {
         assert_inserted_root_records(|_, root| root);
     }
 
-    /// Inserting an HTML element marks nothing below it; the flush that
-    /// styles the root again does.
     #[test]
     fn a_class_change_while_an_ancestor_is_detached_draws_once_inserted() {
         assert_inserted_root_records(|view, _| view);
     }
 
-    /// A laid-out page whose `svg` root holds a `path` that a class flip
-    /// recolours; answers the root and the path.
     fn page() -> (Doc, NodeId, NodeId) {
         let mut doc = Doc::with_css(
             "@namespace svg url(http://www.w3.org/2000/svg);
@@ -607,12 +540,8 @@ mod tests {
         assert!((width - 60.0).abs() < f32::EPSILON, "width {width}");
     }
 
-    // --- CSS animations inside an inline root ---------------------------
-
     const SVG_NS: &str = "@namespace svg url(http://www.w3.org/2000/svg);";
 
-    /// A page whose inline root holds `body`, styled by `css` (after the SVG
-    /// namespace rule), committed once.
     fn animated_page(css: &str, body: &str) -> Doc {
         let mut doc = Doc::with_css(&format!("{SVG_NS} {PAGE} {css}"));
         inline_root(
@@ -625,8 +554,6 @@ mod tests {
         doc
     }
 
-    /// How many times the page's root has been recorded after a commit, and
-    /// whether the frame asks the host for further ticks.
     fn commit(doc: &mut Doc) -> (u32, bool) {
         let root = root_of(doc);
         let frame = doc.dom.commit();
@@ -634,9 +561,6 @@ mod tests {
         (records(doc, root), frame.needs_main_ticks())
     }
 
-    /// Runs a finite one-second animation from 0 s to past its end: each
-    /// tick inside it restyles, re-records and keeps frames coming; the end
-    /// stops them and the recording stays.
     fn assert_animates_then_ends(mut doc: Doc) {
         assert!(doc.dom.has_active_animations(), "running after the flush");
         doc.dom.advance_animations(0.0);
@@ -679,11 +603,6 @@ mod tests {
         ));
     }
 
-    /// `opacity` is a composite property: the painter runs a finite fade of
-    /// a shape below the root, and the frame asks the main thread for no
-    /// tick. A tick the main thread runs all the same records the root
-    /// again; the one that ends the fade records it at the base value, with
-    /// no layer.
     #[test]
     fn an_opacity_animation_below_the_root_runs_in_the_painter() {
         let mut doc = animated_page(
@@ -720,9 +639,6 @@ mod tests {
         );
     }
 
-    /// The spinner: a group turning about the centre of its own box, run by
-    /// the painter. A tick the main thread runs all the same records the
-    /// root again at the value the cascade reached.
     #[test]
     fn a_spinning_group_runs_in_the_painter() {
         let mut doc = animated_page(
@@ -744,7 +660,6 @@ mod tests {
             assert!(!ticks, "{now}: the painter runs the turn");
             previous = recorded;
         }
-        // A quarter turn about the rect's centre (20, 15).
         doc.dom.advance_animations(30.25);
         doc.dom.commit();
         let kept = doc.dom.svg_recording(root_of(&doc)).expect("recorded");

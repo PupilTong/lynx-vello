@@ -33,20 +33,14 @@ use stylo_traits::ParsingMode;
 use crate::style::engine::{NoStyleUpdate, PropertyUpdate, StyleEngine};
 use crate::tree::document::{Document, NodeId};
 
-/// How one attribute of one SVG element reaches the cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mapping {
-    /// The CSS property of this name, from the attribute's value parsed
-    /// with unitless lengths allowed.
     Property(&'static str),
-    /// `transform`, from an SVG transform list.
     Transform,
-    /// `d`, from SVG path data.
     PathData,
 }
 
 impl Mapping {
-    /// The property the mapping writes.
     const fn property(self) -> &'static str {
         match self {
             Self::Property(property) => property,
@@ -56,14 +50,6 @@ impl Mapping {
     }
 }
 
-/// Chromium's `CssPropertyIdForSVGAttributeName` table, less the entries
-/// whose property this build does not have (`alignment-baseline`,
-/// `baseline-shift`, `buffered-rendering`, `clip`, `color-interpolation`,
-/// `color-interpolation-filters`, `color-rendering`, `dominant-baseline`,
-/// `flood-color`, `flood-opacity`, `font-variant`, `lighting-color`,
-/// `marker-end`, `marker-mid`, `marker-start`, `mask-type`,
-/// `shape-rendering`, `text-rendering`, `unicode-bidi`, `vector-effect`,
-/// `word-spacing`, `writing-mode`). Every SVG element maps these.
 const PROPERTY_ATTRIBUTES: [&str; 37] = [
     "clip-path",
     "clip-rule",
@@ -104,8 +90,6 @@ const PROPERTY_ATTRIBUTES: [&str; 37] = [
     "visibility",
 ];
 
-/// The CSS property `attribute` is named as and sets on every SVG element
-/// ([`PROPERTY_ATTRIBUTES`]).
 fn property_attribute(attribute: &str) -> Option<&'static str> {
     PROPERTY_ATTRIBUTES
         .iter()
@@ -113,14 +97,6 @@ fn property_attribute(attribute: &str) -> Option<&'static str> {
         .find(|property| *property == attribute)
 }
 
-/// The geometry property `attribute` of `element` sets (SVG 2 §9.2 and
-/// §5.1.1, the elements Chromium's and Gecko's animated lengths map):
-/// `cx`, `cy`, `r` on `circle`; `cx`, `cy`, `rx`, `ry` on `ellipse`; `x`,
-/// `y`, `width`, `height`, `rx`, `ry` on `rect`; `x`, `y`, `width`,
-/// `height` on `svg`; `x`, `y` on `use`. Everything else of the kind —
-/// `points`, `x1`…`y2`, `viewBox`, `preserveAspectRatio`, the units
-/// attributes, `x`/`y`/`dx`/`dy` on `text` and `tspan` — stays an attribute
-/// only.
 fn geometry_attribute(element: &str, attribute: &str) -> Option<&'static str> {
     let properties: &[&'static str] = match element {
         "circle" => &["cx", "cy", "r"],
@@ -136,7 +112,6 @@ fn geometry_attribute(element: &str, attribute: &str) -> Option<&'static str> {
         .find(|property| *property == attribute)
 }
 
-/// What `attribute` of the SVG element `element` maps to, if anything.
 fn mapping(element: &str, attribute: &str) -> Option<Mapping> {
     match attribute {
         "transform" => Some(Mapping::Transform),
@@ -148,9 +123,6 @@ fn mapping(element: &str, attribute: &str) -> Option<Mapping> {
 }
 
 impl<T> Document<T> {
-    /// Brings `id`'s presentational-hint block, and an `svg` element's
-    /// natural size, in step with its attribute `name`, which was just set
-    /// or removed. `id` is an SVG element.
     pub(crate) fn reflect_svg_attribute(&mut self, id: NodeId, name: &LocalName) {
         let node = self.live(id);
         debug_assert!(node.in_svg_namespace(), "only an SVG element reflects");
@@ -171,14 +143,10 @@ impl<T> Document<T> {
         if sizes_root {
             self.update_svg_natural_size(id);
         }
-        // Every attribute is input to the `svg` root's drawing, mapped to a
-        // property or read as geometry (`svg::present`).
         self.note_svg_change(id);
     }
 }
 
-/// The update that makes `block` hold what an attribute with `value`
-/// (`None` when absent) maps to, `None` when it already does.
 fn hint_update(
     engine: &StyleEngine,
     block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
@@ -205,15 +173,11 @@ fn hint_update(
                 .declaration_update(block, SourcePropertyDeclaration::with_one(declaration));
         }
     }
-    // Absent, or not parsing: no hint. An empty value is a removal.
     engine
         .parse_style_update(block, mapping.property(), "", ParsingMode::DEFAULT)
         .ok()
 }
 
-/// A `transform` attribute as the CSS `transform` it sets: the SVG
-/// transform list (parsed by `svgtypes`, `super::attributes`)
-/// folded into one `matrix()`. `None` for an invalid or empty list.
 fn transform(value: &str) -> Option<PropertyDeclaration> {
     if value.trim().is_empty() {
         return None;
@@ -237,10 +201,6 @@ fn transform(value: &str) -> Option<PropertyDeclaration> {
     )))
 }
 
-/// A `d` attribute as the CSS `d` it sets: stylo's path-data parser, the
-/// one `path()` uses, kept up to the first error as SVG's error handling
-/// asks (SVG 2 §9.3.9; Gecko's `SVGPathData` does the same). `None` when
-/// not one command parses.
 fn path_data(value: &str) -> Option<PropertyDeclaration> {
     let (path, _complete) = SVGPathData::parse_bytes(value.as_bytes());
     (!path.commands().is_empty()).then(|| PropertyDeclaration::D(DProperty::Path(path)))
@@ -252,8 +212,6 @@ mod tests {
     use super::{Mapping, PROPERTY_ATTRIBUTES, mapping};
     use crate::test_common::Doc;
 
-    /// Every property the table names exists in this build: a fork change
-    /// that drops one fails here, not silently.
     #[test]
     fn every_mapped_property_exists() {
         let doc = Doc::new();

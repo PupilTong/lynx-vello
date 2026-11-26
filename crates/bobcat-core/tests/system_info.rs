@@ -22,13 +22,9 @@ use bobcat_core::{
 const MAIN_URL: &str = "app:///main.js";
 const BACKGROUND_URL: &str = "app:///background.js";
 
-/// The create-time viewport both views below are built at, in CSS pixels.
 const VIEW_WIDTH: f32 = 32.0;
 const VIEW_HEIGHT: f32 = 24.0;
 
-/// The MTS entry: it prints the three numbers and then renders one element,
-/// so boot finishes. `SystemInfo` is one of the bindings `MTS_CHUNK_PREAMBLE`
-/// gives a card's MTS body.
 const MAIN_ENTRY: &str = r"
 console.log('mts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
   SystemInfo.pixelHeight);
@@ -37,15 +33,12 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The BTS entry: the same three numbers, which `bobcat:bts-runtime` took
-/// from the `initialize` message before this entry was imported.
 const BACKGROUND_ENTRY: &str = r"
 import { console, SystemInfo } from 'bobcat:bts-runtime';
 console.log('bts ' + SystemInfo.pixelRatio + ' ' + SystemInfo.pixelWidth + ' ' +
   SystemInfo.pixelHeight);
 ";
 
-/// Serves this test's two entries out of memory.
 struct Entries;
 
 impl bobcat_core::FrameImages for Entries {
@@ -59,7 +52,6 @@ impl bobcat_core::FrameImages for Entries {
         None
     }
 
-    /// Nothing is ever answered, so nothing is ever wanted.
     fn want(&self, _picture: &bobcat_core::PictureKey, _hint: bobcat_core::ImageSizeHint) {}
 
     fn retain(&self, _frame: &[bobcat_core::PictureKey]) {}
@@ -73,8 +65,6 @@ impl ResourceFetcher for Entries {
             | SourceRequest::Font { url }
             | SourceRequest::Fetch { url, .. } => url.clone(),
         };
-        // The main-thread entry is a card's MTS body, served as
-        // `bobcat-source` registers a card's root.
         let source = match specifier.as_str() {
             MAIN_URL => Some(format!("{}{MAIN_ENTRY}", bobcat_core::MTS_CHUNK_PREAMBLE)),
             BACKGROUND_URL => Some(BACKGROUND_ENTRY.to_owned()),
@@ -101,12 +91,6 @@ impl ResourceFetcher for Entries {
     }
 }
 
-/// Boots one view at `device_pixel_ratio` reporting `screen`, over the
-/// entry `main` and the BTS entry `background` named against `base`, and
-/// returns what its two realms printed.
-///
-/// The painter is not optional: both lines are pumped out past boot's flush,
-/// and an unbound view never gets there.
 async fn printed(
     device_pixel_ratio: f32,
     screen: ScreenMetrics,
@@ -172,8 +156,6 @@ async fn printed(
 
 #[tokio::test]
 async fn both_realms_report_the_screen_the_embedder_measured() {
-    // A phone's screen, and a view a fraction of its size at another scale:
-    // nothing in the answer may come from the viewport.
     let (main_thread, background) = printed(
         1.0,
         ScreenMetrics {
@@ -190,10 +172,6 @@ async fn both_realms_report_the_screen_the_embedder_measured() {
     assert_eq!(background, "3 1170 2532");
 }
 
-/// A ratio an `f32` cannot hold exactly reads the same in both realms: the
-/// MTS boot module is written with the number's shortest decimal, and the
-/// BTS is posted the MTS realm's `SystemInfo`, so it reports the number that
-/// decimal reads as, not the `f32`'s own value (`1.100000023841858`).
 #[tokio::test]
 async fn both_realms_report_a_ratio_an_f32_cannot_hold_as_the_same_number() {
     let (main_thread, background) = printed(
@@ -226,10 +204,6 @@ async fn a_host_with_no_screen_reports_its_viewport_in_physical_pixels() {
     assert_eq!(background, "2 64 48");
 }
 
-/// The view resolves both entries against its base before either is
-/// requested. [`Entries`] answers only `app:///main.js` and
-/// `app:///background.js`, so both realms printing is what shows that
-/// neither request reached the fetcher as the relative string.
 #[tokio::test]
 async fn relative_entries_resolve_against_the_view_base() {
     let (main_thread, background) = printed(

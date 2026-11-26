@@ -31,20 +31,10 @@ use stylo::values::specified::font::QueryFontMetricsFlags;
 use stylo_traits::{CSSPixel, DevicePixel};
 use terminus::link::{Device, Document, NodeId, StylePool, StylesheetOrigin, standards_device};
 
-/// Long enough that a loaded machine never trips it, short enough that a
-/// serialized pair reports instead of hanging the suite.
 const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Not Stylo's own `FONT_MEDIUM_PX`, so a `font-size: medium` that reached the
-/// witness is distinguishable from one that never did.
 const WITNESS_BASE_FONT_SIZE_PX: f32 = 20.0;
 
-/// A meeting point for two traversals that must be running at once.
-///
-/// Both parties are inside `driver::traverse_dom` when they arrive, on their
-/// own document's worker. Under a shared pool serialized by one lock, the
-/// second party never arrives and the first times out — which is the whole
-/// difference this reports on, without measuring a wall clock.
 #[derive(Debug, Default)]
 struct Rendezvous {
     arrived: Mutex<usize>,
@@ -53,7 +43,6 @@ struct Rendezvous {
 }
 
 impl Rendezvous {
-    /// Blocks until both parties are here, or gives up and records that.
     fn meet(&self) {
         let mut arrived = self.arrived.lock().expect("rendezvous count");
         *arrived += 1;
@@ -75,12 +64,6 @@ impl Rendezvous {
     }
 }
 
-/// Records which threads resolve font-relative lengths, and meets the other
-/// document there once.
-///
-/// Stylo calls this from inside the traversal, on whichever worker is styling
-/// the element — so the recorded set is exactly the set of threads that
-/// touched this document's style data.
 #[derive(Debug)]
 struct WitnessProvider {
     threads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -104,8 +87,6 @@ impl FontMetricsProvider for WitnessProvider {
             self.rendezvous.meet();
         }
         FontMetrics {
-            // A `ch` resolves against this, so it has to be non-zero for the
-            // computed widths the test compares to differ from the default.
             ascent: Length::new(base_size.px()),
             ..FontMetrics::default()
         }
@@ -142,10 +123,6 @@ fn pool(threads: usize) -> StylePool {
         .expect("style workers start")
 }
 
-/// A page whose every element resolves an absolute font-size keyword, which
-/// is what puts the witness on the traversal's own thread: Stylo asks the
-/// device for the generic family's base size while cascading each one. Wide
-/// enough for the driver to hand work to more than one worker.
 fn wide_page(document: &mut Document<()>, elements: usize) -> Vec<NodeId> {
     document.add_stylesheet("div { font-size: medium; }", StylesheetOrigin::Author);
     let root = document.document_element().id();
@@ -237,17 +214,6 @@ fn two_documents_restyle_at_the_same_time() {
     );
 }
 
-/// Two documents, one thread, one pool.
-///
-/// Rayon's takeover is permanent — the test below pins that — so the thread
-/// that built a pool can never build a second. A pool therefore belongs to its
-/// thread rather than to any one document on it, and a thread carrying two
-/// documents shares one between them.
-///
-/// That is safe for the reason the neighbouring test's `is_disjoint` does not
-/// have to cover: the thread driving one traversal is inside it, so the second
-/// cannot start until the first returns, and no worker is ever asked to hold
-/// two `ThreadLocalStyleContext`s at once.
 #[test]
 fn two_documents_on_one_thread_share_one_pool() {
     let (sizes, witnesses, workers, flusher) = std::thread::spawn(|| {
@@ -260,8 +226,6 @@ fn two_documents_on_one_thread_share_one_pool() {
             let device = witness_device(WitnessProvider {
                 threads: Arc::clone(&threads),
                 rendezvous: Arc::new(Rendezvous::default()),
-                // Pre-armed: these two flush in turn, so neither may wait for
-                // the other to arrive.
                 met: AtomicBool::new(true),
             });
             let mut document = Document::new(device, "page", ());
@@ -312,9 +276,6 @@ fn two_documents_on_one_thread_share_one_pool() {
     );
 }
 
-/// Rayon's takeover is permanent, so a thread gets one pool for its whole
-/// life. Every pool here is built on a `bobcat-main` created for its view and
-/// dropped with it, which is the only reason that is affordable.
 #[test]
 fn a_thread_cannot_take_over_a_second_pool() {
     std::thread::spawn(|| {
@@ -338,7 +299,6 @@ fn a_document_without_a_pool_traverses_on_the_flushing_thread() {
     let device = witness_device(WitnessProvider {
         threads: Arc::clone(&threads),
         rendezvous: Arc::clone(&rendezvous),
-        // Pre-armed: this document is the only party, so it must never wait.
         met: AtomicBool::new(true),
     });
     let mut document = Document::new(device, "page", ());
@@ -366,13 +326,6 @@ fn a_pool_wider_than_stylo_indexes_is_refused() {
     );
 }
 
-/// The pool size is Stylo's own, arrived at by Stylo's own arithmetic and
-/// counted the way Stylo counts it — the flushing thread included — so a lone
-/// document restyles on exactly the threads it did when every document shared
-/// Stylo's global pool.
-///
-/// The cut-off at one is Stylo's too: a pool holding only the flushing thread
-/// is that thread doing the same work for extra bookkeeping.
 #[test]
 fn the_pool_size_is_stylos_own_heuristic() {
     let sizes: Vec<_> = [1_usize, 2, 3, 4, 8, 10, 16, 64]

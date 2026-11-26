@@ -30,8 +30,6 @@ const RED: Color = Color::from_rgba8(255, 0, 0, 255);
 const BLUE: Color = Color::from_rgba8(0, 0, 255, 255);
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// What the image pipeline makes of a document: its natural size, and its
-/// recording.
 #[derive(Clone, Debug)]
 struct Parsed {
     natural: (u32, u32),
@@ -47,7 +45,6 @@ impl std::ops::Deref for Parsed {
     }
 }
 
-/// `bytes` parsed, built as an isolated document and recorded.
 fn parse(bytes: &[u8]) -> Result<Parsed, SvgError> {
     let document = VectorDocument::parse(bytes)?;
     Ok(Parsed {
@@ -77,13 +74,10 @@ fn encoded(parsed: &Parsed) -> DisplayList {
     encode_with(parsed, no_fonts())
 }
 
-/// `parsed` drawn with `context` as an image is drawn.
 fn encode_with(parsed: &Parsed, context: TextContext) -> DisplayList {
     drawn(parsed, &mut Some(Box::new(context)))
 }
 
-/// `parsed` as an image draws it: built, recorded, its text shaped through
-/// `context`, planned and painted (`IsolatedSvg::image`).
 fn drawn(parsed: &Parsed, context: &mut Option<Box<TextContext>>) -> DisplayList {
     DisplayList::clone(
         IsolatedSvg::build(&parsed.document, 0.0)
@@ -92,7 +86,6 @@ fn drawn(parsed: &Parsed, context: &mut Option<Box<TextContext>>) -> DisplayList
     )
 }
 
-/// Every path item, in order, with its transform.
 fn paths(parsed: &Recording) -> Vec<(&BezPath, Affine)> {
     parsed
         .items
@@ -106,7 +99,6 @@ fn paths(parsed: &Recording) -> Vec<(&BezPath, Affine)> {
         .collect()
 }
 
-/// `items` as their debug text, every element id written as `NodeId(_)`.
 fn without_ids(items: &[Item]) -> String {
     let text = format!("{items:?}");
     let mut out = String::with_capacity(text.len());
@@ -148,8 +140,6 @@ fn stops(colors: &[(f32, Color)]) -> Vec<ColorStop> {
         })
         .collect()
 }
-
-// --- Paths and shapes -------------------------------------------------
 
 #[test]
 fn a_path_fills_with_its_own_fill_rule() {
@@ -214,11 +204,6 @@ fn a_stroke_carries_width_caps_join_miter_and_dashes() {
         None,
         shape,
     );
-    // The image walk places the stroke by its ink rectangle's origin,
-    // (-2√2, 10 - 2√2), which the plan's f32 world matrix rounds: the draw
-    // transform is a translation by about (4.8e-8, -1.9e-7) where the
-    // recording's is the identity, held to the inline comparison's
-    // tolerance.
     let scene = encoded(&parsed);
     assert_eq!(scene.items().len(), expected.items().len());
     assert!(
@@ -233,8 +218,6 @@ fn a_stroke_carries_width_caps_join_miter_and_dashes() {
     );
 }
 
-/// An odd dash list is repeated to an even one, as SVG asks, and a zero
-/// `stroke-width` strokes nothing.
 #[test]
 fn odd_dash_lists_double_and_a_zero_width_strokes_nothing() {
     let parsed = document(
@@ -269,8 +252,6 @@ fn paint_order_stroke_draws_the_stroke_first() {
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
     let mut expected = DisplayList::new();
     expected.stroke(
-        // SVG's initial cap, join and miter limit, none of which is
-        // kurbo's default.
         &Stroke::new(2.0)
             .with_caps(Cap::Butt)
             .with_join(Join::Miter)
@@ -297,8 +278,6 @@ fn an_invisible_path_and_a_pattern_draw_nothing() {
     assert!(encoded(&patterned).is_empty());
 }
 
-/// `visibility` inherits but a child may turn it back on; `display: none`
-/// takes the subtree with it.
 #[test]
 fn visibility_and_display_follow_their_inheritance() {
     let parsed = document(
@@ -365,8 +344,6 @@ fn basic_shapes_become_their_paths() {
     assert_eq!(shapes[5].0.elements().last(), Some(&PathEl::ClosePath));
 }
 
-/// A segment after `Close` starts at the closed subpath's first point,
-/// so the kurbo path moves there before it.
 #[test]
 fn a_segment_after_close_starts_at_the_subpath_start() {
     let elements = shapes::path_data("M5 5 L10 5 L10 10 Z L20 20 M30 30 L40 30 Z M50 50 L60 60")
@@ -390,8 +367,6 @@ fn a_segment_after_close_starts_at_the_subpath_start() {
     );
 }
 
-/// Relative commands, smooth curves and arcs: a malformed tail renders up
-/// to the error.
 #[test]
 fn path_data_resolves_relative_smooth_and_arc_segments() {
     let path =
@@ -406,8 +381,6 @@ fn path_data_resolves_relative_smooth_and_arc_segments() {
             Point::new(20.0, 15.0)
         )
     );
-    // `s` reflects the previous cubic's second control point through the
-    // current point.
     assert_eq!(
         path.elements()[3],
         PathEl::CurveTo(
@@ -435,8 +408,6 @@ fn path_data_resolves_relative_smooth_and_arc_segments() {
     assert_eq!(truncated.elements().len(), 2, "up to the error");
 }
 
-/// Lengths: percentages of the viewport axes, `em` of the element's font
-/// size, absolute units at 96 px per inch.
 #[test]
 fn lengths_resolve_against_the_viewport_and_the_font_size() {
     let parsed = document(
@@ -453,8 +424,6 @@ fn lengths_resolve_against_the_viewport_and_the_font_size() {
     };
     assert_eq!(stroke.style.width, 24.0);
 }
-
-// --- Paint servers --------------------------------------------------------
 
 #[test]
 fn a_linear_gradient_maps_each_spread_method_and_folds_stop_opacity() {
@@ -492,8 +461,6 @@ fn a_linear_gradient_maps_each_spread_method_and_folds_stop_opacity() {
     }
 }
 
-/// SVG's focal circle is where the gradient starts, so it is peniko's
-/// start circle; the outer circle is the end circle.
 #[test]
 fn a_radial_gradient_starts_at_the_focal_circle() {
     let parsed = document(
@@ -519,8 +486,6 @@ fn a_radial_gradient_starts_at_the_focal_circle() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// `objectBoundingBox` units (the default) are fractions of the shape's
-/// bounding box, so the brush transform maps the unit square onto it.
 #[test]
 fn an_object_bounding_box_gradient_maps_the_unit_square_onto_the_shape() {
     let parsed = document(
@@ -541,7 +506,6 @@ fn an_object_bounding_box_gradient_maps_the_unit_square_onto_the_shape() {
         &rect_path(10.0, 20.0, 50.0, 40.0),
     );
     assert_scenes_identical(&encoded(&parsed), &expected);
-    // A shape with no area disables such a paint.
     let flat = document(
         r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/>
             <stop offset="1" stop-color="#0000ff"/></linearGradient></defs>
@@ -550,8 +514,6 @@ fn an_object_bounding_box_gradient_maps_the_unit_square_onto_the_shape() {
     assert!(flat.items.is_empty());
 }
 
-/// A gradient inherits what it does not declare, stops included, along
-/// its `href` chain; its own attributes win.
 #[test]
 fn a_gradient_href_chain_supplies_stops_and_attributes() {
     let parsed = document(
@@ -584,7 +546,6 @@ fn a_gradient_href_chain_supplies_stops_and_attributes() {
     assert!(cyclic.items.is_empty(), "a cycle ends with no stops");
 }
 
-/// One stop is a solid colour; a missing reference paints its fallback.
 #[test]
 fn a_one_stop_gradient_and_a_fallback_are_solid() {
     let parsed = document(
@@ -606,9 +567,6 @@ fn a_one_stop_gradient_and_a_fallback_are_solid() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// A stop's `currentColor` is the stop's own `color`, inherited through the
-/// gradient and its ancestors, never the painted shape's: two shapes of
-/// different `color` sharing one gradient get the same stop.
 #[test]
 fn a_stops_current_color_inherits_through_the_gradient_not_the_shape() {
     let parsed = document(
@@ -636,8 +594,6 @@ fn a_stops_current_color_inherits_through_the_gradient_not_the_shape() {
     );
 }
 
-// --- Groups, layers and clips -------------------------------------------
-
 #[test]
 fn group_opacity_is_one_layer_over_the_layer_bounds() {
     let parsed = document(
@@ -664,8 +620,6 @@ fn group_opacity_is_one_layer_over_the_layer_bounds() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// The layer bounds include a stroke's reach, in the group's own
-/// coordinates.
 #[test]
 fn layer_bounds_include_strokes() {
     let parsed = document(
@@ -683,8 +637,6 @@ fn layer_bounds_include_strokes() {
     assert_eq!(*bounds, Rect::new(8.0, 8.0, 32.0, 32.0));
 }
 
-/// `mix-blend-mode` and `isolation` have no presentation attribute: as
-/// attributes they change nothing, so the group pushes no layer.
 #[test]
 fn blend_and_isolation_attributes_change_nothing() {
     let parsed = document(
@@ -703,8 +655,6 @@ fn blend_and_isolation_attributes_change_nothing() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// Opacity on a shape itself wraps that one shape in a layer, as a group
-/// would.
 #[test]
 fn opacity_on_a_shape_is_a_layer_around_it() {
     let parsed = document(r##"<rect width="20" height="20" fill="#ff0000" opacity="0.5"/>"##);
@@ -762,8 +712,6 @@ fn a_masked_group_is_skipped_and_its_siblings_still_draw() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// A one-shape clip on a group with opacity 1 is a clip layer at
-/// `group transform * clipPath transform`, under the child's `clip-rule`.
 #[test]
 fn a_single_path_clip_is_a_clip_layer_under_the_full_transform_product() {
     let parsed = document(
@@ -791,7 +739,6 @@ fn a_single_path_clip_is_a_clip_layer_under_the_full_transform_product() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// With opacity, a one-shape clip is the compositing layer's own shape.
 #[test]
 fn a_single_path_clip_with_opacity_is_the_layer_shape() {
     let parsed = document(
@@ -819,9 +766,6 @@ fn a_single_path_clip_with_opacity_is_the_layer_shape() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// Several children clip with their concatenation, each under its own
-/// transform; with opacity the layer takes the bounds and the clip sits
-/// inside it.
 #[test]
 fn a_multi_child_clip_concatenates_its_children() {
     for opacity in ["1", "0.5"] {
@@ -836,7 +780,6 @@ fn a_multi_child_clip_concatenates_its_children() {
         ));
         let mut concatenated = rect_path(0.0, 0.0, 10.0, 10.0);
         let mut rotated = rect_path(20.0, 20.0, 30.0, 30.0);
-        // The cascade keeps a `transform` as CSS numbers, `f32`.
         #[expect(clippy::cast_possible_truncation, reason = "CSS numbers are f32")]
         let rotation = Affine::new(
             Affine::rotate(10_f64.to_radians())
@@ -871,8 +814,6 @@ fn a_multi_child_clip_concatenates_its_children() {
     }
 }
 
-/// A `clipPath` that is itself clipped pushes that clip first, under the
-/// same group transform.
 #[test]
 fn a_clipped_clip_path_pushes_its_own_clip_first() {
     let parsed = document(
@@ -905,8 +846,6 @@ fn a_clipped_clip_path_pushes_its_own_clip_first() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// `clipPathUnits="objectBoundingBox"` scales the clip by the clipped
-/// element's bounding box.
 #[test]
 fn an_object_bounding_box_clip_scales_to_the_element() {
     let parsed = document(
@@ -930,10 +869,6 @@ fn an_object_bounding_box_clip_scales_to_the_element() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-// --- Structure: use, symbol, nested svg, switch, style -------------------
-
-/// A `use` draws its target at `x`/`y`, inheriting from the `use`; a
-/// `symbol` target is a nested viewport sized by the `use`.
 #[test]
 fn use_draws_its_target_and_a_symbol_is_a_sized_viewport() {
     let parsed = document(
@@ -952,8 +887,6 @@ fn use_draws_its_target_and_a_symbol_is_a_sized_viewport() {
         BLUE,
         &rect_path(0.0, 0.0, 10.0, 10.0),
     );
-    // The symbol's 10x10 viewBox meets the 20x40 viewport at scale 2,
-    // centred vertically, inside the viewport's clip.
     expected.push_clip_layer(
         Fill::NonZero,
         Affine::translate((20.0, 20.0)),
@@ -970,8 +903,6 @@ fn use_draws_its_target_and_a_symbol_is_a_sized_viewport() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// A `use` that reaches itself, directly or through an ancestor, draws
-/// nothing rather than looping.
 #[test]
 fn a_recursive_use_draws_nothing() {
     let parsed = document(
@@ -981,10 +912,6 @@ fn a_recursive_use_draws_nothing() {
     assert_eq!(paths(&parsed).len(), 1, "only the rect, once");
 }
 
-/// Parses `body` inside a root `svg` on a thread with the stack a native
-/// host's decode pool gives the parse (tokio's 2 MiB blocking pool, in
-/// `bobcat-resources`), so a walk too deep for it fails the test the way
-/// it would abort the process.
 fn document_on_pool_stack(body: String) -> Parsed {
     std::thread::Builder::new()
         .stack_size(2 << 20)
@@ -994,10 +921,6 @@ fn document_on_pool_stack(body: String) -> Parsed {
         .expect("the parse returns")
 }
 
-/// Element nesting past [`MAX_NESTING`](crate::tree::xml::MAX_NESTING) is
-/// skipped with its subtree by the markup walk, so the builder and the
-/// recorder never recurse deeper; the levels above the bound still draw.
-/// `tspan`s nest the same way.
 #[test]
 fn nesting_past_the_bound_is_skipped() {
     let bound = crate::tree::xml::MAX_NESTING as usize;
@@ -1027,8 +950,6 @@ fn nesting_past_the_bound_is_skipped() {
     assert!(spans.items.is_empty(), "the text lies below the bound");
 }
 
-/// A chain of `use`s, each expanding the next, is bounded the same way,
-/// though its markup is flat: 3,000 of them would overflow the stack.
 #[test]
 fn a_use_chain_past_the_bound_is_skipped() {
     use std::fmt::Write as _;
@@ -1054,7 +975,6 @@ fn a_use_chain_past_the_bound_is_skipped() {
     );
 }
 
-/// A document nested well inside the bound draws its leaf.
 #[test]
 fn nesting_inside_the_bound_draws_the_leaf() {
     let levels = 200;
@@ -1066,8 +986,6 @@ fn nesting_inside_the_bound_draws_the_leaf() {
     assert_eq!(paths(&parsed).len(), 1);
 }
 
-/// A nested `svg` clips to its viewport and maps its `viewBox` by its
-/// `preserveAspectRatio`.
 #[test]
 fn a_nested_svg_clips_and_maps_its_view_box() {
     let parsed = document(
@@ -1102,7 +1020,6 @@ fn a_nested_svg_clips_and_maps_its_view_box() {
     );
 }
 
-/// A `switch` draws its first child with no conditional attribute.
 #[test]
 fn a_switch_draws_its_first_unconditional_child() {
     let parsed = document(
@@ -1124,10 +1041,8 @@ fn a_switch_draws_its_first_unconditional_child() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// A path item's fill colour and stroke (width, colour).
 type PathPaint = (Option<Color>, Option<(f64, Color)>);
 
-/// Each path item's paint, in order.
 fn paints(parsed: &Recording) -> Vec<PathPaint> {
     let solid = |brush: &Brush| match brush {
         Brush::Solid(color) => *color,
@@ -1148,10 +1063,6 @@ fn paints(parsed: &Recording) -> Vec<PathPaint> {
         .collect()
 }
 
-/// A `<style>` element's rules apply, as author rules above the
-/// presentation attributes: a type rule fills a rect with no `fill`, a
-/// class rule's `!important` fill beats the attribute and adds its stroke,
-/// and `display: none` from an id rule takes its element out.
 #[test]
 fn a_style_element_applies() {
     const GREEN: Color = Color::from_rgba8(0, 255, 0, 255);
@@ -1176,9 +1087,6 @@ fn a_style_element_applies() {
     );
 }
 
-/// A `style` attribute applies above the presentation attributes: its fill,
-/// its `display: none`, and a group's `opacity`, which opens a layer. A
-/// layer is always `Normal`: `mix-blend-mode` is not recorded.
 #[test]
 fn a_style_attribute_applies() {
     let parsed = document(
@@ -1204,8 +1112,6 @@ fn a_style_attribute_applies() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// `inherit` takes the parent's value, and `currentColor` is each
-/// element's own `color`.
 #[test]
 fn inherit_and_current_color_resolve_per_element() {
     let parsed = document(
@@ -1236,7 +1142,6 @@ fn inherit_and_current_color_resolve_per_element() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// `image` elements draw nothing, whatever they name.
 #[test]
 fn an_image_element_draws_nothing() {
     let parsed = document(
@@ -1254,14 +1159,9 @@ fn an_empty_document_encodes_nothing() {
     assert!(encoded(&parsed).is_empty());
 }
 
-// --- Sizes and errors ------------------------------------------------------
-
-/// The natural size follows CSS Images 3 default sizing, and the viewport
-/// is the `viewBox` size when there is one.
 #[test]
 fn natural_size_and_viewport_follow_the_root_attributes() {
     let cases = [
-        // (a) Both absolute, with or without a viewBox.
         (r#"width="40" height="30""#, (40, 30), (40.0, 30.0)),
         (r#"width="40" height="30px""#, (40, 30), (40.0, 30.0)),
         (
@@ -1269,22 +1169,17 @@ fn natural_size_and_viewport_follow_the_root_attributes() {
             (40, 30),
             (4.0, 3.0),
         ),
-        // (b) One absolute plus a viewBox.
         (r#"width="40" viewBox="0 0 20 10""#, (40, 20), (20.0, 10.0)),
         (r#"height="30" viewBox="0 0 20 10""#, (60, 30), (20.0, 10.0)),
-        // (c) A viewBox only, fitted into 300x150.
         (r#"viewBox="0 0 10 10""#, (150, 150), (10.0, 10.0)),
         (r#"viewBox="0 0 40 10""#, (300, 75), (40.0, 10.0)),
         (r#"viewBox="0,0,40,10""#, (300, 75), (40.0, 10.0)),
-        // (d) Neither: the default object size, which is also the viewport.
         ("", (300, 150), (300.0, 150.0)),
         (r#"width="50%" height="2em""#, (300, 150), (300.0, 150.0)),
-        // (e) One absolute and no viewBox.
         (r#"width="50%" height="20""#, (300, 20), (300.0, 20.0)),
         (r#"width="50%" height="1in""#, (300, 96), (300.0, 96.0)),
         (r#"width="3pc" height="1ex""#, (48, 150), (48.0, 150.0)),
         (r#"width="40""#, (40, 150), (40.0, 150.0)),
-        // Whole px, at least one; the authored size stays the viewport.
         (r#"width="10.4" height="0.2""#, (10, 1), (10.4, 0.2)),
     ];
     for (attributes, natural, viewport) in cases {
@@ -1298,8 +1193,6 @@ fn natural_size_and_viewport_follow_the_root_attributes() {
     }
 }
 
-/// Every CSS absolute unit converts at 96 px per inch; a relative unit
-/// counts as absent.
 #[test]
 fn absolute_units_convert_to_px() {
     for (length, px) in [
@@ -1331,8 +1224,6 @@ fn absolute_units_convert_to_px() {
     }
 }
 
-/// A `viewBox` with an origin moves the content so the viewport starts at
-/// the origin.
 #[test]
 fn a_view_box_origin_translates_the_content() {
     let parsed = parse(
@@ -1403,11 +1294,6 @@ fn unreadable_documents_fail_with_their_own_error() {
     );
 }
 
-// --- Text ------------------------------------------------------------------
-
-/// `text` starts a chunk at its `x`/`y`; a `tspan` with an absolute
-/// position starts another; `dx`/`dy` move the pen; the font and anchor
-/// inherit and override per span.
 #[test]
 fn text_collects_chunks_with_positions_and_inherited_fonts() {
     let parsed = document(
@@ -1454,8 +1340,6 @@ fn text_collects_chunks_with_positions_and_inherited_fonts() {
     assert!(matches!(second.spans[0].fill, Some(TextPaint::Solid(color)) if color == Color::BLACK));
 }
 
-/// Default `xml:space` collapses runs, drops newlines and trims the ends,
-/// across spans; `preserve` keeps every character as a space.
 #[test]
 fn text_whitespace_follows_xml_space() {
     let collapsed = document("<text x=\"0\" y=\"0\">  a \n  b<tspan>  c </tspan> d  </text>");
@@ -1478,9 +1362,6 @@ fn text_whitespace_follows_xml_space() {
     assert!(!blank.has_text);
 }
 
-/// A collapsed space stays in the chunk that produced it: one that ends a
-/// chunk ends that chunk's last span rather than starting the next chunk,
-/// while one between spans of a chunk still separates them.
 #[test]
 fn a_collapsed_space_stays_in_its_chunk() {
     let chunked = document(r#"<text>Label: <tspan x="100">value</tspan></text>"#);
@@ -1505,9 +1386,6 @@ fn a_collapsed_space_stays_in_its_chunk() {
     assert_eq!(spans, "A B");
 }
 
-/// White space between two `tspan`s is text of the `text` element: it
-/// joins the second span, as it did when the parse kept text only inside
-/// `text`.
 #[test]
 fn white_space_between_tspans_is_text() {
     let parsed = document("<text><tspan>a</tspan> <tspan>b</tspan></text>");
@@ -1521,9 +1399,6 @@ fn white_space_between_tspans_is_text() {
     assert_eq!(spans, ["a", " b"]);
 }
 
-/// White space between elements is text that SVG gives no meaning outside
-/// `text` content: a pretty-printed document records what its minified
-/// form records.
 #[test]
 fn white_space_between_elements_records_nothing() {
     let minified = r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient><clipPath id="c"><rect width="8" height="8"/></clipPath><path id="p" d="M0 0 H4 V4 Z"/></defs><switch><g systemLanguage="xx"/><g opacity="0.5" clip-path="url(#c)"><rect width="10" height="10" fill="url(#g)"/><use href="#p" x="2"/></g></switch><text x="1" y="9">a<tspan>b</tspan></text>"##;
@@ -1549,16 +1424,10 @@ fn white_space_between_elements_records_nothing() {
 "##;
     let minified = document(minified);
     let pretty = document(pretty);
-    // The layer, the rectangle, the `use` instance, the pop and the text,
-    // as at the parse that dropped white space between elements.
     assert_eq!(minified.items.len(), 5, "{:?}", minified.items);
-    // The element ids differ, since the pretty document has more nodes.
     assert_eq!(without_ids(&pretty.items), without_ids(&minified.items));
 }
 
-/// Shaped through Ahem, each span is one glyph run placed by the pen:
-/// the chunk's start, then every span's `dx`/`dy` and advance; a chunk
-/// anchored `middle` or `end` is shifted back by half or all of its width.
 #[test]
 fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
     let parsed = document(
@@ -1594,9 +1463,6 @@ fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
     assert!(glyphs.iter().all(|glyph| glyph.y == 0.0));
 }
 
-/// A text fill through an `objectBoundingBox` gradient resolves against
-/// the chunk's advance box after shaping, with the pen undone in the
-/// run's paint transform; a stroke draws after the fill.
 #[test]
 fn text_gradients_resolve_against_the_shaped_chunk_box() {
     let parsed = document(
@@ -1607,8 +1473,6 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
     let runs = scene.runs();
     assert_eq!(runs.len(), 2, "a fill run and a stroke run");
     let brush = runs[0].paint_transform.expect("the gradient's transform");
-    // The chunk box is 20 wide (two ems) from the pen, 8 above and 2 below
-    // the baseline: the unit square maps onto it, relative to the pen.
     assert_eq!(brush.as_coeffs(), [20.0, 0.0, 0.0, 10.0, 0.0, -8.0]);
     assert!(matches!(
         runs[0].style,
@@ -1624,14 +1488,11 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
     ));
 }
 
-/// Text inside an opacity group extends the layer's bounds once shaped,
-/// so the layer is not clipped to nothing.
 #[test]
 fn text_extends_the_bounds_of_the_layer_around_it() {
     let parsed = document(
         r#"<g opacity="0.5" transform="translate(5 5)"><text x="10" y="20" font-size="10" font-family="Ahem">ab</text></g>"#,
     );
-    // One context for both, so the font blob is the same registration.
     let mut context = Some(Box::new(ahem()));
     let scene = drawn(&parsed, &mut context);
     let mut expected = DisplayList::new();
@@ -1666,8 +1527,6 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
     assert_scenes_identical(&scene, &expected);
 }
 
-/// Shaping with no fonts at all still produces a scene without panicking:
-/// the text simply has no glyphs.
 #[test]
 fn text_without_any_font_encodes_without_glyphs() {
     let parsed = document(r#"<text x="0" y="10">dropped</text>"#);
@@ -1675,7 +1534,6 @@ fn text_without_any_font_encodes_without_glyphs() {
     assert_eq!(scene.glyph_runs(), 0);
 }
 
-/// Every item type crosses threads, and a document clones.
 #[test]
 fn a_document_is_sendable_and_clonable() {
     let parsed =
@@ -1688,9 +1546,6 @@ fn a_document_is_sendable_and_clonable() {
     assert!(format!("{:?}", parsed.recording).starts_with("Recording"));
 }
 
-/// An image's root `currentcolor` is the isolated document's initial
-/// `color`, black, and text with no `font-family` is `sans-serif`, the
-/// family the shaper gives an empty list (the image sheet's rule).
 #[test]
 fn an_image_documents_initial_color_and_font_family() {
     let parsed = document(r#"<rect width="10" height="10" fill="currentColor"/><text>a</text>"#);

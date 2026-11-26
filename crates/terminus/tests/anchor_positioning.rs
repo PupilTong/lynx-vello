@@ -55,12 +55,8 @@ mod common;
 use common::Doc;
 use terminus::link::{NodeId, ShadowRootMode};
 
-/// A border box: `(x, y, width, height)`.
 type Rect4 = (f32, f32, f32, f32);
 
-/// One `anchor-position-borders-001.html` case: containing block classes,
-/// nested containing block classes, anchor classes, target classes, and the
-/// expected offset and size.
 type BorderCase = (
     &'static str,
     Option<&'static str>,
@@ -69,14 +65,8 @@ type BorderCase = (
     Rect4,
 );
 
-/// One `position-anchor-match-parent-rendering.html` case: the parent chain
-/// as `(classes, inline style)`, the probe's inline style, and whether it
-/// anchors.
 type MatchParentCase = (Vec<(&'static str, &'static str)>, &'static str, bool);
 
-/// One `anchor-name-mutation.html` scenario: the anchors named at first,
-/// the expected `(left, top)`, the anchors whose name is then added (`true`)
-/// or removed, and the expected `(left, top)` after.
 type MutationCase = (
     &'static [usize],
     (f32, f32),
@@ -84,17 +74,12 @@ type MutationCase = (
     (f32, f32),
 );
 
-/// One `anchor-scope-*` template: its name, the outline, and each query
-/// box's expected `(left, top)`.
 type ScopeCase = (&'static str, &'static str, &'static [(f32, f32)]);
 
-/// A document laid out from `css`.
 struct Page {
     doc: Doc,
 }
 
-/// The block-flow stand-in every port shares, plus `.cb` for a positioned
-/// containing block.
 const BASE: &str = "
     page { display: flex; flex-direction: column; width: 800px; height: 600px; }
     view { display: flex; flex-direction: column; flex-shrink: 0; }
@@ -123,12 +108,10 @@ impl Page {
         self.doc.dom.layout();
     }
 
-    /// One rendering update: layout, the §6.5.1.1 recording, paint.
     fn render(&mut self) {
         self.doc.dom.render();
     }
 
-    /// `(x, y, width, height)` of the border box in viewport coordinates.
     fn abs(&self, id: NodeId) -> Rect4 {
         let rect = self
             .doc
@@ -143,9 +126,6 @@ impl Page {
         )
     }
 
-    /// `(x, y, width, height)` of `id`'s border box relative to the padding
-    /// box of `frame` — the WPT `data-offset-*` of a box whose offset parent
-    /// is `frame`.
     fn offset(&self, id: NodeId, frame: NodeId) -> Rect4 {
         let (x, y, width, height) = self.abs(id);
         let (fx, fy, ..) = self.abs(frame);
@@ -161,13 +141,6 @@ impl Page {
     }
 }
 
-// ---------------------------------------------------------------------------
-// anchor() and the target lookup.
-
-/// wpt `anchor-position-001.html`: `anchor()` on all four insets, against
-/// two anchors. Adaptation: the anchors' top margins do not collapse
-/// through the container, so `--a1` sits 100px lower than in block flow and
-/// the expected `y` is 200, not 100; the width and height are the file's.
 #[test]
 fn wpt_anchor_position_001() {
     let mut page = Page::new(
@@ -188,10 +161,6 @@ fn wpt_anchor_position_001() {
     assert_eq!(page.offset(target, container), (200.0, 200.0, 300.0, 100.0));
 }
 
-/// wpt `anchor-position-002.html`: anchors whose own containing blocks
-/// differ from the query box's are acceptable through the containing-block
-/// chain — an in-flow wrapper, and a `transform` containing block holding
-/// an absolutely positioned and a fixed wrapper.
 #[test]
 fn wpt_anchor_position_002() {
     let mut page = Page::new(
@@ -222,10 +191,6 @@ fn wpt_anchor_position_002() {
     assert_eq!(page.offset(third, container).0, 33.0);
 }
 
-/// wpt `anchor-position-borders-001.html`, every case: the containing
-/// block's margins, borders and padding, a nested containing block's, the
-/// anchor's and the query box's own. `anchor()` answers in the containing
-/// block's padding-box coordinates.
 #[test]
 #[allow(clippy::too_many_lines, reason = "the file's twelve cases, one table")]
 fn wpt_anchor_position_borders_001() {
@@ -241,10 +206,6 @@ fn wpt_anchor_position_borders_001() {
                    top: anchor(--a1 top); bottom: anchor(--a1 bottom); }",
     );
     let root = page.root();
-    // (containing block classes, nested containing block classes, anchor
-    // classes, target classes, expected offset and size). The anchor sits
-    // at `margin-left: 50px`; its `.margins` case moves it by the top
-    // margin only (the left margin is the anchor's own 50px, overridden).
     let cases: [BorderCase; 12] = [
         (
             "view.cb.margins",
@@ -336,7 +297,6 @@ fn wpt_anchor_position_borders_001() {
         let cb = page.el(root, cb, "");
         page.el(cb, "view.spacer", "");
         let parent = nested.map_or(cb, |nested| page.el(cb, nested, ""));
-        // `.margins` on the anchor would reset its 50px left margin.
         let inline = if anchor.contains("margins") {
             "margin-left: 50px"
         } else {
@@ -352,9 +312,6 @@ fn wpt_anchor_position_borders_001() {
     }
 }
 
-/// wpt `anchor-position-circular.html`: two boxes anchored to each other.
-/// The first reads the second, which is absolutely positioned after it and
-/// so not acceptable; the second reads the first. Neither loops.
 #[test]
 fn wpt_anchor_position_circular() {
     let mut page = Page::new(
@@ -373,10 +330,6 @@ fn wpt_anchor_position_circular() {
     assert_eq!(page.offset(second, cb), (0.0, 100.0, 100.0, 100.0));
 }
 
-/// wpt `mixed-dependency-chain.html`: ten absolutely positioned boxes all
-/// named `--box`, each placed after the one before it by `position-area`
-/// or by `anchor()` — the last acceptable `--box` is always the previous
-/// sibling.
 #[test]
 fn wpt_mixed_dependency_chain() {
     let mut page = Page::new(
@@ -410,12 +363,6 @@ fn wpt_mixed_dependency_chain() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// position-anchor and position-area.
-
-/// `position-anchor` names the default anchor; `position-area` places the
-/// box in the 3×3 grid around it (wpt `position-area-basic.html`'s
-/// `top center` and `bottom right` cells, on a 100×100 anchor at 100,100).
 #[test]
 fn position_area_places_against_the_default_anchor() {
     let mut page = Page::new(
@@ -434,17 +381,11 @@ fn position_area_places_against_the_default_anchor() {
         "position-anchor: --missing; position-area: bottom right",
     );
     page.layout();
-    // Centered over the anchor, ending at its top edge.
     assert_eq!(page.offset(above, cb), (140.0, 80.0, 20.0, 20.0));
-    // The bottom-right cell starts at the anchor's corner.
     assert_eq!(page.offset(below_right, cb), (200.0, 200.0, 20.0, 20.0));
-    // No default anchor: `position-area` does nothing.
     assert_eq!(page.offset(no_anchor, cb), (0.0, 0.0, 20.0, 20.0));
 }
 
-/// wpt `anchored-c-v-hidden.html`: an anchored box that skips its own
-/// contents is still laid out against its anchor. Adaptation: pixel
-/// reftest → geometry, in a positioned container.
 #[test]
 fn wpt_anchored_c_v_hidden() {
     let mut page = Page::new(
@@ -461,13 +402,6 @@ fn wpt_anchored_c_v_hidden() {
     assert_eq!(page.offset(anchored, cb), (0.0, 0.0, 100.0, 100.0));
 }
 
-// ---------------------------------------------------------------------------
-// anchor-scope.
-
-/// wpt `anchor-scope-basic.html`, the cases with one query box: a scoped
-/// name is visible only inside the scope, from both sides. Each case is the
-/// file's template inside the 100×100 `main`; anchors are 10px tall, so
-/// the expected `top` is 10 × the anchor's position in the column.
 #[test]
 fn wpt_anchor_scope_basic() {
     let css = ".scope-all { anchor-scope: all; }
@@ -482,9 +416,6 @@ fn wpt_anchor_scope_basic() {
                                     width: 5px; height: 5px; }
          main { position: relative; width: 100px; height: 100px; }";
 
-    // "Can anchor to a name both defined and scoped by the same element":
-    // the anchor is the query box's parent here, which is not acceptable
-    // for a box whose containing block is `main`, so `main` holds the scope.
     {
         let mut page = Page::new(css);
         let root = page.root();
@@ -499,8 +430,6 @@ fn wpt_anchor_scope_basic() {
         page.layout();
         assert_eq!(page.offset(anchored, main).1, 10.0, "inclusive subtree");
     }
-    // "Sibling can not anchor into anchor-scope, even when anchor-name
-    // present".
     {
         let mut page = Page::new(css);
         let root = page.root();
@@ -517,7 +446,6 @@ fn wpt_anchor_scope_basic() {
         page.layout();
         assert_eq!(page.offset(anchored, main).1, 30.0, "sibling scope");
     }
-    // "anchor-scope:all on common ancestor" and "--a on common ancestor".
     for scope in ["view.scope-all", "view.scope-a"] {
         let mut page = Page::new(css);
         let root = page.root();
@@ -538,7 +466,6 @@ fn wpt_anchor_scope_basic() {
             "{scope} on common ancestor"
         );
     }
-    // "anchor-scope:all on sibling", "scopes multiple names", "--a,--b".
     for scope in ["view.scope-all", "view.scope-ab"] {
         let mut page = Page::new(css);
         let root = page.root();
@@ -560,11 +487,6 @@ fn wpt_anchor_scope_basic() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tree-scoped names.
-
-/// wpt `anchor-name-shadow-higher-tree.html`: a positioned box inside a
-/// shadow tree matches a name declared by the host's (document) styles.
 #[test]
 fn wpt_anchor_name_shadow_higher_tree() {
     let mut page = Page::new(
@@ -588,8 +510,6 @@ fn wpt_anchor_name_shadow_higher_tree() {
     assert_eq!(page.abs(anchored).0, host_rect.0 + host_rect.2);
 }
 
-/// wpt `anchor-name-shadow-lower-tree.html`: a name declared by a shadow
-/// tree's styles is invisible to a reference from the document tree.
 #[test]
 fn wpt_anchor_name_shadow_lower_tree() {
     let mut page = Page::new(
@@ -613,15 +533,6 @@ fn wpt_anchor_name_shadow_lower_tree() {
     assert_eq!(page.abs(anchored).0, 37.0);
 }
 
-/// wpt `anchor-name-in-shadow.html`, first case: a name a shadow tree's
-/// styles declare does not leak out of it.
-///
-/// Its second case ("`anchor()` in shadow tree should not match host
-/// anchor-name") expects a reference from a shadow tree *not* to match a
-/// name the host's document-tree styles declare, which contradicts the
-/// Editor's Draft's loosely matched names and
-/// `anchor-name-shadow-higher-tree.html` (above); this engine follows the
-/// ED, so that case is not ported.
 #[test]
 fn wpt_anchor_name_in_shadow() {
     let mut page = Page::new(
@@ -644,12 +555,6 @@ fn wpt_anchor_name_in_shadow() {
     assert_eq!(page.abs(anchored).1, 100.0);
 }
 
-// ---------------------------------------------------------------------------
-// Position options (§6) and the last successful one (§6.5.1).
-
-/// wpt `last-successful-basic.html`: the option chosen at a rendering
-/// update is where the next determination starts, and it is kept while
-/// nothing fits.
 #[test]
 fn wpt_last_successful_basic() {
     let mut page = Page::new(
@@ -673,8 +578,6 @@ fn wpt_last_successful_basic() {
 
     page.doc.set_inline(anchor, "top: 150px");
     page.render();
-    // flip-block's region is 150px tall below the anchor; the 200px box
-    // overflows it and is shifted back inside the containing block.
     assert_eq!(
         page.offset(anchored, container).1,
         200.0,
@@ -690,8 +593,6 @@ fn wpt_last_successful_basic() {
     );
 }
 
-/// wpt `position-try-fallbacks-no-fit-after-fit.html`: without a rendering
-/// update in between, a second layout starts from the base style again.
 #[test]
 fn wpt_position_try_fallbacks_no_fit_after_fit() {
     let mut page = Page::new(
@@ -725,10 +626,6 @@ fn wpt_position_try_fallbacks_no_fit_after_fit() {
     );
 }
 
-/// wpt `last-successful-change-try-rule.html`: a changed `@position-try`
-/// rule is a fallback-sensitive change, so the next rendering update
-/// forgets the last successful option. Adaptation: the rule is changed by
-/// a later sheet declaring the same name, not through CSSOM.
 #[test]
 fn wpt_last_successful_change_try_rule() {
     let mut page = Page::new(
@@ -770,8 +667,6 @@ fn wpt_last_successful_change_try_rule() {
     );
 }
 
-/// §6.5: the chosen option's accepted properties are what computed-value
-/// readback reports; the others stay the base style's.
 #[test]
 fn readback_reports_the_chosen_options_accepted_properties() {
     let mut page = Page::new(
@@ -795,16 +690,6 @@ fn readback_reports_the_chosen_options_accepted_properties() {
     assert_eq!(page.computed(anchored, "opacity"), "0.5");
 }
 
-// ---------------------------------------------------------------------------
-// The scrollable containing block (css-position-4).
-
-/// wpt `scrollable-containing-block-validity.html`: only a box with a
-/// default anchor is laid out against its scroll container's scrollable
-/// overflow area; a `position-anchor` naming nothing, and a `position-area`
-/// with no anchor, keep the padding box. Adaptation: this engine's
-/// scrolling area (`ScrollBox::scroll_size`) ends at the content's far
-/// edge rather than past the scroller's end padding, so the scrollable
-/// containing block is 190px, not the file's 200px.
 #[test]
 fn wpt_scrollable_containing_block_validity() {
     let mut page = Page::new(
@@ -835,14 +720,6 @@ fn wpt_scrollable_containing_block_validity() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// anchor() sides, through the host.
-
-/// wpt `anchor-inside-outside.html`: `inside`/`outside` on each physical
-/// inset and each inline-axis logical one. Not ported: the four
-/// `inset-block-*` cases — those longhands are not author-facing in the
-/// fork's `lynx` build (without `writing-mode` the block axis is always
-/// vertical), so the declarations are dropped.
 #[test]
 fn wpt_anchor_inside_outside() {
     let mut page = Page::new(
@@ -884,11 +761,6 @@ fn wpt_anchor_inside_outside() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Position options through the fork's cascade.
-
-/// wpt `try-tactic-basic.html`, every case: a named `@position-try` rule
-/// under each try tactic, cascaded at the style harvest.
 #[test]
 fn wpt_try_tactic_basic() {
     let cases: [(&str, Rect4); 30] = [
@@ -957,10 +829,6 @@ fn wpt_try_tactic_basic() {
     }
 }
 
-/// wpt `position-try-order-basic.html`, every case: `position-try-order`
-/// sorts the options by their inset-modified containing block, stably.
-/// Adaptation: the `#target`/`#ref` pair becomes one box laid out under
-/// each `position-try` value in turn.
 #[test]
 fn wpt_position_try_order_basic() {
     let mut page = Page::new(
@@ -1059,22 +927,6 @@ fn wpt_position_try_order_basic() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// position-anchor: match-parent.
-
-/// wpt `position-anchor-match-parent-rendering.html`, every case without a
-/// pseudo-element: a `fixed` probe matching its parent's default anchor
-/// sits at the anchor's bottom-right corner `(70, 40)`, else at its
-/// fallback `(20, 70)`. Adaptation: the file's `fixed` probes and parents
-/// resolve against the viewport, where every probe would see every case's
-/// `--a` (and the last one would win) and fall back to one viewport point,
-/// while its reference draws each probe inside its own case; each `.case`
-/// here is the fixed containing block (`transform`) and scopes `--a`
-/// (`anchor-scope`), which is what the reference draws. The "Parent is not
-/// positioned" case is not ported: the fork's `lynx` grammar has no
-/// `position: static` (Lynx's own `position` values), and its
-/// relatively positioned sibling case covers the same rule. Reftest →
-/// geometry.
 #[test]
 fn wpt_position_anchor_match_parent_rendering() {
     let mut page = Page::new(
@@ -1090,25 +942,19 @@ fn wpt_position_anchor_match_parent_rendering() {
     );
     let root = page.root();
     let cases = page.el(root, "view.cases", "");
-    // (parent chain as (classes, inline style), probe inline, anchored?)
     let specs: Vec<MatchParentCase> = vec![
-        // Parent has a default anchor element.
         (vec![("view.parent", "position-anchor: --a")], "", true),
-        // Parent has `position-anchor: none`.
         (vec![("view.parent", "position-anchor: none")], "", false),
-        // Parent's `position-anchor` selects no anchor element.
         (
             vec![("view.parent", "position-anchor: --nonexistent")],
             "",
             false,
         ),
-        // Parent is relatively positioned, so `position-anchor` does not apply.
         (
             vec![("view.parent", "position: relative; position-anchor: --a")],
             "",
             false,
         ),
-        // Parent also uses `match-parent`.
         (
             vec![
                 ("view.parent", "position-anchor: --a"),
@@ -1117,7 +963,6 @@ fn wpt_position_anchor_match_parent_rendering() {
             "",
             true,
         ),
-        // Chain of `match-parent` parents, several levels deep.
         (
             vec![
                 ("view.parent", "position-anchor: --a"),
@@ -1128,7 +973,6 @@ fn wpt_position_anchor_match_parent_rendering() {
             "",
             true,
         ),
-        // Parent's `match-parent` resolved to no anchor element.
         (
             vec![
                 ("view.parent", "position-anchor: none"),
@@ -1137,13 +981,11 @@ fn wpt_position_anchor_match_parent_rendering() {
             "",
             false,
         ),
-        // Only the grandparent has a default anchor element.
         (
             vec![("view.parent", "position-anchor: --a"), ("view.parent", "")],
             "",
             false,
         ),
-        // Anchored ancestor, with plain wrappers in between.
         (
             vec![
                 ("view.parent", "position-anchor: --a"),
@@ -1153,7 +995,6 @@ fn wpt_position_anchor_match_parent_rendering() {
             "",
             false,
         ),
-        // Intermediate `match-parent` is not absolutely positioned.
         (
             vec![
                 ("view.parent", "position-anchor: --a"),
@@ -1162,8 +1003,6 @@ fn wpt_position_anchor_match_parent_rendering() {
             "",
             false,
         ),
-        // Parent's default anchor element is not acceptable for the probe,
-        // whose containing block is the parent itself.
         (
             vec![("view.parent", "position-anchor: --a")],
             "position: absolute",
@@ -1189,12 +1028,6 @@ fn wpt_position_anchor_match_parent_rendering() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dynamic changes and the settle loop.
-
-/// wpt `anchor-position-dynamic-001.html`: the anchors' geometry changes
-/// after a first layout, and the query box follows. Adaptation: the top
-/// margins do not collapse (see `wpt_anchor_position_001`).
 #[test]
 fn wpt_anchor_position_dynamic_001() {
     let mut page = Page::new(
@@ -1218,10 +1051,6 @@ fn wpt_anchor_position_dynamic_001() {
     assert_eq!(page.offset(target, container), (200.0, 200.0, 300.0, 100.0));
 }
 
-/// wpt `position-anchor-003.html`: changing `position-anchor` relays the
-/// box out against the new default anchor. Adaptation: the anchors live in
-/// a positioned container, and the `fixed` box resolves against the
-/// viewport as the file's does.
 #[test]
 fn wpt_position_anchor_003() {
     let mut page = Page::new(
@@ -1243,8 +1072,6 @@ fn wpt_position_anchor_003() {
     assert_eq!((page.abs(target).0, page.abs(target).1), (200.0, 100.0));
 }
 
-/// wpt `anchor-scope-dynamic.html`, the first two cases: a scope appearing
-/// and disappearing on an anchor's ancestor changes the target.
 #[test]
 fn wpt_anchor_scope_dynamic() {
     for scope in ["all", "--a"] {
@@ -1273,10 +1100,6 @@ fn wpt_anchor_scope_dynamic() {
     }
 }
 
-/// The settle loop: an anchor inside a `contain: strict` sibling resizes.
-/// The containment boundary stops the dirty walk, so the containing block
-/// never runs again on its own; the settle loop re-asks the reader's query
-/// and lays it out again in the same `layout()`.
 #[test]
 fn an_anchor_behind_a_containment_boundary_moves_its_reader() {
     let mut page = Page::new(
@@ -1297,9 +1120,6 @@ fn an_anchor_behind_a_containment_boundary_moves_its_reader() {
     assert_eq!(page.offset(reader, cb).1, 70.0);
 }
 
-/// An absolutely positioned anchor that escapes a static wrapper is laid
-/// out by its containing block's absolute pass, in tree order, before the
-/// later box reading it — not after it, by a pass of its own.
 #[test]
 fn an_escaping_anchor_is_laid_out_before_its_reader() {
     let mut page = Page::new(
@@ -1317,12 +1137,6 @@ fn an_escaping_anchor_is_laid_out_before_its_reader() {
     assert_eq!(page.offset(reader, cb), (90.0, 90.0, 10.0, 10.0));
 }
 
-/// The page css-position-3's layout order exists for: a chain of anchors
-/// alternating between a containing block's own absolutely positioned
-/// children and boxes that escape static wrappers into it. Each box's left
-/// edge is the right edge of the box before it, so every box reads one
-/// placed earlier in tree order in the same absolute pass, and the chain is
-/// right after one `layout()` — and stays right after a change at its head.
 #[test]
 fn an_anchor_chain_through_escaping_boxes_settles_in_tree_order() {
     let mut page = Page::new(
@@ -1347,7 +1161,6 @@ fn an_anchor_chain_through_escaping_boxes_settles_in_tree_order() {
     let y3 = page.el(cb, "view.link.y3", "");
     page.layout();
     let left = |page: &Page, id| page.offset(id, cb).0;
-    // Two hops through one escaping box, then three.
     assert_eq!(
         [x2, y2, x3, y3].map(|id| left(&page, id)),
         [20.0, 30.0, 40.0, 50.0]
@@ -1362,11 +1175,6 @@ fn an_anchor_chain_through_escaping_boxes_settles_in_tree_order() {
     );
 }
 
-/// A box that escapes a subtree relaid in place keeps following its static
-/// position: its containing block, above the subtree, does not run, so the
-/// rounding tail places it from what the relay recorded. (A flex
-/// container's static position for an out-of-flow child is that of a sole
-/// item, so `justify-content: center` makes it depend on the box's size.)
 #[test]
 fn an_escaping_box_follows_an_in_place_relayout() {
     let mut page = Page::new(
@@ -1385,16 +1193,6 @@ fn an_escaping_box_follows_an_in_place_relayout() {
     assert_eq!(page.offset(escaping, cb), (3.0, 85.0, 10.0, 30.0));
 }
 
-/// A box with a default anchor that escapes a subtree relaid in place into a
-/// scroll container is laid out against css-position-4's scrollable
-/// containing block, as a whole-tree layout lays it out. Only the scroll
-/// container's own absolute pass knows that area (its in-flow overflow, here
-/// 300 wide where the padding box is 100), so the in-place relayout of
-/// `.frame` — a fixed-size box whose output the change does not move (its
-/// zero minimum sizes keep a flex item's automatic minimum, which reads
-/// content, out of its input) — falls back to the whole-tree pass rather than
-/// letting the rounding tail place the box against the padding box
-/// (`hoisted::escapes_past_late_placement`).
 #[test]
 fn an_anchored_box_escaping_an_in_place_relayout_keeps_its_scrollable_containing_block() {
     const CSS: &str = ".scroller { overflow: hidden; width: 100px; height: 100px; }
@@ -1427,8 +1225,6 @@ fn an_anchored_box_escaping_an_in_place_relayout_keeps_its_scrollable_containing
     assert_eq!(page.offset(target, scroller), (0.0, 5.0, 300.0, 10.0));
 }
 
-/// A subtree moved under another containing block takes its escaping boxes
-/// with it, caches and all: they are laid out by the new one.
 #[test]
 fn an_escaping_box_moves_with_its_subtree() {
     let mut page = Page::new(
@@ -1446,10 +1242,6 @@ fn an_escaping_box_moves_with_its_subtree() {
     assert_eq!(page.offset(escaping, second).0, 190.0);
 }
 
-/// A position option that makes both insets of an axis `auto` places the
-/// box at its static position — which a grid container computes for a box
-/// with options whatever its own style's insets say (here `justify-items:
-/// center` puts it at 75, not at the padding edge).
 #[test]
 fn an_option_with_auto_insets_reads_the_grid_static_position() {
     let mut page = Page::new(
@@ -1466,10 +1258,6 @@ fn an_option_with_auto_insets_reads_the_grid_static_position() {
     assert_eq!(page.offset(target, grid), (75.0, 0.0, 50.0, 50.0));
 }
 
-/// The same for a box escaping a Lynx `linear` parent: the parent measures
-/// it for its static position when it has options, so the option's `auto`
-/// insets land on the cross-axis gravity (75), not on a zero-size box's
-/// (100).
 #[test]
 fn an_option_with_auto_insets_reads_the_linear_static_position() {
     let mut page = Page::new(
@@ -1487,8 +1275,6 @@ fn an_option_with_auto_insets_reads_the_linear_static_position() {
     assert_eq!(page.offset(target, cb), (75.0, 0.0, 50.0, 50.0));
 }
 
-/// A removed anchor drops its reader to the fallback; a new one is picked
-/// up without any change to the reader.
 #[test]
 fn adding_and_removing_an_anchor_rereads() {
     let mut page = Page::new(
@@ -1511,12 +1297,6 @@ fn adding_and_removing_an_anchor_rereads() {
     assert_eq!(page.offset(reader, cb).1, 7.0);
 }
 
-// ---------------------------------------------------------------------------
-// §2.5 anchor relevance and §3.3 remembered scroll offsets.
-
-/// §2.5: a `content-visibility: auto` subtree far outside the viewport
-/// holding the target anchor of a shown positioned box outside it is
-/// relevant to the user, so its contents are laid out and the box anchors.
 #[test]
 fn an_auto_subtree_holding_an_anchor_stays_relevant() {
     let mut page = Page::new(
@@ -1535,7 +1315,6 @@ fn an_auto_subtree_holding_an_anchor_stays_relevant() {
     page.render();
     assert_eq!(page.offset(reader, cb).0, 40.0);
 
-    // Without the reader nothing keeps it relevant, and it skips.
     let lonely = {
         let mut page = Page::new(
             ".spacer { height: 3000px; }
@@ -1557,10 +1336,6 @@ fn an_auto_subtree_holding_an_anchor_stays_relevant() {
     );
 }
 
-/// §3.3: an anchor inside a scroll container is read at the scroll offset
-/// remembered at the reader's last anchor recalculation point — here, when
-/// it began generating a box — so scrolling alone moves nothing in layout;
-/// the next recalculation point picks the new offset up.
 #[test]
 fn remembered_scroll_offsets_hold_until_a_recalculation_point() {
     let mut page = Page::new(
@@ -1583,12 +1358,10 @@ fn remembered_scroll_offsets_hold_until_a_recalculation_point() {
     page.doc
         .dom
         .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 20.0));
-    // An unrelated relayout of the reader: its anchor answer is unchanged.
     page.doc.set_inline(reader, "width: 11px");
     page.layout();
     assert_eq!(page.offset(reader, cb).1, 80.0);
 
-    // It stops and starts generating a box: a recalculation point.
     page.doc.set_inline(reader, "display: none");
     page.layout();
     page.doc.set_inline(reader, "");
@@ -1596,10 +1369,6 @@ fn remembered_scroll_offsets_hold_until_a_recalculation_point() {
     assert_eq!(page.offset(reader, cb).1, 60.0);
 }
 
-/// wpt `anchor-name-cross-shadow.html`, both cases: a name set on a
-/// shadow part by the document's `::part()` rule, and one set on the host
-/// by the shadow tree's `:host` rule, are each matched from the tree whose
-/// styles declared them.
 #[test]
 fn wpt_anchor_name_cross_shadow() {
     let mut page = Page::new(
@@ -1632,9 +1401,6 @@ fn wpt_anchor_name_cross_shadow() {
     assert_eq!(page.offset(target2, cb2).0, 15.0, ":host");
 }
 
-/// wpt `anchor-scope-shadow-all.html`: `anchor-scope: all` set on a shadow
-/// part by the document's styles is tree-scoped to the document, so it
-/// does not scope the names the shadow tree's styles declare.
 #[test]
 fn wpt_anchor_scope_shadow_all() {
     let mut page = Page::new("#host::part(scope) { anchor-scope: all; }");
@@ -1658,10 +1424,6 @@ fn wpt_anchor_scope_shadow_all() {
     assert_eq!(page.offset(anchored, cb).1, 10.0);
 }
 
-/// wpt `anchor-scope-shadow-names.html`, every case: a scope matches only
-/// names of its own tree — a document `::part()` scope, a shadow `.scope`
-/// around a slotted box, a shadow `::slotted()` scope on the box itself and
-/// a shadow `:host` scope all leave a document-tree lookup alone.
 #[test]
 fn wpt_anchor_scope_shadow_names() {
     let shadow_view = "view { display: flex; flex-direction: column; flex-shrink: 0; }";
@@ -1670,8 +1432,6 @@ fn wpt_anchor_scope_shadow_names() {
          .anchored { position: absolute; top: anchor(bottom, 1px); position-anchor: --a;
                      width: 5px; height: 5px; }";
 
-    // `test_part`: the scope comes from a document `::part()` rule, the
-    // names and the lookup from the shadow tree.
     {
         let mut page = Page::new(".host::part(scope) { anchor-scope: --a; }");
         let root = page.root();
@@ -1688,8 +1448,6 @@ fn wpt_anchor_scope_shadow_names() {
         page.layout();
         assert_eq!(page.offset(anchored, cb).1, 10.0, "::part() scope");
     }
-    // `test_slot`, `test_slotted`, `test_host`: a document-tree lookup from
-    // a box slotted into a shadow tree whose styles declare a scope.
     for (case, shadow_css, wrap) in [
         ("slot", ".scope { anchor-scope: --a; }", true),
         (
@@ -1720,9 +1478,6 @@ fn wpt_anchor_scope_shadow_names() {
     }
 }
 
-/// wpt `last-successful-intermediate-ignored.html`: a layout between two
-/// rendering updates in which the base style fits does not replace the last
-/// successful option; only a rendering update records one.
 #[test]
 fn wpt_last_successful_intermediate_ignored() {
     let mut page = Page::new(
@@ -1756,17 +1511,11 @@ fn wpt_last_successful_intermediate_ignored() {
     assert_eq!(page.offset(anchored, container).1, 200.0, "flip-block kept");
 }
 
-/// The page `position-anchor-001.html` and `-002.html` share: two 100×100
-/// anchors, and a `fixed` box per anchor forced into an `@position-try`
-/// option that places and sizes it from its default anchor.
 const POSITION_ANCHOR_PAGE: &str = ".anchor { width: 100px; height: 100px; }
      .target { position: fixed; position-try-fallbacks: --pf; left: 999999px; }
      @position-try --pf { top: anchor(bottom, 0px); left: anchor(left, 0px);
                           width: anchor-size(width, 0px); height: anchor-size(height, 0px); }";
 
-/// wpt `position-anchor-001.html`: `position-anchor` picks each box's
-/// default anchor, which its fallback option's unnamed functions read.
-/// Adaptation: reftest → geometry; the Ahem text is left out.
 #[test]
 fn wpt_position_anchor_001() {
     let mut page = Page::new(&format!(
@@ -1786,10 +1535,6 @@ fn wpt_position_anchor_001() {
     assert_eq!(page.abs(target2), (300.0, 300.0, 100.0, 100.0));
 }
 
-/// wpt `position-anchor-002.html`: each anchor is a shadow host naming
-/// itself `--a` through `:host`, and its slotted box asks for `--a` through
-/// `::slotted()` — both from the shadow tree, so they match, and the host
-/// (the nearest ancestor) wins over the document's own `--a`.
 #[test]
 fn wpt_position_anchor_002() {
     let mut page = Page::new(&format!(
@@ -1818,8 +1563,6 @@ fn wpt_position_anchor_002() {
     assert_eq!(page.abs(target2), (300.0, 300.0, 100.0, 100.0));
 }
 
-/// A box whose default anchor does not exist yet is laid out without one,
-/// and picks it up when it appears behind a containment boundary.
 #[test]
 fn a_default_anchor_appearing_later_is_picked_up() {
     let mut page = Page::new(
@@ -1839,9 +1582,6 @@ fn a_default_anchor_appearing_later_is_picked_up() {
     assert_eq!(page.offset(reader, cb), (60.0, 30.0, 10.0, 10.0));
 }
 
-/// The page `scrollable-containing-block-size.html` shares: a 100×100
-/// padding box scroller holding a 180×180 filler with the anchor inside,
-/// and an inset-0, stretched box with a default anchor.
 fn scrollable_size_page() -> Page {
     Page::new(
         ".scroller { overflow: hidden; width: 80px; height: 80px; margin: 10px;
@@ -1855,8 +1595,6 @@ fn scrollable_size_page() -> Page {
     )
 }
 
-/// One scroller of [`scrollable_size_page`]: `inline` on the scroller, the
-/// filler's classes; answers the scroller and the target.
 fn scrollable_size_case(page: &mut Page, inline: &str, filler: &str) -> (NodeId, NodeId) {
     let root = page.root();
     let scroller = page.el(root, "view.cb.scroller", inline);
@@ -1865,16 +1603,6 @@ fn scrollable_size_case(page: &mut Page, inline: &str, filler: &str) -> (NodeId,
     (scroller, page.el(scroller, "view.target", ""))
 }
 
-/// wpt `scrollable-containing-block-size.html`, the rows without a
-/// relative shift or a reversed direction: the box is laid out against its
-/// scroller's scrolling area. Adaptation: block rows are column flexboxes.
-/// Where this engine's scrolling area differs from the file's (which ends
-/// past the scroller's end padding), the row asserts the engine's: its
-/// flexbox scrollable overflow ends at the content's far edge (190), its
-/// grid's includes the end padding (200, as the file). Not ported: the
-/// `column-reverse`, `row-reverse` and `direction: rtl` rows, whose
-/// scrollable overflow extends before the padding edge, which this
-/// engine's scroll containers never do.
 #[test]
 fn wpt_scrollable_containing_block_size() {
     let mut page = scrollable_size_page();
@@ -1897,7 +1625,6 @@ fn wpt_scrollable_containing_block_size() {
             (scroller, target, size, inline, filler)
         })
         .collect();
-    // "Grid layout with template": the anchor is the grid item.
     let root = page.root();
     let scroller = page.el(
         root,
@@ -1917,8 +1644,6 @@ fn wpt_scrollable_containing_block_size() {
     }
 }
 
-/// wpt `scrollable-containing-block-size.html`, the relative-shift rows,
-/// as the file expects them.
 #[test]
 #[ignore = "GAP: a relatively positioned child's offset counts toward this engine's flexbox \
             scrollable overflow (the box is 210×230 in block/flex rows; grid matches the file)"]
@@ -1942,13 +1667,6 @@ fn wpt_scrollable_containing_block_size_relative_shift() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Target lookup: more of §2.3.
-
-/// Builds `outline` under `parent`: one element per line, indented two
-/// spaces per level below the least indented line, written
-/// `spec [| inline style] [=> expected]`. Answers the elements carrying an
-/// expectation, in tree order.
 fn outline(page: &mut Page, parent: NodeId, outline: &str) -> Vec<(NodeId, f32)> {
     let lines: Vec<&str> = outline
         .lines()
@@ -1978,7 +1696,6 @@ fn outline(page: &mut Page, parent: NodeId, outline: &str) -> Vec<(NodeId, f32)>
     expectations
 }
 
-/// Lays `page` out and checks every `(box, expected width)` pair.
 fn assert_widths(page: &mut Page, boxes: &[(NodeId, f32)], case: &str) {
     page.layout();
     for (index, &(id, expected)) in boxes.iter().enumerate() {
@@ -1986,19 +1703,11 @@ fn assert_widths(page: &mut Page, boxes: &[(NodeId, f32)], case: &str) {
     }
 }
 
-/// The styles `anchor-name-001.html` to `-003.html` share.
 const ANCHOR_NAME_PAGE: &str = ".relpos { position: relative; }
      .abspos { position: absolute; }
      .anchor1 { anchor-name: --a1; width: 10px; height: 10px; }
      .target { position: absolute; width: anchor-size(--a1 width); height: 10px; }";
 
-/// wpt `anchor-name-001.html`: several acceptable `--a1` anchors, the last
-/// in tree order wins. **The middle target differs from the file:** it sits
-/// inside the 10px `--a1` anchor, which is its ancestor and acceptable (in
-/// flow in the same containing block), and the Editor's Draft's §2.3 now
-/// checks ancestors first ("If an ancestor of query el satisfies the
-/// following conditions, return the nearest such element"), so it reads
-/// 10px; the file predates that rule and expects the last one's 30px.
 #[test]
 fn wpt_anchor_name_001() {
     let mut page = Page::new(ANCHOR_NAME_PAGE);
@@ -2018,9 +1727,6 @@ fn wpt_anchor_name_001() {
     assert_widths(&mut page, &boxes, "anchor-name-001");
 }
 
-/// wpt `anchor-name-002.html`: an absolutely positioned anchor is
-/// acceptable only to boxes after it, directly or through the containing
-/// blocks of its ancestors.
 #[test]
 fn wpt_anchor_name_002() {
     let mut page = Page::new(ANCHOR_NAME_PAGE);
@@ -2045,9 +1751,6 @@ fn wpt_anchor_name_002() {
     assert_widths(&mut page, &boxes, "anchor-name-002");
 }
 
-/// wpt `anchor-name-003.html`, all five groups: in-flow and out-of-flow
-/// anchors in the query box's own and its ancestors' containing blocks,
-/// before and after the ones propagated from below.
 #[test]
 fn wpt_anchor_name_003() {
     let groups = [
@@ -2152,8 +1855,6 @@ fn wpt_anchor_name_003() {
     }
 }
 
-/// wpt `anchor-name-004.html`: one anchor under two names; a third name
-/// nobody declares takes the fallback.
 #[test]
 fn wpt_anchor_name_004() {
     let mut page = Page::new(
@@ -2178,9 +1879,6 @@ fn wpt_anchor_name_004() {
     assert_widths(&mut page, &boxes, "anchor-name-004");
 }
 
-/// wpt `anchor-name-008.html`: a `fixed` box anchors to an absolutely
-/// positioned anchor inside a `fixed` container: the container, whose
-/// containing block is the query box's, is acceptable, so its child is.
 #[test]
 fn wpt_anchor_name_008() {
     let mut page = Page::new(
@@ -2198,11 +1896,6 @@ fn wpt_anchor_name_008() {
     assert_eq!(page.abs(anchored), (100.0, 100.0, 100.0, 100.0));
 }
 
-/// wpt `anchor-name-in-shadow-002.html`: two shadow trees declaring the
-/// same `--a` each resolve their own. Adaptation: each shadow root gets
-/// its own copy of the sheet (the file's point is that a shared sheet does
-/// not confuse the tree scopes; this engine does not share sheets between
-/// shadow roots at all).
 #[test]
 fn wpt_anchor_name_in_shadow_002() {
     let mut page = Page::new(
@@ -2231,9 +1924,6 @@ fn wpt_anchor_name_in_shadow_002() {
     assert_eq!(page.abs(targets[1]).1, 200.0);
 }
 
-/// wpt `anchor-name-mutation.html`, all fifteen cases: an `anchor-name`
-/// added, removed, moved to another element, and a second candidate added
-/// after or before the current one, under the three positioning methods.
 #[test]
 fn wpt_anchor_name_mutation() {
     const NONE: (f32, f32) = (0.0, 0.0);
@@ -2244,7 +1934,6 @@ fn wpt_anchor_name_mutation() {
         "positioned-using-anchor-function-implicit-name",
         "positioned-using-position-area",
     ];
-    // (initially named, expected, then toggled on (+) or off (-), expected)
     let scenarios: [MutationCase; 5] = [
         (&[], NONE, &[(0, true)], FIRST),
         (&[0], FIRST, &[(0, false)], NONE),
@@ -2300,13 +1989,6 @@ fn wpt_anchor_name_mutation() {
     }
 }
 
-/// wpt `anchor-position-003.html`: several `--a1` anchors in one
-/// containing block. **The second group's first target differs from the
-/// file:** it sits inside the 5×7 `--a1` anchor, an acceptable ancestor,
-/// which the Editor's Draft's §2.3 prefers over the last one in tree order
-/// (see `wpt_anchor_name_001`), so it reads 5, not the file's 9. In the
-/// third group the same ancestor generates the box's containing block and
-/// is not acceptable, so the inner anchor wins as in the file.
 #[test]
 fn wpt_anchor_position_003() {
     let mut page = Page::new(
@@ -2356,9 +2038,6 @@ fn wpt_anchor_position_003() {
     }
 }
 
-/// wpt `anchor-position-004.html`, its horizontal-tb half: `anchor()` with
-/// percentages and `center` on each physical inset. Not ported: the
-/// `vertical-rl` half (no `writing-mode`).
 #[test]
 fn wpt_anchor_position_004() {
     let mut page = Page::new(
@@ -2399,10 +2078,6 @@ fn wpt_anchor_position_004() {
     }
 }
 
-/// wpt `anchor-position-borders-002.html`, every case: `direction: rtl`
-/// scroll containers with and without borders as the containing block, as
-/// an intermediate containing block, and around the anchor; the box covers
-/// the anchor's border box exactly.
 #[test]
 fn wpt_anchor_position_borders_002() {
     let mut page = Page::new(
@@ -2462,8 +2137,6 @@ fn wpt_anchor_position_borders_002() {
     }
 }
 
-/// wpt `anchor-position-dynamic-002.html`: anchors in the same and in a
-/// different containing block resize after the first layout.
 #[test]
 fn wpt_anchor_position_dynamic_002() {
     let mut page = Page::new(
@@ -2495,10 +2168,6 @@ fn wpt_anchor_position_dynamic_002() {
     }
 }
 
-/// wpt `anchor-position-dynamic-003.html`, the `contain: layout` and the
-/// scroll container cases: an anchor that changes size inside another
-/// formatting context relays its reader. Not ported: the float, table and
-/// inline-block cases (none of those boxes exists here).
 #[test]
 fn wpt_anchor_position_dynamic_003() {
     let mut page = Page::new(
@@ -2530,8 +2199,6 @@ fn wpt_anchor_position_dynamic_003() {
     }
 }
 
-/// wpt `anchor-position-dynamic-004.html`: the anchor sits behind a
-/// `contain: strict` boundary and moves after the first layout.
 #[test]
 fn wpt_anchor_position_dynamic_004() {
     let mut page = Page::new(
@@ -2554,9 +2221,6 @@ fn wpt_anchor_position_dynamic_004() {
     assert_eq!(page.offset(target, cb), (50.0, 10.0, 30.0, 20.0));
 }
 
-/// wpt `anchor-position-principal-box.html`: a `display: contents` element
-/// generates no box, so its `anchor-name` names nothing; its child with
-/// the same name is the anchor.
 #[test]
 fn wpt_anchor_position_principal_box() {
     let mut page = Page::new(
@@ -2574,11 +2238,6 @@ fn wpt_anchor_position_principal_box() {
     assert_eq!(page.abs(anchored).1, 100.0);
 }
 
-/// wpt `anchor-position-sibling-index.html` and
-/// `anchor-position-flip-sibling-index.html`: `sibling-index()` inside an
-/// `anchor()` side percentage, and the same under `flip-block` (40% becomes
-/// 60% of the anchor on the other inset). Adaptation: the files read
-/// `getComputedStyle(abs).top`; this is the box's position.
 #[test]
 fn wpt_anchor_position_sibling_index() {
     for (inline, expected) in [
@@ -2601,10 +2260,6 @@ fn wpt_anchor_position_sibling_index() {
     }
 }
 
-/// wpt `anchor-positioned-containing-block-resize.html`, the geometry
-/// half: the containing block shrinks and the box stays on its anchor.
-/// Not ported: the `getComputedStyle` inset readbacks (this engine's
-/// readback reports the computed `anchor()`, not a used length).
 #[test]
 fn wpt_anchor_positioned_containing_block_resize() {
     let mut page = Page::new(
@@ -2633,10 +2288,6 @@ fn wpt_anchor_positioned_containing_block_resize() {
     );
 }
 
-/// wpt `remove-anchor-dirty-layout.html`: removing the anchor after a
-/// rendering update and rendering again. The file only requires no crash;
-/// the box falls back to its static position, which in a column flexbox is
-/// the containing block's start.
 #[test]
 fn wpt_remove_anchor_dirty_layout() {
     let mut page = Page::new(
@@ -2654,12 +2305,6 @@ fn wpt_remove_anchor_dirty_layout() {
     assert_eq!(page.abs(target).1, 0.0, "static position");
 }
 
-// ---------------------------------------------------------------------------
-// anchor-center (§4.2) through the host.
-
-/// The container `anchor-center-003.html` and `-004.html` share, inside a
-/// `margin-left: 8px` wrapper standing in for the body's margin (its top
-/// margin collapses with the container's in block flow, so it is left out).
 fn anchor_center_page(anchor: &str, target: &str) -> (Page, NodeId) {
     let mut page = Page::new(&format!(
         ".container {{ width: 100px; height: 100px; border: 3px solid black;
@@ -2675,9 +2320,6 @@ fn anchor_center_page(anchor: &str, target: &str) -> (Page, NodeId) {
     (page, container)
 }
 
-/// wpt `anchor-center-003.html`: a `fixed` box with `justify-self:
-/// anchor-center` and an auto width sizes to its content and centers on the
-/// anchor.
 #[test]
 fn wpt_anchor_center_003() {
     let (mut page, container) = anchor_center_page(
@@ -2692,8 +2334,6 @@ fn wpt_anchor_center_003() {
     assert_eq!((x, width), (111.0, 30.0));
 }
 
-/// wpt `anchor-center-004.html`: `anchor-center` zeroes `auto` margins on
-/// its axis.
 #[test]
 fn wpt_anchor_center_004() {
     let (mut page, container) = anchor_center_page(
@@ -2711,8 +2351,6 @@ fn wpt_anchor_center_004() {
     assert_eq!(page.abs(align).1, 86.0);
 }
 
-/// wpt `anchor-center-offset-change.html`: the anchor grows and the
-/// centered box moves.
 #[test]
 fn wpt_anchor_center_offset_change() {
     let mut page = Page::new(
@@ -2733,11 +2371,6 @@ fn wpt_anchor_center_offset_change() {
     assert_eq!(page.offset(anchored, cb), (0.0, 50.0, 100.0, 100.0));
 }
 
-// ---------------------------------------------------------------------------
-// position-area (§3.1) through the host.
-
-/// Lays `anchored` out under each `(position-area, expected)` pair and
-/// checks its offset and size against `cb`'s padding box.
 fn assert_areas(
     page: &mut Page,
     cb: NodeId,
@@ -2753,9 +2386,6 @@ fn assert_areas(
     }
 }
 
-/// The page `position-area-anchor-outside.html` and
-/// `-partially-outside.html` share: a 400px bordered container and a
-/// stretched box anchored to `anchor`'s absolutely positioned box.
 fn area_outside_page(anchor: &str) -> (Page, NodeId, NodeId) {
     let mut page = Page::new(&format!(
         "#container {{ position: relative; width: 400px; height: 400px; margin: 0px auto;
@@ -2772,9 +2402,6 @@ fn area_outside_page(anchor: &str) -> (Page, NodeId, NodeId) {
     (page, container, anchored)
 }
 
-/// wpt `position-area-anchor-outside.html`, every case: the anchor lies
-/// outside the containing block, so the grid's outer lines extend to it and
-/// some tracks are empty.
 #[test]
 fn wpt_position_area_anchor_outside() {
     let (mut page, cb, anchored) = area_outside_page("left: -200px; top: 500px;");
@@ -2799,7 +2426,6 @@ fn wpt_position_area_anchor_outside() {
     );
 }
 
-/// wpt `position-area-anchor-partially-outside.html`, every case.
 #[test]
 fn wpt_position_area_anchor_partially_outside() {
     let (mut page, cb, anchored) = area_outside_page("right: -50px; top: -50px;");
@@ -2824,9 +2450,6 @@ fn wpt_position_area_anchor_partially_outside() {
     );
 }
 
-/// wpt `position-area-with-insets.html`, every case: insets apply inside
-/// the `position-area` region; without a default anchor only the insets
-/// apply. The anchored box comes before its in-flow anchor in tree order.
 #[test]
 fn wpt_position_area_with_insets() {
     let mut page = Page::new(
@@ -2880,9 +2503,6 @@ fn wpt_position_area_with_insets() {
     );
 }
 
-/// wpt `position-area-in-grid.html`, both cases: the grid area (rows 2–3,
-/// column 3 to the padding edge) is the pre-modification containing block,
-/// and the anchor outside it extends the `position-area` grid.
 #[test]
 fn wpt_position_area_in_grid() {
     let mut page = Page::new(
@@ -2916,8 +2536,6 @@ fn wpt_position_area_in_grid() {
     );
 }
 
-/// wpt `position-area-chain.html`: five boxes each placed right of the one
-/// before by `position-area`, all named `--box`.
 #[test]
 fn wpt_position_area_chain() {
     let mut page = Page::new(
@@ -2939,10 +2557,6 @@ fn wpt_position_area_chain() {
     }
 }
 
-/// wpt `position-area-value.html`, every case: a `position-area` value as
-/// a `position-try-fallbacks` entry places the box as the property does.
-/// Adaptation: one box laid out under each value in turn (as
-/// `wpt_position_try_order_basic` does), the reference first.
 #[test]
 fn wpt_position_area_value() {
     let mut page = Page::new(
@@ -2976,11 +2590,6 @@ fn wpt_position_area_value() {
     }
 }
 
-/// wpt `scrollable-containing-block-position-area.html`, every case: the
-/// `position-area` grid is built on the scrollable containing block.
-/// Adaptation: this engine's flexbox scrolling area ends at the content's
-/// far edge (190px from the padding-box origin), not past the end padding
-/// (the file's 200px) — see `wpt_scrollable_containing_block_size`.
 #[test]
 fn wpt_scrollable_containing_block_position_area() {
     let mut page = Page::new(
@@ -3012,8 +2621,6 @@ fn wpt_scrollable_containing_block_position_area() {
     }
 }
 
-/// wpt `position-area-computed-insets.html`: `position-area` leaves the
-/// computed insets `auto`. Adaptation: Typed OM → computed-value readback.
 #[test]
 fn wpt_position_area_computed_insets() {
     let mut page = Page::new("#abs { position: absolute; position-area: span-all; }");
@@ -3026,8 +2633,6 @@ fn wpt_position_area_computed_insets() {
     }
 }
 
-/// wpt `anchor-in-anchor-positioned.html`: an anchor inside an
-/// anchor-positioned box is found by a later positioned box.
 #[test]
 fn wpt_anchor_in_anchor_positioned() {
     let mut page = Page::new(
@@ -3052,12 +2657,6 @@ fn wpt_anchor_in_anchor_positioned() {
     assert_eq!(page.offset(second, cb), (150.0, 50.0, 50.0, 50.0));
 }
 
-// ---------------------------------------------------------------------------
-// anchor() and its fallbacks.
-
-/// wpt `anchor-function-chain.html`: five boxes each placed 10px right of
-/// the one before; the first has no `--box` before it, so its `left` is
-/// invalid at computed-value time and it keeps its static position.
 #[test]
 fn wpt_anchor_function_chain() {
     let mut page = Page::new(
@@ -3082,9 +2681,6 @@ fn wpt_anchor_function_chain() {
     }
 }
 
-/// wpt `anchor-fallback-invalidation.html`: a class adds `anchor-size()`
-/// whose fallbacks equal the old sizes; the box still resizes to the
-/// anchor.
 #[test]
 fn wpt_anchor_fallback_invalidation() {
     let mut page = Page::new(
@@ -3107,12 +2703,6 @@ fn wpt_anchor_fallback_invalidation() {
     assert_eq!((width, height), (40.0, 30.0));
 }
 
-/// wpt `anchor-query-fallback.html`, every case but the two with an
-/// `anchor-size()` inside an `anchor-size()` fallback (below): fallbacks
-/// for a missing anchor and a wrong-axis side, percentage and nested
-/// `calc()` fallbacks, and anchor functions inside fallbacks. Adaptation:
-/// the container is a row flexbox explicitly (the file's `display: flex`);
-/// two extra rows check the anchors the fallbacks read.
 #[test]
 fn wpt_anchor_query_fallback() {
     let mut page = Page::new(
@@ -3130,7 +2720,6 @@ fn wpt_anchor_query_fallback() {
         page.el(container, "view.flex-item", "");
     }
     page.el(container, "view.flex-item#a2", "");
-    // (inline style, which of x/y/width/height, expected)
     let cases: [(&str, usize, f32); 16] = [
         ("left: anchor(--inexist-anchor left, 50px)", 0, 50.0),
         ("width: anchor-size(--inexist-anchor width, 50px)", 2, 50.0),
@@ -3190,11 +2779,6 @@ fn wpt_anchor_query_fallback() {
     }
 }
 
-/// wpt `anchor-query-fallback.html`, the two cases whose `anchor-size()`
-/// fallback is itself an `anchor-size()` (alone, or in `calc()`). The
-/// fork's `anchor-size()` grammar accepts only a `<length-percentage>`
-/// without anchor functions as its fallback, so both declarations are
-/// dropped at parse time (`anchor()`'s fallback does accept them).
 #[test]
 #[ignore = "GAP: the fork does not parse an anchor function inside an anchor-size() fallback"]
 fn wpt_anchor_query_fallback_nested_anchor_size() {
@@ -3229,12 +2813,6 @@ fn wpt_anchor_query_fallback_nested_anchor_size() {
     assert_eq!(page.abs(calc).3, 75.0);
 }
 
-/// wpt `anchor-invalid-fallback.html`, every case: an unresolvable anchor
-/// function without a fallback makes its declaration invalid at
-/// computed-value time, so the box lays out as the reference with every
-/// inset and size `unset`. Adaptation: the files compare `getComputedStyle`
-/// values; this compares boxes (each holding a 10px content box for the
-/// file's "X"), and the `max-*`/`margin` fallback cases compare geometry.
 #[test]
 #[allow(clippy::too_many_lines, reason = "the file's cases, one table")]
 fn wpt_anchor_invalid_fallback() {
@@ -3346,9 +2924,6 @@ fn wpt_anchor_invalid_fallback() {
     );
 }
 
-/// wpt `anchor-function-zero-fallback.html`, every case: a math function
-/// that resolves to a unitless zero is a `<number>`, not a
-/// `<length-percentage>`, so it is no fallback; a bare `0` is.
 #[test]
 fn wpt_anchor_function_zero_fallback() {
     for (property, value) in [
@@ -3367,11 +2942,6 @@ fn wpt_anchor_function_zero_fallback() {
     }
 }
 
-/// wpt `anchor-inherited.html`: an anchor function inherits as the length
-/// it resolved to. This engine keeps the function in the computed value and
-/// resolves it at layout, only for an absolutely positioned box, so the
-/// relatively positioned child's inherited `top`/`left`/`width`/`height`
-/// are unresolvable there and take their initial values.
 #[test]
 #[ignore = "GAP: anchor functions inherit as functions, not as the resolved length (§28)"]
 fn wpt_anchor_inherited() {
@@ -3396,12 +2966,6 @@ fn wpt_anchor_inherited() {
     assert_eq!((cx - x, cy - y, width, height), (20.0, 10.0, 100.0, 100.0));
 }
 
-// ---------------------------------------------------------------------------
-// Position fallback (§6.5) through the host.
-
-/// wpt `position-try-002.html`: the base style overflows its inset-modified
-/// containing block, so the first fallback that fits is used. Adaptation:
-/// the inline-block spacer is a 200×100 child.
 #[test]
 fn wpt_position_try_002() {
     let mut page = Page::new(
@@ -3422,9 +2986,6 @@ fn wpt_position_try_002() {
     assert_eq!(page.offset(target, cb), (200.0, 0.0, 200.0, 100.0));
 }
 
-/// wpt `position-try-003.html`, the first and third cases: options that
-/// exceed the end edge or the size of the inset-modified containing block
-/// are skipped. Not ported: the second case (`vertical-rl`).
 #[test]
 fn wpt_position_try_003() {
     let mut page = Page::new(
@@ -3463,10 +3024,6 @@ fn wpt_position_try_003() {
     }
 }
 
-/// wpt `position-try-004.html`: margins in an option; the used margins are
-/// the chosen option's. Adaptation: the file's `data-expected-margin-*`
-/// read the computed margins, which this engine's readback reports from
-/// the chosen option.
 #[test]
 fn wpt_position_try_004() {
     let mut page = Page::new(
@@ -3502,8 +3059,6 @@ fn wpt_position_try_004() {
     }
 }
 
-/// wpt `position-try-dynamic.html`: setting `position-try-fallbacks` after
-/// the first layout moves the overflowing box to its option.
 #[test]
 fn wpt_position_try_dynamic() {
     let mut page = Page::new(
@@ -3522,8 +3077,6 @@ fn wpt_position_try_dynamic() {
     assert_eq!(page.abs(anchored).0, 100.0);
 }
 
-/// wpt `position-try-fallbacks-limit.html`: names without a rule are not in
-/// the options list, and at least five options are tried.
 #[test]
 fn wpt_position_try_fallbacks_limit() {
     let mut page = Page::new(
@@ -3549,8 +3102,6 @@ fn wpt_position_try_fallbacks_limit() {
     assert_eq!(page.offset(t2, container).0, 20.0);
 }
 
-/// wpt `position-try-grid-001.html`: the options of a box whose containing
-/// block is a grid area, anchored to an element inside a grid item.
 #[test]
 fn wpt_position_try_grid_001() {
     let mut page = Page::new(
@@ -3582,9 +3133,6 @@ fn wpt_position_try_grid_001() {
     assert_eq!((x, y, height), (135.0, 70.0, 100.0));
 }
 
-/// wpt `position-try-position-anchor.html`: an option changes
-/// `position-anchor`, and the option's unnamed `anchor()` reads the new
-/// default anchor.
 #[test]
 fn wpt_position_try_position_anchor() {
     let mut page = Page::new(
@@ -3605,10 +3153,6 @@ fn wpt_position_try_position_anchor() {
     assert_eq!(page.offset(anchored, cb).0, 100.0);
 }
 
-/// wpt `position-try-order-inset-modified-containing-block.html`, every
-/// case: margins are not part of the inset-modified containing block, so
-/// `most-width`/`most-height` see a tie and keep list order. Adaptation:
-/// one box laid out under each value in turn.
 #[test]
 fn wpt_position_try_order_inset_modified_containing_block() {
     let mut page = Page::new(
@@ -3641,9 +3185,6 @@ fn wpt_position_try_order_inset_modified_containing_block() {
     }
 }
 
-/// wpt `position-try-order-position-area.html`, every case: the
-/// `position-area` version of `position-try-order-basic.html`.
-/// Adaptation: one box laid out under each value in turn.
 #[test]
 fn wpt_position_try_order_position_area() {
     let mut page = Page::new(
@@ -3738,13 +3279,6 @@ fn wpt_position_try_order_position_area() {
     }
 }
 
-/// wpt `position-try-cascade.html`, the rule, inline style, `!important`
-/// and `revert`/`revert-layer` cases: the Position Fallback Origin sits
-/// above author normal declarations (inline ones included) and below
-/// `!important` ones; `revert` in it goes to the user origin and
-/// `revert-layer` to the author origin. Not ported: the animation and
-/// transition cases (they need a document timeline this harness does not
-/// drive).
 #[test]
 fn wpt_position_try_cascade() {
     let mut page = Page::new(
@@ -3780,11 +3314,6 @@ fn wpt_position_try_cascade() {
     }
 }
 
-/// wpt `position-try-custom-property.html`, both cases: `var()` inside an
-/// `@position-try` rule, in longhands and in the `inset` shorthand.
-/// Adaptation: in a column flexbox the base style's static position is the
-/// containing block's start, where the box fits; `top: 60px` makes it
-/// overflow as the file's block-flow static position does.
 #[test]
 fn wpt_position_try_custom_property() {
     let mut page = Page::new(
@@ -3813,10 +3342,6 @@ fn wpt_position_try_custom_property() {
     }
 }
 
-/// wpt `position-try-tree-scoped.html`, every case: `@position-try` names
-/// are tree-scoped — a reference sees its own tree's rules and its
-/// ancestors' trees', never a descendant's — and a `:host`, `::slotted()`
-/// or `::part()` rule's reference resolves in the tree of its stylesheet.
 #[test]
 fn wpt_position_try_tree_scoped() {
     let mut page = Page::new(
@@ -3902,9 +3427,6 @@ fn wpt_position_try_tree_scoped() {
     assert_eq!(page.offset(part, host).0, 1.0, "::part()");
 }
 
-/// wpt `try-tactic-basic-anchor.html`, every case: `flip-block`,
-/// `flip-inline` and both, on `anchor()` insets. Adaptation: the file reads
-/// `getComputedStyle` insets; this reads the box's position.
 #[test]
 fn wpt_try_tactic_basic_anchor() {
     let mut page = Page::new(
@@ -3932,8 +3454,6 @@ fn wpt_try_tactic_basic_anchor() {
     }
 }
 
-/// wpt `try-tactic-back-to-base.html`: nothing fits, so the base style
-/// stays (readback and geometry).
 #[test]
 fn wpt_try_tactic_back_to_base() {
     let mut page = Page::new(
@@ -3950,8 +3470,6 @@ fn wpt_try_tactic_back_to_base() {
     assert_eq!(page.offset(target, cb), (180.0, 190.0, 50.0, 50.0));
 }
 
-/// wpt `try-tactic-base.html`: `flip-start` swaps the sizes, and the
-/// readback reports the chosen option's.
 #[test]
 fn wpt_try_tactic_base() {
     let mut page = Page::new(
@@ -3971,11 +3489,6 @@ fn wpt_try_tactic_base() {
     assert_eq!(page.computed(target, "height"), "150px");
 }
 
-/// wpt `at-position-try-invalidation.html`, the first three cases: a rule
-/// appearing later, and a later rule of the same name overriding it.
-/// Adaptation: the rules arrive as added stylesheets (the file enables a
-/// `media="print"` sheet and inserts into it). Not ported: the last case,
-/// which disables the sheet (this document cannot remove one).
 #[test]
 fn wpt_at_position_try_invalidation() {
     let mut page = Page::new(
@@ -3999,8 +3512,6 @@ fn wpt_at_position_try_invalidation() {
     assert_eq!(page.abs(anchored).0, 200.0, "overriding rule");
 }
 
-/// wpt `at-position-try-invalidation-shadow-dom.html`: a rule added to a
-/// shadow tree's styles reaches its `:host` and `::slotted()` references.
 #[test]
 fn wpt_at_position_try_invalidation_shadow_dom() {
     let mut page = Page::new("#host { width: 200px; }");
@@ -4025,9 +3536,6 @@ fn wpt_at_position_try_invalidation_shadow_dom() {
     assert_eq!(page.offset(slotted, host).0, 100.0);
 }
 
-/// wpt `base-style-invalidation.html`: a base-style change that makes the
-/// box overflow picks the `--pt flip-start` option; changing it back
-/// returns to the base style.
 #[test]
 fn wpt_base_style_invalidation() {
     let mut page = Page::new(
@@ -4057,9 +3565,6 @@ fn wpt_base_style_invalidation() {
     assert_eq!(position(&mut page), (20.0, 75.0), "base again");
 }
 
-/// The page `last-successful-change-fallbacks-position-area.html` and
-/// `last-successful-fallback-to-base-style.html` share: a 600×300
-/// container, a 100px anchor at (100, 100) and a 200×100 box left of it.
 fn last_successful_page(fallbacks: &str) -> (Page, NodeId, NodeId, NodeId) {
     let mut page = Page::new(&format!(
         "#container {{ width: 600px; height: 300px; }}
@@ -4076,8 +3581,6 @@ fn last_successful_page(fallbacks: &str) -> (Page, NodeId, NodeId, NodeId) {
     (page, container, anchor, anchored)
 }
 
-/// wpt `last-successful-change-fallbacks.html`: changing
-/// `position-try-fallbacks` forgets the last successful option.
 #[test]
 fn wpt_last_successful_change_fallbacks() {
     let mut page = Page::new(
@@ -4104,9 +3607,6 @@ fn wpt_last_successful_change_fallbacks() {
     assert_eq!(page.offset(anchored, container).1, 0.0, "forgotten");
 }
 
-/// wpt `last-successful-change-fallbacks-position-area.html`: setting
-/// `position-try-fallbacks` to the value it already has is no change, so
-/// the last successful option is kept; a different value forgets it.
 #[test]
 fn wpt_last_successful_change_fallbacks_position_area() {
     let (mut page, container, anchor, anchored) = last_successful_page("right center");
@@ -4129,8 +3629,6 @@ fn wpt_last_successful_change_fallbacks_position_area() {
     assert_eq!(page.offset(anchored, container).0, 100.0, "changed: base");
 }
 
-/// wpt `last-successful-fallback-to-base-style.html`: from a fallback back
-/// to the base style, which then stays while both fit.
 #[test]
 fn wpt_last_successful_fallback_to_base_style() {
     let (mut page, container, anchor, anchored) = last_successful_page("flip-inline");
@@ -4144,13 +3642,6 @@ fn wpt_last_successful_fallback_to_base_style() {
     assert_eq!(page.offset(anchored, container).0, 100.0, "base kept");
 }
 
-/// wpt `anchor-fallback-scroll-axis.html`: a `fixed` box shown while its
-/// anchor's scroller is scrolled remembers that offset; a later horizontal
-/// scroll shifts it off the viewport, which re-determines its fallback at
-/// the next rendering update. The file reads `getBoundingClientRect()`,
-/// which includes the default scroll shift; here both readings are taken
-/// when the shift is zero (right after a recalculation point) or when the
-/// chosen option does not compensate.
 #[test]
 fn wpt_anchor_fallback_scroll_axis() {
     let mut page = Page::new(
@@ -4183,12 +3674,6 @@ fn wpt_anchor_fallback_scroll_axis() {
     assert_eq!(page.abs(anchored).0, 0.0, "the fallback after the scroll");
 }
 
-// ---------------------------------------------------------------------------
-// anchor-scope (§2.2): the remaining cases.
-
-/// The styles `anchor-scope-basic.html`, `-dynamic.html` and
-/// `-display-contents.tentative.html` share; `scope_display` is appended to
-/// every scope class.
 fn scope_css(scope_display: &str) -> String {
     format!(
         ".scope-all {{ anchor-scope: all; {scope_display} }}
@@ -4207,8 +3692,6 @@ fn scope_css(scope_display: &str) -> String {
     )
 }
 
-/// One `anchor-scope-*` template inside a fresh 100px `main`: answers each
-/// query box marked `=> 0` in the outline with its `(left, top)`.
 fn scope_case(css: &str, template: &str) -> Vec<(f32, f32)> {
     let mut page = Page::new(css);
     let root = page.root();
@@ -4228,9 +3711,6 @@ fn scope_case(css: &str, template: &str) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// wpt `anchor-scope-basic.html`, the cases `wpt_anchor_scope_basic` does
-/// not cover: a scope for one name leaves the others alone, and
-/// out-of-flow anchors inside and outside a scope.
 #[test]
 fn wpt_anchor_scope_basic_names_and_out_of_flow() {
     let css = scope_css("");
@@ -4302,13 +3782,9 @@ fn wpt_anchor_scope_basic_names_and_out_of_flow() {
     }
 }
 
-/// wpt `anchor-scope-dynamic.html`, the last two cases: a scope for a name
-/// nobody references changes nothing, and a scope for `--a` appearing and
-/// going away moves only the `--a` reader.
 #[test]
 fn wpt_anchor_scope_dynamic_names() {
     let css = scope_css("");
-    // "anchor-scope:--b appearing dynamically (--b never referenced)".
     {
         let mut page = Page::new(&css);
         let root = page.root();
@@ -4325,7 +3801,6 @@ fn wpt_anchor_scope_dynamic_names() {
             assert_eq!(page.offset(anchored, main).1, 40.0, "{scope:?}");
         }
     }
-    // "anchor-scope:--a appearing dynamically scopes only --a".
     {
         let mut page = Page::new(&css);
         let root = page.root();
@@ -4346,11 +3821,6 @@ fn wpt_anchor_scope_dynamic_names() {
     }
 }
 
-/// wpt `anchor-scope-display-contents.tentative.html`, every case: a
-/// `display: contents` scope still scopes its subtree; an anchor that is
-/// itself `display: contents` names nothing (the first case). The file
-/// reads `getComputedStyle().top`; this reads the box's position, which
-/// for an unresolvable `anchor()` is its static position.
 #[test]
 #[allow(clippy::too_many_lines, reason = "the file's ten templates, one table")]
 fn wpt_anchor_scope_display_contents() {
@@ -4473,8 +3943,6 @@ fn wpt_anchor_scope_display_contents() {
     }
 }
 
-/// wpt `anchor-scope-shadow-flat-tree.html`: a scope in a shadow tree
-/// covers a slotted box, because scoping follows the flat tree.
 #[test]
 fn wpt_anchor_scope_shadow_flat_tree() {
     let mut page = Page::new("");
@@ -4502,8 +3970,6 @@ fn wpt_anchor_scope_shadow_flat_tree() {
     assert_eq!(page.offset(inner, cb).1, 10.0, "outside the scope");
 }
 
-/// wpt `chrome-443261872.html`: an `anchor-name` in a shadow element's
-/// inline style keeps its tree scope when another inline property changes.
 #[test]
 fn wpt_chrome_443261872() {
     let mut page = Page::new("");
@@ -4531,12 +3997,6 @@ fn wpt_chrome_443261872() {
     assert_eq!(page.abs(anchored).2, 100.0);
 }
 
-// ---------------------------------------------------------------------------
-// Reftests reinterpreted as geometry.
-
-/// wpt `position-try-fallbacks-001.html` and `-002.html`: `flip-block` on
-/// `bottom: anchor(outside)` and `bottom: anchor(inside)`. Reftest (a green
-/// 100px square) → the box's geometry.
 #[test]
 fn wpt_position_try_fallbacks_001_002() {
     for (side, height, expected) in [
@@ -4560,9 +4020,6 @@ fn wpt_position_try_fallbacks_001_002() {
     }
 }
 
-/// wpt `anchor-name-006.html` and `-007.html`: an anchor inside two and
-/// three nested `fixed` boxes is acceptable to a `fixed` box outside them.
-/// Reftest → the box's size.
 #[test]
 fn wpt_anchor_name_006_007() {
     for depth in [2, 3] {
@@ -4587,11 +4044,6 @@ fn wpt_anchor_name_006_007() {
     }
 }
 
-/// wpt `no-anchor-anchor-center.html`: the only `--dropdownAnchor` is not
-/// acceptable to a box inside a `fixed` container (neither it nor the
-/// element generating its containing block shares the box's containing
-/// block), so `anchor-center` is `center`. Reftest → geometry, with
-/// `box-sizing: content-box` as in the file.
 #[test]
 fn wpt_no_anchor_anchor_center() {
     let mut page = Page::new(
@@ -4610,8 +4062,6 @@ fn wpt_no_anchor_anchor_center() {
     assert_eq!((x, width), (109.0, 82.0));
 }
 
-/// wpt `position-area-no-default-anchor.html`: `position-area` without a
-/// default anchor does nothing. Reftest → geometry.
 #[test]
 fn wpt_position_area_no_default_anchor() {
     let mut page = Page::new(".abspos { position: absolute; width: 100px; height: 100px; }");
@@ -4623,8 +4073,6 @@ fn wpt_position_area_no_default_anchor() {
     assert_eq!(page.offset(area, cb), (0.0, 0.0, 100.0, 100.0));
 }
 
-/// wpt `anchor-in-css-min-max-function.html`: `anchor()` inside `min()` and
-/// `max()` with several arguments. Reftest → geometry.
 #[test]
 fn wpt_anchor_in_css_min_max_function() {
     let mut page = Page::new(
@@ -4649,9 +4097,6 @@ fn wpt_anchor_in_css_min_max_function() {
     assert_eq!(page.abs(target), page.abs(anchor3));
 }
 
-/// wpt `sticky-anchor-position-invalid.html`: `anchor()` on a sticky box is
-/// always unresolvable, so its fallback is the sticky inset. Reftest → the
-/// box's position after the scroll.
 #[test]
 fn wpt_sticky_anchor_position_invalid() {
     let mut page = Page::new(
@@ -4670,9 +4115,6 @@ fn wpt_sticky_anchor_position_invalid() {
     assert_eq!(page.abs(sticky).1, 42.0);
 }
 
-/// wpt `anchor-position-non-anchored-fallback.html`: after a layout picked
-/// the fallback, the anchor shrinks and the base style fits again at the
-/// rendering update. Reftest → geometry, the viewport 600px tall.
 #[test]
 fn wpt_anchor_position_non_anchored_fallback() {
     let mut page = Page::new(
@@ -4691,8 +4133,6 @@ fn wpt_anchor_position_non_anchored_fallback() {
     assert_eq!(page.abs(anchored).1, 50.0, "the base again");
 }
 
-/// wpt `under-invalidation.html`: the base style's `min-height` overflows,
-/// the option's does not. Reftest → geometry.
 #[test]
 fn wpt_under_invalidation() {
     let mut page = Page::new(
@@ -4711,11 +4151,6 @@ fn wpt_under_invalidation() {
     assert_eq!(page.offset(target, container), (0.0, 0.0, 100.0, 90.0));
 }
 
-/// wpt `anchor-center-002.html`, the flexbox half: `anchor-center` on an
-/// in-flow item is `center` (§4.2: "If the box is not absolutely
-/// positioned … this value behaves as center"). Reftest → geometry. The
-/// grid half uses plain `center` in the file; `in_flow_anchor_center_is_center_in_grid`
-/// runs the keyword itself there.
 #[test]
 fn wpt_anchor_center_002() {
     let mut page = Page::new("");
@@ -4734,8 +4169,6 @@ fn wpt_anchor_center_002() {
     assert_eq!(page.offset(item, container).1, 30.0);
 }
 
-/// §4.2's in-flow rule on a grid item, both axes: `anchor-center` is
-/// `center`.
 #[test]
 fn in_flow_anchor_center_is_center_in_grid() {
     let mut page = Page::new("");
@@ -4754,10 +4187,6 @@ fn in_flow_anchor_center_is_center_in_grid() {
     assert_eq!(page.offset(item, container), (30.0, 40.0, 40.0, 20.0));
 }
 
-/// wpt `inherit-height-from-fallback.html`: a child inherits `height` from
-/// the chosen option. This engine lays the chosen option's accepted
-/// properties out on the box itself but cascades its descendants from the
-/// base style, so the child inherits `auto`. Reftest → geometry.
 #[test]
 #[ignore = "GAP: descendants inherit from the base style, not the chosen position option (§28)"]
 fn wpt_inherit_height_from_fallback() {
@@ -4778,11 +4207,6 @@ fn wpt_inherit_height_from_fallback() {
     assert_eq!(page.abs(child).3, 100.0, "inherited from the option");
 }
 
-/// Not a WPT port: layout places the box against the remembered scroll
-/// offsets and the painter applies the default scroll shift, but
-/// `bounding_client_rect` (the `boundingClientRect` UI method,
-/// `getBoundingClientRect`) adds the shift, as browsers do — for the box
-/// and for its descendants.
 #[test]
 fn bounding_client_rect_includes_the_default_scroll_shift() {
     let mut page = Page::new(
@@ -4812,10 +4236,6 @@ fn bounding_client_rect_includes_the_default_scroll_shift() {
     assert_eq!(page.abs(child).1, 60.0, "and so does its content");
 }
 
-/// wpt `registered-custom-property-anchor.html`, both cases: `anchor()` and
-/// `anchor-size()` are not valid values of a registered custom property
-/// accepting `<length>`, `<length-percentage>` or `<number>`, so each
-/// computes to its initial value.
 #[test]
 fn wpt_registered_custom_property_anchor() {
     let mut page = Page::new(

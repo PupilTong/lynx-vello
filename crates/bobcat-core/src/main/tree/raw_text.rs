@@ -23,16 +23,6 @@
 
 use std::sync::LazyLock;
 
-/// Every Lynx tag: Lynx's JSX intrinsic elements
-/// (`lynx/js_libraries/types/types/common/element/element.d.ts:56-90`),
-/// web-core's tag-map keys (`lynx-stack/packages/web-platform/web-core/ts/
-/// constants.ts:93-123`), and web-core's element names, which compiled cards
-/// write verbatim and this engine defines (`x-swiper`, `x-refresh-view`, …;
-/// `lynx-stack/packages/web-platform/web-elements/src/elements/`). Every
-/// name here is a document tag, so Lynx's `svg` is listed as `lynx-svg` and
-/// Lynx's `input` and `textarea` as `x-input` and `x-textarea`, the elements
-/// they create (`super::tag_map`; `input` and `textarea` by user ruling
-/// 2026-11-26).
 const LYNX_TAGS: &[&str] = &[
     "blur-view",
     "component",
@@ -95,11 +85,6 @@ const LYNX_TAGS: &[&str] = &[
     "x-webview",
 ];
 
-/// Carriers are hidden unless the box holding them renders their text (module
-/// doc), and author CSS may override or suppress their content. A Lynx
-/// paragraph keeps every run verbatim (`text.rs`), so a
-/// carrier's own `preserve-breaks` decides its newlines only as loose text in
-/// an HTML element.
 pub(super) static UA_RULES: LazyLock<String> = LazyLock::new(|| {
     let lynx = LYNX_TAGS.join(", ");
     format!(
@@ -314,8 +299,6 @@ mod tests {
         raw_text(&mut document, view, "hidden");
         document.layout();
 
-        // One anonymous item holding "Hello Bob": nine 20px em squares on
-        // one 20px line.
         let div_box = document.rounded_layout(div).expect("laid out");
         assert_eq!(
             (div_box.size.width, div_box.size.height),
@@ -340,8 +323,6 @@ mod tests {
         let _raw = raw_text(&mut document, text, "hello");
         document.layout();
 
-        // A text node generates no box: the paragraph belongs to the element
-        // that establishes it, and its content size is what the run measures.
         let run = document
             .text_block_size(text)
             .expect("the text element established a paragraph");

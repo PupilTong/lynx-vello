@@ -39,8 +39,6 @@ enum Side {
     Left,
 }
 
-/// One side that actually paints: nonzero used width, paintable style,
-/// non-transparent resolved color.
 #[derive(Debug, Clone, Copy)]
 struct SidePaint {
     side: Side,
@@ -182,8 +180,6 @@ fn paint_side(
         BorderStyle::Dashed | BorderStyle::Dotted => {
             let centerline = inset_shape(fragment, 0.5);
             let stroke = dash_stroke(side.line, side.width);
-            // Unequal adjacent widths make the centerline elliptical. Keep the
-            // fixed-width stroke inside the actual border ring at those corners.
             ring_path_into(&mut paths.ring, outer, inner);
             scene.push_clip_layer(Fill::EvenOdd, transform, &paths.ring);
             with_shape!(&centerline, |shape| scene
@@ -228,10 +224,6 @@ fn side_clip_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect, radi
         Side::Bottom => (radii.bottom_right, radii.bottom_left),
         Side::Left => (radii.bottom_left, radii.top_left),
     };
-    // Extend each miter through its rounded corner to the first radius axis.
-    // Both endpoints are inside the convex padding shape, so their connecting
-    // chord cannot cut the border ring. Extending to infinity would also admit
-    // the opposite border, especially with unequal side widths.
     let d = corner_join(Point::from(a), Point::from(d), start_radius);
     let c = corner_join(Point::from(b), Point::from(c), end_radius);
     path.truncate(0);
@@ -467,8 +459,8 @@ mod tests {
     fn dashed_pattern_has_a_three_width_period() {
         let stroke = dash_stroke(BorderStyle::Dashed, 4.0);
         assert_eq!(stroke.dash_pattern.len(), 2);
-        assert!((stroke.dash_pattern[0] - 8.0).abs() < 1e-12); // 2w dash
-        assert!((stroke.dash_pattern[1] - 4.0).abs() < 1e-12); // 1w gap
+        assert!((stroke.dash_pattern[0] - 8.0).abs() < 1e-12);
+        assert!((stroke.dash_pattern[1] - 4.0).abs() < 1e-12);
         assert!((stroke.width - 4.0).abs() < 1e-12);
         assert_eq!(stroke.start_cap, Cap::Butt);
     }
@@ -515,7 +507,7 @@ mod tests {
         assert_close(dark.components[0], 0.6);
         assert_close(dark.components[1], 0.4);
         assert_close(dark.components[2], 0.2);
-        assert_close(dark.components[3], 0.5); // alpha preserved
+        assert_close(dark.components[3], 0.5);
         let light = lighten(base);
         assert_close(light.components[0], 0.9 + 0.1 / 3.0);
         assert_close(light.components[1], 0.6 + 0.4 / 3.0);
@@ -598,7 +590,6 @@ mod tests {
                 ..CornerRadii::ZERO
             },
         );
-        // On the radius-75 arc at 45 degrees, far below the 2px top strip.
         assert_ne!(top.winding(Point::new(128.0, 23.0)), 0);
         assert_eq!(top.winding(Point::new(1.0, 100.0)), 0);
     }
@@ -635,7 +626,7 @@ mod tests {
     fn outline_radii_grow_but_sharp_corners_stay_sharp() {
         let mut radii = uniform_radii(4.0);
         radii.bottom_right = Size2D::new(0.0, 0.0);
-        radii.bottom_left = Size2D::new(0.0, 5.0); // square per §5: one zero
+        radii.bottom_left = Size2D::new(0.0, 5.0);
         let grown = grow_radii(&radii, 3.0);
         assert_close(grown.top_left.width, 7.0);
         assert_close(grown.top_left.height, 7.0);

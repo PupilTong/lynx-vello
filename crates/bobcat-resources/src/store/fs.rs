@@ -27,22 +27,13 @@ use vant::{Estimate, Meta, Store, StoreError, Volatility};
 
 use crate::file_body::{self, Body};
 
-/// A [`Store`] over the files of one directory.
 #[derive(Debug)]
 pub struct FsStore {
     dir: PathBuf,
-    /// Numbers this process's temporary files, so concurrent writes never
-    /// share one.
     next_temp: AtomicU64,
 }
 
 impl FsStore {
-    /// Opens `dir`, creating it, and checks that it can be listed. Nothing
-    /// is read until [`Store::scan`].
-    ///
-    /// # Errors
-    ///
-    /// When the directory cannot be created or listed.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
@@ -53,7 +44,6 @@ impl FsStore {
         })
     }
 
-    /// The directory the entries live in.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -67,8 +57,6 @@ impl FsStore {
         self.dir.join(format!("{}.json", hash_key(key)))
     }
 
-    /// Writes `contents` to `path` through a temporary file renamed into
-    /// place.
     fn write_atomically(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         let temp = self.dir.join(format!(
             "{}-{}.tmp",
@@ -96,7 +84,6 @@ impl FsStore {
         self.write_atomically(&self.meta_path(&meta.key), value.to_string().as_bytes())
     }
 
-    /// The [`Meta`] in the file at `path`, `None` when there is no file.
     fn read_meta(path: &Path) -> Result<Option<Meta>, StoreError> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -118,11 +105,6 @@ impl Store for FsStore {
         let mut records: Vec<PathBuf> = Vec::new();
         for item in fs::read_dir(&self.dir)? {
             let item = item?;
-            // A directory is never an entry, and never removed: another Store
-            // may live in one (the code cache's `code` directory is inside the
-            // byte tier's). Its name alone would not protect it — `code` has
-            // no extension and so happens to be skipped below, but a
-            // directory whose name has a dot would reach the removal.
             if item.file_type()?.is_dir() {
                 continue;
             }
@@ -139,8 +121,6 @@ impl Store for FsStore {
                     bodies.insert(stem.to_owned(), item.metadata()?.len());
                 }
                 "json" if well_named => records.push(path),
-                // Temporary files from an interrupted write, and anything
-                // else that is not ours.
                 _ => {
                     let _ = fs::remove_file(&path);
                 }
@@ -160,9 +140,6 @@ impl Store for FsStore {
                     entries.push(meta);
                 }
                 _ => {
-                    // A record without its body, a body of the wrong size, a
-                    // record filed under the wrong name, or one that does not
-                    // parse.
                     let _ = fs::remove_file(&path);
                     if bodies.remove(&stem).is_some() {
                         let _ = fs::remove_file(self.dir.join(format!("{stem}.bin")));
@@ -212,13 +189,6 @@ impl Store for FsStore {
         Ok(())
     }
 
-    /// Moves the body file's modification time to `now`, so a host that
-    /// evicts by it agrees with the tier's order, and records `now` as the
-    /// entry's last use.
-    ///
-    /// A body handed over mapped ([`Body::Mapped`]) is keyed by its file's
-    /// modification time, so the next mapping after a touch is a new one;
-    /// the tier touches an entry at most once a day.
     fn touch(&self, key: &str, now: SystemTime) -> Result<(), StoreError> {
         let Some(mut meta) = self.get_meta(key)? else {
             return Err(StoreError::Corrupt(format!("no record for `{key}`")));
@@ -235,8 +205,6 @@ impl Store for FsStore {
         file_body::read(&self.body_path(key), Body::Mapped).ok()
     }
 
-    /// The bytes the bodies in the directory take, read from the directory
-    /// itself. The OS names no quota for a cache directory.
     fn estimate(&self) -> Estimate {
         let used = fs::read_dir(&self.dir)
             .into_iter()
@@ -253,10 +221,6 @@ impl Store for FsStore {
         Estimate { used, quota: None }
     }
 
-    /// macOS may purge `~/Library/Caches` while the app is not running.
-    /// Everywhere else the directory is treated as durable for now: Linux's
-    /// `$XDG_CACHE_HOME` is only cleared by the user, and the hosts whose OS
-    /// evicts at any moment (Android, iOS) bring their own Store.
     fn volatility(&self) -> Volatility {
         if cfg!(target_os = "macos") {
             Volatility::PurgedWhenIdle
@@ -280,8 +244,6 @@ fn unix_seconds(time: SystemTime) -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// 64-bit FNV-1a of the key, as sixteen hex digits: the name of the key's
-/// two files.
 #[must_use]
 pub fn hash_key(key: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -292,8 +254,6 @@ pub fn hash_key(key: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// The platform's per-user cache directory for this product, or `None` when
-/// the environment does not say where that is.
 #[must_use]
 pub fn default_cache_dir() -> Option<PathBuf> {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
@@ -407,8 +367,6 @@ mod tests {
         let dir = TempDir::new();
         let store = FsStore::open(&dir.0).expect("open");
         store.put(&meta("k", 6), b"pixels").expect("put");
-        // The code cache's Store, inside this one's directory, and a
-        // directory whose name looks like one of this Store's files.
         let code = FsStore::open(dir.0.join("code")).expect("open the inner store");
         code.put(&meta("inner", 5), b"bytes").expect("put inside");
         let dotted = dir.0.join(format!("{}.json", hash_key("dotted")));
@@ -466,7 +424,6 @@ mod tests {
         let one = "https://a.test/one";
         assert!(cache.store(one, None, &response(one, &[], b"one"), SystemTime::now()));
         drop(cache);
-        // Forge a record filed under `one`'s hash that claims another key.
         let forged = json!({
             "key": "https://a.test/two", "len": 3, "last_used": 1,
             "record": { "media_type": null, "status": 200, "headers": [], "stored_at": 1 },
@@ -499,7 +456,6 @@ mod tests {
         assert!(!dir.0.join("0123456789abcdef.bin").exists());
         assert!(!dir.file(b, "bin").exists());
 
-        // A body that vanished after open reads as a miss and drops the entry.
         fs::remove_file(dir.file(a, "bin")).expect("rm");
         assert!(matches!(
             reopened.lookup(a, CachePolicy::ForceCache, now, Read::Mapped),

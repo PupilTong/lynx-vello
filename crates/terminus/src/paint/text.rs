@@ -104,55 +104,19 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
     }
 }
 
-/// Everything one glyph run paints with, resolved once per paint item.
-///
-/// A paragraph is flattened from a subtree, so a glyph run can belong to a
-/// nested scope with its own `color`, `text-shadow`, `-webkit-text-stroke` and
-/// decorations. parley splits runs at every style-index change, so this is
-/// indexed by that index and the lookup is O(1).
-///
-/// The establishing element answers for anything with no element of its own —
-/// an index the block cannot resolve — which is also what the whole paragraph
-/// used to paint with.
 pub(crate) struct RunPaints<'doc> {
     by_style: Vec<RunPaint<'doc>>,
     fallback: RunPaint<'doc>,
-    /// Which nested scopes paint a background behind the runs of one parley
-    /// style index, outermost ancestor first.
-    ///
-    /// One entry per *index that has such a chain*, not one per index: almost
-    /// every paragraph has none at all, and the ones that do have a handful, so
-    /// the per-line pass scans a list that is as long as the paragraph has
-    /// backgrounded scopes rather than allocating a table the width of the
-    /// style space.
     backgrounds: SmallVec<[(usize, BackgroundChain); 2]>,
-    /// The same for atomic inline boxes, keyed by the [`PlacedBox`] id the
-    /// paragraph placed them under. An atom paints its *own* background as an
-    /// element box, so its chain starts at its parent.
     atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]>,
 }
 
-/// The inline scopes that paint a background behind one run, outermost first.
 type BackgroundChain = SmallVec<[crate::tree::document::NodeId; 2]>;
 
 pub(crate) struct RunPaint<'doc> {
     style: &'doc ComputedValues,
-    /// The style the ink fill comes from, separately from everything else.
-    ///
-    /// The two differ for exactly one run: the truncation marker under Lynx
-    /// `tail-color-convert`, which swaps the dots' foreground colour for the
-    /// establishing element's and changes nothing else — not the font, so the
-    /// marker's geometry never moves, and not its shadow, stroke or
-    /// decorations, which stay the cut run's.
     fill_style: &'doc ComputedValues,
     decorations: SmallVec<[Decorations; 2]>,
-    /// The tile this run's gradient-valued `color` fills from.
-    ///
-    /// A per-run decision, because `color` is a per-run property: the
-    /// establishing element's ramp spans its padding box, while a nested
-    /// element's spans that element's own line fragments, which is the box a
-    /// background on it would cover. `None` where no tile could be resolved,
-    /// which falls the run back to a solid fill.
     gradient_box: Option<Rect>,
 }
 
@@ -174,40 +138,22 @@ impl<'doc> RunPaints<'doc> {
             decorations: propagated_decorations(document, element),
             gradient_box,
         };
-        // Native Lynx defaults this off: the dots wear the cut run's colour
-        // (`lynx/js_libraries/types/skills/text.md`, Android
-        // `TextRenderer.convertTailColor`, iOS
-        // `LynxTextRenderer.m overrideTruncatedAttrIfNeed`). web-core inverts
-        // the default; the 2026-09-15 ruling follows native.
         let convert_tail = crate::layout::converts_tail_color(block_style);
         let sources = paragraph.sources;
         let truncation_sources = paragraph.truncation_sources;
-        // An inline formatting context's inline boxes paint their own
-        // fragments (`paint::walker`); only a Lynx paragraph's scopes paint
-        // backgrounds from their runs.
         let scope_backgrounds = paragraph.paints_scope_backgrounds();
         let mut by_style = Vec::new();
-        // The style indices a nested element's own ramp paints, with that
-        // element. Empty for every paragraph whose runs are solid-coloured or
-        // whose only gradient is the block's own, so the layout pass below
-        // never runs for them.
         let mut nested: SmallVec<[(usize, crate::tree::document::NodeId); 2]> = SmallVec::new();
         let mut backgrounds: SmallVec<[(usize, BackgroundChain); 2]> = SmallVec::new();
         for index in 0..paragraph.style_count() {
-            // The dots are shaped in the run holding the last visible byte, so
-            // that run's element answers for them exactly as it answers for its
-            // own glyphs — unless `tail-color-convert` reclaims the fill below.
             let source = paragraph.source_of(u16::try_from(index).unwrap_or(u16::MAX));
             let converted = convert_tail && matches!(source, SourceItem::Ellipsis { .. });
             let resolved = match source {
-                // The strut: no glyph run carries it.
                 SourceItem::Strut => None,
                 SourceItem::Content(item) | SourceItem::Ellipsis { item } => sources
                     .get(item as usize)
                     .copied()
                     .and_then(|node| document.paint_style(node).map(|style| (node, style))),
-                // The truncation flow has its own element subtree, indexed in
-                // its own space.
                 SourceItem::Truncation(item) => truncation_sources
                     .get(item as usize)
                     .copied()
@@ -242,9 +188,6 @@ impl<'doc> RunPaints<'doc> {
         if !nested.is_empty() {
             assign_nested_tiles(paragraph, &mut by_style, &nested);
         }
-        // An atom is a box of its own, so its *own* background already paints
-        // through the element-box path; what it can still sit inside is a
-        // backgrounded scope, which is why the walk starts at its parent.
         let mut atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]> = SmallVec::new();
         for placed in paragraph.boxes().iter().filter(|_| scope_backgrounds) {
             let PlacedBox::Visible { id, .. } = *placed else {
@@ -277,8 +220,6 @@ impl<'doc> RunPaints<'doc> {
         &self.fallback
     }
 
-    /// Whether any nested scope in this paragraph paints a background, and the
-    /// per-line fragment pass therefore has to run at all.
     pub(crate) fn has_inline_backgrounds(&self) -> bool {
         !self.backgrounds.is_empty() || !self.atom_backgrounds.is_empty()
     }
@@ -298,12 +239,6 @@ impl<'doc> RunPaints<'doc> {
     }
 }
 
-/// The node behind one placed atomic box.
-///
-/// `InlineBoxSpec::id` is the flattened item index, with the truncation flow's
-/// ids offset past the content flow's
-/// (`crates/terminus/src/layout/text_block.rs:410-411`), so the two source tables
-/// concatenate into that one id space.
 fn box_source(
     id: u64,
     sources: &[crate::tree::document::NodeId],
@@ -316,17 +251,6 @@ fn box_source(
     }
 }
 
-/// The inline scopes strictly between `node` and the establishing `element`
-/// (inclusive of `node`, exclusive of `element`) that paint a background of
-/// their own, outermost first.
-///
-/// Outermost first is the paint order css-backgrounds-3 wants: an inner
-/// scope's background covers its ancestor's.
-///
-/// The scopes come from [`inline_scopes`](crate::layout::text_block::inline_scopes),
-/// the same walk `Document::inline_source_range` answers from, so the
-/// element a background fragment paints for is the element that owns those
-/// source units.
 fn background_chain<T>(
     document: &crate::tree::document::Document<T>,
     node: crate::tree::document::NodeId,
@@ -340,11 +264,7 @@ fn background_chain<T>(
     chain
 }
 
-/// Whether an inline scope has a background worth a fragment.
 fn paints_background(style: &ComputedValues) -> bool {
-    // A `display: contents` element — what the compiled `wrapper` carrier
-    // computes to — generates no box at all, so it has no background painting
-    // area either (css-display-3 3.3).
     if crate::layout::generates_no_box(style) {
         return false;
     }
@@ -357,29 +277,11 @@ fn paints_background(style: &ComputedValues) -> bool {
             .any(|image| !matches!(image, Image::None))
 }
 
-/// Gives each nested run with a gradient-valued `color` the tile its ramp fills
-/// from: the union of that element's line fragments, in paragraph-local space.
-///
-/// Matches web-core, which rewrites `color: <gradient>` into
-/// `color: transparent; background-clip: text` plus a gradient background *on
-/// that element* (`packages/web-platform/web-core/src/style_transformer/
-/// rules.rs:259-291`), so the ramp spans the inline box's own background area:
-/// horizontally each fragment's advance, vertically its whole line box.
-///
-/// A fragment that only *inherits* the gradient from an enclosing scope gets a
-/// union of its own rather than the ancestor's tile. The two agree wherever the
-/// inner scope spans the outer one, which is the shape the reference's fixtures
-/// take.
 fn assign_nested_tiles(
     paragraph: &PaintedParagraph<'_>,
     by_style: &mut [RunPaint<'_>],
     nested: &[(usize, crate::tree::document::NodeId)],
 ) {
-    // One entry per gradient-coloured element, not per style index: parley
-    // splits a run at every style change and at every line break, so one
-    // element's ink can arrive as several indices and must still sample one
-    // ramp. Linear scans over a list that is as long as the paragraph has
-    // gradient elements.
     let mut tiles: SmallVec<[(crate::tree::document::NodeId, Rect); 2]> = SmallVec::new();
     for line in paragraph.layout.lines() {
         let metrics = line.metrics();
@@ -405,54 +307,17 @@ fn assign_nested_tiles(
         }
     }
     for &(index, node) in nested {
-        // A style index with no glyph run of its own — an empty run, or one
-        // truncation removed — keeps the block's tile it was built with.
         if let Some((_, tile)) = tiles.iter().find(|(seen, _)| *seen == node) {
             by_style[index].gradient_box = Some(*tile);
         }
     }
 }
 
-/// The background fragments every nested scope of this paragraph paints, in
-/// paragraph-local space and in paint order.
-///
-/// CSS geometry of an inline box's background (css-backgrounds-3 2, CSS 2.1
-/// 10.6.1), which is what web-core gets for free by making a nested
-/// `x-text`/`inline-text` `display: inline`
-/// (`packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`
-/// adds nothing but `background-clip: inherit`): the scope is split into one
-/// fragment per line, and each fragment covers
-///
-/// * horizontally, that scope's own run of the line — the union of the advances of the glyph runs
-///   on the line whose source element is the scope or a descendant of it;
-/// * vertically, the *content area*: the font's ascent above and descent below the baseline. Not
-///   the line box — `line-height: 40px` on a 20px font leaves the half-leading unpainted, which is
-///   what a browser draws. This is deliberately a different box from the gradient tile
-///   [`assign_nested_tiles`] builds, which spans the whole line box because web-core's `color:
-///   <gradient>` rewrite makes the ramp a background of the *box*, not of the text's content area.
-///
-/// Native Lynx fills the line box instead (Android `BackgroundColorSpan` /
-/// `LynxTextBackgroundSpan`, iOS `NSBackgroundColorAttributeName`); the
-/// 2026-09-16 ruling follows web-core. `docs/tracking/web-text-test-replication
-/// .md` records the conflict.
-///
-/// Two deliberate approximations, both of the `box-decoration-break` family:
-///
-/// * each fragment is painted as a whole box, so `border-radius` rounds every fragment rather than
-///   only the run's two outer ends — `clone` where the web default is `slice`. The fork has no
-///   `box-decoration-break` property to say otherwise.
-/// * an atomic inline box under the scope is unioned into the fragment on both axes, so a tall atom
-///   grows the background band. A browser keeps the band at the inline box's own font metrics and
-///   lets the atom overflow it. The union is what keeps a scope whose only content *is* an atom —
-///   which has no glyph run to take metrics from — painting anything at all.
 pub(crate) fn inline_background_fragments(
     paragraph: &PaintedParagraph<'_>,
     runs: &RunPaints<'_>,
     out: &mut Vec<(crate::tree::document::NodeId, Rect)>,
 ) {
-    // Insertion order *is* paint order: a chain is walked outermost first and
-    // every chain that holds a descendant holds its ancestors too, so an
-    // ancestor is always pushed before the scope nested in it.
     let mut scopes: SmallVec<[(crate::tree::document::NodeId, Rect); 4]> = SmallVec::new();
     let atoms = !runs.atom_backgrounds.is_empty();
     for (index, line) in paragraph.layout.lines().enumerate() {
@@ -461,9 +326,6 @@ pub(crate) fn inline_background_fragments(
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
-            // parley splits a run at every style change, so the glyph run's
-            // style index answers for the whole run — the same lookup
-            // `paint_pass` makes.
             if glyph_run.glyphs().next().is_none() {
                 continue;
             }
@@ -533,12 +395,6 @@ fn union_into(
     }
 }
 
-/// Whether `paragraph` shapes a glyph that is not white space: Paint
-/// Timing's test for a contentful text node. A space, a no-break space and a
-/// hard line break are white space; a cluster with no glyph, and the edge
-/// and strut runs [`PaintedParagraph::draws`] skips, are no ink at all.
-/// Stops at the first such glyph, which on a page of text is in the first
-/// run it reads.
 pub(crate) fn has_visible_glyph(paragraph: &PaintedParagraph<'_>) -> bool {
     paragraph.layout.lines().any(|line| {
         line.items().any(|item| {
@@ -563,9 +419,6 @@ pub(crate) fn paint(
     transform: Affine,
     runs: &RunPaints<'_>,
 ) {
-    // Two sweeps, not one per run: every shadow in the paragraph paints under
-    // every glyph in it, which is what a single-run block already did and what
-    // keeps one run's ink from landing under the next run's shadow.
     paint_shadows(scene, paragraph, transform, runs);
     paint_pass(scene, paragraph, transform, runs, Layer::Ink);
 }
@@ -576,7 +429,6 @@ fn paint_shadows(
     transform: Affine,
     runs: &RunPaints<'_>,
 ) {
-    // Depth first: the last-specified shadow sits deepest, so it paints first.
     let depth = runs
         .by_style
         .iter()
@@ -589,12 +441,9 @@ fn paint_shadows(
     }
 }
 
-/// Which of a run's two appearances is being drawn.
 #[derive(Clone, Copy)]
 enum Layer {
-    /// The `text-shadow` at this depth, if the run has one that deep.
     Shadow(usize),
-    /// The glyphs themselves, with the run's fill, stroke and decorations.
     Ink,
 }
 
@@ -639,7 +488,6 @@ pub(crate) fn extent(style: &ComputedValues) -> f64 {
     shadow_reach + stroke_reach
 }
 
-/// One decorating box's paint: which lines it draws, in its style/color.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Decorations {
     underline: bool,
@@ -677,11 +525,6 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
     })
 }
 
-/// Draws the paragraph's glyph ink as an opaque mask.
-///
-/// `background-clip: text` needs the shape, not the appearance, so this takes
-/// no per-run styles and no decorations: every run contributes the same solid
-/// coverage whatever colour it would otherwise paint in.
 pub(crate) fn paint_silhouette(
     scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
@@ -709,12 +552,9 @@ fn paint_pass(
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
-            // An inline box's edge cluster is advance, not ink.
             if !paragraph.draws(glyph_run.style_index()) {
                 continue;
             }
-            // parley splits a glyph run at every style-index change, so the
-            // glyph run's style index answers for every glyph in it.
             let run = if glyph_run.glyphs().next().is_some() {
                 runs.at(usize::from(glyph_run.style_index()))
             } else {
@@ -815,8 +655,6 @@ fn draw_glyph_run(
     fill: &TextFill,
 ) {
     let run = glyph_run.run();
-    // The list takes the coordinates as raw F2Dot14 bits; parley hands them out
-    // typed. Empty for every font that is not variable.
     let normalized_coords: SmallVec<[i16; 4]> = run
         .normalized_coords()
         .iter()
@@ -845,7 +683,6 @@ fn draw_glyph_run(
         );
 }
 
-/// One decoration line's geometry in item-local space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DecorationBand {
     x: f64,
@@ -956,37 +793,17 @@ fn wavy_path(band: &DecorationBand) -> BezPath {
     path
 }
 
-/// The selection highlight's colour: a UA constant until `::selection` is
-/// supported (deferred in `docs/editable-text-design.md`). Chromium's light
-/// blue for a focused selection, opaque, painted behind the glyphs.
 const SELECTION_BACKGROUND: Color = Color::from_rgba8(0xB4, 0xD5, 0xFE, 0xFF);
 
-/// What the selection host paints under and over its paragraph
-/// (`crate::editing`): the selection highlight, and for the focused editing
-/// host the caret and the IME composition's underline.
 pub(crate) struct EditingPaint {
     selection: parley::Selection,
     composition: Option<core::ops::Range<usize>>,
-    /// The caret's colour; `None` while the selection is a range, which
-    /// shows no caret, and for a selectable element selected without focus,
-    /// which has none.
     caret: Option<Color>,
-    /// The composition underline's colour: the host's text colour.
     underline: Color,
-    /// How tall the caret is in a paragraph with no line to measure.
     empty_line_height: f32,
 }
 
 impl EditingPaint {
-    /// The editing state the paragraph `node` paints: `node` is the
-    /// selection host's paragraph — the host itself, or the anonymous block
-    /// box around its text ([`crate::tree::anonymous`]) — and `style` its
-    /// style.
-    ///
-    /// The session's offsets are its selection text's — a focused host's
-    /// value, a selectable element's paragraph source text; they reach the
-    /// layout through the paragraph's source map, an offset the layout does
-    /// not show (past a truncation cut) painted at the end of what it shows.
     pub(crate) fn of<T>(
         document: &crate::tree::document::Document<T>,
         node: crate::tree::document::NodeId,
@@ -1018,13 +835,6 @@ impl EditingPaint {
     }
 }
 
-/// The caret of the focused host when no paragraph holds its text — a host
-/// that establishes no paragraph of its own (a flex `view`) and is empty, or
-/// holds white space it does not render. A host that establishes one has a
-/// line even when empty, where its caret paints with its text:
-/// [`crate::editing::CARET_WIDTH`] wide and one used line tall, at the
-/// content box's origin, in the host's border-box space. `None` for every
-/// other element, and while the selection is a range.
 pub(crate) fn empty_host_caret<T>(
     document: &crate::tree::document::Document<T>,
     node: crate::tree::document::NodeId,
@@ -1053,16 +863,10 @@ pub(crate) fn empty_host_caret<T>(
     ))
 }
 
-/// The caret's colour: `caret-color: auto`, which is the text's own
-/// colour. The stylo fork compiles `caret-color` for Gecko only (its
-/// longhand has no `servo_pref`), so no other value can reach here yet; the
-/// gap is recorded in `docs/editable-text-design.md`.
 fn caret_color(style: &ComputedValues) -> Color {
     convert::current_color(style)
 }
 
-/// The selection highlight, one box per line the selection covers, under
-/// everything the paragraph paints.
 pub(crate) fn paint_selection(
     scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
@@ -1080,8 +884,6 @@ pub(crate) fn paint_selection(
     });
 }
 
-/// The caret and the composition underline, over the glyphs. The caret does
-/// not blink (deferred in `docs/editable-text-design.md`).
 pub(crate) fn paint_caret_and_composition(
     scene: &mut DisplayList,
     layout: &Layout<crate::layout::TextBrush>,
@@ -1098,8 +900,6 @@ pub(crate) fn paint_caret_and_composition(
                 return;
             };
             let metrics = line.metrics();
-            // The line's deepest font descent: parley 0.13's line metrics
-            // are the CSS line box, so the descent is the glyph runs'.
             let descent = line
                 .items()
                 .filter_map(|item| match item {
@@ -1109,8 +909,6 @@ pub(crate) fn paint_caret_and_composition(
                     PositionedLayoutItem::InlineBox(_) => None,
                 })
                 .fold(0.0_f32, f32::max);
-            // One CSS px under the baseline by half the descent, kept inside
-            // the line box.
             let y =
                 f64::from((metrics.baseline + descent * 0.5).min(metrics.block_max_coord - 1.0));
             scene.fill(
@@ -1152,7 +950,6 @@ mod tests {
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-    /// Every glyph `scene` encodes, as `(x, y)` in the scene's space.
     fn glyph_origins(scene: &DisplayList) -> Vec<(f32, f32)> {
         scene
             .runs()
@@ -1169,8 +966,6 @@ mod tests {
 
     #[test]
     fn an_inline_formatting_context_paints_its_glyphs_on_the_css_baseline() {
-        // A 20px Ahem block holding 10px Ahem text: the strut puts the line's
-        // baseline at 16 (CSS 2.2 §10.8.1), where parley alone puts it at 8.
         let mut doc = crate::tree::document::Document::new(
             crate::tree::document::tests::device(),
             "page",
@@ -1279,8 +1074,6 @@ mod tests {
         assert_near(strike.centerline(), 12.5);
     }
 
-    /// The selection highlight paints for a selectable element's session,
-    /// which never shows a caret; a focused host's collapsed selection does.
     #[test]
     fn a_selectable_root_paints_its_selection_and_no_caret() {
         let mut doc =

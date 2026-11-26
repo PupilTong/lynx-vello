@@ -42,11 +42,6 @@ use stylo_traits::ToCss;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
-/// The box edge a resolved-value substitution reads off the last layout.
-///
-/// Only these longhands differ between the computed and the resolved value
-/// here; every other property resolves to its computed value, which is what
-/// CSSOM asks for and what both references report.
 #[derive(Clone, Copy)]
 enum UsedBoxValue {
     MarginTop,
@@ -62,8 +57,6 @@ enum UsedBoxValue {
 }
 
 impl UsedBoxValue {
-    /// The physical longhand this substitution answers for, or `None` when the
-    /// property has no used value distinct from its computed one.
     fn of(physical: LonghandId) -> Option<Self> {
         Some(match physical {
             LonghandId::MarginTop => Self::MarginTop,
@@ -81,11 +74,6 @@ impl UsedBoxValue {
     }
 }
 
-/// Whether `physical` is an accepted `@position-try` property
-/// (css-anchor-position-1 §6.3): an inset, a margin, a size or min/max
-/// size, `justify-self`, `align-self`, `position-anchor` or
-/// `position-area`. Logical longhands are asked about through their
-/// physical mapping.
 fn accepts_position_try(physical: LonghandId) -> bool {
     matches!(
         physical,
@@ -111,24 +99,6 @@ fn accepts_position_try(physical: LonghandId) -> bool {
 }
 
 impl<T> Document<T> {
-    /// One property's computed — or, with `resolved`, resolved — value, as
-    /// CSSOM serializes it.
-    ///
-    /// `None` for a name the author-facing parser does not accept (an unknown
-    /// property, or one of the fork's internal non-authorable longhands), for a
-    /// shorthand, for a stale or non-element id, and for an element the style
-    /// pass has not reached yet. A custom property name that is simply unset
-    /// answers `Some("")`, the way `getPropertyValue` does.
-    ///
-    /// The name is matched as given. Stylo's own lookup is ASCII
-    /// case-insensitive for non-custom names and exact for `--*` names; nothing
-    /// is folded or camel-case-converted on the way in.
-    ///
-    /// With `resolved`, `margin-*`, `padding-*`, `width` and `height` report
-    /// the used values of the last layout pass instead of their computed ones.
-    /// Those numbers come from the *rounded* layout, so they are snapped to
-    /// device pixels; every other property, insets included, reports its
-    /// computed value.
     #[must_use]
     pub fn computed_style_text(
         &self,
@@ -148,20 +118,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Every author-facing longhand, then every custom property that has a
-    /// value on the element, as `(name, value)` pairs.
-    ///
-    /// An empty `filter` asks for all of them, both groups ordered by code
-    /// point, longhands first — the order a Typed OM `computedStyleMap()`
-    /// iterates in. A non-empty `filter` answers each listed name through
-    /// [`Document::computed_style_text`], in the filter's own order and under
-    /// the name as given, so it matches the way that entry point does and a
-    /// name it would refuse is simply absent. Shorthands are absent either
-    /// way.
-    ///
-    /// Empty for a stale or non-element id and for an element the style pass
-    /// has not reached yet. `resolved` carries the same meaning as in
-    /// [`Document::computed_style_text`], including the device-pixel snapping.
     #[must_use]
     pub fn computed_style_entries(
         &self,
@@ -186,10 +142,6 @@ impl<T> Document<T> {
             .filter_map(NonCustomPropertyId::as_longhand)
             .filter(|longhand| {
                 let name = longhand.name();
-                // The author parser is the authority on what is author-facing:
-                // the fork's internal longhands have a name here but no entry
-                // in the name map, and its UA-only one parses at UA origin
-                // alone.
                 PropertyId::parse_enabled_for_all_content(name).is_ok()
             })
             .map(|longhand| {
@@ -201,12 +153,6 @@ impl<T> Document<T> {
             .collect();
         longhands.sort_by(|left, right| left.0.cmp(&right.0));
 
-        // The upstream iterator walks the copy-on-write chain leaf-first and
-        // means to skip an ancestor entry a descendant overrode, but its
-        // `continue` continues the inner `for` instead of the outer `loop`
-        // (`custom_properties_map.rs`), so the overridden entry is yielded a
-        // second time. Dedupe by name with the first — the descendant's —
-        // occurrence winning.
         let properties = style.custom_properties();
         let mut seen: HashSet<String> = HashSet::new();
         let mut customs: Vec<(String, String)> = Vec::new();
@@ -216,8 +162,6 @@ impl<T> Document<T> {
             .chain(properties.non_inherited.iter())
         {
             if value.is_none() {
-                // `CustomPropertiesMap::remove` stores a `None`: the name is in
-                // the map precisely to shadow an ancestor's value.
                 continue;
             }
             let display_name = format!("--{name}");
@@ -246,11 +190,6 @@ impl<T> Document<T> {
         if resolved && let Some(used) = self.used_box_value(id, style, physical) {
             return used;
         }
-        // css-anchor-position-1 §6.5: the position option a box was laid out
-        // with applies "via interleaving, so they affect computed values".
-        // Layout and paint keep reading the base style (plus the option's
-        // geometry, which `seldon` reads from the option itself); only this
-        // readback swaps the accepted `@position-try` properties in.
         let style = if accepts_position_try(physical)
             && let Some(option) = self.applied_position_option(id)
         {
@@ -261,8 +200,6 @@ impl<T> Document<T> {
         style.computed_value_to_string(PropertyDeclarationId::Longhand(longhand))
     }
 
-    /// The used value of a box-edge longhand, or `None` when the element has no
-    /// box in the last layout pass (and so nothing to resolve against).
     fn used_box_value(
         &self,
         id: NodeId,
@@ -346,9 +283,6 @@ mod tests {
         );
     }
 
-    /// The fork's internal longhands pass `enabled_for_all_content` and have a
-    /// `name()`, but no author can write them; enumeration has to drop them,
-    /// and the UA-only `-servo-top-layer` with them.
     #[test]
     fn enumeration_lists_author_facing_longhands_in_code_point_order() {
         let mut doc = Doc::new();
@@ -438,12 +372,6 @@ mod tests {
         );
     }
 
-    /// `width: 50%` of a 200px containing block is a 100px *border* box under
-    /// `border-box` and a 100px *content* box under `content-box`, so the two
-    /// report the same text while the boxes they name differ by the padding:
-    /// each box-sizing is read in its own frame of reference. Where the two
-    /// part company is a used width the author did not write — the stretched
-    /// item below.
     #[test]
     fn width_resolves_against_the_last_layout_per_box_sizing() {
         let mut doc = Doc::with_css(
@@ -579,9 +507,6 @@ mod tests {
         let child = doc.el(doc.root, "view.child");
         doc.flush();
 
-        // The filter's own order, one entry per name that resolves: a
-        // shorthand and an unknown name are absent, and a non-custom name
-        // matches the way stylo's parser does, ASCII-case-insensitively.
         let entries = doc.dom.computed_style_entries(
             child,
             &["width", "margin", "bogus", "COLOR", "color"],

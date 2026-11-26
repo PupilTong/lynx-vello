@@ -40,20 +40,12 @@ use terminus::link::clock::{AnswerWhenReady, alignment_channel};
 use crate::clock::{ALIGNMENT_PATIENCE, ClockInstant};
 use crate::view::EngineError;
 
-/// Waiting for its deadline, and the only state a registration is wakeable in.
 const ARMED: u8 = 0;
-/// The deadline passed and the alarm thread took the waker. Whoever polls
-/// next is done, whatever their own clock says.
 const FIRED: u8 = 1;
-/// The `Sleep` was dropped before its deadline. The heap entry is dead weight
-/// until the next sweep, and wakes nobody.
 const CANCELLED: u8 = 2;
 
-/// What one registration and the future that made it share.
 struct AlarmSlot {
     state: AtomicU8,
-    /// Taken by whichever side ends the wait, and replaced by a poll on a new
-    /// task. `None` once the wake has been delivered or the wait cancelled.
     waker: Mutex<Option<Waker>>,
 }
 
@@ -62,10 +54,6 @@ impl AlarmSlot {
         self.state.load(Atomic::Acquire)
     }
 
-    /// Claims the wait for the alarm thread and hands back who to wake.
-    ///
-    /// The flag is published before the waker is taken, so a task woken by it
-    /// cannot observe the wake without also observing the fact behind it.
     fn fire(&self) -> Option<Waker> {
         self.state
             .compare_exchange(ARMED, FIRED, Atomic::AcqRel, Atomic::Relaxed)
@@ -74,8 +62,6 @@ impl AlarmSlot {
     }
 }
 
-/// One deadline and the slot waiting on it. Ordered by the deadline alone:
-/// two alarms due at once are equivalent, whichever was registered first.
 struct Alarm {
     deadline: ClockInstant,
     slot: Arc<AlarmSlot>,
@@ -97,57 +83,26 @@ impl PartialOrd for Alarm {
 
 impl Ord for Alarm {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reversed, so the binary heap's root is the earliest deadline.
         other.deadline.cmp(&self.deadline)
     }
 }
 
-/// What every engine thread hands the alarm thread, and the one number it
-/// hands back.
 #[derive(Default)]
 struct Registry {
     arrivals: Mutex<Arrivals>,
-    /// Registrations cancelled since the last sweep, counted rather than
-    /// removed: the cancelling thread is a runtime's, and taking the lock and
-    /// searching a heap on it to reclaim one entry would cost more than the
-    /// entry does.
     cancelled: AtomicUsize,
 }
 
 #[derive(Default)]
 struct Arrivals {
-    /// Registered but not yet in the thread's own heap.
     alarms: Vec<Alarm>,
-    /// Published by the alarm thread before its first pass, so a registration
-    /// that beats it to the lock is still seen.
     thread: Option<thread::Thread>,
 }
 
-/// The registry every engine thread registers with.
 static ALARMS: OnceLock<Registry> = OnceLock::new();
 
-/// Whether the thread reading the registry has been spawned.
 static STARTED: Mutex<bool> = Mutex::new(false);
 
-/// Boots the alarm thread, once per process, and hands back the answer to its
-/// clock alignment for the caller to await; `None` when it is already running.
-///
-/// Called by [`crate::LynxGroup::new`] on the embedder's thread, before the
-/// group's own threads, rather than left to the first timer a card arms:
-/// starting a Worker is not free, and a page whose first `setTimeout` paid
-/// for one would wait out a cold start it never asked for. And from the
-/// embedder's thread because a Worker does not start until the thread that
-/// created it returns to its event loop, which the embedder's thread does
-/// while it awaits and an engine thread, parked in its scheduler, never
-/// does: spawned from `bobcat-main`, this thread never ran, and no realm
-/// timer on wasm32 ever fired.
-///
-/// The thread compares deadlines armed on the engine threads with its own
-/// clock, so its first statement aligns that clock to the embedder thread's
-/// ([`crate::clock`]), the one every engine thread is aligned to. A thread
-/// that does not align runs on its own clock, and what is lost is accuracy
-/// alone: a wake lands early or late by the Workers' offset, and the `FIRED`
-/// flag still ends the wait.
 pub(crate) fn start() -> Result<Option<AnswerWhenReady>, EngineError> {
     let mut started = lock(&STARTED);
     if *started {
@@ -169,8 +124,6 @@ pub(crate) fn start() -> Result<Option<AnswerWhenReady>, EngineError> {
     Ok(Some(clock.answer(ALIGNMENT_PATIENCE)))
 }
 
-/// The registry. A registration made before the thread runs waits in it, and
-/// is read on the thread's first pass.
 fn registrations() -> &'static Registry {
     ALARMS.get_or_init(Registry::default)
 }
@@ -181,7 +134,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|error| panic!("the alarm registry is poisoned: {error}"))
 }
 
-/// Registers one deadline and hands back the slot it will be answered on.
 fn register(deadline: ClockInstant, waker: Waker) -> Arc<AlarmSlot> {
     let slot = Arc::new(AlarmSlot {
         state: AtomicU8::new(ARMED),
@@ -196,15 +148,12 @@ fn register(deadline: ClockInstant, waker: Waker) -> Arc<AlarmSlot> {
         });
         arrivals.thread.clone()
     };
-    // Outside the lock: an unpark that arrives before the thread parks is
-    // remembered, so the only ordering that matters is push-then-unpark.
     if let Some(thread) = waiting {
         thread.unpark();
     }
     slot
 }
 
-/// The alarm thread's whole body.
 fn run(registry: &'static Registry) {
     lock(&registry.arrivals).thread = Some(thread::current());
     let mut pending: BinaryHeap<Alarm> = BinaryHeap::new();
@@ -229,14 +178,6 @@ fn run(registry: &'static Registry) {
     }
 }
 
-/// Drops the entries whose futures are gone, once enough of the heap is dead
-/// to be worth walking it.
-///
-/// The threshold is what keeps this amortized: a sweep is linear in the heap,
-/// so paying for one per cancellation would make a loop that re-arms every
-/// round quadratic in its own timer horizon. The count is read before the
-/// sweep and subtracted after it, so a cancellation racing this one is still
-/// counted for the next.
 fn sweep_cancelled(registry: &'static Registry, pending: &mut BinaryHeap<Alarm>) {
     let cancelled = registry.cancelled.load(Atomic::Relaxed);
     if cancelled <= pending.len() / 2 {
@@ -246,7 +187,6 @@ fn sweep_cancelled(registry: &'static Registry, pending: &mut BinaryHeap<Alarm>)
     registry.cancelled.fetch_sub(cancelled, Atomic::Relaxed);
 }
 
-/// Resolves once `deadline` has passed.
 pub(crate) fn sleep_until(deadline: ClockInstant) -> Sleep {
     Sleep {
         deadline,
@@ -256,18 +196,10 @@ pub(crate) fn sleep_until(deadline: ClockInstant) -> Sleep {
 
 pub(crate) struct Sleep {
     deadline: ClockInstant,
-    /// The registration the alarm thread holds, once one has been made.
     slot: Option<Arc<AlarmSlot>>,
 }
 
 impl Sleep {
-    /// Whether this wait is over: the clock says so, or the alarm thread does.
-    ///
-    /// The clock first, because a caller that arms an already-passed deadline
-    /// — which is every timer the engine finds due — must resolve with no
-    /// round trip at all. The flag second, because the clock alone is not
-    /// enough: it is read here on the waiting Worker and there on the alarm
-    /// thread, and the two agree only to within the alignment's error.
     fn elapsed(&self) -> bool {
         ClockInstant::now() >= self.deadline
             || self.slot.as_ref().is_some_and(|slot| slot.state() == FIRED)
@@ -283,8 +215,6 @@ impl Future for Sleep {
             return Poll::Ready(());
         }
         match &this.slot {
-            // Still armed: the thread already holds this registration, so all
-            // a re-poll owes it is the waker of whoever is waiting now.
             Some(slot) if slot.state() == ARMED => {
                 let mut held = lock(&slot.waker);
                 if held
@@ -294,13 +224,8 @@ impl Future for Sleep {
                     *held = Some(context.waker().clone());
                 }
             }
-            // Never registered, or registered on a slot the thread has
-            // already used up: either way this wait needs one of its own.
             _ => this.slot = Some(register(this.deadline, context.waker().clone())),
         }
-        // The thread may have fired the slot while the waker above was being
-        // replaced, taking a waker this poll has already superseded. Nothing
-        // would wake this task again, so the flag is read once more here.
         if this.elapsed() {
             return Poll::Ready(());
         }
@@ -309,9 +234,6 @@ impl Future for Sleep {
 }
 
 impl Drop for Sleep {
-    /// A wait that is dropped before it fires releases its task at once: the
-    /// waker goes, and the entry the thread still holds is marked for the
-    /// next sweep.
     fn drop(&mut self) {
         let Some(slot) = self.slot.take() else {
             return;

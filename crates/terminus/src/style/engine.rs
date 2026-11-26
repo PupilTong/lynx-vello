@@ -37,18 +37,6 @@ use stylo_traits::ParsingMode;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::shadow::ShadowRootData;
 
-/// An author stylesheet scoped to one shadow tree.
-///
-/// The document-level sheets are stylo's [`DocumentStyleSheet`], which
-/// reports no implicit `@scope` root (css-cascade-6 §2.5: the root of an
-/// `@scope` rule without a `<scope-start>`), so stylo falls back to the
-/// document element, Gecko's root for a sheet with no owner node. A shadow
-/// tree's sheet has no owner node either, but its containing node tree is
-/// the shadow tree, so its implicit root is the shadow host — the root a
-/// constructed sheet adopted by a shadow root resolves to in a browser.
-/// [`ImplicitScopeRoot::Constructed`] is that root: stylo resolves it to the
-/// host of the tree whose rules are being matched, and it may match the host
-/// itself.
 #[derive(Clone, Debug)]
 pub(crate) struct ShadowStyleSheet(pub(crate) Arc<Stylesheet>);
 
@@ -76,64 +64,27 @@ impl StylesheetInDocument for ShadowStyleSheet {
     }
 }
 
-/// One declaration of a directly constructed rule: a property name plus the
-/// value text a decoded wire format already carries.
-///
-/// This is the pre-parsed ingestion boundary. The name is resolved to a
-/// [`PropertyId`] and the value text is handed to stylo's value parser, so no
-/// declaration list is ever tokenized and no property name is looked up twice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CssDeclaration<'a> {
-    /// The CSS property name, as spelled by the source that produced it.
     pub property: &'a str,
-    /// The declaration value text, without the trailing `!important`.
     pub value: Cow<'a, str>,
-    /// Whether the declaration carries `!important`.
     pub important: bool,
 }
 
-/// One `@keyframes` child block of a directly constructed keyframes rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CssKeyframe<'a> {
-    /// The keyframe selector text (`from`, `to`, `50%`, or a comma list).
     pub selector: &'a str,
-    /// The declarations of this keyframe block.
     pub declarations: Vec<CssDeclaration<'a>>,
 }
 
-/// The lock every user-agent stylesheet is parsed and read under: one for
-/// the process, as Gecko's is, rather than one per document like the lock an
-/// engine's author sheets and inline styles take.
-///
-/// The one lock is what allows sharing. A sheet's rules are [`Locked`] to the
-/// lock they were parsed under, and a stylist reads them with a guard of that
-/// lock, so a sheet parsed under this one can be mounted by every document in
-/// the process — the engine's UA sheet, parsed once per page configuration
-/// instead of once per document ([`UserAgentStylesheet`]) — and stylo's
-/// cascade-data cache for the user-agent origin, keyed by the sheet contents
-/// mounted, then answers a new document with the cascade data an earlier one
-/// built.
-/// Stylo reads each origin's rules with the guard of its own lock
-/// ([`StylesheetGuards`]`::ua_or_user` against `::author`), which is why a
-/// second lock costs nothing in the style system itself.
-///
-/// Nothing writes under this lock: a user-agent sheet is never edited after it
-/// is parsed. That matters because stylo's lock is a borrow counter, not a
-/// mutex — a write while any thread holds a read is a panic — and documents on
-/// different threads read under it at once.
 static USER_AGENT_LOCK: LazyLock<SharedRwLock> = LazyLock::new(SharedRwLock::new);
 
-/// A read of both locks a stylist's rules are under, held together: the
-/// process-wide [`USER_AGENT_LOCK`] and one engine's own author lock. Every
-/// stylist operation that reads rules of more than one origin — a flush, a
-/// traversal, a media change — takes its [`StylesheetGuards`] from here.
 pub(crate) struct RuleGuards<'a> {
     user_agent: SharedRwLockReadGuard<'static>,
     author: SharedRwLockReadGuard<'a>,
 }
 
 impl RuleGuards<'_> {
-    /// Both guards, as stylo takes them.
     pub(crate) fn guards(&self) -> StylesheetGuards<'_> {
         StylesheetGuards {
             ua_or_user: &self.user_agent,
@@ -141,7 +92,6 @@ impl RuleGuards<'_> {
         }
     }
 
-    /// The guard that reads rules of `origin`.
     fn for_origin(&self, origin: Origin) -> &SharedRwLockReadGuard<'_> {
         match origin {
             Origin::UserAgent | Origin::User => &self.user_agent,
@@ -150,7 +100,6 @@ impl RuleGuards<'_> {
     }
 }
 
-/// Reads [`USER_AGENT_LOCK`] and `author` together.
 pub(crate) fn rule_guards(author: &SharedRwLock) -> RuleGuards<'_> {
     RuleGuards {
         user_agent: USER_AGENT_LOCK.read(),
@@ -158,9 +107,6 @@ pub(crate) fn rule_guards(author: &SharedRwLock) -> RuleGuards<'_> {
     }
 }
 
-/// The context an author-origin value, declaration or rule of `rule_type`
-/// parses in: no quirks, the default parsing mode, no error reporter, and
-/// `url_data` as the base of its URLs.
 pub(crate) fn author_parser_context(
     url_data: &UrlExtraData,
     rule_type: CssRuleType,
@@ -178,20 +124,10 @@ pub(crate) fn author_parser_context(
     )
 }
 
-/// A user-agent stylesheet parsed once, for any number of documents to mount.
-///
-/// Parsed under the process-wide user-agent lock, so every document reads it
-/// with the guard it already takes for the user-agent origin, and mounting
-/// it copies nothing: the documents share the one parsed sheet, and, through
-/// stylo's user-agent cascade-data cache, the cascade data built from it.
-/// This is how an embedder that opens many documents over one UA sheet —
-/// one per page configuration — parses it once.
 #[derive(Clone, Debug)]
 pub struct UserAgentStylesheet(Arc<Stylesheet>);
 
 impl UserAgentStylesheet {
-    /// Parses `css` as a user-agent sheet. Its base URL is `about:blank`,
-    /// as every document's own is.
     #[must_use]
     pub fn parse(css: &str) -> Self {
         Self(Arc::new(parse_stylesheet_under(
@@ -203,7 +139,6 @@ impl UserAgentStylesheet {
     }
 }
 
-/// Parses one stylesheet whose rules are locked under `lock`.
 fn parse_stylesheet_under(
     lock: &SharedRwLock,
     css: &str,
@@ -224,11 +159,6 @@ fn parse_stylesheet_under(
     )
 }
 
-/// One pre-built CSS rule, branded with the document context that parsed and
-/// locked it.
-///
-/// The inner stylo rule and the [`SharedRwLock`] that guards it never leave
-/// this type, so a rule can only be appended to the document that built it.
 #[derive(Clone, Debug)]
 pub struct CssRule {
     inner: StyloCssRule,
@@ -244,37 +174,18 @@ impl CssRule {
     }
 }
 
-/// One parsed shadow-tree stylesheet, branded with the document that parsed
-/// it, for mounting on any number of that document's shadow trees.
-///
-/// Every tree it is mounted on holds the same sheet, which is what lets
-/// stylo build the trees' rule data once: its cascade-data cache is keyed on
-/// sheet identity, so trees mounting the same sheets share one copy, where a
-/// sheet parsed per tree builds one per tree. A component whose instances all
-/// carry the same rules parses them once per document
-/// ([`Document::parse_shadow_stylesheet`]) and mounts the result on each
-/// instance ([`Document::add_shadow_sheet`]).
-///
-/// Like a [`CssRule`], it can only be mounted by the document that parsed it.
 #[derive(Clone, Debug)]
 pub struct ShadowSheet {
     inner: ShadowStyleSheet,
     owner: StdArc<SharedRwLock>,
 }
 
-/// Why [`StyleEngine::parse_style_update`] answered no update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoStyleUpdate {
-    /// The property name or the value does not parse.
     Invalid,
-    /// The block already reads as the update would leave it.
     Unchanged,
 }
 
-/// One `setProperty` call, parsed and checked against the block it updates
-/// ([`StyleEngine::parse_style_update`]): it is known to change that block,
-/// and carries the positions in it the change lands on, so applying it
-/// ([`StyleEngine::apply_style_update`]) does not search the block again.
 #[expect(
     clippy::large_enum_variant,
     reason = "one per call, on the stack; boxing the declarations would allocate on every write"
@@ -291,8 +202,6 @@ pub(crate) enum PropertyUpdate {
 }
 
 impl PropertyUpdate {
-    /// Applies the update to the block it was checked against, or to an
-    /// unchanged copy of it.
     fn apply(self, block: &mut PropertyDeclarationBlock) {
         match self {
             Self::Remove { property, first } => block.remove_property(&property, first),
@@ -304,50 +213,25 @@ impl PropertyUpdate {
     }
 }
 
-/// What a change to the style context requires of the tree that was styled
-/// under the old one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[must_use]
 pub(crate) enum StyleInvalidation {
-    /// Which rules apply is unchanged; only their computed values can move.
     Recascade,
-    /// The set of applicable rules may have moved, so selectors have to run
-    /// again.
     Rematch,
 }
 
-/// One `@font-face` rule reduced to what a resource loader needs.
-///
-/// The `format()` and `tech()` hints on a `src` component are dropped: they
-/// exist so a browser can skip a face it could not decode, and this engine
-/// hands every candidate to the loader in author order and takes the first
-/// that loads. The matching descriptors — `font-style`, `font-weight`,
-/// `font-stretch`, `unicode-range` — are dropped because nothing reads them:
-/// a loaded face is registered under the declared family carrying its own
-/// metadata, see
-/// [`TextContext::register_font_face`](seldon::text::TextContext::register_font_face).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFaceRequest {
-    /// The `font-family` descriptor: the family the face is registered under.
     pub family: String,
-    /// The `src` components in author order. The first one that loads wins.
     pub sources: Vec<FontFaceSource>,
 }
 
-/// One component of an `@font-face` rule's `src` descriptor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FontFaceSource {
-    /// `url(...)`, resolved against the document's base URL. An embedder
-    /// fetches it; nothing in `terminus` performs IO.
     Url(String),
-    /// `local(...)`: a face already installed on the platform, by name.
     Local(String),
 }
 
-/// Reduces one parsed `@font-face` rule to a loadable request.
-///
-/// `None` for a rule that names no family or offers no usable source — a
-/// rule a browser would also never load anything for.
 fn font_face_request(rule: &FontFaceRule) -> Option<FontFaceRequest> {
     let family = rule.descriptors.font_family.as_ref()?;
     let sources = rule
@@ -357,9 +241,6 @@ fn font_face_request(rule: &FontFaceRule) -> Option<FontFaceRequest> {
         .0
         .iter()
         .filter_map(|source| match source {
-            // `as_str` is the URL resolved against the document's base; an
-            // unresolvable one serializes as the empty string and is dropped
-            // here rather than handed to a fetcher that could only fail.
             StyloFontFaceSource::Url(url) => {
                 let url = url.url.as_str();
                 (!url.is_empty()).then(|| FontFaceSource::Url(url.to_owned()))
@@ -373,28 +254,12 @@ fn font_face_request(rule: &FontFaceRule) -> Option<FontFaceRequest> {
     })
 }
 
-/// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
     stylist: Stylist,
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
-    /// Whether an author sheet has been mounted since the last time the
-    /// `@font-face` rules were reported. Reading the rules takes the shared
-    /// lock and walks every origin, and the answer can only change when a
-    /// sheet arrives, so this keeps the ordinary "nothing new" call free.
     font_faces_dirty: bool,
-    /// Every `@font-face` rule already reported, kept alive so that pointer
-    /// identity stays unique: a rule survives the cascade rebuilds that
-    /// re-collect it, and a strong reference is what stops a freed rule's
-    /// address from being reused by a later one.
     reported_font_faces: Vec<Arc<Locked<FontFaceRule>>>,
-    /// The `@position-try` names whose rules the stylist flushes since the
-    /// last style harvest added, removed or changed
-    /// (`CascadeDataDifference::changed_position_try_names`). No element's
-    /// base style changes with them, so no restyle carries the news; the
-    /// harvest re-cascades the position options that name one
-    /// (css-anchor-position-1 §6.5.1, and `layout::anchors`). Empty for a
-    /// page whose sheets declare no `@position-try` rule.
     changed_position_try_names: FxHashSet<Atom>,
 }
 
@@ -423,8 +288,6 @@ impl StyleEngine {
         }
     }
 
-    /// Keeps what one stylist flush reports that the style harvest has to
-    /// act on outside the element restyles it already produces.
     fn note_flush(pending: &mut FxHashSet<Atom>, invalidations: &StylesheetInvalidationSet) {
         let changed = &invalidations
             .cascade_data_difference
@@ -432,28 +295,10 @@ impl StyleEngine {
         pending.extend(changed.iter().cloned());
     }
 
-    /// Takes the `@position-try` names changed since the last call.
     pub(crate) fn take_changed_position_try_names(&mut self) -> FxHashSet<Atom> {
         std::mem::take(&mut self.changed_position_try_names)
     }
 
-    /// Every `@font-face` rule this engine has not reported before.
-    ///
-    /// The seam an embedder loads declared faces over: `terminus` never performs
-    /// IO, so it names the rules and the caller fetches their sources and
-    /// hands the bytes back through
-    /// [`Document::register_font_face`](crate::tree::document::Document::register_font_face).
-    ///
-    /// A rule is reported once per document, whatever later sheets do to the
-    /// cascade: the collected list is rebuilt from scratch on every stylist
-    /// flush, and a face already handed to the font backend does not need
-    /// loading again. Rules without a `font-family` or without a usable `src`
-    /// are skipped, as is a `url()` that did not resolve against the
-    /// document's base URL.
-    ///
-    /// Shadow-scoped sheets are not walked: their `@font-face` rules live in
-    /// a scoped `AuthorStyles` rather than in the stylist's own origins, and
-    /// no scoped sheet in this engine carries one yet.
     pub(crate) fn take_font_face_requests(&mut self) -> Vec<FontFaceRequest> {
         if !std::mem::take(&mut self.font_faces_dirty) {
             return Vec::new();
@@ -496,15 +341,10 @@ impl StyleEngine {
         &self.stylist
     }
 
-    /// The engine's own lock: what its author sheets, its shadow trees'
-    /// sheets and its inline styles are locked under. User-agent sheets are
-    /// under [`USER_AGENT_LOCK`] instead; [`Self::rule_guards`] reads both.
     pub(crate) fn shared_lock(&self) -> &SharedRwLock {
         &self.lock
     }
 
-    /// A read of both locks this engine's rules are under, for a stylist
-    /// operation that reads rules of every origin.
     pub(crate) fn rule_guards(&self) -> RuleGuards<'_> {
         rule_guards(&self.lock)
     }
@@ -513,14 +353,6 @@ impl StyleEngine {
         PropertyId::parse(property, &self.parser_context(CssRuleType::Style)).is_ok()
     }
 
-    /// Parses one CSSOM-style property update — `setProperty`'s semantics:
-    /// an empty value removes the property — against the declaration block
-    /// an element holds, under `mode` (`ParsingMode::DEFAULT` but for an SVG
-    /// presentation attribute, which allows unitless lengths).
-    ///
-    /// Answers why there is no update for a property name or value that
-    /// does not parse and for an update that would not change the block, so
-    /// a caller can return before it records anything about the write.
     pub(crate) fn parse_style_update(
         &self,
         block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
@@ -553,8 +385,6 @@ impl StyleEngine {
             .ok_or(NoStyleUpdate::Unchanged)
     }
 
-    /// The update that removes `property` from `block`, `None` when the
-    /// block does not hold it.
     pub(crate) fn removal_update(
         &self,
         block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
@@ -569,9 +399,6 @@ impl StyleEngine {
         })
     }
 
-    /// The update that writes declarations already built — by
-    /// [`Self::parse_style_update`], or by a caller that made the value
-    /// itself — into `block`, `None` when it would not change it.
     pub(crate) fn declaration_update(
         &self,
         block: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
@@ -591,27 +418,6 @@ impl StyleEngine {
             .then_some(PropertyUpdate::Set { source, updates })
     }
 
-    /// Applies an update [`Self::parse_style_update`] checked against the
-    /// block in `slot`, which must not have changed since. `slot` then holds
-    /// the updated block, or `None` once it is empty.
-    ///
-    /// A block nothing else holds is updated where it is, keeping its
-    /// identity. One the rule tree holds — the block the element's computed
-    /// style was cascaded from — is copied and the copy is updated, as Gecko's
-    /// `DeclarationBlock::EnsureMutable` copies a block the rule tree holds,
-    /// for two reasons:
-    ///
-    /// - The flush finds a changed block by its identity. Replacing the style-attribute level of a
-    ///   rule node, Stylo's `update_rule_at_level` (`vendor/stylo/style/rule_tree/mod.rs`) takes
-    ///   the same `Arc` at that level for an unchanged block and keeps the old rule node, so a
-    ///   block updated where the rule tree holds it would never be cascaded again. A
-    ///   presentational-hint block is collected while matching, but it too is held by the rule node
-    ///   it was matched into.
-    /// - An animation tick before the next style flush cascades the element again from its rule
-    ///   node, and has to see the declarations the element had at the last flush, which only the
-    ///   flush replaces.
-    ///
-    /// Later writes before that flush find the copy unshared.
     pub(crate) fn apply_style_update(
         &self,
         slot: &mut Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -637,25 +443,6 @@ impl StyleEngine {
         *slot = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
     }
 
-    /// Builds a complete inline declaration block from a record of
-    /// name/value pairs.
-    ///
-    /// This is the batch counterpart of
-    /// [`Self::parse_style_update`], for the setter whose semantics
-    /// are a *replacement* rather than a mutation. Building from an empty
-    /// block replaces the element's declarations in one pass, where the
-    /// per-property path merges each declaration into the block the element
-    /// already holds.
-    ///
-    /// Each declaration is parsed exactly as
-    /// [`Self::parse_style_update`] parses one — a name that does
-    /// not resolve, or a value that does not parse, drops that declaration
-    /// and nothing else. An empty value is skipped: `setProperty` with an
-    /// empty value removes a property, and there is nothing here to remove.
-    ///
-    /// Returns the block, `None` when nothing parsed. The `style` attribute
-    /// reads back as its serialization, made when it is read
-    /// ([`Node::attribute`](crate::tree::node::Node::attribute)).
     pub(crate) fn build_inline_style_block<'a>(
         &self,
         declarations: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -664,9 +451,6 @@ impl StyleEngine {
         let mut block = PropertyDeclarationBlock::new();
         let mut source = SourcePropertyDeclaration::default();
         for (property, value) in declarations {
-            // Fresh per declaration: `prepare_for_update` asserts it starts
-            // empty and only `update` clears it, so a declaration that
-            // parses but changes nothing would poison the next one.
             let mut updates = SourcePropertyDeclarationUpdate::default();
             if value.is_empty() {
                 continue;
@@ -732,9 +516,6 @@ impl StyleEngine {
         self.parse_stylesheet_at(css, origin, self.url_data.clone())
     }
 
-    /// Parses one sheet under the lock its origin reads with: the
-    /// process-wide user-agent lock for a user-agent sheet, this engine's
-    /// own for an author sheet.
     fn parse_stylesheet_at(&self, css: &str, origin: Origin, url_data: UrlExtraData) -> Stylesheet {
         let lock = match origin {
             Origin::UserAgent | Origin::User => &*USER_AGENT_LOCK,
@@ -748,15 +529,10 @@ impl StyleEngine {
         self.mount_document_sheet(sheet, origin);
     }
 
-    /// Mounts a user-agent sheet parsed once for every document
-    /// ([`UserAgentStylesheet`]), as the one `add_stylesheet` parses for this
-    /// document alone would be.
     pub(crate) fn add_user_agent_stylesheet(&mut self, sheet: &UserAgentStylesheet) {
         self.mount_document_sheet(DocumentStyleSheet(Arc::clone(&sheet.0)), Origin::UserAgent);
     }
 
-    /// Appends one document-level sheet of `origin` to the stylist and
-    /// flushes it.
     fn mount_document_sheet(&mut self, sheet: DocumentStyleSheet, origin: Origin) {
         let guards = rule_guards(&self.lock);
         self.stylist
@@ -767,13 +543,10 @@ impl StyleEngine {
         self.font_faces_dirty = true;
     }
 
-    /// Parses an author sheet for shadow trees.
     fn parse_scoped_stylesheet(&self, css: &str) -> ShadowSheet {
         self.shadow_sheet(self.parse_stylesheet(css, Origin::Author))
     }
 
-    /// [`Self::parse_scoped_stylesheet`] for a sheet the engine wrote itself:
-    /// an author sheet of the tree, parsed with chrome rules enabled.
     fn parse_engine_scoped_stylesheet(&self, css: &str) -> ShadowSheet {
         self.shadow_sheet(self.parse_stylesheet_at(
             css,
@@ -789,13 +562,6 @@ impl StyleEngine {
         }
     }
 
-    /// Appends a parsed sheet to one shadow tree's sheets, as it is: every
-    /// tree that mounts the same [`ShadowSheet`] shares its rule data.
-    ///
-    /// # Panics
-    ///
-    /// Panics if another engine parsed the sheet, or if the tree already
-    /// mounts it.
     fn add_scoped_sheet(
         &mut self,
         styles: &mut AuthorStyles<ShadowStyleSheet>,
@@ -817,13 +583,6 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
-    /// Replaces the scoped sheet at `index` with one parsed from `css`, in
-    /// the same place in the tree's sheet order: the new sheet goes in
-    /// before the old one, which then leaves.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the tree has no sheet at `index`.
     pub(crate) fn replace_scoped_stylesheet(
         &mut self,
         styles: &mut AuthorStyles<ShadowStyleSheet>,
@@ -840,9 +599,6 @@ impl StyleEngine {
         styles
             .stylesheets
             .insert_stylesheet_before(sheet, old.clone(), &guard);
-        // No device: a shadow tree's sheets collect no invalidations (stylo's
-        // `AuthorStyles::flush` passes none either); the caller re-matches
-        // the host's subtree instead.
         let data = styles.data.clone();
         styles
             .stylesheets
@@ -852,11 +608,6 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
-    /// Wraps rules this engine built into one author-origin sheet.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any rule was built by a different engine.
     fn stylesheet_from_rules(&self, rules: Vec<CssRule>) -> Stylesheet {
         assert!(
             rules
@@ -880,12 +631,6 @@ impl StyleEngine {
         }
     }
 
-    /// Installs rules this engine built as one author-origin sheet scoped to
-    /// one shadow tree: built like [`Self::append_rules`], flushed like
-    /// [`Self::add_scoped_sheet`].
-    ///
-    /// Like the text path, this leaves `font_faces_dirty` alone, so an
-    /// `@font-face` rule in a shadow sheet is not loaded.
     pub(crate) fn append_scoped_rules(
         &mut self,
         styles: &mut AuthorStyles<ShadowStyleSheet>,
@@ -899,8 +644,6 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
-    /// Removes every sheet of one shadow tree, leaving it styled by no
-    /// author rule of its own.
     pub(crate) fn clear_scoped_stylesheets(&mut self, styles: &mut AuthorStyles<ShadowStyleSheet>) {
         let sheets: Vec<ShadowStyleSheet> = styles.stylesheets.iter().cloned().collect();
         let guard = self.lock.read();
@@ -917,7 +660,6 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
-    /// Installs rules this engine built as one author-origin sheet.
     pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>) {
         let sheet = self.stylesheet_from_rules(rules);
         self.mount_document_sheet(DocumentStyleSheet(Arc::new(sheet)), Origin::Author);
@@ -949,12 +691,6 @@ impl StyleEngine {
         name: &str,
         keyframes: impl IntoIterator<Item = CssKeyframe<'d>>,
     ) -> Option<CssRule> {
-        // `<keyframes-name>` is an ident *or* a string, and a producer that
-        // preserves the authored prelude hands over the quotes with it. Parsing
-        // resolves both spellings to the same atom, which is what
-        // `animation-name` is matched against; taking the text as an ident
-        // would leave `"spin"` unable to match `spin`, and would make the names
-        // that only exist in string form (`"none"`) unreachable.
         let context = self.parser_context(CssRuleType::Keyframes);
         let name = Parser::new(name)
             .parse_entirely(|input| KeyframesName::parse(&context, input))
@@ -984,11 +720,6 @@ impl StyleEngine {
         ))
     }
 
-    /// Builds an `@font-face` rule from its descriptor block text.
-    ///
-    /// Font-face descriptors are not CSS properties, so stylo exposes no
-    /// per-descriptor constructor and this one block is parsed as text. Its
-    /// input is a single rule body, never a stylesheet.
     #[must_use]
     pub(crate) fn build_font_face_rule(&self, descriptors: &str) -> CssRule {
         let context = self.parser_context(CssRuleType::FontFace);
@@ -1042,14 +773,6 @@ impl StyleEngine {
         author_parser_context(&self.url_data, rule_type)
     }
 
-    /// Re-evaluates the media queries against the device that was just
-    /// changed, and reports what the tree now needs.
-    ///
-    /// Stylo answers which origins' rule sets a device change moved. An empty
-    /// answer means every media query still evaluates the way it did, so no
-    /// selector can start or stop matching and only the computed values that
-    /// read the device — viewport units, `rpx`, resolution-dependent images,
-    /// snapped border widths — have to be produced again.
     fn refresh_device(&mut self) -> StyleInvalidation {
         let guards = rule_guards(&self.lock);
         let changed = self
@@ -1072,14 +795,12 @@ impl<T> Document<T> {
         self.style_engine().device()
     }
 
-    /// The viewport in CSS px.
     #[must_use]
     pub fn viewport_size(&self) -> euclid::default::Size2D<f32> {
         let size = self.device().viewport_size();
         euclid::default::Size2D::new(size.width, size.height)
     }
 
-    /// CSS-px → device-px scale factor.
     #[must_use]
     pub fn device_pixel_ratio(&self) -> f32 {
         self.device().device_pixel_ratio().get()
@@ -1097,37 +818,14 @@ impl<T> Document<T> {
         self.change_style_rules(|engine| engine.add_stylesheet(css, origin));
     }
 
-    /// Mounts a user-agent sheet parsed once for every document
-    /// ([`UserAgentStylesheet::parse`]), where [`Self::add_stylesheet`] with
-    /// [`Origin::UserAgent`] parses one for this document alone. Same
-    /// cascade, same order rules: a later sheet cascades over an earlier
-    /// one.
     pub fn add_user_agent_stylesheet(&mut self, sheet: &UserAgentStylesheet) {
         self.change_style_rules(|engine| engine.add_user_agent_stylesheet(sheet));
     }
 
-    /// Appends rules this document built as one author-origin stylesheet.
-    ///
-    /// This is the pre-parsed ingestion path: the caller lowers an already
-    /// decoded wire format through [`Document::build_style_rule`] and friends,
-    /// so no CSS stylesheet text is produced or tokenized. Later calls cascade
-    /// over earlier ones, as later stylesheets do in a document.
-    ///
-    /// The origin is fixed rather than chosen, because the builders resolve
-    /// property names and values in an author parser context; a sheet mounted
-    /// at another origin would not be the sheet that was parsed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any rule was built by a different document.
     pub fn append_rules(&mut self, rules: Vec<CssRule>) {
         self.change_style_rules(|engine| engine.append_rules(rules));
     }
 
-    /// Builds one style rule from selector text and pre-parsed declarations.
-    ///
-    /// Returns `None` if the selector list does not parse; individual
-    /// declarations that do not parse are dropped, as in a stylesheet.
     #[must_use]
     pub fn build_style_rule<'d>(
         &self,
@@ -1138,10 +836,6 @@ impl<T> Document<T> {
             .build_style_rule(selectors, declarations)
     }
 
-    /// Builds one `@keyframes` rule from its name and its keyframe blocks.
-    ///
-    /// Returns `None` for an empty name; keyframes whose selector does not
-    /// parse are dropped.
     #[must_use]
     pub fn build_keyframes_rule<'d>(
         &self,
@@ -1151,18 +845,11 @@ impl<T> Document<T> {
         self.style_engine().build_keyframes_rule(name, keyframes)
     }
 
-    /// Builds one `@font-face` rule from its descriptor block text.
     #[must_use]
     pub fn build_font_face_rule(&self, descriptors: &str) -> CssRule {
         self.style_engine().build_font_face_rule(descriptors)
     }
 
-    /// Adds an author stylesheet scoped to one shadow tree.
-    ///
-    /// This parses `css` for this one tree. Rules every instance of a
-    /// component carries are parsed once instead
-    /// ([`Self::parse_shadow_stylesheet`]) and mounted on each tree
-    /// ([`Self::add_shadow_sheet`]); the two cascade alike.
     pub fn add_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
         let host = self
             .shadow_host(shadow_root)
@@ -1171,43 +858,16 @@ impl<T> Document<T> {
         self.mount_shadow_sheet(shadow_root, host, &sheet);
     }
 
-    /// Parses an author stylesheet for this document's shadow trees, to be
-    /// mounted on any number of them with [`Self::add_shadow_sheet`].
-    ///
-    /// The sheet cascades as one [`Self::add_shadow_stylesheet`] parses.
     #[must_use]
     pub fn parse_shadow_stylesheet(&self, css: &str) -> ShadowSheet {
         self.style_engine().parse_scoped_stylesheet(css)
     }
 
-    /// [`Self::parse_shadow_stylesheet`] for a stylesheet the engine itself
-    /// wrote: the sheet cascades as one
-    /// [`Self::add_engine_shadow_stylesheet`] parses.
     #[must_use]
     pub fn parse_engine_shadow_stylesheet(&self, css: &str) -> ShadowSheet {
         self.style_engine().parse_engine_scoped_stylesheet(css)
     }
 
-    /// Mounts a parsed stylesheet on one shadow tree, after the sheets the
-    /// tree already has.
-    ///
-    /// The tree holds the sheet itself rather than a copy, so the trees one
-    /// sheet is mounted on share the rule data stylo builds from it. It
-    /// cascades exactly as the same text added with
-    /// [`Self::add_shadow_stylesheet`] (or, for a sheet from
-    /// [`Self::parse_engine_shadow_stylesheet`],
-    /// [`Self::add_engine_shadow_stylesheet`]) would.
-    ///
-    /// Stylo reports the `@position-try` names a flush changed only when it
-    /// builds rule data, which a tree reusing another's skips. Nothing misses
-    /// them: the names reach only the tree and its host, and mounting restyles
-    /// the host's whole subtree, whose restyled elements re-cascade their
-    /// options whatever the report says.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shadow_root` is not a live shadow root, if another document
-    /// parsed the sheet, or if the tree already mounts it.
     pub fn add_shadow_sheet(&mut self, shadow_root: NodeId, sheet: &ShadowSheet) {
         let host = self
             .shadow_host(shadow_root)
@@ -1224,13 +884,6 @@ impl<T> Document<T> {
         self.mark_subtree_dirty(host);
     }
 
-    /// Adds a stylesheet the engine itself wrote to one shadow tree, such as
-    /// a component's own rules for the HTML content it builds there.
-    ///
-    /// It cascades as [`Self::add_shadow_stylesheet`]'s sheets do, in the
-    /// order sheets are added, but it parses with chrome rules enabled, so it
-    /// can write the values the `lynx` grammar keeps from authors:
-    /// `display: block`, `flow` and `inline`, the flow layout of that content.
     pub fn add_engine_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
         let host = self
             .shadow_host(shadow_root)
@@ -1239,19 +892,6 @@ impl<T> Document<T> {
         self.mount_shadow_sheet(shadow_root, host, &sheet);
     }
 
-    /// Replaces the stylesheet at `index` among those
-    /// [`Self::add_shadow_stylesheet`] and [`Self::add_engine_shadow_stylesheet`]
-    /// added to one shadow tree, counting from the first added, with an author
-    /// sheet, keeping its place in their order: a sheet a component
-    /// rewrites, such as the one `<x-markdown>` builds from its
-    /// `markdown-style` attribute, still cascades after the sheets added
-    /// before it and before the ones added after it, as replacing the text of
-    /// a `<style>` element in a shadow tree keeps that element's place.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shadow_root` is no live shadow root, or has no sheet at
-    /// `index`.
     pub fn replace_shadow_stylesheet(&mut self, shadow_root: NodeId, index: usize, css: &str) {
         let host = self
             .shadow_host(shadow_root)
@@ -1264,24 +904,6 @@ impl<T> Document<T> {
         self.mark_subtree_dirty(host);
     }
 
-    /// Appends rules this document built as one author-origin stylesheet
-    /// scoped to one shadow tree.
-    ///
-    /// This is [`Document::append_rules`] for a shadow root, and the
-    /// pre-parsed counterpart of [`Document::add_shadow_stylesheet`]: the
-    /// sheet's rules match only inside `shadow_root`'s tree (and the host,
-    /// through `:host`), and its implicit `@scope` root is the host. Later
-    /// calls cascade over earlier sheets of the same shadow root.
-    ///
-    /// An `@font-face` rule in the sheet is not loaded: font faces are
-    /// collected from the document's sheets only, as for a constructed sheet
-    /// adopted by a shadow root in Chromium (`adoptedStyleSheets`). The text
-    /// path, [`Document::add_shadow_stylesheet`], behaves the same way.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shadow_root` is not a live shadow root, or if any rule was
-    /// built by a different document.
     pub fn append_shadow_rules(&mut self, shadow_root: NodeId, rules: Vec<CssRule>) {
         let host = self
             .shadow_host(shadow_root)
@@ -1294,15 +916,6 @@ impl<T> Document<T> {
         self.mark_subtree_dirty(host);
     }
 
-    /// Removes every sheet [`Document::add_shadow_stylesheet`] and
-    /// [`Document::append_shadow_rules`] mounted on one shadow tree: the
-    /// shadow-root counterpart of emptying a shadow root's
-    /// `adoptedStyleSheets` (CSSOM §Using CSS style sheets). The tree is
-    /// matched again against the document's UA rules alone.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shadow_root` is not a live shadow root.
     pub fn clear_shadow_stylesheets(&mut self, shadow_root: NodeId) {
         let host = self
             .shadow_host(shadow_root)
@@ -1328,9 +941,6 @@ impl<T> Document<T> {
         (engine, shadow)
     }
 
-    /// A change to the device the document is styled against. The engine says
-    /// whether any media query changed its answer; only then does the tree
-    /// need its selectors run again.
     fn change_device(&mut self, change: impl FnOnce(&mut StyleEngine) -> StyleInvalidation) {
         self.note_visual_mutation();
         let invalidation = change(self.style_engine_mut());
@@ -1341,8 +951,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// A change to the rule set itself, which always re-matches: a rule that
-    /// did not exist before cannot be known not to match.
     fn change_style_rules(&mut self, change: impl FnOnce(&mut StyleEngine)) {
         self.note_visual_mutation();
         change(self.style_engine_mut());
@@ -1370,9 +978,6 @@ mod tests {
         }
     }
 
-    /// Nothing above this crate can observe the keyframes registry, so the
-    /// name atom and the per-block selector parse are checked here, where the
-    /// built rule is still readable.
     #[test]
     fn a_built_keyframes_rule_carries_its_name_selectors_and_blocks() {
         let document = document();
@@ -1419,7 +1024,6 @@ mod tests {
         assert_eq!(declarations, 1, "each keyframe keeps its own block");
     }
 
-    /// A keyframe whose offset does not parse is dropped; the rest survive.
     #[test]
     fn an_unparsable_keyframe_selector_drops_only_its_own_block() {
         let document = document();
@@ -1447,8 +1051,6 @@ mod tests {
         assert_eq!(keyframes.read_with(&guard).keyframes.len(), 1);
     }
 
-    /// `<keyframes-name>` accepts a string as well as an ident, and both
-    /// spellings must reach the same atom `animation-name` is matched against.
     #[test]
     fn a_quoted_keyframes_name_resolves_to_the_same_atom_as_the_ident() {
         let document = document();
@@ -1482,8 +1084,6 @@ mod tests {
         }
     }
 
-    /// A rule built by one document must never enter another's cascade: the
-    /// lock that guards its contents belongs to the document that minted it.
     #[test]
     #[should_panic(expected = "CSS rule belongs to another Document")]
     fn a_rule_from_another_document_is_refused() {
@@ -1494,9 +1094,6 @@ mod tests {
         document().append_rules(vec![rule]);
     }
 
-    /// Every tree one parsed sheet is mounted on holds that sheet, so stylo
-    /// builds their rule data once and the trees share it; the rules match in
-    /// each tree as the text path's do.
     #[test]
     fn trees_mounting_one_parsed_sheet_share_its_rule_data() {
         let mut doc = crate::test_common::Doc::new();
@@ -1531,8 +1128,6 @@ mod tests {
         }
     }
 
-    /// Replacing a shared sheet on one tree leaves every other tree mounting
-    /// it with the shared sheet and the shared rule data.
     #[test]
     fn replacing_a_shared_sheet_on_one_tree_leaves_the_others_alone() {
         let mut doc = crate::test_common::Doc::new();

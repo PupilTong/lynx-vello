@@ -19,8 +19,6 @@ use url::Url;
 mod support;
 use support::DelayedBackground;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(100.0, 100.0, 1.0);
 
@@ -144,8 +142,6 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
             sources,
         )
         .unwrap();
-    // Boot's first flush waits for a painter to bind the view, and everything
-    // below is past it.
     let mut painter = Painter::new(DrawTarget::Offscreen, 100.0, 100.0, 1.0)
         .await
         .unwrap();
@@ -200,8 +196,6 @@ async fn public_updates_require_mts_boot_then_preserve_order() {
             .iter()
             .any(|message| message == "mts update 9 false true")
     );
-    // The BTS logs to the host itself, so its lines keep their own order but
-    // have none relative to the main thread's.
     assert!(
         seen.messages
             .iter()

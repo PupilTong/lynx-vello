@@ -21,21 +21,12 @@ use crate::view::{EngineEvent, NoWakeup};
 
 const AHEM: &[u8] = include_bytes!("../../../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// The URL the card's background thread registers its bundle at:
-/// `requireModule('/app-service.js')` resolves under this container to
-/// `app:///react-markdown.web.bundle/app-service.js`.
 const BUNDLE_URL: &str = "app:///react-markdown.web.bundle";
 
-/// The card's image, a 48 by 24 green PNG.
 const IMAGE_PREFIX: &str = "data:image/png;base64,iVBORw0KGgo";
 
-/// How long a wait for the background thread may take: a hang detector.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// The card booted over a view whose default font is Ahem, as
-/// `bobcat-source`'s `PageSource` would register it: the root module as the
-/// entry, the background thread's boot script as `PageSource` writes it, and
-/// every manifest body at the URL its bundle path names.
 fn booted_card() -> TestEngine {
     let template = bobcat_source::web::decode(fixtures::fixture("react-markdown").page)
         .expect("the compiled card decodes");
@@ -71,9 +62,6 @@ fn booted_card() -> TestEngine {
     engine
 }
 
-/// Pumps the view until the card's background thread has logged every one
-/// of `lines` (`markdown-card <name> <detail JSON>`), answering what it
-/// logged on the way. A failure the view reports fails the wait.
 fn await_logged(engine: &mut TestEngine, lines: &[&str]) -> Vec<String> {
     let deadline = Instant::now() + PATIENCE;
     let mut logged = Vec::new();
@@ -106,7 +94,6 @@ fn await_logged(engine: &mut TestEngine, lines: &[&str]) -> Vec<String> {
     }
 }
 
-/// The element `selector` names in the light tree.
 fn light(document: &LynxDocument, selector: &str) -> terminus::link::NodeId {
     document
         .query_selector(document.document_element().id(), selector)
@@ -114,7 +101,6 @@ fn light(document: &LynxDocument, selector: &str) -> terminus::link::NodeId {
         .unwrap_or_else(|| panic!("the card renders `{selector}`"))
 }
 
-/// Every element named `tag` in `host`'s shadow tree, in tree order.
 fn shadow_all(
     document: &LynxDocument,
     host: terminus::link::NodeId,
@@ -132,7 +118,6 @@ fn shadow_all(
     found
 }
 
-/// The text nodes under `element`, concatenated.
 fn text_of(document: &LynxDocument, element: terminus::link::NodeId) -> String {
     let mut text = String::new();
     let mut stack = vec![element];
@@ -146,24 +131,12 @@ fn text_of(document: &LynxDocument, element: terminus::link::NodeId) -> String {
     text
 }
 
-/// One computed longhand of `element`, as a string.
 fn computed(document: &LynxDocument, element: terminus::link::NodeId, property: &str) -> String {
     let id = PropertyId::parse_enabled_for_all_content(property).expect("a known property");
     let longhand = id.as_shorthand().expect_err("a longhand");
     style_of(document, element).computed_value_to_string(longhand)
 }
 
-/// The card's `<x-markdown>`, compiled: the structured `markdown-style`
-/// reaches the element as its JSON text, the shadow tree holds web-core's
-/// `basic` fixture with the link and the image after it, the link is the
-/// `markdown-style` red and the inline code its blue, and the sibling
-/// `<markdown>` renders under native's tag.
-///
-/// On the background thread: the render's `parseEnd` reaches `bindparseEnd`
-/// with `{id: "case-1"}`, and the mount effect's selector-query `invoke` of
-/// `getContent({start: 0, end: 6})` answers `{content: "# Title"}`. Then a
-/// tap on the link's text, through the painter's gesture path, reaches
-/// `bindlink` with web-core's `{url, content, contentId}`.
 #[test]
 fn a_compiled_card_renders_its_markdown_and_hears_its_events() {
     let mut engine = booted_card();
@@ -224,9 +197,6 @@ fn a_compiled_card_renders_its_markdown_and_hears_its_events() {
             assert_eq!(strong.len(), 1);
             assert_eq!(text_of(document, strong[0]), "plain");
 
-            // The middle of the link's text, in viewport px: its paragraph's
-            // content origin plus the centre of the box its source range
-            // occupies.
             let paragraph = document.paragraph_of(link).expect("the link's paragraph");
             let range = document
                 .inline_source_range(link)

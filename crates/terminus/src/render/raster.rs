@@ -22,7 +22,6 @@ use super::gpu::{GpuError, SharedGpu};
 use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::Color;
 
-/// See the [module documentation](self).
 pub(crate) struct Raster {
     sparse: super::sparse::SparseBackend,
 }
@@ -34,28 +33,16 @@ impl std::fmt::Debug for Raster {
 }
 
 impl Raster {
-    /// The usage a texture this rasterizer renders into needs: it draws
-    /// through a render pass.
     pub(crate) const TARGET_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
 
-    /// The usage a texture bound through [`Self::bind_texture`] needs: it
-    /// is sampled in place.
     pub(crate) const BOUND_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING;
 
-    /// Builds a target's rasterizer on `gpu`, sharing its renderer.
     pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
             sparse: super::sparse::SparseBackend::new(gpu),
         }
     }
 
-    /// Renders `scene` into `view`, a `width` × `height` RGBA8 texture on
-    /// this rasterizer's device, created with [`Self::TARGET_USAGE`], over
-    /// `base`.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Render`] if the render fails.
     pub(crate) fn render_to_texture(
         &mut self,
         scene: &DisplayList,
@@ -69,21 +56,10 @@ impl Raster {
             .map_err(GpuError::Render)
     }
 
-    /// Binds `bound` to every draw of `texture`, or with `None` unbinds it.
-    ///
-    /// `bound` is the size [`Texture`] names as its texture size, was
-    /// created with [`Self::BOUND_USAGE`], and holds premultiplied colour —
-    /// what the rasterizer writes into every target, since it blends into
-    /// it premultiplied. A draw samples the texture as it is at that render,
-    /// so redrawing into a bound texture needs no further call.
     pub(crate) fn bind_texture(&mut self, texture: &Texture, bound: Option<wgpu::Texture>) {
         self.sparse.bind(texture, bound);
     }
 
-    /// How many bitmap draws of this target's renders, its bakes' included,
-    /// drew nothing because no upload was resident and the pixels they
-    /// were lent were gone: a count that moves only when an owner of lent
-    /// pixels must read them again.
     pub(crate) fn lost_pixels(&self) -> u64 {
         self.sparse.lost()
     }

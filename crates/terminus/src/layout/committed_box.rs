@@ -152,28 +152,8 @@ use super::style::{StyleView, skips_contents};
 use crate::tree::document::{NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
-/// How many times one [`Document::layout`](crate::tree::document::Document::layout) call may
-/// lay the document out — and, inside one run, how many nesting levels of
-/// deferred query containers it may settle.
-///
-/// A size query container's own size never answers to its contents —
-/// css-contain-3 §2.1 contains the axes it supplies, so the contents cannot
-/// feed back into them — which is what makes both loops converge rather than
-/// oscillate. What they converge in is the depth of the deepest chain of
-/// containers that all move at once, because a container's size can still
-/// depend on its *ancestors'*: the outer one settles first, its descendants
-/// re-resolve, and only then can an inner one's `cqw`-derived size be final.
-/// Four covers every page anyone has, and the cap makes termination a
-/// property of the code rather than of the content: past it the last layout
-/// stands and the marks it left are resolved by the next flush, one commit
-/// behind at worst. The interleave's own last iteration reaches the cap
-/// differently — it closes the interleave instead of capping it, so a relay
-/// that may not defer lays every remaining subtree out for real.
 pub(crate) const CONTAINER_PASSES: u32 = 4;
 
-/// One element's content box, per physical axis, in unrounded CSS px, each
-/// axis reading `None` when it carries nothing — which the two halves of
-/// [`CommittedBox`] mean their own kind of nothing by.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ContentBox {
     pub(crate) width: Option<f32>,
@@ -187,27 +167,10 @@ impl ContentBox {
     }
 }
 
-/// The css-sizing-4 §5.2.1 last remembered size.
-///
-/// An axis reads `None` when nothing is remembered for it — the state the
-/// spec's "remove its last remembered size" leaves behind, and the state
-/// every element starts in.
 pub(crate) type RememberedSize = ContentBox;
 
-/// The css-contain-3 §2.1 size a query container supplies: `container-type:
-/// size` records both axes, `inline-size` the width alone (this engine is
-/// horizontal-writing-mode only, so inline is width, and Stylo's own
-/// `evaluate_potential_size_container` hard-codes `height: None` for an
-/// inline-size container anyway — recording it would cost a recascade every
-/// time the contents changed a height nothing can read).
-///
-/// An axis reads `None` when the container does not supply it, and both do
-/// for an element that is no size container at all. Stylo merges a `None`
-/// axis with the next container up the chain and falls back to the small
-/// viewport when the walk ends without one.
 pub(crate) type ContainerSize = ContentBox;
 
-/// What one element's last committing layout run left behind.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct CommittedBox {
     pub(crate) remembered: RememberedSize,
@@ -221,36 +184,10 @@ impl CommittedBox {
     }
 }
 
-/// The arena-key-keyed table: a published half both readers see and a pending
-/// half the layout pass writes.
 #[derive(Debug, Default)]
 pub(crate) struct CommittedBoxTable {
-    /// What [`query_container_size`](stylo::dom::TElement::query_container_size)
-    /// and the `contain-intrinsic-*` substitution answer from. Written only
-    /// through `&mut self`, so the parallel style traversal's reads are plain
-    /// shared reads.
-    ///
-    /// Keyed by arena key, holding an entry only for an element whose last
-    /// record was not empty: an absent one reads as "remembers nothing,
-    /// contains nothing", so a page with neither feature allocates nothing
-    /// here, and a page with some holds one entry per recording element
-    /// rather than a slot for every key up to the highest one that recorded.
     entries: FxHashMap<usize, CommittedBox>,
-    /// One record per committing run of the layout pass in flight, waiting
-    /// for [`Self::apply`].
-    ///
-    /// Bounded by how many times the pass committed a box that either
-    /// remembers a size or is a query container: an ordinary box records
-    /// nothing over nothing and never reaches here, so this stays empty — and
-    /// unborrowed — for every box of every page that uses neither feature.
     pending: RefCell<Vec<(NodeId, CommittedBox)>>,
-    /// Whether this document has ever cascaded a style that resolved a
-    /// container-relative unit (`ComputedValueFlags::USES_CONTAINER_UNITS`).
-    ///
-    /// Sticky, and the gate on the post-layout recascade loop: a page that
-    /// has query containers but writes no `cqw`/`cqh` has nothing to
-    /// re-resolve when one of them resizes. Set from the style traversal,
-    /// which is why it is an atomic.
     uses_container_units: AtomicBool,
 }
 
@@ -260,17 +197,6 @@ impl CommittedBoxTable {
         self.entries.get(&key).copied().unwrap_or_default()
     }
 
-    /// Records `committed` for `id`, for [`Self::apply`] to publish.
-    ///
-    /// The one thing filtered out is the box that records nothing and had
-    /// nothing recorded — every box of every page that uses neither feature,
-    /// which is what keeps both free for them. Everything else is appended
-    /// unconditionally, including a second record for a box that commits
-    /// twice in a pass: keeping one record per element would mean scanning
-    /// what is already staged on every commit, which is quadratic in the
-    /// number of recording boxes, to save at most one extra recascade of one
-    /// subtree. [`Self::apply`] replays the records in order, so the last one
-    /// still decides what is published.
     pub(crate) fn note(&self, id: NodeId, committed: CommittedBox) {
         if committed.is_empty() && self.get(id.arena_key()).is_empty() {
             return;
@@ -278,25 +204,11 @@ impl CommittedBoxTable {
         self.pending.borrow_mut().push((id, committed));
     }
 
-    /// Publishes the pass's recordings and appends every *query container*
-    /// whose size moved to `resized`.
-    ///
-    /// Each record is compared against what is published at the moment it is
-    /// replayed, so a box that committed twice in one pass and ended where it
-    /// started lands in `resized` all the same. That is not a correctness
-    /// question: what is published is the last record, and `resized` only
-    /// decides *whose* subtree is searched for container-unit users — a
-    /// search `Document::mark_container_units_users` is idempotent in. The
-    /// remembered half needs no such report: nothing but layout reads it.
     pub(crate) fn apply(&mut self, resized: &mut Vec<NodeId>) {
-        // Taken out and handed back so the buffer keeps its capacity: a page
-        // whose container animates records into the same allocation forever.
         let mut pending = std::mem::take(self.pending.get_mut());
         for (id, committed) in pending.drain(..) {
             let key = id.arena_key();
             if committed.is_empty() {
-                // An empty record publishes as no entry; dropping a container
-                // half is a move all the same.
                 if self
                     .entries
                     .remove(&key)
@@ -316,8 +228,6 @@ impl CommittedBoxTable {
         *self.pending.get_mut() = pending;
     }
 
-    /// Resets a freed slot, so the key's next occupant remembers nothing and
-    /// is no container.
     pub(crate) fn reset(&mut self, key: usize) {
         if !self.entries.is_empty() {
             self.entries.remove(&key);
@@ -335,8 +245,6 @@ impl CommittedBoxTable {
     }
 }
 
-/// csswg-drafts#8407: an element with `content-visibility: auto` behaves as if
-/// its `contain-intrinsic-*` values carried the `auto` keyword.
 fn effective(
     value: ContainIntrinsicSize,
     content_visibility: ContentVisibility,
@@ -348,7 +256,6 @@ fn effective(
     }
 }
 
-/// Whether a computed value carries the `auto` keyword.
 const fn has_auto(value: &ContainIntrinsicSize) -> bool {
     matches!(
         value,
@@ -356,13 +263,6 @@ const fn has_auto(value: &ContainIntrinsicSize) -> bool {
     )
 }
 
-/// Whether the *effective* value carries it — the same question [`effective`]
-/// answers, without building the value, since #8407 adds the keyword to every
-/// value an `auto` element has.
-///
-/// This is what the recording side asks, once per axis per committing run of
-/// every box on the page, so it reads the two computed values in place rather
-/// than cloning them.
 const fn has_effective_auto(
     value: &ContainIntrinsicSize,
     content_visibility: ContentVisibility,
@@ -370,8 +270,6 @@ const fn has_effective_auto(
     matches!(content_visibility, ContentVisibility::Auto) || has_auto(value)
 }
 
-/// The effective `contain-intrinsic-*` value for one axis, with #8407 applied
-/// and the last remembered size substituted where the spec calls for it.
 fn axis_value<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -379,9 +277,6 @@ fn axis_value<T>(
     axis: impl FnOnce(RememberedSize) -> Option<f32>,
 ) -> ContainIntrinsicSize {
     let value = effective(computed, *style.get_content_visibility());
-    // "and is currently skipping its contents": a `contain: size` box that is
-    // *not* skipping keeps its `<length>` (or `none`) however recently it was
-    // laid out with real contents.
     if !has_auto(&value) || !skips_contents(node, style) {
         return value;
     }
@@ -415,13 +310,6 @@ pub(crate) fn contain_intrinsic_height<T>(
     )
 }
 
-/// The recording moment: one committing layout run of one box, filling both
-/// halves of its entry from the one content box that run produced.
-///
-/// `size` is that run's own border-box output, unrounded. The host calls this
-/// only for a run that commits — a measurement establishes no rendered size —
-/// and only on a cache **miss**, because a box served from the cache produced
-/// the same size it already recorded under the same input.
 pub(crate) fn record<T>(
     tree: &TreeArenas<T>,
     node: NodeSlot,
@@ -441,28 +329,10 @@ pub(crate) fn record<T>(
     );
 
     if !is_container && !auto.width && !auto.height {
-        // The empty record, which both halves mean something by: "if an
-        // element has a last remembered size but does not have auto keyword
-        // in contain-intrinsic-size property, remove its last remembered
-        // size", and "this box is not a size query container". Free for the
-        // overwhelming majority of elements, which never reached the table at
-        // all.
         tree.note_committed_box(id, CommittedBox::default());
         return;
     }
 
-    // "but does not have size containment". A size-contained box was laid out
-    // as if it had no contents, so this run's inner dimensions are the
-    // substituted estimate rather than anything its contents produced —
-    // recording it would overwrite the measurement with the guess. Every
-    // *skipping* box is in here too (skipping turns `SIZE` on), which is
-    // exactly what lets a remembered size survive for as long as the box goes
-    // on skipping. The spec's sentence names whole-box size containment, but
-    // containment is per axis and so is this: under `contain: inline-size`
-    // (and under `container-type: inline-size`, which implies it) the height
-    // this run produced *is* the contents' own, and only the width is the
-    // estimate. An axis records what its contents made, or keeps what it last
-    // remembered.
     let containment = view.containment();
     let contained = Size::new(
         containment.contains(Contain::INLINE_SIZE),
@@ -470,20 +340,12 @@ pub(crate) fn record<T>(
     );
     let published = tree.committed_box(id);
     if contained.width && contained.height && !is_container && published.container.is_empty() {
-        // Every axis is frozen and neither this box nor what is published for
-        // it is a query container, so the record would be the published entry
-        // itself: the skipping box's pass, costing one enum test and one
-        // lookup. Sound to skip rather than stage because every branch this
-        // run took is a pass-constant, so a box that commits twice in a pass
-        // reaches here on both of them or on neither.
         return;
     }
 
     let inner = content_box(view, input, size);
     debug_assert_estimate_agrees(view, input, is_container, inner);
 
-    // A contained axis keeps what it last remembered; an axis without the
-    // keyword remembers nothing; the rest record what they just measured.
     let axis = |auto: bool, contained: bool, published: Option<f32>, inner: f32| {
         if !auto {
             return None;
@@ -523,11 +385,6 @@ pub(crate) fn record<T>(
     );
 }
 
-/// The content box a run's border-box output leaves behind — "the current
-/// inner dimensions of its principal box" and "the query container's content
-/// box" are the same box, resolved the way the algorithms themselves resolve
-/// it: percentages against the containing block's inline size, `none`/`hidden`
-/// border sides reading zero.
 fn content_box<T>(view: &StyleView<'_, T>, input: LayoutInput, size: Size<f32>) -> Size<f32> {
     let padding = used_padding(view, input.parent_size.width);
     let border = used_border(view);
@@ -537,8 +394,6 @@ fn content_box<T>(view: &StyleView<'_, T>, input: LayoutInput, size: Size<f32>) 
     )
 }
 
-/// The axes a query container of this type supplies, out of the content box
-/// it was laid out at.
 fn container_size(container_type: ContainerType, inner: Size<f32>) -> ContainerSize {
     ContainerSize {
         width: Some(inner.width),
@@ -548,38 +403,11 @@ fn container_size(container_type: ContainerType, inner: Size<f32>) -> ContainerS
     }
 }
 
-/// What a `container-type: size` box will come out at, computed at the entry
-/// of its own committing run — before one child style has been read.
 pub(crate) struct ContainerEstimate {
-    /// The box's own output, which is final: every axis is size-contained.
     pub(crate) output: LayoutOutput,
-    /// The content box descendants' `cqw`/`cqh` resolve against.
     pub(crate) container: ContainerSize,
 }
 
-/// The size a query container will supply, from its own style and its layout
-/// input alone.
-///
-/// **`container-type: size` only**, and that is the whole reason the
-/// interleave exists in the shape it does. css-contain-3 §2.1 gives such a box
-/// `contain: size`, so *both* of its axes are laid out as if it had no
-/// contents — which is exactly [`compute_skipped_contents_size`]'s job, and
-/// exactly the branch every algorithm takes for a contained axis
-/// (`contained_axes` + the same `clamp_axis(extent + inset, …)`). Its output
-/// is therefore not an estimate of the box's size so much as the same
-/// computation the algorithm is about to do, done one step earlier, and the
-/// box's contents cannot move it.
-///
-/// A `container-type: inline-size` box contains only its inline axis: its
-/// block size *is* a function of the contents, so there is no answer to give
-/// here before laying them out, and such a container goes on being settled by
-/// the loop in [`Document::layout`](crate::tree::document::Document::layout).
-///
-/// `None` for anything that is not a size query container, and for a box whose
-/// effective containment does not (yet) contain both axes — a state
-/// `container-type: size` cannot be in, checked because the cost is one bit
-/// test and the consequence of being wrong is laying a subtree out at a size
-/// its own contents moved.
 pub(crate) fn container_estimate<T>(
     view: &StyleView<'_, T>,
     input: LayoutInput,
@@ -597,13 +425,6 @@ pub(crate) fn container_estimate<T>(
     })
 }
 
-/// Stages an estimate as `id`'s container half, leaving what it last
-/// remembered alone.
-///
-/// The deferral's counterpart to [`record`]: the run that produced this
-/// estimate laid no contents out, so it has nothing to say about the
-/// css-sizing-4 half — that half answers for what the element last *rendered*
-/// at, and this run has not rendered it yet.
 pub(crate) fn note_container_estimate<T>(
     tree: &TreeArenas<T>,
     id: NodeId,
@@ -618,23 +439,6 @@ pub(crate) fn note_container_estimate<T>(
     );
 }
 
-/// The interleave's invariant, checked where the algorithm's own answer is:
-/// for a `container-type: size` box, what [`container_estimate`] said at the
-/// run's entry is what the run came out at.
-///
-/// A violation is not a correctness bug — the record below publishes the
-/// algorithm's size, and the loop in [`Document::layout`](crate::tree::document::Document::layout)
-/// re-cascades from it, which is the pre-interleave behaviour — so this is a
-/// `debug_assert`: it costs a release build nothing and tells a debug one that
-/// a page just paid the extra pass.
-///
-/// A Lynx text element is exempt, and so is a block container: the paragraph
-/// algorithms ([`crate::layout::text_block`], [`crate::layout::inline_flow`])
-/// implement no size containment at all, so a paragraph element that is also
-/// a size query container really does answer to its contents.
-/// [`container_estimate`] never fires for one either — the host leaves those
-/// display modes out — and both halves of that pair are the same recorded
-/// deviation.
 fn debug_assert_estimate_agrees<T>(
     view: &StyleView<'_, T>,
     input: LayoutInput,
@@ -707,7 +511,6 @@ mod tests {
         }
     }
 
-    /// Published only by `apply`, and then whole.
     fn publish(table: &mut CommittedBoxTable) -> Vec<NodeId> {
         let mut resized = Vec::new();
         table.apply(&mut resized);
@@ -734,20 +537,14 @@ mod tests {
         assert_eq!(publish(&mut table), vec![id]);
         assert_eq!(table.get(3), container(200.0, Some(100.0)));
 
-        // Re-recording the published size is not a move.
         table.note(id, container(200.0, Some(100.0)));
         assert_eq!(publish(&mut table), []);
 
-        // Two commits in one pass publish the last of them. Ending where
-        // they started still reports a move — once per record replayed —
-        // which costs one recascade of a subtree that did not need it and
-        // nothing else.
         table.note(id, container(50.0, Some(100.0)));
         table.note(id, container(200.0, Some(100.0)));
         assert_eq!(publish(&mut table), vec![id, id]);
         assert_eq!(table.get(3), container(200.0, Some(100.0)));
 
-        // Losing `container-type` is a move, and so is a freed slot.
         table.note(id, CommittedBox::default());
         assert_eq!(publish(&mut table), vec![id]);
         assert!(table.get(3).is_empty());
@@ -765,8 +562,6 @@ mod tests {
         assert_eq!(table.get(9), CommittedBox::default());
         assert!(table.get(9).is_empty());
 
-        // Recording nothing for an unreached key leaves the table empty, which
-        // is what a page with no `auto` keyword does on every commit.
         table.note(id(9), CommittedBox::default());
         assert_eq!(publish(&mut table), []);
         assert_eq!(table.get(9), CommittedBox::default());
@@ -808,8 +603,6 @@ mod tests {
         table.reset(77);
     }
 
-    /// The two halves are recorded together and published together, and
-    /// neither overwrites the other.
     #[test]
     fn a_record_is_staged_until_apply_and_then_carries_both_halves() {
         let mut table = CommittedBoxTable::default();
@@ -834,8 +627,6 @@ mod tests {
         assert_eq!(publish(&mut table), vec![id]);
         assert_eq!(table.get(5), both);
 
-        // Publishing one half never clobbers the other: a box that stops
-        // being a query container goes on remembering what it rendered at.
         let remembered_only = CommittedBox {
             remembered: both.remembered,
             container: ContainerSize::default(),

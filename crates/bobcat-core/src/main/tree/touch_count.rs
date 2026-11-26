@@ -28,29 +28,14 @@ use smallvec::SmallVec;
 use terminus::link::NodeId;
 use terminus::link::event::{ElementEvent, EventPhase};
 
-/// The touch event a finger going down dispatches.
 pub(super) const TOUCH_START: &str = "touchstart";
-/// The touch event a finger lifting dispatches.
 pub(super) const TOUCH_END: &str = "touchend";
-/// The touch event a touch the platform took back dispatches.
 pub(super) const TOUCH_CANCEL: &str = "touchcancel";
 
-/// The fingers down per element: a component's own table, which it feeds
-/// every touch event its element hears ([`Self::observe`]), asks
-/// ([`Self::is_down`]) and empties for an element that leaves the document
-/// or is freed ([`Self::forget`]). A component that keeps one names
-/// [`TOUCH_START`], [`TOUCH_END`] and [`TOUCH_CANCEL`] in its
-/// `observed_events`.
 #[derive(Debug, Default)]
 pub(super) struct TouchCount(RefCell<SmallVec<[(NodeId, u32); 2]>>);
 
 impl TouchCount {
-    /// Counts `event` at `element`, the element whose handler is running.
-    ///
-    /// Answers whether this delivery is the one the event counts at — a
-    /// touch event, outside the capture pass — so a component that acts on a
-    /// `touchend` acts on the same delivery, once. Any other event, and the
-    /// capture-pass delivery of a touch, change nothing and answer `false`.
     pub(super) fn observe(&self, element: NodeId, event: &ElementEvent<'_>) -> bool {
         let name = event.type_name();
         if event.phase() == EventPhase::Capturing
@@ -69,20 +54,15 @@ impl TouchCount {
                     table.swap_remove(index);
                 }
             }
-            // A lift with no finger counted down: one that went down before
-            // the element was connected, or before the count was forgotten.
             (_, None) => {}
         }
         true
     }
 
-    /// Whether at least one finger is down on `element` or inside it.
     pub(super) fn is_down(&self, element: NodeId) -> bool {
         self.0.borrow().iter().any(|&(held, _)| held == element)
     }
 
-    /// Drops `element`'s count: it left the document, where no finger can
-    /// lift on it, or was freed.
     pub(super) fn forget(&self, element: NodeId) {
         self.0.borrow_mut().retain(|(held, _)| *held != element);
     }
@@ -102,8 +82,6 @@ mod tests {
 
     const TAG: &str = "x-touch-probe";
 
-    /// A test component whose only state is a [`TouchCount`] table, which it
-    /// shares with the test, and which records each delivery it counted.
     struct Probe {
         touch_count: Rc<TouchCount>,
         counted: Rc<RefCell<Vec<&'static str>>>,
@@ -142,7 +120,6 @@ mod tests {
         inner: NodeId,
     }
 
-    /// A probe under the page, with a `view` inside it.
     fn fixture() -> Fixture {
         let mut document = document();
         let touches = Rc::new(TouchCount::default());
@@ -165,8 +142,6 @@ mod tests {
         }
     }
 
-    /// Dispatches `name` at `target` as the runtime dispatches a routed
-    /// touch event: bubbling and composed.
     fn touch(document: &mut LynxDocument, target: NodeId, name: &'static str) {
         document.dispatch_element_event(target, name, &EventDetail::None, true, true, 0.0);
     }
@@ -264,8 +239,6 @@ mod tests {
         touch(&mut document, inner, TOUCH_END);
         assert!(!touches.is_down(host), "the lift of a forgotten finger");
 
-        // A detached element still hears a touch dispatched inside it, and
-        // its free, which no disconnection precedes, forgets it.
         document.remove_element(host);
         touch(&mut document, inner, TOUCH_START);
         assert!(touches.is_down(host));

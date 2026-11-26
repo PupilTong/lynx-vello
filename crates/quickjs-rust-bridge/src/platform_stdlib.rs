@@ -14,23 +14,16 @@ fn c_byte(byte: c_int) -> u8 {
     byte
 }
 
-/// Terminates the process through Rust's standard library.
 #[unsafe(no_mangle)]
 pub extern "C" fn qjs_rust_abort() -> ! {
     std::process::abort()
 }
 
-/// Computes the inverse hyperbolic tangent through Rust's standard library.
 #[unsafe(no_mangle)]
 pub extern "C" fn qjs_rust_atanh(value: c_double) -> c_double {
     value.atanh()
 }
 
-/// Rounds to the nearest integer, with halfway cases rounded to even.
-///
-/// The active `QuickJS` caller supplies only finite values in `[0, 255]`, so
-/// Rust's saturating float-to-integer behavior outside the C `lrint` domain is
-/// deliberately irrelevant to this private ABI.
 #[unsafe(no_mangle)]
 #[allow(
     clippy::cast_possible_truncation,
@@ -40,8 +33,6 @@ pub extern "C" fn qjs_rust_lrint(value: c_double) -> c_long {
     value.round_ties_even() as c_long
 }
 
-/// Finds a byte in a bounded C memory region.
-///
 /// # Safety
 ///
 /// When `length` is non-zero, `pointer` must address `length` readable bytes.
@@ -68,8 +59,6 @@ pub unsafe extern "C" fn qjs_rust_memchr(
     unsafe { pointer.cast::<u8>().add(offset).cast_mut().cast() }
 }
 
-/// Finds the first matching byte in a NUL-terminated C string.
-///
 /// # Safety
 ///
 /// `string` must point to a valid NUL-terminated C string.
@@ -88,8 +77,6 @@ pub unsafe extern "C" fn qjs_rust_strchr(string: *const c_char, byte: c_int) -> 
     unsafe { string.add(offset).cast_mut() }
 }
 
-/// Compares two NUL-terminated C strings as sequences of unsigned bytes.
-///
 /// # Safety
 ///
 /// `left` and `right` must each point to a valid NUL-terminated C string.
@@ -107,8 +94,6 @@ pub unsafe extern "C" fn qjs_rust_strcmp(left: *const c_char, right: *const c_ch
     }
 }
 
-/// Finds the last matching byte in a NUL-terminated C string.
-///
 /// # Safety
 ///
 /// `string` must point to a valid NUL-terminated C string.

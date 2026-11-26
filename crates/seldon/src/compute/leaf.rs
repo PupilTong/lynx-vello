@@ -19,19 +19,6 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     style: &Style,
     natural_size: NaturalSize,
 ) -> LayoutOutput {
-    // css-contain-2: a size-contained element is sized as if it had no
-    // contents, and a replaced element's natural ratio *is* contents — it is
-    // the bitmap speaking, not the box. The measurement below is already
-    // substituted by `contain-intrinsic-size`, but the ratio reaches sizing by
-    // a second road: `resolve_leaf_sizing` fills a missing axis from it before
-    // containment is ever consulted, so a contained image with one authored
-    // axis would still derive the other from its pixels.
-    //
-    // One contained axis is enough to drop it: a ratio is a *coupling*, so
-    // whichever end it is read from, the bitmap is what sizes the box. Under
-    // `contain: inline-size` a natural ratio would carry an authored height
-    // straight into the width the containment exists to keep contents out of.
-    // An authored `aspect-ratio` is style rather than contents and survives.
     let contained = contained_axes(style.containment(), style);
     let natural_aspect_ratio = if contained.any() {
         None
@@ -49,8 +36,6 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
 }
 
 #[allow(clippy::too_many_lines)]
-/// `contained` is `style`'s size-contained axes, which the caller has
-/// already derived.
 pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
     input: LayoutInput,
     style: &Style,
@@ -104,8 +89,6 @@ where
         );
     }
 
-    // Read only by the measurement's available space, so resolved only once
-    // the box goes on to measure its contents.
     let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
     let mut measure_known_dimensions = Size::new(
         node_size
@@ -115,12 +98,6 @@ where
             .height
             .map(|height| (height - padding_border_size.height).max(0.0)),
     );
-    // css-contain-2 §3.1.3: a contained axis is sized as if the box had no
-    // contents, and the contents then lay out *into* the size that produces —
-    // under `contain: inline-size` a text leaf wraps at the substituted width
-    // rather than at the width it would have asked for. An axis that already
-    // has a size keeps it; the substitute only stands in for the measurement
-    // that would otherwise have settled the axis.
     if let Some(width) = contained.width() {
         measure_known_dimensions.width.get_or_insert(width);
     }
@@ -147,8 +124,6 @@ where
     );
 
     let measurement = if let Some(contents) = contained.all() {
-        // Both axes contained: nothing the contents could say is ever read,
-        // so they are never measured at all.
         LeafMetrics::new(contents)
     } else {
         let mut measurement = measure(LeafMeasureInput::new(
@@ -156,14 +131,10 @@ where
             available_space,
             input.goal,
         ));
-        // One axis contained: the contents did run — the other axis needs
-        // them — but they may not speak for this one.
         if let Some(width) = contained.width() {
             measurement.size.width = width;
         }
         if let Some(height) = contained.height() {
-            // A baseline is the block axis speaking for the box, which
-            // block-size containment is exactly what forbids.
             measurement.size.height = height;
             measurement.first_baseline = None;
             measurement.last_baseline = None;
@@ -202,7 +173,6 @@ where
     );
 
     let content_size = padding_box_end(size.zip_map(measured_border_box, f32::max), border);
-    // Content-box baselines become border-box ones, as the output reports them.
     let from_border_box =
         |baseline: Option<f32>| baseline.map(|baseline| content_origin.y + baseline);
     LayoutOutput::new(size, content_size)
@@ -232,15 +202,11 @@ where
     )
 }
 
-/// Content-box constraints consumed by seldon's closed leaf engines.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMeasureInput {
     pub known_dimensions: Size<Option<f32>>,
     pub available_space: Size<AvailableSpace>,
-    /// The goal of the pass that reached this leaf. A `Commit` payload is the
-    /// committing parent's claim about that pass's input, not a leaf-level
-    /// flag; leaf closures only ask [`LayoutGoal::commits`].
     pub goal: LayoutGoal,
 }
 
@@ -259,7 +225,6 @@ impl LeafMeasureInput {
     }
 }
 
-/// Decoded intrinsic data for replaced content.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct NaturalSize {
@@ -327,18 +292,11 @@ fn ratio_from_dimensions(width: f32, height: f32) -> Option<f32> {
     sanitize_ratio((height > 0.0).then_some(width / height))
 }
 
-/// Metrics produced by seldon's concrete content engines.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMetrics {
     pub size: Size<f32>,
-    /// The content's first baseline, a distance down from the content box's
-    /// top edge: a paragraph's first line box's baseline.
     pub first_baseline: Option<f32>,
-    /// The content's last baseline, in the same content-box coordinates as
-    /// `first_baseline`: a paragraph's last line box's baseline. The leaf
-    /// wrapper moves both onto the border box for
-    /// [`LayoutOutput::last_baseline`].
     pub last_baseline: Option<f32>,
 }
 
@@ -414,7 +372,6 @@ fn apply_measured_aspect_ratio(
     size
 }
 
-/// A preferred ratio together with the box whose width/height it relates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PreferredAspectRatio(f32);
 
@@ -443,8 +400,6 @@ impl PreferredAspectRatio {
     }
 }
 
-/// Resolved box-model and sizing inputs reused throughout one leaf-layout
-/// call; all optional dimensions are border-box sizes.
 struct LeafSizing {
     border: Edges<f32>,
     padding_border_size: Size<f32>,
@@ -991,14 +946,6 @@ mod tests {
         assert_eq!(intrinsic.content_size, Size::new(120.0, 70.0));
     }
 
-    /// css-contain-2: a size-contained box is sized as if it had no contents,
-    /// and a replaced element's natural ratio *is* contents.
-    ///
-    /// The ratio reaches sizing by a road the substituted measurement does not
-    /// cover — `resolve_leaf_sizing` fills a missing axis from it before
-    /// containment is consulted — so without the suppression a contained image
-    /// with one authored axis would still derive the other from its pixels.
-    /// This is the branch the Lynx `<image>` tag's `contain: size` depends on.
     #[test]
     fn size_containment_suppresses_the_natural_aspect_ratio() {
         let natural = NaturalSize::from_size(Size::new(40.0, 20.0));
@@ -1032,8 +979,6 @@ mod tests {
         );
     }
 
-    /// An author's own `aspect-ratio` is style, not contents, so containment
-    /// leaves it alone — only the natural ratio is suppressed.
     #[test]
     fn size_containment_leaves_an_authored_aspect_ratio_alone() {
         let style = BoxStyle {
@@ -1096,8 +1041,6 @@ mod tests {
         assert_eq!(output.first_baseline, Some(18.0));
         assert_eq!(output.last_baseline, Some(48.0));
 
-        // Block-size containment forbids the contents to speak for the block
-        // axis, which is what a baseline is; inline-size containment does not.
         for (containment, kept) in [(Contain::BLOCK_SIZE, false), (Contain::INLINE_SIZE, true)] {
             let contained = BoxStyle {
                 containment,

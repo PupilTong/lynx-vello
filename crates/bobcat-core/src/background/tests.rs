@@ -32,8 +32,6 @@ use crate::resource::{
 };
 
 impl WorkerHome {
-    /// Starts the thread as `LynxGroup::new` does, answering its clock
-    /// alignment, and hands back what the thread measured.
     pub(crate) fn start_aligned_for_test() -> (Self, Option<Alignment>) {
         let (clock, clock_end) = alignment_channel();
         let home = Self::start(clock_end).expect("the worker thread starts");
@@ -60,32 +58,20 @@ impl WorkerHome {
     }
 }
 
-/// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// One string in the shape the boundary carries it: a `HostValue`, because a
-/// primitive crosses as itself rather than inside an encoding.
 fn wire(data: &str) -> HostValue {
     HostValue::String(data.to_owned())
 }
 
-/// One realm's whole side of its workers, which is one channel each, the one
-/// they all report on. The view token does not own any worker's lifetime.
 struct View {
     messages: FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>,
     events: mpsc::UnboundedSender<WorkerEvent>,
     incoming: mpsc::UnboundedReceiver<WorkerEvent>,
-    /// This view's end signal, standing in for the one `create_lynx_view`
-    /// mints on the embedder's thread.
     token: CancellationToken,
     notices: mpsc::UnboundedSender<ViewNotice>,
     sources: mpsc::UnboundedReceiver<ViewNotice>,
-    /// The module requests [`Self::request_for`] read off `sources` on its
-    /// way to another one, in the order they arrived. [`Self::source`]
-    /// answers with these first.
     passed: VecDeque<(String, SourceCompletion)>,
-    /// This view's base URL, which every worker it constructs resolves its
-    /// synchronous loads against: `app:///` unless a test names another.
     base: Arc<Url>,
 }
 
@@ -111,7 +97,6 @@ impl View {
             .expect("the worker thread has something to report")
     }
 
-    /// What the worker said, for the tests that only care about that.
     fn message(&mut self) -> HostValue {
         match self.next().payload {
             WorkerPayload::Message(data) => data,
@@ -122,8 +107,6 @@ impl View {
         }
     }
 
-    /// The next module request a worker of this view made, in the order the
-    /// requests arrived.
     fn source(&mut self) -> (String, SourceCompletion) {
         if let Some(passed) = self.passed.pop_front() {
             return passed;
@@ -132,9 +115,6 @@ impl View {
             .expect("the worker requested a module")
     }
 
-    /// The request a worker of this view made for the module at `url`,
-    /// waited for. A request for anything else that arrives first stays
-    /// queued, in order, for [`Self::source`].
     fn request_for(&mut self, url: &str) -> SourceCompletion {
         if let Some(position) = self
             .passed
@@ -156,8 +136,6 @@ impl View {
         }
     }
 
-    /// The next module request to arrive on the channel itself, or `None`
-    /// once `deadline` has passed without one.
     fn arriving(&mut self, deadline: ClockInstant) -> Option<(String, SourceCompletion)> {
         match block_on_deadline(self.sources.recv(), deadline).flatten()? {
             ViewNotice::RequestSource {
@@ -168,28 +146,18 @@ impl View {
         }
     }
 
-    /// Whether no request of this view's workers is waiting to be read:
-    /// none arrived that a test has not taken.
     fn asked_for_nothing_more(&mut self) -> bool {
         self.passed.is_empty() && self.sources.try_recv().is_err()
     }
 }
 
-/// What the test knows of one worker it constructed: where its requests
-/// arrive, the URL its realm loads as its root module, and its own token.
 struct Constructed {
     view: usize,
     url: String,
-    /// A clone of the token the worker's `Start` carried, which the worker
-    /// cancels as it ends.
     token: CancellationToken,
 }
 
-/// One group's worker thread, with the test on both of its ends.
 struct Group {
-    /// The thread itself, waited for by its own drop — which is reached with
-    /// the goodbye already said, because [`Drop for Group`](Group::drop) drops
-    /// the test's own sender and every view before any field drops.
     home: WorkerHome,
     commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
     views: Vec<View>,
@@ -217,47 +185,27 @@ impl Group {
             .send(command);
     }
 
-    /// Names one worker on a view, without answering its script yet. Its
-    /// URL is made from its key, and is the name the realm loads its script
-    /// by as its root module. The worker asks its view's host for that
-    /// script itself once its boot job has run; [`Self::script_request`] is
-    /// where the test, as that host, takes the request, and [`Self::answer`]
-    /// answers it.
     fn construct(&mut self, view: usize, name: &str) -> WorkerKey {
         let url = format!("app:///requested/{}.js", self.next_key.get());
         self.construct_requesting(view, name, &url)
     }
 
-    /// The same, over a URL of the test's own.
     fn construct_requesting(&mut self, view: usize, name: &str, url: &str) -> WorkerKey {
         self.start_worker(view, name, url, Vec::new())
     }
 
-    /// Names one worker on a view over a URL that is an engine name: the
-    /// realm's own loader loads the name or refuses it, and the worker asks
-    /// its host for nothing.
     fn construct_engine_name(&mut self, view: usize, url: &str) -> WorkerKey {
         self.start_worker(view, "", url, Vec::new())
     }
 
-    /// Names one BTS on a view, started the way boot's
-    /// `new Worker("bobcat:bts")` starts one. Nothing is answered for it:
-    /// its root module is the registered `bobcat:bts`, which asks the host
-    /// for the entry an `initialize` message names once one arrives.
     fn construct_background(&mut self, view: usize) -> WorkerKey {
         self.construct_background_after(view, Vec::new())
     }
 
-    /// The same, with `posted` already waiting in the new worker's message
-    /// channel when its `Start` is sent, which is the earliest any message
-    /// can reach a worker.
     fn construct_background_after(&mut self, view: usize, posted: Vec<WorkerMessage>) -> WorkerKey {
         self.start_worker(view, "lynx-bg", BTS_MODULE_SPECIFIER, posted)
     }
 
-    /// Names one BTS on a view, initializes it with an entry at
-    /// `app:///bts<key>.js` and answers that entry with `source`, which
-    /// imports `bobcat:bts-runtime` for its `lynx`.
     fn background_running(&mut self, view: usize, source: &str) -> WorkerKey {
         let key = self.construct_background(view);
         let url = format!("app:///bts{}.js", key.get());
@@ -276,8 +224,6 @@ impl Group {
         key
     }
 
-    /// Emits the global event `name` with no arguments in the BTS `key`, as
-    /// the main thread's `sendGlobalEvent` does.
     fn global_event(&self, key: WorkerKey, name: &str) {
         self.send(
             key,
@@ -287,9 +233,6 @@ impl Group {
         );
     }
 
-    /// Sends one `Start` on a view, as `createWorker` builds it for `url`,
-    /// and keeps the sending end of the new worker's message channel, into
-    /// which `posted` is sent first.
     fn start_worker(
         &mut self,
         view: usize,
@@ -333,17 +276,11 @@ impl Group {
         key
     }
 
-    /// The request the worker `key` made of its view's host for its own
-    /// script, waited for: it leaves the worker thread in the worker's boot
-    /// job. What other workers of that view asked for meanwhile stays
-    /// queued for [`View::source`].
     fn script_request(&mut self, key: WorkerKey) -> SourceCompletion {
         let Constructed { view, url, .. } = &self.workers[&key];
         self.views[*view].request_for(url)
     }
 
-    /// The host's half: one script, answered from the response URL `url`,
-    /// which is the module's URL whatever it was requested by.
     fn answer(&mut self, key: WorkerKey, url: &str, source: &str) {
         self.script_request(key).complete(Ok(LoadedSource::Module {
             source: source.to_owned(),
@@ -351,8 +288,6 @@ impl Group {
         }));
     }
 
-    /// Waits for the worker `key` to have ended, which is its own token
-    /// having been cancelled: every way a worker ends cancels it.
     fn wait_for_end(&self, key: WorkerKey, what: &str) {
         let deadline = ClockInstant::now() + PATIENCE;
         while !self.workers[&key].token.is_cancelled() {
@@ -361,7 +296,6 @@ impl Group {
         }
     }
 
-    /// Constructs a worker on view 0 and answers its script with `source`.
     fn start(&mut self, source: &str) -> WorkerKey {
         let key = self.construct(0, "");
         self.answer(key, "app:///worker.js", source);
@@ -372,7 +306,6 @@ impl Group {
         self.send(key, WorkerMessage::post(wire(data)));
     }
 
-    /// Posts whatever the test built, for the structured-clone cases.
     fn post_value(&self, key: WorkerKey, data: HostValue) {
         self.send(key, WorkerMessage::post(data));
     }
@@ -387,12 +320,6 @@ impl Group {
         panic!("no view holds worker {key:?}");
     }
 
-    /// `Worker.terminate()`: the realm forgets the worker and tells it so.
-    ///
-    /// One more message follows the terminate on a channel that is still
-    /// open, and only then is the sender dropped. That is what makes the
-    /// silence afterwards mean `Terminate`: a worker that ended merely
-    /// because its channel closed would have delivered this one first.
     fn terminate(&mut self, key: WorkerKey) {
         for view in &mut self.views {
             if let Some(messages) = view.messages.remove(&key) {
@@ -404,24 +331,14 @@ impl Group {
         }
     }
 
-    /// A view is gone, and with it every sender it held.
     fn release(&mut self, view: usize) {
         self.views[view].messages.clear();
     }
 
-    /// The embedder released a view, and nothing else has happened yet: the
-    /// token is cancelled while every message sender is still open and
-    /// unsent-to, which is the order `LynxView::drop` does it in.
     fn cancel(&mut self, view: usize) {
         self.views[view].token.cancel();
     }
 
-    /// Waits for the released view's worker tasks to have ended, which is the
-    /// count of that view's event senders falling back to the test's own.
-    ///
-    /// The task and the thread's own reporter table are what hold the other
-    /// clones, so the count is the observation; silence alone could not say
-    /// it.
     fn wait_for_workers_to_end(&self, view: usize, patience: Duration, what: &str) {
         let deadline = ClockInstant::now() + patience;
         while self.views[view].events.strong_count() > 1 {
@@ -438,9 +355,6 @@ impl Group {
         self.views[view].message()
     }
 
-    /// Nothing more arrives, and a full round of the thread has passed to
-    /// prove it: a `close()` the thread has already served would have to
-    /// overtake this message to make the assertion pass by accident.
     fn quiet(&mut self) {
         let probe = self.construct(0, "");
         self.answer(
@@ -457,10 +371,6 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
-        // The group's own goodbye, which a test has no reason to spell: every
-        // realm is gone, so every worker's own channel is too. The home's own
-        // sender is the last one, and it closes — and the thread is waited for
-        // — as this struct's fields drop behind this body.
         self.views.clear();
         drop(self.commands.take());
     }
@@ -480,11 +390,6 @@ fn a_worker_answers_what_the_group_posts_and_carries_the_name_it_was_given() {
     assert_eq!(group.message(0), wire("counter:ping"));
 }
 
-/// A value that is not a primitive crosses as a structured clone, which is
-/// what lets it cross a thread at all: the group's worker realms write and
-/// read it with the engine's own serializer, so what one worker posts is what
-/// the next one receives — an `undefined`-valued key, `NaN`, a `Date`, a typed
-/// array, a `BigInt` and a cycle included.
 #[test]
 fn a_structured_value_survives_a_round_trip_through_two_worker_realms() {
     let mut group = Group::new();
@@ -524,9 +429,6 @@ postMessage(value);",
 fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
     let mut group = Group::new();
     let key = group.construct(0, "");
-    // Both posted before the script has been answered, and possibly before
-    // the worker has asked for it, which is the ordinary shape: a card
-    // constructs a worker and posts to it in the same task.
     group.post(key, "first");
     group.post(key, "second");
     group.answer(
@@ -539,10 +441,6 @@ fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
     assert_eq!(group.message(0), wire("second"));
 }
 
-/// `self.name` is set by `bobcat:worker` as it is evaluated, which is before
-/// any module the script imports after it is: the script imports it first.
-/// So a module the script imports statically reads the name at its own top
-/// level.
 #[test]
 fn a_module_the_script_imports_statically_reads_the_workers_name() {
     let mut group = Group::new();
@@ -562,17 +460,6 @@ fn a_module_the_script_imports_statically_reads_the_workers_name() {
     assert_eq!(group.message(0), wire("named"));
 }
 
-/// The script is completed under the name it was requested by, which is the
-/// name the realm's load of its root module waits on, and it runs as the
-/// module of the response URL: its `import.meta.url`. A fetcher that answered
-/// from another URL, as a redirect does, changes neither, and the request the
-/// realm's load raised is the only one: the script is asked for once, under
-/// the URL the worker was constructed with.
-///
-/// The echo is what the last assertion waits on. A second request would
-/// leave in the epilogue of the job that completed the script, which is
-/// after the script's own first message, and the echo is posted by a later
-/// job of the same worker.
 #[test]
 fn a_script_answered_from_another_url_runs_as_that_url_and_is_asked_for_once() {
     let mut group = Group::new();
@@ -595,11 +482,6 @@ fn a_script_answered_from_another_url_runs_as_that_url_and_is_asked_for_once() {
     );
 }
 
-/// Once the script has arrived, the consumer goes on waiting for the root
-/// module to finish: a script still waiting in an import leaves that module
-/// unfinished, and a post and a `Terminate` that arrive meanwhile are read as
-/// before it arrived — the post held, the `Terminate` ending the worker
-/// without delivering it.
 #[test]
 fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker() {
     let mut group = Group::new();
@@ -618,15 +500,9 @@ fn a_post_and_a_terminate_while_the_answered_script_still_imports_end_the_worker
         source: String::new(),
         url,
     }));
-    // Neither the post nor a failure: the worker ended without delivering
-    // what it held, and its thread did not trap.
     group.quiet();
 }
 
-/// A BTS is started over the registered module `bobcat:bts`, which imports
-/// the view's BTS entry only once the first `initialize` message arrives, by
-/// the URL that message names. The entry is asked for by this worker as any
-/// import is, and it runs under the name the view gave it.
 #[test]
 fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     let mut group = Group::new();
@@ -648,16 +524,6 @@ fn a_bts_imports_its_entry_through_bobcat_bts_once_initialized() {
     assert_eq!(group.message(0), wire("lynx-bg function app:///bts.js"));
 }
 
-/// The BTS's root module is `bobcat:bts`, as every worker's root module is
-/// the module at its URL. The realm's own loader loads that registered
-/// module, so the root module finishes inside the job that opens the realm,
-/// before any job that delivers a post, and the worker holds what is posted
-/// until then in any case. So an `initialize` already waiting in the channel
-/// when the BTS's `Start` is sent, the earliest any message can arrive, is
-/// delivered only once `bobcat:bts` has imported the worker's global scope
-/// and handed `bobcat:bts-runtime` the function it starts the BTS with: the
-/// BTS asks for its entry and runs it. Delivered any earlier, it would reach
-/// a realm with no listener for it.
 #[test]
 fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
     let mut group = Group::new();
@@ -676,10 +542,6 @@ fn an_initialize_posted_before_the_bts_starts_waits_for_bobcat_bts() {
     assert_eq!(group.message(0), wire("entry ran"));
 }
 
-/// A BTS's `SystemInfo` and `NativeModules` come from the `initialize`
-/// message, not from its `Start`: `bobcat:bts-runtime` fills both in before
-/// it imports the entry that message names, so the entry's own top level
-/// already reads them, through each name the runtime gives them.
 #[test]
 fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
     let mut group = Group::new();
@@ -722,14 +584,6 @@ fn a_bts_reads_its_screen_and_native_modules_from_initialize() {
     );
 }
 
-/// A script its host could not fetch fails the load of the worker's root
-/// module, as a module it imports that could not be fetched does: the load
-/// rejects in the realm, which is one `Errored`, named as a module load and
-/// carrying the fetcher's reason, and the worker stays. That is what
-/// `new Worker("bobcat:nope")` leaves too. Nothing ran in its realm, so what
-/// is posted to it is dropped and reports nothing, both the post the worker
-/// held while the request was outstanding and one sent after the failure.
-/// It ends when it is terminated, and its end reports nothing.
 #[test]
 fn a_script_that_cannot_be_fetched_is_reported_once_and_leaves_a_terminable_worker() {
     let mut group = Group::new();
@@ -755,8 +609,6 @@ fn a_script_that_cannot_be_fetched_is_reported_once_and_leaves_a_terminable_work
         error.message
     );
     group.post(doomed, "dropped");
-    // A full round of the thread later, the worker has reported nothing
-    // more, its end included, and has not asked for its script again.
     group.quiet();
     assert!(
         group.views[2].incoming.try_recv().is_err(),
@@ -776,16 +628,11 @@ fn a_script_that_cannot_be_fetched_is_reported_once_and_leaves_a_terminable_work
         group.views[2].incoming.try_recv().is_err(),
         "its end reported nothing"
     );
-    // The runtime is untouched: the next worker over the same thread runs.
     let key =
         group.start("import 'bobcat:worker'; import 'bobcat:timers'; postMessage(\"alive\");");
     assert_eq!(group.next(0).key, key);
 }
 
-/// A script answered with something that is not a script is a module that
-/// could not be loaded, whichever module it is: the same one `Errored`, named
-/// as a module load and saying what the fetcher returned, and the same worker
-/// left running until it is terminated.
 #[test]
 fn a_script_answered_with_a_stylesheet_is_reported_once_and_leaves_the_worker_running() {
     let mut group = Group::new();
@@ -829,9 +676,6 @@ fn a_script_answered_with_a_stylesheet_is_reported_once_and_leaves_the_worker_ru
     );
 }
 
-/// A script answered from a response URL that cannot name a module, one
-/// containing a NUL, is a module that could not be loaded too: one `Errored`
-/// named as a module load, and the worker stays.
 #[test]
 fn a_script_answered_from_a_url_containing_nul_is_reported_once_and_leaves_the_worker_running() {
     let mut group = Group::new();
@@ -865,16 +709,6 @@ fn a_script_answered_from_a_url_containing_nul_is_reported_once_and_leaves_the_w
     group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
 }
 
-/// A worker terminated before its boot job has run opens no realm, and so
-/// asks its host for nothing: the request for a worker's script leaves in
-/// that job, not at construction.
-///
-/// The boot job is held back by a sibling's job parked on a synchronous
-/// load, which runs no other job. The new worker's message consumer is a
-/// task, so it reads the `Terminate` during that wait and ends the worker.
-/// Once the load is answered the parked job returns and the boot job runs,
-/// for a worker that has ended. The worker's task returning is what shows
-/// that job has run: the job that reclaims the worker is queued behind it.
 #[test]
 fn a_worker_terminated_before_its_boot_job_asks_its_host_for_nothing() {
     let mut group = Group::new();
@@ -906,11 +740,6 @@ postMessage('resumed');",
     );
 }
 
-/// A script the fetcher answered with something other than a script is
-/// reported with this text and nothing else: the context of a module load,
-/// the `TypeError` a realm rejects a failed completion with, the module's
-/// name, and what the fetcher returned for which URL. That the worker is
-/// left running is the stylesheet test's to pin, above.
 #[test]
 fn a_script_answered_with_a_font_is_reported_naming_the_module_and_the_answer() {
     let mut group = Group::new();
@@ -930,9 +759,6 @@ fn a_script_answered_with_a_font_is_reported_naming_the_module_and_the_answer() 
     );
 }
 
-/// An import the fetcher answered with something other than a script is
-/// rejected with the module's name and what the fetcher returned for it, and
-/// nothing else.
 #[test]
 fn an_import_answered_with_a_stylesheet_is_rejected_naming_the_answer() {
     let mut group = Group::new();
@@ -951,13 +777,6 @@ fn an_import_answered_with_a_stylesheet_is_rejected_naming_the_answer() {
     );
 }
 
-/// A worker whose URL is an engine name is loaded by its realm's own loader
-/// alone: the load of such a root module raises no request, so the worker
-/// asks its host for nothing and nothing waits for an answer. A registered
-/// built-in is the root module, and links and runs. A name nothing registered
-/// is refused in the realm with a `ReferenceError`, which the worker reports
-/// as something it threw, and it goes on running like a worker whose script
-/// threw.
 #[test]
 fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
     let mut group = Group::new();
@@ -974,8 +793,6 @@ fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
         "{}",
         error.message
     );
-    // A full round of the thread later, no worker has reported anything
-    // more, its end included, and none asked its host for anything.
     group.quiet();
     for view in [1, 2] {
         assert!(
@@ -987,8 +804,6 @@ fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
             "the worker asked its host for nothing"
         );
     }
-    // Each is still running until it is told to stop: its task still holds
-    // its view's event sender, and lets go of it once terminated.
     for (view, key) in [(1, registered), (2, refused)] {
         assert!(
             group.views[view].events.strong_count() > 1,
@@ -999,21 +814,12 @@ fn a_worker_named_by_an_engine_url_is_loaded_by_its_realm_without_the_host() {
     }
 }
 
-/// A trap in the thread's own loop ends every worker on it at once, and no
-/// worker's own owner is left to say so: the thread tells the creator of each
-/// live one `Failed` and sets the flag `bobcat-main` reads before a `Start`.
-/// A worker that ended before the trap is not told again, even while its task
-/// has not been joined yet. The thread is over, so the group's drop still
-/// joins it.
 #[test]
 fn a_trapped_worker_thread_fails_every_live_worker() {
     let mut group = Group::new();
     group.views.push(View::new());
-    // One worker per view, each still waiting for its script.
     let first = group.construct(0, "");
     let second = group.construct(1, "");
-    // This one's script job waits on a load until the test answers it, and
-    // no other job runs meanwhile.
     let parked = group.construct(2, "");
     group.answer(
         parked,
@@ -1023,11 +829,6 @@ fn a_trapped_worker_thread_fails_every_live_worker() {
 createRequire(import.meta.url)('./held.cjs');",
     );
     let (url, held) = group.views[2].source();
-    // Constructed and ended during that wait, by a `Terminate` its message
-    // consumer reads while its boot job is still queued behind the waiting
-    // one. Its task is not joined before the trap: the job that reclaims its
-    // realm is queued there too. Its token being cancelled is what shows it
-    // has ended.
     let ended = group.construct(1, "");
     group.terminate(ended);
     group.wait_for_end(ended, "the terminated worker ended");
@@ -1049,9 +850,6 @@ createRequire(import.meta.url)('./held.cjs');",
         );
     }
     assert!(group.home.trapped().load(Ordering::Acquire));
-    // Exactly one each, and none for the worker that had ended: once the
-    // thread has dropped every clone of a view's sender, nothing more can
-    // arrive on it.
     for view in [0, 1, 2] {
         group.wait_for_workers_to_end(
             view,
@@ -1080,12 +878,6 @@ throw new Error(\"boom\");",
     assert_eq!(group.message(0), wire("still here"));
 }
 
-/// A worker's root module is its script, with nothing written around it: a
-/// throw at the script's top level is reported at the script's own URL and
-/// at the line it is on in the script, the import on its first line counted
-/// as the script's own. The job that completes the script is what evaluates
-/// it, so the throw is reported as a module load, like that of any module a
-/// completion evaluates.
 #[test]
 fn a_throw_at_a_scripts_top_level_is_reported_at_its_own_url_and_line() {
     let mut group = Group::new();
@@ -1110,18 +902,6 @@ fn a_throw_at_a_scripts_top_level_is_reported_at_its_own_url_and_line() {
     assert_eq!(location.line, Some(3));
 }
 
-/// The engine installs no global scope in a worker realm: a script that
-/// wants `onmessage` imports `bobcat:worker`, and one that imports nothing
-/// has nothing a message could be delivered to. What is posted to it is
-/// dropped, and nothing is reported for it: no `Errored`, no `Failed`. It is
-/// still a worker, running until it is terminated, and then it ends.
-///
-/// The script's one statement is an `import()` nothing awaits, whose request
-/// is how the test knows the script has finished: the worker's epilogue
-/// reads the root module's load, and so marks it finished, before it sends
-/// that request. The post below reaches the realm after that either way —
-/// at once, or held until the message consumer has seen the load finish —
-/// and is dropped there.
 #[test]
 fn a_worker_whose_script_imports_no_global_scope_drops_what_is_posted() {
     let mut group = Group::new();
@@ -1148,13 +928,6 @@ fn a_worker_whose_script_imports_no_global_scope_drops_what_is_posted() {
     );
 }
 
-/// A message is delivered once `bobcat:worker` has *run* in the realm, not
-/// once the realm has the module. A script whose module graph fails to load
-/// leaves `bobcat:worker` compiled into the realm but never linked and never
-/// run, and a module in that state has no namespace that can be read. So a
-/// post to that worker is dropped, as a post to one whose script never
-/// imported the module is; the failed load is the only thing reported, and
-/// it is reported once.
 #[test]
 fn a_worker_whose_graph_failed_before_its_scope_ran_drops_what_is_posted() {
     let mut group = Group::new();
@@ -1191,12 +964,6 @@ fn a_worker_whose_graph_failed_before_its_scope_ran_drops_what_is_posted() {
     group.wait_for_workers_to_end(2, PATIENCE, "the terminated worker ended");
 }
 
-/// A root module whose graph fails in a job after its own completion — the
-/// job that answers a module the script imports — is reported once, by that
-/// job, named by what it was doing. The epilogue's read of the root module's
-/// load after it only learns that the load has settled. Two ways a graph
-/// fails there: a dependency the host could not load, and a dependency that
-/// throws as it is evaluated.
 #[test]
 fn a_root_whose_dependency_fails_is_reported_once() {
     let mut group = Group::new();
@@ -1253,12 +1020,6 @@ fn a_root_whose_dependency_fails_is_reported_once() {
     group.wait_for_workers_to_end(3, PATIENCE, "the terminated worker ended");
 }
 
-/// The engine writes no global scope into a worker realm, so a script that
-/// uses `postMessage` without importing `bobcat:worker` has no such binding:
-/// its first line throws a `ReferenceError`, reported at the script's own URL
-/// and line as something the worker threw. The worker goes on running, with
-/// nothing in it that receives a post, until it is terminated, and its end
-/// reports nothing.
 #[test]
 fn a_script_that_uses_the_global_scope_without_importing_it_throws_a_reference_error() {
     let mut group = Group::new();
@@ -1323,24 +1084,14 @@ fn a_terminated_worker_is_never_heard_from_again() {
     );
     group.post(key, "one");
     assert_eq!(group.message(0), wire("one"));
-    // The terminate is followed by a post the worker would echo if it were
-    // still running, so the silence below is this worker obeying rather than
-    // its channel having closed under it.
     group.terminate(key);
     group.quiet();
 }
 
-/// A `Terminate` read while the request for the worker's script is
-/// outstanding ends the worker, and the end cancels that request, because
-/// the request carries the worker's own token: the host reads it as
-/// cancelled, and an answer the host completes it with afterwards reaches
-/// nothing. The script never runs and nothing is reported.
 #[test]
 fn terminating_a_worker_whose_script_is_still_in_flight_leaves_nothing_behind() {
     let mut group = Group::new();
     let key = group.construct(0, "");
-    // The worker's boot job has run by the time its request is here, so its
-    // realm's root module is waiting for this answer.
     let completion = group.script_request(key);
     assert!(
         !completion.is_cancelled(),
@@ -1374,8 +1125,6 @@ fn releasing_a_view_ends_the_workers_it_created() {
 
     group.wait_for_workers_to_end(0, PATIENCE, "the released view's worker task never ended");
 
-    // Another view's worker still answers, which is what makes the silence
-    // above a release rather than a stopped thread.
     let survivor = group.construct(1, "");
     group.answer(
         survivor,
@@ -1386,7 +1135,6 @@ fn releasing_a_view_ends_the_workers_it_created() {
     assert_eq!(event.key, survivor);
 }
 
-/// The MTS handle, not the view token, owns a worker still loading its script.
 #[test]
 fn cancelling_a_view_does_not_end_a_worker_whose_mts_handle_is_alive() {
     let mut group = Group::new();
@@ -1418,10 +1166,6 @@ const handle = setInterval(() => {
     assert_eq!(group.message(0), HostValue::Number(3.0));
 }
 
-/// `lynx.setSharedData` stores on the runtime's shared object, which every
-/// BTS of the group holds by reference: another view reads the object that
-/// was set, sees a mutation made after the set, and can call a function
-/// another view stored.
 #[test]
 fn a_bts_reads_what_another_views_bts_set_as_itself() {
     let mut group = Group::new();
@@ -1462,12 +1206,6 @@ fn a_bts_reads_what_another_views_bts_set_as_itself() {
     assert_eq!(group.message(1), wire(r#"[{"n":2},true,"from view 0"]"#));
 }
 
-/// The observer list is on the shared object too, so a set in one view
-/// calls every observer of the group inside the set, in registration order:
-/// the other view's observer marks the change before the setter's own
-/// observer, registered after it, reads it. That observer's `postMessage`
-/// reaches its own view, although it runs in the setter's task. Once it is
-/// removed, the next set calls the setter's alone.
 #[test]
 fn a_set_calls_every_observer_of_the_group_inside_the_set() {
     let mut group = Group::new();
@@ -1521,10 +1259,6 @@ fn a_set_calls_every_observer_of_the_group_inside_the_set() {
     assert_eq!(group.message(0), wire(r#"own {"theme":{"count":2}}"#));
 }
 
-/// The shared object goes with the group's last worker realm, as native's
-/// shared JS context goes with the group's last view and web-core's group
-/// worker with its last card: a BTS started after every earlier one has
-/// ended reads nothing of theirs.
 #[test]
 fn the_shared_data_goes_with_the_groups_last_worker() {
     let mut group = Group::new();
@@ -1552,11 +1286,6 @@ fn the_shared_data_goes_with_the_groups_last_worker() {
 #[test]
 fn two_views_over_one_url_each_run_their_own_bytes() {
     let mut group = Group::new();
-    // Every view has its own `ResourceFetcher`, so one URL can resolve to two
-    // different scripts in one group. Each worker must run the bytes its own
-    // view answered with — which nothing has to arrange, because a worker's
-    // script is completed into its realm rather than registered on the
-    // runtime under a name a second view could reach.
     let first = group.construct_requesting(0, "", "app:///shared.js");
     let second = group.construct_requesting(1, "", "app:///shared.js");
     group.answer(
@@ -1631,10 +1360,6 @@ fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_fini
     assert!(group.views[0].asked_for_nothing_more());
 }
 
-/// `require` reaches the same host as an import and resolves against the same
-/// response URLs, from the job that completes the script of a worker on the
-/// thread every worker of the group shares: no JavaScript of that thread's
-/// runs while a load is out.
 #[test]
 fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     let mut group = Group::new();
@@ -1673,11 +1398,6 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     );
 }
 
-/// The compiled-bundle loader over the same synchronous load: a bundle path is
-/// asked for under the container URL the bundle was registered with, and the
-/// exports of its body are what `requireModule` answers. Nothing is registered
-/// with the realm but that URL, so a path a container carried and one it did
-/// not are one mechanism.
 #[test]
 fn a_bts_bundle_requires_a_chunk_under_its_container_url() {
     let mut group = Group::new();
@@ -1701,16 +1421,6 @@ fn a_bts_bundle_requires_a_chunk_under_its_container_url() {
     );
 }
 
-/// A body `PageSource` registered is an **ES module**, and the same
-/// `requireModule` loads it: `require(esm)` compiles it, links its
-/// `BTS_CHUNK_PREAMBLE` import of this realm's own runtime, evaluates it and
-/// answers its namespace, whose default export is what native's host would
-/// have kept as that script's completion value. An `{init}` there is what
-/// starts the card, with the entry published for the call.
-///
-/// The `require` runs from inside the entry module's own evaluation, which is
-/// where a page's boot script calls it from, and the body's import of
-/// `bobcat:bts-runtime` links to the instance this realm already has.
 #[test]
 fn a_registered_bundle_body_answers_through_its_modules_default_export() {
     let mut group = Group::new();
@@ -1739,10 +1449,6 @@ fn a_registered_bundle_body_answers_through_its_modules_default_export() {
     );
 }
 
-/// A synchronous load in a worker resolves against its view's base URL, not
-/// against the worker's own script URL: the base a view's MTS realm resolves
-/// its loads against too, and the one its fetcher registered a lazy
-/// container's sections under.
 #[test]
 fn a_worker_sync_load_resolves_against_the_views_base_not_its_own_url() {
     let mut group = Group::new();
@@ -1781,10 +1487,6 @@ fn a_require_nobody_answers_throws_in_the_worker_and_leaves_it_usable() {
     assert_eq!(wire_json(&group.views[0].message()), r#"[true,"queued"]"#);
 }
 
-/// The worker runtime registers every built-in, and a worker realm's host
-/// modules decide which of them link: the MTS modules import members only an
-/// MTS realm's `bobcat-internal:host` has, so they fail at link, and a name
-/// no runtime registered fails to load. None of the three reaches the host.
 #[test]
 fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
     let mut group = Group::new();
@@ -1818,10 +1520,6 @@ fn a_worker_links_only_the_built_ins_its_host_modules_have_members_for() {
     assert!(group.views[0].asked_for_nothing_more());
 }
 
-/// The members a worker realm's three host modules export, which is what
-/// decides the built-ins it can link. Written down so that a change to any
-/// set is a change to these lists. A namespace lists its exports sorted by
-/// name; `testFuture` is the test build's own producer.
 #[test]
 fn a_worker_realm_declares_these_host_members() {
     let mut group = Group::new();
@@ -1921,8 +1619,6 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
             .into(),
         url: "app:///rejected.js".into(),
     }));
-    // Reported once, by the timer entry the rejection happened in, and then
-    // the held post is delivered: the failure does not poison delivery.
     let WorkerPayload::Errored(error) = group.next(0).payload else {
         panic!("TLA rejection must be reported")
     };
@@ -1931,17 +1627,6 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
     group.quiet();
 }
 
-/// One `Future` in a worker realm, read both ways over the real boundary:
-/// this worker's own token, its own job queue, and the settle task its own
-/// epilogue spawns rather than a view's.
-///
-/// Nothing in production registers a future yet, so the operation is the
-/// host's test-only producer — `testFuture(delayMs, value, rejects)`, which
-/// is why this test is in the crate rather than beside it. `wait(20)` runs
-/// out its deadline against a 200 ms operation, and the `await` that follows
-/// is the *same* Future, which is what says the timeout cancelled nothing.
-/// Past that conversion the Future is a Promise, and a third read of it is
-/// refused.
 #[test]
 fn one_worker_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
     let mut group = Group::new();

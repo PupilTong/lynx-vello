@@ -101,12 +101,8 @@ use vant::image::{DecodedImage, ImageDescriptor, frame_bytes};
 use crate::image_header::ImageHeader;
 use crate::mime::ImageFormat;
 
-/// How many frames after the one a playhead plays from are kept decoded
-/// while it is drawn.
 pub(crate) const AHEAD: usize = 2;
 
-/// What decodes one frame: the encoded bytes and what they are, the frame,
-/// and the size to decode it at.
 #[derive(Clone, Debug)]
 pub(crate) struct FrameDecode {
     pub(crate) bytes: Bytes,
@@ -116,22 +112,16 @@ pub(crate) struct FrameDecode {
     pub(crate) max: (u32, u32),
 }
 
-/// Work the store asks for, started once the painter thread lets go of the
-/// state.
 #[derive(Debug)]
 pub(crate) enum Job {
-    /// Decode a frame other than the first.
     Frame {
         source: Arc<str>,
         decode: FrameDecode,
     },
-    /// Decode the first frame again: a refinement or a restore the
-    /// residency planned.
     Refine {
         source: Arc<str>,
         refinement: Refinement,
     },
-    /// Wake the host at `due`, `wait` from now.
     Timer {
         source: Arc<str>,
         due: ClockInstant,
@@ -139,14 +129,10 @@ pub(crate) enum Job {
     },
 }
 
-/// One playhead over a source's frames and what the store keeps for it.
 #[derive(Debug)]
 struct Head {
     playhead: Playhead,
-    /// The frame shown has nothing to draw it from: decoded before any frame
-    /// ahead.
     wanted: bool,
-    /// The instant a timer is armed for.
     armed: Option<ClockInstant>,
 }
 
@@ -159,8 +145,6 @@ impl Head {
         }
     }
 
-    /// Whether the playhead is in the last loop of a finite count, so it
-    /// will not wrap to the first frame again.
     fn in_last_loop(&self) -> bool {
         match self.playhead.policy().loops {
             Loops::Infinite => false,
@@ -168,11 +152,6 @@ impl Head {
         }
     }
 
-    /// The frames this playhead holds while drawn, in the order they are
-    /// decoded: the frame shown when `shown` asks for it, the one it plays
-    /// from when that is another (after a stop), then up to [`AHEAD`] after
-    /// that, none past the last frame of the last loop and none once it has
-    /// finished or a frame failed.
     fn window(&self, count: usize, failed: bool, shown: bool) -> impl Iterator<Item = usize> {
         let frame = self.playhead.frame();
         let current = self.playhead.position();
@@ -192,8 +171,6 @@ impl Head {
         )
     }
 
-    /// Advances the playhead to `at`, onto a frame that is held: the first
-    /// frame when the residency holds it, another when `held` does.
     fn step<F: Clone>(
         &mut self,
         timeline: &Timeline,
@@ -215,7 +192,6 @@ impl Head {
         step
     }
 
-    /// Arms the timer for the next frame, when it is due after `at`.
     fn arm(
         &mut self,
         timeline: &Timeline,
@@ -242,74 +218,50 @@ impl Head {
         }
     }
 
-    /// Stops the timer and the want of a playhead no longer drawn.
     fn undrawn(&mut self) {
         self.wanted = false;
         self.armed = None;
     }
 }
 
-/// An `Id` picture playing an animated source under a playhead of its own.
 #[derive(Debug)]
 struct Owned<F> {
     head: Head,
-    /// Where the frame the playhead shows is published.
     slot: PictureSlot<F>,
-    /// The playhead's step count the slot's newest frame shows; `None`
-    /// before the first publish, and after the painter said it has nothing
-    /// to draw the picture from.
     published: Option<u64>,
-    /// The view that asked for the playback, which hears its loops.
     reports: ImageReports,
     view: ViewKey,
-    /// How large the frame last drew it.
     hint: ImageSizeHint,
 }
 
 impl<F> Owned<F> {
-    /// Whether the frame the playhead shows still has to be published.
     fn unpublished(&self) -> bool {
         self.published != Some(self.head.playhead.steps())
     }
 }
 
-/// One animated source.
 #[derive(Debug)]
 struct Animation<F> {
     timeline: Timeline,
-    /// The URL picture's playhead.
     shared: Head,
-    /// The `Id` pictures playing the source.
     pictures: FxHashMap<PictureId, Owned<F>>,
     bytes: Bytes,
     format: ImageFormat,
     header: Option<ImageHeader>,
-    /// Per frame, its pixels while held. Frame 0's are the residency's, so
-    /// its slot stays empty.
     held: Vec<Option<PictureFrame<F>>>,
-    /// Per frame, the bitmap it was last decoded as, held or not.
     decoded: Vec<Option<ImageDescriptor>>,
-    /// The frame whose decode is in flight.
     decoding: Option<usize>,
-    /// The size frames decode at: frame 0's, as last known.
     size: (u32, u32),
-    /// How large the frame last drew the URL picture.
     hint: ImageSizeHint,
-    /// A frame failed to decode: no playhead moves any more.
     failed: bool,
-    /// The frame the URL playhead shows failed to decode: there is nothing
-    /// to draw it from.
     lost: bool,
 }
 
 impl<F: Clone> Animation<F> {
-    /// Whether every frame fits in the URL playhead's window, so every frame
-    /// is held while it is drawn.
     fn held_whole(&self) -> bool {
         self.timeline.len() <= AHEAD + 1
     }
 
-    /// Whether any playhead of the source is drawn.
     fn is_drawn(&self) -> bool {
         self.shared.playhead.is_drawn()
             || self
@@ -318,10 +270,6 @@ impl<F: Clone> Animation<F> {
                 .any(|owned| owned.head.playhead.is_drawn())
     }
 
-    /// The frames held for every drawn playhead, with whether each is
-    /// decoded when not held: the URL playhead's frame shown is decoded again
-    /// only when wanted, since the painter otherwise draws it from its
-    /// upload.
     fn windows(&self) -> Vec<(usize, bool)> {
         let count = self.timeline.len();
         let mut frames = Vec::new();
@@ -347,7 +295,6 @@ impl<F: Clone> Animation<F> {
         frames
     }
 
-    /// Whether a drawn `Id` picture's window holds `frame`.
     fn pictures_hold(&self, frame: usize) -> bool {
         let count = self.timeline.len();
         self.pictures.values().any(|owned| {
@@ -363,8 +310,6 @@ impl<F: Clone> Animation<F> {
         })
     }
 
-    /// Drops the pixels of every frame outside the drawn playheads' windows:
-    /// all of them when none is drawn.
     fn trim(&mut self) {
         let keep: FxHashSet<usize> = self.windows().into_iter().map(|(frame, _)| frame).collect();
         for (frame, held) in self.held.iter_mut().enumerate() {
@@ -374,8 +319,6 @@ impl<F: Clone> Animation<F> {
         }
     }
 
-    /// What the URL playhead's frame shown draws as, without its generation
-    /// and next change; `None` when there is nothing to draw it from.
     fn shown(
         &self,
         residency: &mut ImageResidency<F>,
@@ -413,10 +356,6 @@ impl<F: Clone> Animation<F> {
         }
     }
 
-    /// Publishes the frame `picture`'s playhead shows into its slot when it
-    /// has not been yet and its pixels are at hand: the residency's for the
-    /// first frame, the store's for another. Answers whether the host is
-    /// owed a wake.
     fn publish(
         &mut self,
         picture: PictureId,
@@ -467,8 +406,6 @@ impl<F: Clone> Animation<F> {
         wake
     }
 
-    /// Plans what the drawn playheads need: the timer for each one's next
-    /// frame, and the next decode or restore their windows lack.
     fn plan(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -505,11 +442,6 @@ impl<F: Clone> Animation<F> {
                 continue;
             }
             if frame == 0 {
-                // The first frame is the residency's, and comes back as a
-                // restore. The URL playhead's frame shown is drawn from its
-                // upload or wanted through the residency, so only a frame
-                // ahead of it, or one an `Id` picture still has to publish,
-                // asks for it here.
                 if (shared_frame != Some(0) || self.pictures_hold(0))
                     && !residency.is_resident(source)
                     && let Some(refinement) = residency.want(source, hint)
@@ -539,30 +471,21 @@ impl<F: Clone> Animation<F> {
     }
 }
 
-/// What one view last drew of the animated pictures.
 #[derive(Debug, Default)]
 struct Drawn {
     sources: Vec<Arc<str>>,
     pictures: Vec<PictureId>,
 }
 
-/// Every animated source of one scope, the `Id` pictures playing them, the
-/// drawn set each view last reported of them, and the origin their
-/// playheads' time is measured from.
 #[derive(Debug)]
 pub(crate) struct Animations<F> {
     entries: FxHashMap<Arc<str>, Animation<F>>,
-    /// The source each `Id` picture plays.
     pictures: FxHashMap<PictureId, Arc<str>>,
-    /// Each view's drawn animated pictures: a playhead runs while the union
-    /// includes its picture.
     views: FxHashMap<ViewKey, Drawn>,
     origin: ClockInstant,
 }
 
 impl<F: Clone> Animations<F> {
-    /// No animated source yet; every playhead's time is measured from
-    /// `origin`.
     pub(crate) fn new(origin: ClockInstant) -> Self {
         Self {
             entries: FxHashMap::default(),
@@ -572,24 +495,18 @@ impl<F: Clone> Animations<F> {
         }
     }
 
-    /// The playheads' time at `now`.
     fn at(&self, now: ClockInstant) -> Duration {
         now.saturating_duration_since(self.origin)
     }
 
-    /// Whether no source of the scope animates.
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Whether `source` is an animated source: the one constant check a
-    /// still image pays.
     pub(crate) fn contains(&self, source: &str) -> bool {
         !self.entries.is_empty() && self.entries.contains_key(source)
     }
 
-    /// The sources the `Id` pictures of `pictures` play, for the residency's
-    /// working set: their first frames are the residency's.
     pub(crate) fn sources_of(&self, pictures: &[PictureId]) -> Vec<Arc<str>> {
         pictures
             .iter()
@@ -597,9 +514,6 @@ impl<F: Clone> Animations<F> {
             .collect()
     }
 
-    /// `source` loaded as an animation of `frames`, frame 0 decoded at
-    /// `size`, from `bytes` of `format`: its URL playhead starts on frame 0,
-    /// under the count the file states, not drawn yet.
     pub(crate) fn insert(
         &mut self,
         source: Arc<str>,
@@ -630,12 +544,6 @@ impl<F: Clone> Animations<F> {
         );
     }
 
-    /// What a frame drawing `source` at `hint` at `now` draws: the frame its
-    /// URL playhead is on once advanced to `now`, at the playhead's
-    /// generation, with the instant its next frame is due while it runs. A
-    /// describe is a draw, so it starts the playhead if it was not running.
-    /// Plans the decodes, the restore and the timer the source needs into
-    /// `jobs`.
     pub(crate) fn describe(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -672,14 +580,6 @@ impl<F: Clone> Animations<F> {
         Some(image)
     }
 
-    /// What a frame drawing the `Id` picture `picture` at `hint` at `now`
-    /// draws: its slot's newest frame, once its playhead has advanced to
-    /// `now` and the frame it then shows has been published, with the
-    /// instant its next frame is due while it runs. A describe is a draw, as
-    /// for a URL. Each loop the step completed is reported to the view that
-    /// asked for the playback. Answers the description, `None` while nothing
-    /// has been published, and whether the host is owed a wake: a report was
-    /// made, which a view's turn delivers.
     pub(crate) fn describe_picture(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -725,9 +625,6 @@ impl<F: Clone> Animations<F> {
             }
             wake = true;
         }
-        // The painter describing the picture takes the frame published here
-        // in the same adoption, so the publish owes the host no turn; the
-        // reports above do, for the view's turn to drain them.
         let _ = animation.publish(picture, residency, &source, origin, jobs);
         if !matches!(step, Step::Stay | Step::Waiting) {
             animation.trim();
@@ -747,10 +644,6 @@ impl<F: Clone> Animations<F> {
         (image, wake)
     }
 
-    /// A frame draws `source` and has nothing to draw it from. The first
-    /// frame is the residency's to restore, so `false` is answered for it;
-    /// another is decoded again here, before any frame ahead. Answers
-    /// whether `source` is animated and on a frame of its own.
     pub(crate) fn want(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -772,10 +665,6 @@ impl<F: Clone> Animations<F> {
         true
     }
 
-    /// A frame draws the `Id` picture `picture` and its slot had no frame to
-    /// take and the painter no texture: the frame its playhead shows is
-    /// published again as soon as its pixels are at hand, decoded or
-    /// restored first when they are not.
     pub(crate) fn want_picture(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -799,11 +688,6 @@ impl<F: Clone> Animations<F> {
         animation.plan(residency, &source, origin, at, jobs);
     }
 
-    /// The painter's rasterizer holds the uploads of `sources`' frames
-    /// shown. An animated source on a frame of its own drops that frame's
-    /// pixels, unless every frame is held for as long as it is drawn or an
-    /// `Id` picture still has to publish it; answers the sources whose
-    /// bitmap the residency drops.
     pub(crate) fn release(&mut self, sources: &[Arc<str>]) -> Vec<Arc<str>> {
         if self.entries.is_empty() {
             return sources.to_vec();
@@ -829,11 +713,6 @@ impl<F: Clone> Animations<F> {
         residency
     }
 
-    /// Records `view`'s drawn set, at `now`: the URL playhead of each of
-    /// `sources` and the playhead of each of `pictures` run while some
-    /// view's set includes them, and stop when none does; a source none of
-    /// whose playheads is drawn drops its frames. Answers the encoded bytes
-    /// of every source that stopped, whose frames the decoder may forget.
     pub(crate) fn retain(
         &mut self,
         view: ViewKey,
@@ -860,8 +739,6 @@ impl<F: Clone> Animations<F> {
         self.restate(now)
     }
 
-    /// Forgets `view`'s drawn set and ends the `Id` pictures it asked to
-    /// play, at `now`; answers as [`Self::retain`].
     pub(crate) fn release_view(&mut self, view: ViewKey, now: ClockInstant) -> Vec<Bytes> {
         let ended: Vec<PictureId> = self
             .entries
@@ -884,9 +761,6 @@ impl<F: Clone> Animations<F> {
         stopped
     }
 
-    /// Moves every playhead to whether the union of the views' sets
-    /// includes its picture; answers the bytes of the sources none of whose
-    /// playheads is drawn any more.
     fn restate(&mut self, now: ClockInstant) -> Vec<Bytes> {
         let at = self.at(now);
         let mut stopped = Vec::new();
@@ -938,12 +812,6 @@ impl<F: Clone> Animations<F> {
         stopped
     }
 
-    /// The `Id` picture `picture` shows the frames of `source` under a
-    /// playhead of its own that starts on the first frame under `policy`,
-    /// reporting its loops to `reports`, for `view`. Its first frame is
-    /// published at once when the residency holds it; otherwise it is
-    /// restored. A source this store does not animate plays nothing: the
-    /// picture stays without frames. Answers whether the host is owed a wake.
     #[expect(
         clippy::too_many_arguments,
         reason = "the request's three parts, its view's two, and the store's three"
@@ -998,10 +866,6 @@ impl<F: Clone> Animations<F> {
         wake
     }
 
-    /// Applies `control` to `picture`'s playhead at `now`. Answers whether
-    /// the picture exists: the host then takes a turn, so the picture is
-    /// described again, publishes the frame it now shows and arms the timer
-    /// for its next one.
     pub(crate) fn control(
         &mut self,
         picture: PictureId,
@@ -1027,8 +891,6 @@ impl<F: Clone> Animations<F> {
         true
     }
 
-    /// `picture` is gone: its playhead and slot go. Answers the source's
-    /// encoded bytes when that left none of its playheads drawn.
     pub(crate) fn end(&mut self, picture: PictureId) -> Option<Bytes> {
         let source = self.pictures.remove(&picture)?;
         for drawn in self.views.values_mut() {
@@ -1041,8 +903,6 @@ impl<F: Clone> Animations<F> {
         (was_drawn && !animation.is_drawn()).then(|| animation.bytes.clone())
     }
 
-    /// Plans what every drawn source needs at `now`: after completions,
-    /// which free a source's decode for the next frame its windows lack.
     pub(crate) fn plan(
         &mut self,
         residency: &mut ImageResidency<F>,
@@ -1055,8 +915,6 @@ impl<F: Clone> Animations<F> {
         }
     }
 
-    /// Frame `index` of `source` decoded as `bitmap`: held while it is in
-    /// the window of a drawn playhead, and dropped otherwise.
     pub(crate) fn decoded(&mut self, source: &str, index: usize, bitmap: DecodedImage<F>) {
         let Some(animation) = self.entries.get_mut(source) else {
             return;
@@ -1081,14 +939,6 @@ impl<F: Clone> Animations<F> {
         }
     }
 
-    /// Frame `index` of `source` failed to decode at `now`: every playhead
-    /// of it stops on the frame it is on, the URL playhead paused so it
-    /// names no next change and the painter stops asking, and when that is
-    /// the frame that failed, there is nothing to draw it from. An `Id`
-    /// picture's playhead keeps the state its owner's controls gave it and
-    /// does not move again. Nothing retries it, as nothing retries a failed
-    /// restore. Answers the encoded bytes, whose frames the decoder may
-    /// forget.
     pub(crate) fn decode_failed(
         &mut self,
         source: &str,
@@ -1112,7 +962,6 @@ impl<F: Clone> Animations<F> {
         Some(animation.bytes.clone())
     }
 
-    /// The timer armed for `due` on `source` fired.
     pub(crate) fn fired(&mut self, source: &str, due: ClockInstant) {
         if let Some(animation) = self.entries.get_mut(source) {
             for head in std::iter::once(&mut animation.shared)
@@ -1125,8 +974,6 @@ impl<F: Clone> Animations<F> {
         }
     }
 
-    /// Bytes of decoded frames held, frame 0 aside: those are the
-    /// residency's. A platform frame counts four bytes a pixel.
     pub(crate) fn held_bytes(&self) -> usize {
         self.entries
             .values()
@@ -1141,8 +988,6 @@ impl<F: Clone> Animations<F> {
             .sum()
     }
 
-    /// Takes the newest frame of `picture`'s slot, if one is there that has
-    /// not been taken.
     pub(crate) fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<F>> {
         let source = self.pictures.get(&picture)?;
         self.entries
@@ -1153,8 +998,6 @@ impl<F: Clone> Animations<F> {
             .take()
     }
 
-    /// The frame `source`'s URL playhead is on, the loops it has completed
-    /// and whether it is drawn, for tests.
     #[cfg(test)]
     pub(crate) fn position(&self, source: &str) -> Option<(usize, u32, bool)> {
         self.entries.get(source).map(|animation| {
@@ -1166,8 +1009,6 @@ impl<F: Clone> Animations<F> {
         })
     }
 
-    /// The frame `picture`'s playhead shows, the one it plays from, the
-    /// loops it has completed and whether it is drawn, for tests.
     #[cfg(test)]
     pub(crate) fn picture_position(&self, picture: PictureId) -> Option<(usize, usize, u32, bool)> {
         let source = self.pictures.get(&picture)?;
@@ -1181,7 +1022,6 @@ impl<F: Clone> Animations<F> {
         ))
     }
 
-    /// The frames `source` holds, for tests.
     #[cfg(test)]
     pub(crate) fn held_frames(&self, source: &str) -> Vec<usize> {
         self.entries.get(source).map_or_else(Vec::new, |animation| {

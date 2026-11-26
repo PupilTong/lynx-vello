@@ -28,74 +28,35 @@ use crate::view::{
     ViewSources,
 };
 
-/// The compiled `ReactLynx` cards, built by `pnpm --filter
-/// reactlynx-test-fixtures build`: one module for every test in the crate
-/// that boots one, since the registry embeds every bundle.
 #[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
 pub(crate) mod fixtures;
 
-/// How long a test waits on work that should already be happening.
-///
-/// A hang detector rather than a performance assertion: the first document a
-/// test process builds pays for the platform's font registry, which is
-/// seconds on some machines and nothing on others.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// The URL every [`TestViewSpec`] view names its entry by, and the one
-/// module URL an [`InlineFetcher`] answers with its entry script.
 const ENTRY: &str = "app:///main.js";
 
-/// The base URL every [`TestViewSpec`] view is built with, which its
-/// [`InlineFetcher`] resolves a stylesheet or a plain fetch against.
 const BASE: &str = "app:///";
 
-/// The URL a [`TestViewSpec`] view given a BTS entry names it by, which its
-/// [`InlineFetcher`] answers with that script.
 const BACKGROUND_ENTRY: &str = "app:///background.js";
 
-/// One author stylesheet, in whichever of the two forms a host has it, or
-/// one the view lists and the host does not have.
 pub(crate) enum TestSheet {
     Text(String),
     Preparsed(Arc<PreparsedStyleSheet>),
-    /// Answered with the not-found error an unknown URL gets.
     Missing,
 }
 
-/// A host whose whole resource system is the strings it was built with.
 pub(crate) struct InlineFetcher {
-    /// The script served for [`ENTRY`]; every other module is missing. A
-    /// card's MTS body as `bobcat-source` registers it, with
-    /// `MTS_CHUNK_PREAMBLE` in front, since the engine adds nothing to it.
     entry: String,
-    /// The script served for [`BACKGROUND_ENTRY`], when the view names one:
-    /// a plain module, served as it was given.
     background: Option<String>,
-    /// Every other module this host serves, by URL, each served as it was
-    /// given: what a compiled card's BTS asks for by bundle path.
     modules: FxHashMap<String, String>,
     sheets: FxHashMap<String, TestSheet>,
-    /// The faces this host serves an `@font-face` `src` from, by URL. A URL
-    /// that is not in here fails, which is how a test drives the fall-through
-    /// to a rule's next source.
     fonts: FxHashMap<String, terminus::link::FontBlob>,
-    /// The absolute URLs a [`SourceRequest::Fetch`] succeeds for; every
-    /// other plain fetch fails.
     fetchable: FxHashSet<String>,
-    /// The absolute URLs a plain fetch has succeeded for, which
-    /// [`ResourceFetcher::fetch_probe`] answers from when this host has one.
     fetched: Option<Arc<Mutex<FxHashSet<String>>>>,
-    /// Whether this host answers [`ResourceFetcher::style_sheet_probe`]: from
-    /// the sheets it holds, by absolute URL. Without one, every
-    /// `hasStyleSheet` is `true`.
     probes_style_sheets: bool,
-    /// Every [`SourceRequest::Fetch`] this host was asked, in order: its URL
-    /// as the realm named it and whether it was timed.
     pub(crate) fetch_requests: Mutex<Vec<(String, bool)>>,
 }
 
-/// `url` resolved against [`BASE`], as a fetcher resolves the stylesheets
-/// and plain fetches it is handed; one that does not resolve stays as it is.
 fn resolved(url: &str) -> String {
     url::Url::parse(BASE)
         .and_then(|base| base.join(url))
@@ -113,10 +74,8 @@ impl terminus::link::FrameImages for InlineFetcher {
         None
     }
 
-    /// Nothing is ever answered, so nothing is ever wanted.
     fn want(&self, _picture: &terminus::link::PictureKey, _hint: terminus::link::ImageSizeHint) {}
 
-    /// Nothing is held, so there is no working set to narrow.
     fn retain(&self, _frame: &[terminus::link::PictureKey]) {}
 }
 
@@ -167,8 +126,6 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            // This double serves no module but the two entries and the ones it
-            // was given, and no plain fetch but the ones it was told succeed.
             SourceRequest::Module(url) => Err(missing(&url)),
         };
         completion.complete(answer);
@@ -206,10 +163,6 @@ impl InlineFetcher {
             .push((url.to_owned(), timed));
     }
 
-    /// What a timed fetch of `url` reports, as a fetcher with a container
-    /// installer would: the bytes it stands in for are the modules served
-    /// under the URL, which arrived now and were installed in no time.
-    /// Nothing for an untimed one.
     fn fetch_outcome(&self, url: &str, timed: bool) -> FetchOutcome {
         if !timed {
             return FetchOutcome::default();
@@ -242,28 +195,15 @@ fn missing(locator: &str) -> crate::LynxViewError {
     .into()
 }
 
-/// A view the crate's own tests drive, over the host above.
 pub(crate) type TestView = LynxView<Rc<InlineFetcher>>;
 
-/// A view and the painter watching it, which is what most of this crate's
-/// tests want: the two halves an embedder owns, driven as one.
-///
-/// The split itself — attaching, detaching, one painter across two views — is
-/// asserted from outside, in `tests/painter.rs`, over the public API. What a
-/// test in here is usually about is a document, and for that the pair is one
-/// thing.
 pub(crate) struct TestEngine {
     pub(crate) view: TestView,
     pub(crate) painter: Painter,
-    /// What a turn [`wait_for_boot`] took reported after boot's
-    /// `ScriptFinished`: the test's, not the wait's, so the next
-    /// [`Self::pump`] hands it back first.
     after_boot: Vec<EngineEvent>,
 }
 
 impl TestEngine {
-    /// One host turn: the painter's, then the view's — the order every
-    /// embedder takes them in.
     pub(crate) fn pump(&mut self) -> Vec<EngineEvent> {
         self.painter
             .pump()
@@ -302,45 +242,30 @@ impl TestEngine {
     }
 }
 
-/// Where a test's painter draws, if it draws anywhere.
 enum TestTarget {
-    /// Nowhere at all, which is what a test about routing, events or timers
-    /// wants: no GPU device is built for it.
     None,
-    /// A texture of its own, for a test that reads pixels back.
     Offscreen,
 }
 
-/// One view to build: its entry, its author sheets in listed order, and
-/// where — if anywhere — its painter draws.
 pub(crate) struct TestViewSpec {
     entry: String,
     background: Option<String>,
     modules: Vec<(String, String)>,
     config: crate::main::tree::PageConfig,
     sheets: Vec<(String, TestSheet)>,
-    /// Sheets the host holds and the view does not list: what an adoption
-    /// asks for by URL.
     served_sheets: Vec<(String, TestSheet)>,
     fonts: Vec<(String, terminus::link::FontBlob)>,
-    /// A face the view registers at construction and its family, the page's
-    /// default font.
     default_font: Option<(String, terminus::link::FontBlob)>,
     locale: String,
     fetchable: FxHashSet<String>,
     probes_fetches: bool,
     probes_style_sheets: bool,
-    /// The [`EchoModule`]s the view is built with: each one's name, and the
-    /// ES module it supplies, if any.
     echo_modules: Vec<(&'static str, Option<crate::native_module::NativeModuleEsm>)>,
     target: TestTarget,
     width: f32,
     height: f32,
 }
 
-/// A native module that answers every call through its first function
-/// argument, with the call's own argument list: what a test needs to see
-/// that a realm's call reached the embedder and its answer came back.
 struct EchoModule(&'static str, Option<crate::native_module::NativeModuleEsm>);
 
 impl crate::native_module::NativeModule for EchoModule {
@@ -364,12 +289,6 @@ impl crate::native_module::NativeModule for EchoModule {
 }
 
 impl TestViewSpec {
-    /// A phone-shaped view whose painter has nowhere to draw, which is what a
-    /// test about routing, events or timers wants.
-    ///
-    /// `entry` is a card's MTS body, which the host serves the way
-    /// `bobcat-source` registers a card's root: `MTS_CHUNK_PREAMBLE`, then the
-    /// body on the preamble's own line.
     pub(crate) fn new(entry: &str) -> Self {
         Self {
             entry: entry.to_owned(),
@@ -391,41 +310,27 @@ impl TestViewSpec {
         }
     }
 
-    /// A BTS entry, which the view names at [`BACKGROUND_ENTRY`] and the host
-    /// serves as this module source — a plain module, which imports what it
-    /// uses from `bobcat:bts-runtime` itself. A view built without one has a
-    /// BTS that imports nothing.
     pub(crate) fn with_background_entry(mut self, source: &str) -> Self {
         self.background = Some(source.to_owned());
         self
     }
 
-    /// One more module this host serves at `url`, as it is given: a body a
-    /// compiled card's BTS loads by bundle path, beside the base URL
-    /// `app:///`.
     pub(crate) fn with_module(mut self, url: &str, source: &str) -> Self {
         self.modules.push((url.to_owned(), source.to_owned()));
         self
     }
 
-    /// The page configuration the view is built with, as a bundle's own
-    /// switches give it.
     pub(crate) const fn with_config(mut self, config: crate::main::tree::PageConfig) -> Self {
         self.config = config;
         self
     }
 
-    /// One face this host serves, at the URL an `@font-face` `src` names.
     pub(crate) fn with_font(mut self, url: &str, bytes: &'static [u8]) -> Self {
         self.fonts
             .push((url.to_owned(), terminus::link::FontBlob::from_static(bytes)));
         self
     }
 
-    /// A face the view registers at construction, as an embedder's
-    /// `ViewSources::fonts` does, and `family`, its name, as the page's
-    /// default font: text no author rule gives a family shapes with it, and
-    /// not with whatever the machine has.
     pub(crate) fn with_default_font(mut self, family: &str, bytes: &'static [u8]) -> Self {
         self.default_font = Some((
             family.to_owned(),
@@ -434,56 +339,37 @@ impl TestViewSpec {
         self
     }
 
-    /// The language of the view's text, as an embedder's
-    /// `ViewSources::locale` names it.
     pub(crate) fn with_locale(mut self, tag: &str) -> Self {
         tag.clone_into(&mut self.locale);
         self
     }
 
-    /// A URL a plain fetch (`fetchResource`) succeeds for, resolved against
-    /// the view's base. What it registers is whatever else this host was
-    /// given: [`Self::with_module`] and [`Self::serving_style_sheet`] stand
-    /// in for a container installer.
     pub(crate) fn with_fetchable(mut self, url: &str) -> Self {
         self.fetchable.insert(resolved(url));
         self
     }
 
-    /// One sheet this host holds at `url` as CSS text, which the view does
-    /// not list: an adoption by that URL is what mounts it.
     pub(crate) fn serving_style_sheet(mut self, url: &str, css: &str) -> Self {
         self.served_sheets
             .push((resolved(url), TestSheet::Text(css.to_owned())));
         self
     }
 
-    /// Answers [`ResourceFetcher::fetch_probe`] from the plain fetches this
-    /// host has completed, as a caching resource system does: a repeat
-    /// `fetchResource` of one settles at once, so a `frame`'s card for it
-    /// starts in a microtask rather than a later job.
     pub(crate) fn with_fetch_probe(mut self) -> Self {
         self.probes_fetches = true;
         self
     }
 
-    /// Answers `hasStyleSheet` from the sheets this host holds, listed and
-    /// served alike, rather than `true` for every URL.
     pub(crate) fn with_style_sheet_probe(mut self) -> Self {
         self.probes_style_sheets = true;
         self
     }
 
-    /// A native module the view is built with, named `name`, with one
-    /// method, `echo`, which answers through its first function argument
-    /// with the call's argument list as JSON text.
     pub(crate) fn with_echo_module(mut self, name: &'static str) -> Self {
         self.echo_modules.push((name, None));
         self
     }
 
-    /// [`Self::with_echo_module`], the module also supplying the ES module
-    /// `source` compiles to, as `lynx:<name>`.
     pub(crate) fn with_echo_esm_module(
         mut self,
         name: &'static str,
@@ -502,14 +388,12 @@ impl TestViewSpec {
         self
     }
 
-    /// One author sheet as CSS text, mounted before the entry runs.
     pub(crate) fn with_style_sheet(mut self, css: &str) -> Self {
         let url = format!("app:///sheet-{}.css", self.sheets.len());
         self.sheets.push((url, TestSheet::Text(css.to_owned())));
         self
     }
 
-    /// One author sheet the host decoded itself, as a bundle embedder's does.
     pub(crate) fn with_preparsed_style_sheet(mut self, sheet: PreparsedStyleSheet) -> Self {
         let url = format!("app:///sheet-{}.css", self.sheets.len());
         self.sheets
@@ -517,17 +401,12 @@ impl TestViewSpec {
         self
     }
 
-    /// One author sheet the view lists and this host has nothing for, which
-    /// fails the view's startup: boot's own `__FlushElementTree` throws the
-    /// not-found error the host answers it with.
     pub(crate) fn with_missing_style_sheet(mut self) -> Self {
         let url = format!("app:///sheet-{}.css", self.sheets.len());
         self.sheets.push((url, TestSheet::Missing));
         self
     }
 
-    /// A painter that renders into a texture of its own, for a test that
-    /// reads pixels back.
     pub(crate) fn offscreen(mut self, width: f32, height: f32) -> Self {
         self.target = TestTarget::Offscreen;
         self.width = width;
@@ -535,14 +414,11 @@ impl TestViewSpec {
         self
     }
 
-    /// Builds the view alone, without waiting for it to boot — for a test
-    /// about a view nobody is painting.
     pub(crate) fn create_view<R: EventRequester>(self, requester: Arc<R>) -> TestView {
         let (view, _) = self.build(requester, false);
         view
     }
 
-    /// Builds the view and its painter without waiting for boot.
     pub(crate) fn create<R: EventRequester>(self, requester: Arc<R>) -> TestEngine {
         let (view, painter) = self.build(requester, true);
         TestEngine {
@@ -642,7 +518,6 @@ impl TestViewSpec {
         })
     }
 
-    /// Builds the view and its painter and waits for the entry to finish.
     pub(crate) fn boot(self) -> TestEngine {
         let mut engine = self.create(Arc::new(NoWakeup));
         wait_for_boot(&mut engine);
@@ -650,15 +525,6 @@ impl TestViewSpec {
     }
 }
 
-/// Drives ordinary turns until the entry finishes.
-///
-/// What the view reported before `ScriptFinished` is boot's, and this wait
-/// takes it. What the same turn reported after it is not: one turn hands
-/// over everything since the last, so a host that took no turn for a while —
-/// a test thread the OS left unscheduled under parallel load — gets boot's
-/// end and whatever the view did next in one batch, a background thread's
-/// first answers included. That rest goes back to the engine, which the next
-/// [`TestEngine::pump`] returns first.
 pub(crate) fn wait_for_boot(engine: &mut TestEngine) {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -684,11 +550,6 @@ pub(crate) fn wait_for_boot(engine: &mut TestEngine) {
     }
 }
 
-/// Runs `future` to completion on this thread.
-///
-/// Building a draw target is the only asynchronous part of the public API, so
-/// every test needs an executor for exactly that and then drives the view and
-/// its painter synchronously, as an embedder does.
 pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -696,33 +557,18 @@ pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
-/// Where an [`IntersectionWatcher`] records the entries it was delivered.
 pub(crate) type WatcherLog = Arc<Mutex<Vec<String>>>;
 
-/// Everything `log` holds, leaving it empty.
 pub(crate) fn take_watched(log: &WatcherLog) -> Vec<String> {
     std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
 }
 
-/// An engine component that observes intersection, for the tests that pin
-/// when its entries are delivered: a `terminus::link::CustomElement` defined by the test
-/// itself, through a document probe, rather than a component the engine
-/// ships. Its observers are created with a `terminus::link::ElementHandler` naming it,
-/// which calls its `intersections_changed`.
-///
-/// It records every entry it hears as `observer:target:intersecting:ratio`,
-/// naming the target by its `id` attribute, and does nothing on connection —
-/// the test creates its observers from the probe that created the element.
 pub(crate) struct IntersectionWatcher {
     pub(crate) log: WatcherLog,
-    /// Whether the next delivery also writes to the tree: set, it writes an
-    /// inline `opacity` on the watcher itself and clears the flag, so one
-    /// delivery mutates and the rest do not.
     pub(crate) mutate: Arc<AtomicBool>,
 }
 
 impl IntersectionWatcher {
-    /// A watcher that records into `log`, with [`Self::mutate`] clear.
     pub(crate) fn new(log: &WatcherLog) -> Self {
         Self {
             log: Arc::clone(log),
@@ -763,21 +609,6 @@ impl terminus::link::CustomElement<()> for IntersectionWatcher {
 mod tests {
     use super::*;
 
-    /// A host that took no turn while boot finished and the view went on gets
-    /// both in its next turn, and [`wait_for_boot`] takes boot's end alone:
-    /// what came after it reaches the test's next [`TestEngine::pump`].
-    ///
-    /// A test thread the OS leaves unscheduled under parallel load takes that
-    /// turn, with a card's background thread answering behind
-    /// `ScriptFinished`. The wait used to return from the middle of it and
-    /// drop the rest.
-    ///
-    /// The log is armed from a timer the entry armed: an epilogue runs the
-    /// timers that are due before it reports the boot it finished, so the
-    /// outer one may run ahead of `ScriptFinished`, and the one it arms comes
-    /// due in a later epilogue. No turn is taken until that one has run — a
-    /// probe and the attribute it sets are what say so — so the first turn
-    /// the wait takes reports boot's end and then the log.
     #[test]
     fn what_the_turn_that_finished_boot_reported_after_it_reaches_the_next_pump() {
         let mut engine = TestViewSpec::new(

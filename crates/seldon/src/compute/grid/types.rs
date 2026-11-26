@@ -9,9 +9,6 @@ pub(super) use crate::compute::util::Axis;
 use crate::compute::util::{BaselineSet, ItemGeometry, ItemKey};
 use crate::geometry::Size;
 
-/// One placed in-flow item with resolved box values and local contribution
-/// caches.  Contributions are invalidated only for the bounded column/row
-/// reruns required by Grid sizing.
 #[derive(Debug, Clone)]
 pub(super) struct GridItem<N> {
     pub(super) geometry: ItemGeometry,
@@ -28,12 +25,7 @@ pub(super) struct GridItem<N> {
     pub(super) minimum_contribution: Size<Option<f32>>,
     pub(super) min_content_contribution: Size<Option<f32>>,
     pub(super) max_content_contribution: Size<Option<f32>>,
-    /// For a `baseline` item, its measured first baseline, from its border
-    /// box's top edge: what its baseline shim is computed from.
     pub(super) measured_baseline: Option<f32>,
-    /// For a `last baseline` item, the distance from its measured last
-    /// baseline down to its border box's bottom edge: what its baseline shim
-    /// is computed from.
     pub(super) measured_last_descent: Option<f32>,
     pub(super) baseline_shim: f32,
 }
@@ -49,9 +41,6 @@ impl<N> GridItem<N> {
         usize::try_from(span.end - span.start).unwrap_or(1).max(1)
     }
 
-    /// Whether the item's size in `axis` is its area's: it stretches there
-    /// (css-align-3 §6.1 `stretch`) with no preferred size and no `auto`
-    /// margin to take the space instead.
     #[inline]
     pub(super) fn stretches(&self, axis: Axis) -> bool {
         let alignment = match axis {
@@ -64,11 +53,6 @@ impl<N> GridItem<N> {
             && !self.margin_auto.end(axis)
     }
 
-    /// The row's baseline-sharing group the item joins (css-align-3 §9.2),
-    /// if any: its `align-self` is `baseline` or `last baseline` and neither
-    /// block-axis margin is `auto`, which would take the alignment instead.
-    /// Baselines are horizontal in this engine, so `justify-self` baseline
-    /// values share nothing and take their fallback alignment.
     #[inline]
     pub(super) fn baseline_participation(&self) -> Option<BaselineSet> {
         if self.margin_auto.start(Axis::Vertical) || self.margin_auto.end(Axis::Vertical) {
@@ -92,11 +76,6 @@ impl<N> GridItem<N> {
     }
 }
 
-/// A track's minimum sizing function as §12.4 initializes it: a
-/// `<length-percentage>` that resolves is `Fixed` (its value is the track's
-/// initial base size), one that does not — a percentage with no basis — is
-/// `Auto`. `minmax()` takes no `<flex>` minimum by grammar, and a lone
-/// `<flex>` or `fit-content()` has an `auto` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum MinKind {
     Fixed,
@@ -107,18 +86,12 @@ pub(super) enum MinKind {
 }
 
 impl MinKind {
-    /// An intrinsic sizing function (§12.4): anything but a fixed one.
     #[inline]
     pub(super) fn is_intrinsic(self) -> bool {
         self != Self::Fixed
     }
 }
 
-/// A track's maximum sizing function as §12.4 initializes it, a percentage
-/// with no basis being `Auto`. `Fixed` carries the resolved maximum floored
-/// by the resolved fixed minimum (zero for a non-fixed one) and by zero: the
-/// track's share of the fixed maximum that clamps an automatic minimum
-/// (§6.6), computed whether or not the track is collapsed.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(super) enum MaxKind {
     Fixed(f32),
@@ -130,15 +103,12 @@ pub(super) enum MaxKind {
 }
 
 impl MaxKind {
-    /// An intrinsic sizing function (§12.4): neither fixed nor flexible.
     #[inline]
     pub(super) fn is_intrinsic(self) -> bool {
         matches!(self, Self::Auto | Self::MinContent | Self::MaxContent)
     }
 }
 
-/// The sizing-function kinds and used values of one concrete explicit or
-/// implicit track.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Track {
     pub(super) min: MinKind,
@@ -153,15 +123,12 @@ pub(super) struct Track {
 }
 
 impl Track {
-    /// A flexible track (§12.4): a `<flex>` maximum on a track that is not
-    /// collapsed.
     #[inline]
     pub(super) fn is_flexible(&self) -> bool {
         !self.collapsed && self.max == MaxKind::Flex
     }
 }
 
-/// Concrete tracks and the used gap in one physical axis.
 #[derive(Debug, Default)]
 pub(super) struct TrackSet {
     pub(super) tracks: Vec<Track>,

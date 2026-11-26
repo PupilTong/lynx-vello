@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// A least-recently-used cache keyed by source string, budgeted in bytes.
 pub struct MemoryCache<V> {
     entries: FxHashMap<Arc<str>, Entry<V>>,
     pinned: FxHashSet<Arc<str>>,
@@ -34,8 +33,6 @@ struct Entry<V> {
     last_used: u64,
 }
 
-/// What an insert displaced: the previous value under the same key, and the
-/// entries evicted to make room.
 #[derive(Debug)]
 pub struct Insertion<V> {
     pub replaced: Option<V>,
@@ -71,22 +68,16 @@ impl<V> MemoryCache<V> {
         self.budget
     }
 
-    /// Changes the budget, evicting whatever no longer fits.
     pub fn set_budget(&mut self, budget_bytes: usize) -> Vec<(Arc<str>, V)> {
         self.budget = budget_bytes;
         self.trim()
     }
 
-    /// Whether an entry of `bytes` would fit inside the budget on its own.
     #[must_use]
     pub fn fits(&self, bytes: usize) -> bool {
         bytes <= self.budget
     }
 
-    /// Inserts or replaces `key`, then trims. The entry just inserted is
-    /// never evicted by its own insert: the caller asked for it to be
-    /// resident now, and an oversized one is the caller's decision to make
-    /// (see [`Self::fits`]).
     pub fn insert(&mut self, key: Arc<str>, value: V, bytes: usize) -> Insertion<V> {
         let stamp = self.tick();
         let replaced = self.entries.remove(&key).map(|entry| {
@@ -107,7 +98,6 @@ impl<V> MemoryCache<V> {
         Insertion { replaced, evicted }
     }
 
-    /// Reads `key`, marking it most recently used.
     pub fn get(&mut self, key: &str) -> Option<&V> {
         let stamp = self.tick();
         let entry = self.entries.get_mut(key)?;
@@ -115,7 +105,6 @@ impl<V> MemoryCache<V> {
         Some(&entry.value)
     }
 
-    /// Reads `key` mutably, marking it most recently used.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut V> {
         let stamp = self.tick();
         let entry = self.entries.get_mut(key)?;
@@ -123,7 +112,6 @@ impl<V> MemoryCache<V> {
         Some(&mut entry.value)
     }
 
-    /// Reads `key` without touching recency.
     #[must_use]
     pub fn peek(&self, key: &str) -> Option<&V> {
         self.entries.get(key).map(|entry| &entry.value)
@@ -140,10 +128,6 @@ impl<V> MemoryCache<V> {
         Some(entry.value)
     }
 
-    /// Replaces the pinned set with `keys` — the sources the frame is
-    /// drawing — and trims, since what was pinned before may be evictable
-    /// now. A pinned key that is absent stays pinned, so an insert of it
-    /// later is protected from the start.
     pub fn pin(&mut self, keys: &[Arc<str>]) -> Vec<(Arc<str>, V)> {
         self.pinned.clear();
         self.pinned.extend(keys.iter().cloned());
@@ -170,8 +154,6 @@ impl<V> MemoryCache<V> {
         self.entries.is_empty()
     }
 
-    /// Evicts unpinned entries, least recently used first, until the budget
-    /// holds; returns them.
     pub fn trim(&mut self) -> Vec<(Arc<str>, V)> {
         self.trim_sparing(None)
     }

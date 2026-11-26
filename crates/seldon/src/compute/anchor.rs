@@ -56,14 +56,6 @@ use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::{CoreStyle, direction};
 use crate::tree::{AnchorSpec, LayoutTree};
 
-/// The physical axis of the anchor an `anchor-size()` keyword measures, for a
-/// function used in a property on `property_axis`.
-///
-/// css-anchor-position-1 §5.1: `width`/`height` are physical; `block`/`inline`
-/// are the anchor's writing-mode axes and `self-block`/`self-inline` the query
-/// box's; an omitted keyword is the axis of the property. With `writing-mode`
-/// disabled every box is `horizontal-tb`, so both pairs of logical keywords
-/// land on the same physical axes: block is vertical, inline horizontal.
 #[must_use]
 pub(super) fn anchor_size_axis(
     keyword: AnchorSizeKeyword,
@@ -80,8 +72,6 @@ pub(super) fn anchor_size_axis(
     }
 }
 
-/// The property a function is substituted in: its physical axis, and for an
-/// inset its side — `anchor()` is allowed only there (§3.2).
 #[derive(Clone, Copy)]
 pub(super) enum Property {
     Axis(PhysicalAxis),
@@ -99,7 +89,6 @@ impl Property {
     }
 }
 
-/// An `<anchor-side>` with its percentage flattened to a fraction.
 #[derive(Clone, Copy)]
 pub(super) enum EdgeSide {
     Keyword(AnchorSideKeyword),
@@ -115,13 +104,9 @@ impl EdgeSide {
     }
 }
 
-/// What the anchor functions of one box resolve against.
 pub(super) trait Anchors {
-    /// §5.1.1: the size on `axis` of the target `name` selects.
     fn size(&mut self, name: &TreeScoped<DashedIdent>, axis: PhysicalAxis) -> Option<f32>;
 
-    /// §3.2.1: the inset on `property` that aligns the inset-modified
-    /// containing block's edge with the target's `side`.
     fn inset(
         &mut self,
         name: &TreeScoped<DashedIdent>,
@@ -130,7 +115,6 @@ pub(super) trait Anchors {
     ) -> Option<f32>;
 }
 
-/// The anchors of a box nothing resolves for.
 pub(super) struct Unresolvable;
 
 impl Anchors for Unresolvable {
@@ -150,8 +134,6 @@ impl Anchors for Unresolvable {
     }
 }
 
-/// The spec an `<anchor-name>` selects: an omitted name is the default
-/// anchor (§3.2, §5.1).
 #[inline]
 fn spec_of(name: &TreeScoped<DashedIdent>) -> AnchorSpec<'_> {
     if name.value.0.is_empty() {
@@ -161,27 +143,11 @@ fn spec_of(name: &TreeScoped<DashedIdent>) -> AnchorSpec<'_> {
     }
 }
 
-/// What one absolute layout of a box has asked its host, kept for the rest
-/// of that layout.
-///
-/// The fallback loop lays one option out up to three times — §6.2's sort,
-/// the trial, the commit — and several anchor functions of one option may
-/// name the same anchor, so without this each question reaches the host's
-/// §2.3 lookup once per use. The memo lives exactly as long as one call of
-/// the absolute pass, never across a pass: the same pass can lay the box out
-/// earlier, before its anchors are placed (a `linear` parent measures an
-/// escaping box for its static position while it handles its own
-/// out-of-flow children, `commit_non_in_flow_children`), and an answer kept
-/// from there would outlive the anchors it missed.
 #[derive(Debug, Default)]
 pub(super) struct AnchorMemo {
-    /// Each answered anchor rectangle, per option and name (`None` is the
-    /// default anchor), in host coordinates.
     rects: SmallVec<[MemoRect; 4]>,
 }
 
-/// One answered rectangle: the option, the name (`None` for the default
-/// anchor) and the host's answer.
 type MemoRect = (usize, Option<TreeScoped<DashedIdent>>, Option<Rect<f32>>);
 
 impl AnchorMemo {
@@ -219,9 +185,6 @@ impl AnchorMemo {
     }
 }
 
-/// The anchors of an absolutely positioned box laid out with one position
-/// option, as its host answers them in the current pass, plus what §3.3 and
-/// §6.6 want to know about the references.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "two directions and two facts about the default anchor, not a state machine"
@@ -232,18 +195,12 @@ struct HostAnchors<'a, T: LayoutTree> {
     node: T::NodeId,
     option: usize,
     memo: &'a mut AnchorMemo,
-    /// Host coordinates (the containing block generator's padding box) minus
-    /// this, is the current containing block's coordinates: the grid area's
-    /// and `position-area` region's offsets.
     origin: Point<f32>,
-    /// The current containing block's size: the `position-area` region's,
-    /// else the (scrollable) containing block's.
     containing_size: Size<f32>,
     containing_rtl: bool,
     self_rtl: bool,
     has_default_anchor: bool,
     references_default_anchor: bool,
-    /// §3.3's third condition, per axis.
     compensates: Size<bool>,
 }
 
@@ -275,8 +232,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
         property: PhysicalSide,
     ) -> Option<f32> {
         let horizontal = matches!(property, PhysicalSide::Left | PhysicalSide::Right);
-        // §3.2.1: "If its <anchor-side> specifies a physical keyword, it's
-        // specified in an inset property applicable to that axis."
         if let EdgeSide::Keyword(keyword) = side {
             let matching = match keyword {
                 AnchorSideKeyword::Left | AnchorSideKeyword::Right => horizontal,
@@ -294,10 +249,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
         } else {
             (rect.origin.y, rect.origin.y + rect.size.height)
         };
-        // "start and end … resolving the keyword against the writing mode of
-        // either the positioned box (for self-start and self-end) or the
-        // positioned box's containing block (for start and end)". Only the
-        // horizontal axis of an `rtl` box runs backwards.
         let start_end = |rtl: bool| {
             if horizontal && rtl {
                 (high, low)
@@ -307,8 +258,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
         };
         let starts_low = matches!(property, PhysicalSide::Left | PhysicalSide::Top);
         let edge = match side {
-            // "inside refers to the same side as the inset property …, while
-            // outside refers to the opposite."
             EdgeSide::Keyword(AnchorSideKeyword::Inside) => {
                 if starts_low {
                     low
@@ -329,9 +278,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
             EdgeSide::Keyword(AnchorSideKeyword::End) => start_end(self.containing_rtl).1,
             EdgeSide::Keyword(AnchorSideKeyword::SelfStart) => start_end(self.self_rtl).0,
             EdgeSide::Keyword(AnchorSideKeyword::SelfEnd) => start_end(self.self_rtl).1,
-            // "Refers to a position a corresponding percentage between the
-            // start and end sides, with 0% being equivalent to start and 100%
-            // being equivalent to end. center is equivalent to 50%."
             EdgeSide::Keyword(AnchorSideKeyword::Center) => {
                 let (start, end) = start_end(self.containing_rtl);
                 start + 0.5 * (end - start)
@@ -364,10 +310,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
                 };
             }
         }
-        // "resolves … to the <length> that would align the edge of the
-        // positioned boxes' inset-modified containing block corresponding to
-        // the property the function appears in with the specified edge of the
-        // target anchor element's anchor box."
         Some(match property {
             PhysicalSide::Left | PhysicalSide::Top => edge,
             PhysicalSide::Right => self.containing_size.width - edge,
@@ -376,7 +318,6 @@ impl<T: LayoutTree> Anchors for HostAnchors<'_, T> {
     }
 }
 
-/// What one anchor function resolves to.
 enum Outcome<'a, V> {
     Resolved(f32),
     Fallback(&'a V),
@@ -410,9 +351,6 @@ fn inset_outcome<'a, P, V>(
     property: Property,
     anchors: &mut impl Anchors,
 ) -> Outcome<'a, V> {
-    // §3.2: "It is only allowed in the inset properties (and is otherwise
-    // invalid)" — outside an inset, and with a side that did not flatten to
-    // a keyword or a percentage, nothing resolves.
     let resolved = match (property, side) {
         (Property::Inset(property), Some(side)) => {
             anchors.inset(&function.target_element, side, property)
@@ -427,14 +365,6 @@ fn length(px: f32) -> LengthPercentage {
     LengthPercentage::new_length(Length::new(px))
 }
 
-/// A math function with every anchor function inside it replaced by the
-/// resolved length or by its fallback; `None` when one of them has neither,
-/// which makes the whole declaration invalid at computed-value time.
-///
-/// Stylo keeps the computed calc tree private, so the tree is reached through
-/// its specified form: `from_computed_value` rebuilds it with absolute-length
-/// and percentage leaves only, and those are exactly the leaves
-/// `compute_without_context` turns back into a computed value.
 fn substitute_calc(
     value: &LengthPercentage,
     property: Property,
@@ -443,7 +373,6 @@ fn substitute_calc(
     let specified::LengthPercentage::Calc(calc) =
         specified::LengthPercentage::from_computed_value(value)
     else {
-        // No math function left means no anchor function left either.
         return Some(value.clone());
     };
     let mut numeric = calc.0;
@@ -456,8 +385,6 @@ fn substitute_calc(
     substituted
 }
 
-/// The side of an `anchor()` inside a math function; its percentage is a
-/// calc node the parser simplified to one leaf.
 fn calc_side(side: &GenericAnchorSide<Box<SpecifiedCalcNode>>) -> Option<EdgeSide> {
     match side {
         GenericAnchorSide::Keyword(keyword) => Some(EdgeSide::Keyword(*keyword)),
@@ -502,7 +429,6 @@ fn substitute_node(
     })
 }
 
-/// A size with its anchor functions substituted.
 pub(super) fn substitute_style_size(
     value: &StyleSize,
     property: Property,
@@ -525,7 +451,6 @@ pub(super) fn substitute_style_size(
     }
 }
 
-/// A max size with its anchor functions substituted.
 pub(super) fn substitute_max_size(
     value: &MaxSize,
     property: Property,
@@ -545,7 +470,6 @@ pub(super) fn substitute_max_size(
     }
 }
 
-/// A margin with its anchor functions substituted.
 pub(super) fn substitute_margin(
     value: &Margin,
     property: Property,
@@ -564,7 +488,6 @@ pub(super) fn substitute_margin(
     }
 }
 
-/// An inset with its anchor functions substituted.
 pub(super) fn substitute_inset(
     value: &Inset,
     property: Property,
@@ -590,9 +513,6 @@ pub(super) fn substitute_inset(
         other => other.clone(),
     }
 }
-
-// The unresolvable forms. Which property a function would have resolved in is
-// irrelevant when nothing resolves, so these pass an arbitrary one.
 
 const ANY_PROPERTY: Property = Property::Axis(PhysicalAxis::Horizontal);
 
@@ -640,9 +560,6 @@ fn is_anchor_margin(value: &Margin) -> bool {
     )
 }
 
-/// Whether an inset carries an anchor function, which may still resolve to
-/// `auto` — the conservative answer for a caller deciding whether it needs a
-/// static position.
 #[inline]
 pub(super) fn is_anchor_inset(value: &Inset) -> bool {
     matches!(
@@ -653,21 +570,6 @@ pub(super) fn is_anchor_inset(value: &Inset) -> bool {
     )
 }
 
-/// Whether an absolutely positioned box's style uses anything of
-/// css-anchor-position-1 the absolute pass resolves: an anchor function in a
-/// size, min/max size, margin or inset, a `position-area`,
-/// `anchor-center` self-alignment, or a `position-anchor` that names an
-/// element (which gives the box a default anchor, and with it the
-/// scrollable containing block). One of the two style checks every
-/// absolutely positioned box pays, beside
-/// [`CoreStyle::has_position_try_fallbacks`]; a box that passes neither is
-/// laid out exactly as before.
-///
-/// Public for hosts: exactly the boxes this answers `true` for (plus those
-/// with position options) are reported through
-/// [`LayoutTree::set_anchor_outcome`](crate::tree::LayoutTree::set_anchor_outcome),
-/// so a host keeping per-box anchor state can tell a box that stopped being
-/// anchor-positioned from one that simply was not laid out again.
 #[inline]
 pub fn uses_anchor_positioning(style: &impl CoreStyle) -> bool {
     let size = style.size();
@@ -695,8 +597,6 @@ pub fn uses_anchor_positioning(style: &impl CoreStyle) -> bool {
         || style.names_position_anchor()
 }
 
-/// The geometry values an absolutely positioned box's layout reads, borrowed
-/// either straight from its style or from its [`AnchoredGeometry`].
 pub(super) struct GeometryValues<'a> {
     pub(super) size: Size<&'a StyleSize>,
     pub(super) min_size: Size<&'a StyleSize>,
@@ -718,31 +618,6 @@ impl<'a> GeometryValues<'a> {
     }
 }
 
-/// One absolutely positioned box's geometry under one position option, with
-/// every anchor function substituted by what §3.2.1 and §5.1.1 make of it in
-/// the current pass, `auto` insets and margins zeroed where `position-area`
-/// and `anchor-center` zero them, and the containing block and
-/// self-alignment the box is placed with.
-///
-/// Owned, because the substituted values exist nowhere in the style; built
-/// only for a box that uses anchor positioning or is tried with a fallback
-/// option, so every other box keeps borrowing its values straight from the
-/// style.
-///
-/// **Why this is enough, and why the box stays cacheable.** The box's own
-/// algorithm still reads its own (base) style directly, where the functions
-/// take the unresolvable path and a fallback option's values do not exist.
-/// The absolute pass therefore hands the box every quantity its own run
-/// would read differently — on each [`AbsolutePlacement::sensitive`] axis,
-/// the used border-box size — as that axis's known dimension, where the run
-/// takes it over its own style; insets and margins it applies itself,
-/// outside the box's run. So the box's layout input carries everything an
-/// anchor or an option contributes, and its cache is keyed on it: a changed
-/// anchor is a changed input, a miss rather than a stale hit. What makes the
-/// absolute pass run again at all is the anchor's own change: a target of the
-/// host's lookup is laid out in the same containing block, so anything that
-/// moves it clears the containing block's cache on the way up, and the
-/// containing block's committing run is the pass that lays the box out.
 pub(super) struct AnchoredGeometry {
     size: Size<StyleSize>,
     min_size: Size<StyleSize>,
@@ -750,20 +625,12 @@ pub(super) struct AnchoredGeometry {
     margin: Edges<Margin>,
     inset: Edges<Inset>,
     pub(super) placement: AbsolutePlacement,
-    /// [`crate::tree::AnchorOutcome::default_anchor_missing`].
     pub(super) default_anchor_missing: bool,
-    /// §3.3, per axis.
     pub(super) compensates: Size<bool>,
-    /// [`crate::tree::AnchorOutcome::carried_edges`].
     pub(super) carried: Edges<bool>,
 }
 
 impl AnchoredGeometry {
-    /// The geometry of `node` under position option `option`, whose style is
-    /// `style` (`base` is the box's own, and `base_uses` whether it
-    /// [uses anchor positioning](uses_anchor_positioning)), or `None` for
-    /// option `0` of a box that uses no anchor positioning at all — the
-    /// common case, which allocates nothing.
     #[allow(
         clippy::too_many_lines,
         reason = "one ordered pass over §3.1, §3.2, §4 and §5; splitting it scatters the order"
@@ -789,9 +656,6 @@ impl AnchoredGeometry {
         let self_rtl = base.direction() == direction::T::Rtl;
         let containing_rtl = containing_block.rtl;
 
-        // §2.4: the default anchor. The host resolves `position-anchor`
-        // under the option's style; its rectangle comes in the containing
-        // block generator's padding-box coordinates.
         let default_rect = memo
             .rect(tree, state, node, option, AnchorSpec::Default)
             .map(|rect| {
@@ -802,16 +666,9 @@ impl AnchoredGeometry {
             });
         let has_default_anchor = default_rect.is_some();
 
-        // css-position-4: with a default anchor, a containing block a scroll
-        // container generates is its scrollable overflow area. §3.1.1's
-        // "pre-modification containing block" is that one; css-position-3
-        // §2.1.1's original containing block (the overflow limit's) is the
-        // same unless grid placement narrowed it to a grid area.
         let scrollable = match default_rect {
             Some(_) if containing_block.is_padding_box => {
                 let scrollable = containing_block.scrollable;
-                // The generator's algorithm clamped it against the same
-                // padding box in this run (`scrollable_containing_block`).
                 debug_assert!(
                     scrollable
                         .is_none_or(|scrollable| scrollable.width >= containing_block.size.width
@@ -828,10 +685,6 @@ impl AnchoredGeometry {
             |size| Rect::new(Point::ZERO, size),
         );
 
-        // §3.1: "If the box does not have a default anchor box, or is not an
-        // absolutely positioned box, this value has no effect. Otherwise,
-        // selects a region of the position-area grid, and makes that the
-        // box's containing block."
         let position_area = style.position_area();
         let area_keywords = (!position_area.is_none())
             .then(|| AreaKeywords::physical(position_area, containing_rtl, self_rtl));
@@ -857,8 +710,6 @@ impl AnchoredGeometry {
             containing_rtl,
             self_rtl,
             has_default_anchor,
-            // "If the box references the default anchor box (e.g. using
-            // position-area, …)".
             references_default_anchor: !position_area.is_none(),
             compensates: Size::new(false, false),
         };
@@ -941,20 +792,11 @@ impl AnchoredGeometry {
             mut compensates,
             ..
         } = anchors;
-        // The computed `auto` insets, after an unresolvable function without
-        // a fallback made one `auto`: they decide the weaker inset (css-
-        // position-3 §3.5.2) and §4.1's single-`auto` rule even where
-        // `position-area` makes their used value 0.
         let auto_inset = geometry
             .inset
             .as_ref()
             .map(|inset| matches!(inset, Inset::Auto));
         geometry.placement.auto_inset = auto_inset;
-        // §6.5's fit test after a default scroll shift (Blink's
-        // `CalculateNonOverflowingRangeInOneAxis`): an edge a non-`auto`
-        // inset places keeps its relation to the box as laid out, and so does
-        // a `position-area` line that is the anchor's own edge; only an
-        // `auto` inset's containing-block edge stays where it is.
         let area_carried = match (area_keywords, default_rect) {
             (Some(keywords), Some(anchor)) => {
                 position_area_carried(keywords, pre_modification, anchor)
@@ -974,8 +816,6 @@ impl AnchoredGeometry {
         };
 
         if let Some(keywords) = area_keywords {
-            // §4.1: "When position-area is not none, the used value of normal
-            // self-alignment changes depending on the <position-area> value".
             let align = &mut geometry.placement.align;
             if align.width.is_normal() {
                 align.width.flags = area_default_alignment(
@@ -993,20 +833,11 @@ impl AnchoredGeometry {
                     containing_rtl,
                 );
             }
-            // §3.1: "The used value of any auto inset properties and auto
-            // margin properties resolves to 0."
             geometry.zero_auto_edges(PhysicalAxis::Horizontal);
             geometry.zero_auto_edges(PhysicalAxis::Vertical);
-            // §3.3: "abspos has a non-none value for position-area".
             compensates = Size::new(true, true);
         }
 
-        // §4.2: "if the positioned box has a default anchor box, then it is
-        // centered (insofar as possible) over the default anchor box in the
-        // relevant axis. Additionally: The used value of any auto inset
-        // properties and auto margin properties resolves to 0. If the box …
-        // does not have a default anchor box, this value behaves as center and
-        // has no additional effect on how inset properties resolve."
         for axis in [PhysicalAxis::Horizontal, PhysicalAxis::Vertical] {
             let alignment = match axis {
                 PhysicalAxis::Horizontal => geometry.placement.align.width,
@@ -1046,15 +877,9 @@ impl AnchoredGeometry {
                 PhysicalAxis::Vertical => geometry.placement.align.height = resolved,
             }
         }
-        // §3.3: "abspos has a default anchor box" is the first condition of
-        // every compensation, and every writer above already requires one.
         geometry.compensates = compensates;
-        // §6.6 `anchor-valid`.
         geometry.default_anchor_missing = references_default_anchor && !has_default_anchor;
 
-        // The box's own run reads its base style: every axis on which the
-        // values it lays out with differ from those is handed over as a known
-        // dimension. An aspect ratio carries a size across the axes.
         let base_size = base.size();
         let base_min = base.min_size();
         let base_max = base.max_size();
@@ -1080,7 +905,6 @@ impl AnchoredGeometry {
         Some(geometry)
     }
 
-    /// Zeroes the `auto` insets and margins on `axis`.
     fn zero_auto_edges(&mut self, axis: PhysicalAxis) {
         let zero_inset = |inset: &mut Inset| {
             if matches!(inset, Inset::Auto) {
@@ -1119,16 +943,11 @@ impl AnchoredGeometry {
         }
     }
 
-    /// §6.2: the inset-modified containing block's size this option yields,
-    /// "treating auto inset values as zero" — margins do not enter it.
     pub(super) fn sort_size(&self) -> Size<f32> {
         imcb_size_auto_zero(self.placement.area.size, self.inset.as_ref())
     }
 }
 
-/// The size of the inset-modified containing block `inset` cuts from a
-/// containing block of size `area`, "treating auto inset values as zero"
-/// (§6.2's sort key).
 pub(super) fn imcb_size_auto_zero(area: Size<f32>, inset: Edges<&Inset>) -> Size<f32> {
     let used =
         |inset: &Inset, basis: f32| super::util::resolve_inset(inset, Some(basis)).unwrap_or(0.0);
@@ -1138,10 +957,6 @@ pub(super) fn imcb_size_auto_zero(area: Size<f32>, inset: Edges<&Inset>) -> Size
     )
 }
 
-/// The author's self-alignment of an absolutely positioned box: all of it
-/// where the containing block honors self-alignment, only `anchor-center` in
-/// a Lynx `linear` or `relative` container (see
-/// [`AbsoluteContainingBlock::honors_self_alignment`]).
 #[inline]
 pub(super) fn authored_alignment(
     flags: AlignFlags,

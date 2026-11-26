@@ -30,27 +30,15 @@ use stylo::values::computed::{
 use crate::style::TextBrush;
 use crate::text::line::generic_family;
 
-/// The fully resolved effective style of one text run.
-///
-/// The Lynx scoped style overlay — a nested text applies only its own declared
-/// properties over the inherited run state — is the host cascade's job: on the
-/// web compat target nested `x-text` is `display: inline` and plain CSS
-/// inheritance produces exactly that overlay, so each run arrives here already
-/// carrying the effective values of its innermost enclosing text element.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunStyle {
     pub font_family: FontFamily,
-    /// CSS px; the block lays out at scale 1.0 like the measurement path.
     pub font_size: f32,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,
     pub font_features: FontFeatureSettings,
     pub font_variations: FontVariationSettings,
-    /// Resolved px.
     pub letter_spacing: f32,
-    /// Per-run, following the web compat target (native textra applies
-    /// line-height paragraph-wide; a host wanting that writes one value into
-    /// every run, which inheritance does on its own).
     pub line_height: LineHeight,
 }
 
@@ -73,7 +61,6 @@ impl Default for RunStyle {
 pub enum LineHeight {
     #[default]
     Normal,
-    /// The CSS unitless number: a factor of the run's font size.
     Number(f32),
     Px(f32),
 }
@@ -103,57 +90,25 @@ pub enum TextWrap {
     NoWrap,
 }
 
-/// css-text-4 `white-space-collapse`, per run.
-///
-/// The four values the fork parses; `discard` and `preserve-spaces` do not
-/// parse there at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WhiteSpaceCollapse {
-    /// Spaces, tabs and segment breaks collapse (css-text-3 §4.1.1).
     #[default]
     Collapse,
-    /// Segment breaks are preserved as forced line breaks; spaces and tabs
-    /// still collapse, and the ones next to a preserved break are removed.
-    /// What Lynx raw-text carries.
     PreserveBreaks,
-    /// Spaces, tabs and segment breaks are all preserved. A preserved segment
-    /// break is a forced line break, a preserved space is one cluster per
-    /// source space, and a preserved tab advances to the next tab stop
-    /// (`super::tab`).
     Preserve,
-    /// Preserved like [`Self::Preserve`], except that a wrap opportunity
-    /// follows every preserved space and tab and none of them hangs at a
-    /// line end: trailing spaces take width and wrap like content
-    /// (css-text-3 §4.1.3, §5.1).
     BreakSpaces,
 }
 
-/// `-webkit-text-security`, per run: whether the run's characters are
-/// replaced by a mask character before white-space processing.
-///
-/// Under any value but [`Self::None`] every character of the run is masked,
-/// white space and newlines included, as Blink's `LayoutText::SecureText`
-/// fills the whole text node with the mask before white-space processing: a
-/// masked run never collapses, never wraps at a space it had and never breaks
-/// at a newline it had. One mask stands for one Unicode scalar value of the
-/// source, where Blink fills per UTF-16 code unit, so a caret never lands
-/// between the halves of a surrogate pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextSecurity {
     #[default]
     None,
-    /// U+25E6 WHITE BULLET, Blink's `kWhiteBulletCharacter`.
     Circle,
-    /// U+2022 BULLET, Blink's `kBulletCharacter`.
     Disc,
-    /// U+25A0 BLACK SQUARE, Blink's `kBlackSquareCharacter`.
     Square,
 }
 
 impl TextSecurity {
-    /// The character every source character of a run is shown as, or `None`
-    /// for an unmasked run. Each is three bytes in UTF-8
-    /// (`super::content::MASK_BYTES`).
     pub(in crate::text) const fn mask(self) -> Option<char> {
         match self {
             Self::None => None,
@@ -172,25 +127,14 @@ pub enum WordBreak {
     KeepAll,
 }
 
-/// css-text-3 `overflow-wrap`: whether a word with no other break point may
-/// be broken at an arbitrary point when it does not fit its line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OverflowWrap {
     #[default]
     Normal,
-    /// The arbitrary break points also count toward the min-content width.
     Anywhere,
-    /// The arbitrary break points do not count toward the min-content width.
     BreakWord,
 }
 
-/// The line-breaking values parley keeps on every style rather than on the
-/// paragraph.
-///
-/// `parley_style` writes them into each style it builds, and `word_break`
-/// also decides whether the paragraph takes the line-break override
-/// (`super::shape`). A consumer whose values are paragraph-wide hands the same
-/// one for every span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BreakStyle {
     pub word_break: WordBreak,
@@ -198,17 +142,9 @@ pub struct BreakStyle {
     pub overflow_wrap: OverflowWrap,
 }
 
-/// The `text-indent` value, as a caller resolves it.
-///
-/// Deliberately not a paragraph style field: a percentage resolves against the
-/// definite inline size, which is the caller's to know, while the block only
-/// ever sees a break width — resolving against *that* would make the indent
-/// depend on the constraint it helps decide. The resolved px goes into
-/// [`BlockConstraint`](super::BlockConstraint).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextIndent {
     Px(f32),
-    /// Resolved against a definite layout width; zero when unconstrained.
     Percent(f32),
 }
 
@@ -218,19 +154,13 @@ impl Default for TextIndent {
     }
 }
 
-/// The `text-indent` keywords (css-text-3 §8.1): which lines the indent
-/// applies to. Both off is the first line only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IndentKeywords {
-    /// `each-line`: also every line after a forced line break.
     pub each_line: bool,
-    /// `hanging`: the lines the indent would apply to are the ones it skips,
-    /// and the other way round.
     pub hanging: bool,
 }
 
 impl IndentKeywords {
-    /// The same choice in parley's vocabulary.
     pub(in crate::text) const fn options(self) -> IndentOptions {
         IndentOptions {
             each_line: self.each_line,
@@ -239,10 +169,8 @@ impl IndentKeywords {
     }
 }
 
-/// Vertical alignment of an atomic inline box on its line.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
-    /// Covers Lynx `kDefault` and `kBaseline`.
     #[default]
     Baseline,
     Sub,
@@ -252,21 +180,11 @@ pub enum VerticalAlign {
     Middle,
     Bottom,
     TextBottom,
-    /// CSS sign: positive raises the box above its baseline position.
     Length(f32),
-    /// A fraction of the line's resolved line height; positive raises.
     Percent(f32),
-    /// Lynx-only value; behaves as [`Self::Middle`] per the recorded mapping
-    /// in `docs/tracking/css-text.md`.
     Center,
 }
 
-/// Maps the declared alignment to parley's physical vocabulary.
-///
-/// Resolution happens against the declared direction, matching Lynx's
-/// `ResolveTextAlign` (physical before the engine); parley's own `Start`/`End`
-/// — resolved against the detected content direction — are deliberately
-/// unused.
 pub(in crate::text) fn resolve_alignment(text_align: TextAlign, direction: Direction) -> Alignment {
     match (text_align, direction) {
         (TextAlign::Left, _)
@@ -280,8 +198,6 @@ pub(in crate::text) fn resolve_alignment(text_align: TextAlign, direction: Direc
     }
 }
 
-/// Translates one run into the parley style the shaper consumes, with the
-/// line-breaking values of `breaking` written in.
 pub(in crate::text) fn parley_style(
     run: &RunStyle,
     breaking: BreakStyle,
@@ -332,10 +248,7 @@ pub(in crate::text) fn parley_style(
     .with_breaking(breaking)
 }
 
-/// Writing a [`BreakStyle`]'s line-breaking values into a parley style.
 pub(in crate::text) trait WithBreaking: Sized {
-    /// `self` with `breaking`'s `word-break`, `overflow-wrap` and
-    /// `text-wrap-mode` written in, and nothing else changed.
     #[must_use]
     fn with_breaking(self, breaking: BreakStyle) -> Self;
 }
@@ -408,8 +321,6 @@ impl From<stylo::values::computed::WordBreak> for WordBreak {
     }
 }
 
-/// Builds one run's parameters from the style of the innermost element its
-/// characters sit in.
 impl RunStyle {
     #[must_use]
     pub fn from_run_style<S: crate::style::TextRunStyle>(style: &S) -> Self {
@@ -436,11 +347,6 @@ impl RunStyle {
     }
 }
 
-/// Translates a stylo family list into parley's.
-///
-/// Lives with the paragraph core rather than with the measurement path
-/// because the core is the paragraph implementation that survives; the
-/// measurement path borrows it back until it goes.
 pub(in crate::text) fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
     let families = &family.families.list;
     if families.is_empty() {
@@ -455,10 +361,6 @@ pub(in crate::text) fn translate_font_family_list(family: &FontFamily) -> Parley
 }
 
 impl crate::text::ResolvedFont {
-    /// The font a computed style names, for a host that shapes one line
-    /// under it ([`crate::text::shape_line`]): the family list with each
-    /// generic translated as the paragraph translates it, and the computed
-    /// size, weight, style and width.
     #[must_use]
     pub fn from_computed(font: &stylo::properties::style_structs::Font) -> Self {
         use crate::text::{ResolvedFamily, ResolvedFontStyle};

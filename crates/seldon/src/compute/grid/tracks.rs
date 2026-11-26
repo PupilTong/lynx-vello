@@ -16,11 +16,8 @@ const MAX_AXIS_TRACKS: usize = 10_000;
 pub(super) const MAX_MATERIALIZED_TRACKS: usize = 20_000;
 const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;
 
-/// The `auto` track size, which an empty `grid-auto-*` list stands for.
 const AUTO_TRACK: &TrackSize = &TrackSize::Breadth(TrackBreadth::Auto);
 
-/// The minimum half of a track size's `minmax()` form (css-grid-2 §7.2.1): a
-/// lone `<flex>` and `fit-content()` have an `auto` minimum.
 pub(super) fn min_breadth(size: &TrackSize) -> &TrackBreadth {
     match size {
         TrackSize::Breadth(TrackBreadth::Flex(_)) | TrackSize::FitContent(_) => &TrackBreadth::Auto,
@@ -28,8 +25,6 @@ pub(super) fn min_breadth(size: &TrackSize) -> &TrackBreadth {
     }
 }
 
-/// The maximum half of a track size's `minmax()` form: `fit-content()` has a
-/// `max-content` maximum, capped by [`fit_content_limit`].
 pub(super) fn max_breadth(size: &TrackSize) -> &TrackBreadth {
     match size {
         TrackSize::Breadth(breadth) | TrackSize::Minmax(_, breadth) => breadth,
@@ -37,7 +32,6 @@ pub(super) fn max_breadth(size: &TrackSize) -> &TrackBreadth {
     }
 }
 
-/// The argument of a `fit-content()` track size.
 pub(super) fn fit_content_limit(size: &TrackSize) -> Option<&LengthPercentage> {
     match size {
         TrackSize::FitContent(TrackBreadth::Breadth(limit)) => Some(limit),
@@ -48,10 +42,6 @@ pub(super) fn fit_content_limit(size: &TrackSize) -> Option<&LengthPercentage> {
     }
 }
 
-/// A concrete explicit track list after expanding every `repeat()` group:
-/// the style's own track sizes, and the range of tracks the `auto-fit`
-/// repetition expanded to, if the list has one (the grammar allows at most
-/// one automatic repetition).
 #[derive(Debug, Clone, Default)]
 pub(super) struct ExpandedTemplate<'a> {
     pub(super) tracks: Vec<&'a TrackSize>,
@@ -141,7 +131,6 @@ pub(super) fn expand_template(
             .checked_mul(repetitions - 1)
             .expect("the repetition count is clamped to the track limit");
         debug_assert!(tracks.len() + extra_tracks <= MAX_AXIS_TRACKS);
-        // The extra repetitions follow the group, before the tracks after it.
         let after = tracks.split_off(group_end);
         tracks.reserve(extra_tracks + after.len());
         for _ in 1..repetitions {
@@ -249,16 +238,12 @@ fn finite_non_negative(value: f32) -> Option<f64> {
     value.is_finite().then(|| f64::from(value.max(0.0)))
 }
 
-/// One concrete track: its size, borrowed from the style, and whether it is
-/// an empty `auto-fit` track, which collapses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct AxisTrackSpec<'a> {
     pub(super) sizing: &'a TrackSize,
     pub(super) collapsed: bool,
 }
 
-/// Whether any track breadth or `fit-content()` limit is a percentage, which
-/// resolves against the container's inner size on the axis.
 pub(super) fn specs_depend_on_basis(specs: &[AxisTrackSpec<'_>]) -> bool {
     let breadth_reads_basis = |breadth: &TrackBreadth| matches!(breadth, TrackBreadth::Breadth(lp) if lp.has_percentage());
     specs.iter().any(|spec| {
@@ -268,10 +253,6 @@ pub(super) fn specs_depend_on_basis(specs: &[AxisTrackSpec<'_>]) -> bool {
     })
 }
 
-/// The concrete tracks of one axis, one per coordinate of `range` in order,
-/// and the coordinate of the first. `auto_tracks` is the `grid-auto-*` list
-/// and `occupied` the occupancy of `range`, which only an `auto-fit` track
-/// reads.
 pub(super) fn build_axis_tracks<'a>(
     explicit: &ExpandedTemplate<'a>,
     auto_tracks: &'a [TrackSize],
@@ -312,8 +293,6 @@ pub(super) fn build_axis_tracks<'a>(
     (start, result)
 }
 
-/// Which tracks of `range` some area covers, in the axis `select` picks:
-/// what an `auto-fit` track reads to know whether it collapses.
 pub(super) fn occupied_tracks<Select>(
     areas: &[placement::GridArea],
     range: placement::TrackSpan,

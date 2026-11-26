@@ -5,16 +5,10 @@
 use super::CanvasError;
 use crate::render::canvas::{PendingRead, SurfaceError};
 
-/// A `getImageData` whose readback is issued
-/// ([`Context2d::read_image_data`](super::Context2d::read_image_data)): the
-/// answer's pixels once the GPU has sent them. Owns everything it needs,
-/// so the canvas is free while it is waited on.
 #[derive(Debug)]
 #[must_use = "the pixels are only had by waiting"]
 pub struct ImageDataRead {
-    /// The answer, transparent black where the bitmap is not.
     pub(super) out: Vec<u8>,
-    /// The part inside the bitmap, `None` when there is none.
     pub(super) read: Option<RegionRead>,
 }
 
@@ -24,24 +18,15 @@ pub(super) struct RegionRead {
     pub(super) place: Placement,
 }
 
-/// Where the rows read go in the answer.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Placement {
-    /// The first pixel read, in the answer.
     pub(super) x0: i64,
     pub(super) y0: i64,
-    /// Pixels per row read, and per row of the answer.
     pub(super) span: i64,
     pub(super) stride: i64,
 }
 
 impl ImageDataRead {
-    /// Blocks the calling thread until the pixels are read.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidState` when the GPU did not answer the readback: no device,
-    /// a device lost, or, on wasm32, the Render Worker dropped it.
     pub fn wait(self) -> Result<Vec<u8>, CanvasError> {
         match self.read {
             None => Ok(self.out),
@@ -52,11 +37,6 @@ impl ImageDataRead {
         }
     }
 
-    /// [`Self::wait`] for a caller that waits asynchronously.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::wait`].
     pub async fn wait_async(self) -> Result<Vec<u8>, CanvasError> {
         match self.read {
             None => Ok(self.out),
@@ -69,7 +49,6 @@ impl ImageDataRead {
 }
 
 impl Placement {
-    /// Unpremultiplies the rows `read` answered into `out`.
     fn write(
         self,
         mut out: Vec<u8>,
@@ -88,7 +67,6 @@ impl Placement {
     }
 }
 
-/// A rectangle's start and extent with a negative extent turned around.
 pub(super) fn normalize(start: i32, extent: i32) -> (i64, i64) {
     let (start, extent) = (i64::from(start), i64::from(extent));
     if extent < 0 {
@@ -98,12 +76,10 @@ pub(super) fn normalize(start: i32, extent: i32) -> (i64, i64) {
     }
 }
 
-/// A coordinate already clipped to the bitmap.
 pub(super) fn to_u32(value: i64) -> u32 {
     u32::try_from(value).expect("a coordinate inside the bitmap")
 }
 
-/// The byte offset of pixel `(x, y)` in rows `stride` pixels wide.
 pub(super) fn index(y: i64, x: i64, stride: i64) -> usize {
     usize::try_from((y * stride + x) * 4).expect("pixel inside the buffer")
 }

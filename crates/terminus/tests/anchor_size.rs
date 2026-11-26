@@ -18,7 +18,6 @@ use common::Doc;
 use terminus::link::NodeId;
 use terminus::link::layout::{NaturalSize, Size};
 
-/// A document laid out from `css`, with helpers for rounded geometry.
 struct Page {
     doc: Doc,
 }
@@ -42,7 +41,6 @@ impl Page {
         self.doc.dom.layout();
     }
 
-    /// `(x, y, width, height)` of the rounded border box, in the box parent.
     fn rect(&self, id: NodeId) -> (f32, f32, f32, f32) {
         let layout = self.doc.dom.rounded_layout(id).expect("node is laid out");
         (
@@ -58,7 +56,6 @@ impl Page {
         (width, height)
     }
 
-    /// `(left, right, top, bottom)` used margins.
     fn margin(&self, id: NodeId) -> (f32, f32, f32, f32) {
         let margin = self.doc.dom.rounded_layout(id).expect("laid out").margin;
         (margin.left, margin.right, margin.top, margin.bottom)
@@ -73,9 +70,6 @@ impl Page {
             .y
     }
 }
-
-// ---------------------------------------------------------------------------
-// Grammar: what reaches computed style.
 
 #[test]
 fn anchor_size_parses_in_every_property_the_fork_admits() {
@@ -110,16 +104,6 @@ fn anchor_parses_in_an_inset() {
     assert_eq!(doc.value(el, "top"), "anchor(--a top)");
 }
 
-// ---------------------------------------------------------------------------
-// web-platform-tests ports.
-
-/// The shared page of `anchor-size-001.html`, `anchor-size-minmax-001.html`
-/// and `anchor-size-replaced-001.html`: a positioned 10px-tall container
-/// whose first child is the 5×7 (24 tall in the replaced test) anchor
-/// `--a1`. Adaptation: the container is a column flexbox rather than a block,
-/// the one block-level layout this engine has, which places the in-flow
-/// anchor and every static position at the container's origin just as block
-/// flow does.
 fn wpt_page(anchor_height: f32) -> (Page, NodeId) {
     let mut page = Page::new(&format!(
         "page {{ display: flex; flex-direction: column; width: 800px; height: 600px; }}
@@ -135,7 +119,6 @@ fn wpt_page(anchor_height: f32) -> (Page, NodeId) {
     (page, container)
 }
 
-/// What one `anchor-size-001.html` target checks.
 #[derive(Clone, Copy)]
 enum Expect {
     Width(f32),
@@ -148,10 +131,6 @@ enum Expect {
     MarginBottom(f32),
 }
 
-/// wpt `css/css-anchor-position/anchor-size-001.html`, every case: each
-/// keyword on each axis in a size, an inset and a margin, and the implicit
-/// keyword. Adaptation: `data-offset-*` reads the box's position in the
-/// container, which is its offset parent there.
 #[test]
 fn wpt_anchor_size_001() {
     let (mut page, container) = wpt_page(7.0);
@@ -171,8 +150,6 @@ fn wpt_anchor_size_001() {
         ("left: anchor-size(--a1 width)", Expect::OffsetX(5.0)),
         ("top: anchor-size(--a1 height)", Expect::OffsetY(7.0)),
         ("left: anchor-size(--a1 height)", Expect::OffsetX(7.0)),
-        // The WPT source leaves this one's parenthesis open, which the CSS
-        // tokenizer closes at the end of the declaration.
         ("top: anchor-size(--a1 width", Expect::OffsetY(5.0)),
         (
             "margin-left: anchor-size(--a1 width)",
@@ -224,8 +201,6 @@ fn wpt_anchor_size_001() {
     }
 }
 
-/// wpt `css/css-anchor-position/anchor-size-minmax-001.html`, every case:
-/// min/max sizes on boxes whose own size is `auto`, sized from content.
 #[test]
 fn wpt_anchor_size_minmax_001() {
     let (mut page, container) = wpt_page(7.0);
@@ -242,10 +217,6 @@ fn wpt_anchor_size_minmax_001() {
     assert_eq!(page.size(max_height).1, 5.0);
 }
 
-/// wpt `css/css-anchor-position/anchor-size-function-chain.html`: five
-/// absolutely positioned boxes all named `--box`, each after the first sized
-/// from the one before it — the last acceptable `--box` in tree order, since
-/// a later absolutely positioned one is not laid out yet.
 #[test]
 fn wpt_anchor_size_function_chain() {
     let mut page = Page::new(
@@ -280,9 +251,6 @@ fn wpt_anchor_size_function_chain() {
     );
 }
 
-/// wpt `css/css-anchor-position/anchor-size-replaced-001.html`, every case:
-/// a 16×16 replaced box against a 5×24 anchor. Adaptation: the image is an
-/// element given the natural size `green-16x16.png` decodes to.
 #[test]
 fn wpt_anchor_size_replaced_001() {
     let (mut page, container) = wpt_page(24.0);
@@ -321,9 +289,6 @@ fn wpt_anchor_size_replaced_001() {
         assert_eq!(page.size(image), expected, "`{inline}`");
     }
 }
-
-// ---------------------------------------------------------------------------
-// Resolution and fallback.
 
 fn anchored_page() -> (Page, NodeId) {
     let mut page = Page::new(
@@ -378,8 +343,6 @@ fn without_a_target_the_fallback_applies_and_without_one_the_initial_value() {
         ".abs",
         "width: anchor-size(--missing width, 12px); height: anchor-size(--missing height, 10px)",
     );
-    // Invalid at computed-value time: `auto`, so the box is its content's
-    // size — here a 7×9 child.
     let initial = page.el(cb, ".abs", "width: anchor-size(--missing width)");
     page.el(initial, "view", "width: 7px; height: 9px; flex-shrink: 0");
     let inset = page.el(
@@ -401,7 +364,6 @@ fn without_a_target_the_fallback_applies_and_without_one_the_initial_value() {
     page.layout();
     assert_eq!(page.size(fallback), (12.0, 10.0));
     assert_eq!(page.size(initial), (7.0, 9.0));
-    // `top: auto` with `bottom: 5px` puts the box 5px above the bottom.
     assert_eq!(page.rect(inset).1, 200.0 - 5.0 - 1.0);
     assert_eq!(page.size(calc), (1.0, 150.0));
     assert_eq!(page.size(calc_invalid), (1.0, 3.0));
@@ -411,8 +373,6 @@ fn without_a_target_the_fallback_applies_and_without_one_the_initial_value() {
 fn an_in_flow_box_takes_the_fallback_or_the_initial_value() {
     let (mut page, cb) = anchored_page();
     page.el(cb, ".anchor", "");
-    // Relatively positioned and in flow: §5.1.1 resolves nothing for it even
-    // with an anchor right before it.
     let fallback = page.el(
         cb,
         "view",
@@ -426,21 +386,12 @@ fn an_in_flow_box_takes_the_fallback_or_the_initial_value() {
          top: anchor-size(--a height); margin-left: anchor-size(--a width)",
     );
     page.layout();
-    // Below the 30px anchor, nudged down by the 2px fallback.
     assert_eq!(page.rect(fallback), (0.0, 32.0, 11.0, 13.0));
-    // `width: auto` stretches across the column; `top: auto` and a `0` margin
-    // leave the box where the column put it.
     assert_eq!(page.rect(initial), (0.0, 43.0, 300.0, 4.0));
 }
 
 #[test]
 fn a_box_placed_by_the_positioned_pass_resolves_through_the_containing_block_chain() {
-    // The parent is not positioned, so the absolute box escapes to the
-    // positioned `.cb` and is placed by the rounding tail's positioned pass.
-    // Its containing block is `.cb`, whose in-flow child is the anchor, so
-    // §2.3 accepts it. The `fixed` box's containing block is the viewport;
-    // the anchor's chain reaches the root element, which the initial
-    // containing block (here: the viewport) contains, in flow.
     let (mut page, cb) = anchored_page();
     page.el(cb, ".anchor", "");
     let parent = page.el(
@@ -465,9 +416,6 @@ fn a_box_placed_by_the_positioned_pass_resolves_through_the_containing_block_cha
 
 #[test]
 fn a_fixed_box_whose_parent_contains_it_resolves_like_an_absolute_one() {
-    // A `transform` makes the parent the containing block of a `fixed` child,
-    // so the parent's own absolute pass lays the box out; a `fixed` box is
-    // absolutely positioned, and §5.1.1 resolves for it.
     let (mut page, cb) = anchored_page();
     page.doc.set_inline(cb, "transform: translateX(0px)");
     page.el(cb, ".anchor", "");
@@ -479,9 +427,6 @@ fn a_fixed_box_whose_parent_contains_it_resolves_like_an_absolute_one() {
     page.layout();
     assert_eq!(page.size(fixed), (40.0, 6.0));
 }
-
-// ---------------------------------------------------------------------------
-// Which element is the target (§2.3).
 
 #[test]
 fn an_in_flow_anchor_after_the_query_is_acceptable() {
@@ -514,9 +459,7 @@ fn the_last_acceptable_anchor_in_tree_order_wins() {
     let (mut page, cb) = anchored_page();
     page.el(cb, ".anchor", "");
     let query = page.el(cb, ".abs", "width: anchor-size(--a width); height: 1px");
-    // In flow, so acceptable though it follows the query; last in tree order.
     page.el(cb, ".anchor", "width: 60px");
-    // Absolutely positioned and after the query: not laid out yet.
     page.el(cb, ".anchor.abs", "width: 90px");
     page.layout();
     assert_eq!(page.size(query).0, 60.0);
@@ -538,9 +481,6 @@ fn an_anchor_through_a_contents_wrapper_is_a_box_child_of_the_containing_block()
 
 #[test]
 fn an_ancestor_is_never_a_target_of_a_box_its_parent_contains() {
-    // §2.3 wants an anchor inside the query box's containing block; the
-    // containing block of an absolute box laid out by its parent is that
-    // parent, so the parent and everything above it are outside.
     let (mut page, cb) = anchored_page();
     page.doc.set_inline(cb, "anchor-name: --a");
     let query = page.el(
@@ -554,9 +494,6 @@ fn an_ancestor_is_never_a_target_of_a_box_its_parent_contains() {
 
 #[test]
 fn an_anchor_inside_a_sibling_subtree_is_acceptable() {
-    // §2.3's containing-block-chain clause: the anchor's containing block is
-    // generated by the sibling, which is in flow in the query box's
-    // containing block.
     let (mut page, cb) = anchored_page();
     let sibling = page.el(cb, "view", "display: flex; flex-shrink: 0");
     page.el(sibling, ".anchor", "");
@@ -583,9 +520,6 @@ fn a_hidden_anchor_is_not_a_target() {
     assert_eq!(page.size(query).0, 20.0);
 }
 
-// ---------------------------------------------------------------------------
-// The `<scroll-coordinator>` geometry in plain CSS (design §2).
-
 const COORDINATOR: &str = "
     page { display: flex; width: 400px; height: 600px; }
     .coordinator { display: flex; flex-direction: column; position: relative;
@@ -610,7 +544,6 @@ fn the_coordinator_slot_sits_under_the_header_and_fills_below_the_toolbar() {
     assert_eq!(page.rect(toolbar), (0.0, 0.0, 400.0, 200.0));
     assert_eq!(page.rect(header), (0.0, 0.0, 400.0, 400.0));
     assert_eq!(page.rect(slot), (0.0, 400.0, 400.0, 400.0));
-    // Header height minus toolbar height.
     assert_eq!(page.scroll_range(coordinator), 200.0);
 }
 
@@ -638,9 +571,6 @@ fn a_slot_before_its_header_falls_back_to_the_top() {
     assert_eq!(page.rect(slot), (0.0, 0.0, 400.0, 400.0));
 }
 
-// ---------------------------------------------------------------------------
-// Invalidation: a moved anchor lays the query box out again.
-
 #[test]
 fn a_resized_header_moves_the_slot() {
     let mut page = Page::new(COORDINATOR);
@@ -664,9 +594,6 @@ fn a_resized_header_moves_the_slot() {
 
 #[test]
 fn a_header_that_grows_with_its_content_moves_the_slot() {
-    // The header's height is its content's, so the change starts below it:
-    // the header relays out under its own committed input, and only its new
-    // size reaches the coordinator.
     let mut page = Page::new(COORDINATOR);
     let root = page.doc.root;
     let coordinator = page.el(root, ".coordinator", "");

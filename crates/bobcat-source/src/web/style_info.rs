@@ -14,7 +14,6 @@ pub use super::css_property::{
 };
 use super::error::DecodeError;
 
-/// Root of the `StyleInfo` section. Mirrors web-core's `RawStyleInfo`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct StyleInfo {
@@ -22,24 +21,12 @@ pub struct StyleInfo {
     pub style_text_size_hint: usize,
 }
 
-/// Root of the `CustomSectionsStyleInfo` section (label 7). Mirrors
-/// web-core's `RawStyleInfoMap` (lynx-stack
-/// `packages/web-platform/web-core/src/template/template_sections/style_info/raw_style_info_map.
-/// rs`, added by lynx-stack#4138): every custom section the compiler tagged
-/// `encoding: 'CSS'`, keyed by its section name, each one an ordinary
-/// [`StyleInfo`] holding the section's rule list under css id `0`
-/// (`encodeCSSMap` in `ts/encode/encodeCSS.ts`).
-///
-/// web-core keys an `FnvHashMap`; rkyv 0.7 archives a hash map with its own
-/// hash index whatever the source map's hasher was, so a `HashMap` reads the
-/// same bytes.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct StyleInfoMap {
     pub name_to_style_info: HashMap<String, StyleInfo>,
 }
 
-/// One CSS fragment. Mirrors web-core's `StyleSheet`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct StyleSheet {
@@ -47,7 +34,6 @@ pub struct StyleSheet {
     pub rules: Vec<Rule>,
 }
 
-/// A style / `@font-face` / `@keyframes` rule. Mirrors web-core's `Rule`.
 #[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(bound(
     serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace",
@@ -78,14 +64,12 @@ pub enum RuleKind {
     Keyframes = 3,
 }
 
-/// Rule prelude. Mirrors web-core's `RulePrelude`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct RulePrelude {
     pub selectors: Vec<Selector>,
 }
 
-/// One complex selector. Mirrors web-core's `Selector`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct Selector {
@@ -100,14 +84,11 @@ impl Selector {
         buf
     }
 
-    /// Appends [`Self::to_css_string`] to `buf`, without allocating a
-    /// temporary for each selector of a list.
     pub fn write_css_string(&self, buf: &mut String) {
         SelectorRead::write_css_string(self, buf);
     }
 }
 
-/// One simple selector or combinator. Mirrors web-core's `OneSimpleSelector`.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct SimpleSelector {
@@ -116,10 +97,6 @@ pub struct SimpleSelector {
 }
 
 impl SimpleSelector {
-    /// Appends this one component's CSS text to `buf`. A selector's text is
-    /// its components' texts in order, with nothing between them, so a
-    /// component can be spliced into a selector by writing it between two
-    /// runs of the selector's own components.
     pub fn write_css_string(&self, buf: &mut String) {
         ComponentRead::write_css_string(self, buf);
     }
@@ -142,23 +119,16 @@ pub enum SimpleSelectorKind {
     UnknownText = 9,
 }
 
-/// A rule's declarations. Mirrors web-core's `DeclarationBlock`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct DeclarationBlock {
     pub declarations: Vec<ParsedDeclaration>,
 }
 
-/// Bounds allocation for the copied archive and validation work.
 const MAX_SECTION_LEN: usize = 1 << 20;
 
-/// The deepest rule tree a caller may receive, walk, or drop.
 const MAX_RULE_DEPTH: usize = 64;
 
-/// Bound recursive byte validation *before* constructing an owned rule tree.
-/// Each children vector consumes a subtree level. The remaining allowance
-/// covers the root, map entries, rules vector and leaf vectors/strings; it
-/// does not grow with input size. Tests exercise populated rules at the limit.
 const MAX_VALIDATION_DEPTH: usize = MAX_RULE_DEPTH + 8;
 
 pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
@@ -166,17 +136,11 @@ pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> 
     deserialize(check_style_info(&section)?).map_err(DecodeError::StyleInfo)
 }
 
-/// Decodes the `CustomSectionsStyleInfo` section under the same bounds as
-/// [`decode_style_info`]: the one section-length cap for the whole map, one
-/// validation level more for the map around the `StyleInfo`s, and the rule
-/// depth limit for every entry.
 pub(crate) fn decode_style_info_map(bytes: &[u8]) -> Result<StyleInfoMap, DecodeError> {
     let section = AlignedSection::new(bytes).map_err(DecodeError::CustomSectionsStyleInfo)?;
     deserialize(check_style_info_map(&section)?).map_err(DecodeError::CustomSectionsStyleInfo)
 }
 
-/// One rkyv section, copied to the alignment validation and every archived
-/// read need, and refused over [`MAX_SECTION_LEN`] before it is copied.
 pub(crate) struct AlignedSection(rkyv::AlignedVec);
 
 impl AlignedSection {
@@ -193,8 +157,6 @@ impl AlignedSection {
     }
 }
 
-/// The `StyleInfo` section validated in place: what lowering reads, with no
-/// owned tree built and dropped around it.
 pub(crate) fn check_style_info(
     section: &AlignedSection,
 ) -> Result<&ArchivedStyleInfo, DecodeError> {
@@ -204,9 +166,6 @@ pub(crate) fn check_style_info(
     Ok(style_info)
 }
 
-/// The `CustomSectionsStyleInfo` section validated in place, one validation
-/// level more for the map around the `StyleInfo`s and the rule depth limit
-/// for every entry.
 pub(crate) fn check_style_info_map(
     section: &AlignedSection,
 ) -> Result<&ArchivedStyleInfoMap, DecodeError> {
@@ -220,21 +179,16 @@ pub(crate) fn check_style_info_map(
     Ok(map)
 }
 
-/// Validates one rkyv root, bounding validation recursion by `max_depth`.
 fn check_archive<T>(section: &AlignedSection, max_depth: usize) -> Result<&T::Archived, String>
 where
     T: Archive,
     for<'a> T::Archived: bytecheck::CheckBytes<ArchiveValidator<'a>>,
     for<'a> <T::Archived as bytecheck::CheckBytes<ArchiveValidator<'a>>>::Error: std::fmt::Display,
 {
-    // This model contains no shared pointers, so ArchiveValidator supplies
-    // every check it needs. No platform-specific threads or unsafe access:
-    // excessive nesting fails during validation on the calling thread.
     let mut validator = ArchiveValidator::with_max_depth(&section.0, max_depth);
     check_archived_root_with_context::<T, _>(&section.0, &mut validator).map_err(|e| e.to_string())
 }
 
-/// An owned copy of a validated archive.
 fn deserialize<T, A>(archived: &A) -> Result<T, String>
 where
     A: RkyvDeserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
@@ -244,9 +198,6 @@ where
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Refuses a rule tree deeper than [`MAX_RULE_DEPTH`]. Validation already
-/// bounded the tree; rejecting and dropping it here cannot recurse to an
-/// input-controlled depth.
 fn check_rule_depth(style_info: &impl StyleInfoRead) -> Result<(), String> {
     let depth = nesting_depth(style_info);
     if depth > MAX_RULE_DEPTH {
@@ -257,7 +208,6 @@ fn check_rule_depth(style_info: &impl StyleInfoRead) -> Result<(), String> {
     Ok(())
 }
 
-/// Deepest `children` chain in the section, counted without recursion.
 fn nesting_depth<S: StyleInfoRead>(style_info: &S) -> usize {
     let mut deepest = 0;
     let mut pending: Vec<(&<S::Sheet as StyleSheetRead>::Rule, usize)> = style_info
@@ -271,24 +221,18 @@ fn nesting_depth<S: StyleInfoRead>(style_info: &S) -> usize {
     deepest
 }
 
-// Read access. The owned model and its archived form both implement these, so
-// lowering reads a section where it lies instead of from a deserialized copy.
-
-/// Read access to a `StyleInfo`: its fragments by css id.
 pub(crate) trait StyleInfoRead {
     type Sheet: StyleSheetRead;
     fn sheet(&self, css_id: i32) -> Option<&Self::Sheet>;
     fn sheets(&self) -> impl Iterator<Item = (i32, &Self::Sheet)>;
 }
 
-/// Read access to one fragment.
 pub(crate) trait StyleSheetRead {
     type Rule: RuleRead;
     fn imports(&self) -> &[i32];
     fn rules(&self) -> &[Self::Rule];
 }
 
-/// Read access to one rule.
 pub(crate) trait RuleRead: Sized {
     type Selector: SelectorRead;
     type Declaration: DeclarationRead;
@@ -298,12 +242,10 @@ pub(crate) trait RuleRead: Sized {
     fn children(&self) -> &[Self];
 }
 
-/// Read access to one complex selector.
 pub(crate) trait SelectorRead {
     type Component: ComponentRead;
     fn components(&self) -> &[Self::Component];
 
-    /// [`Selector::write_css_string`].
     fn write_css_string(&self, buf: &mut String) {
         for component in self.components() {
             component.write_css_string(buf);
@@ -311,16 +253,16 @@ pub(crate) trait SelectorRead {
     }
 }
 
-/// Read access to one simple selector or combinator.
 pub(crate) trait ComponentRead {
     fn kind(&self) -> SimpleSelectorKind;
     fn value(&self) -> &str;
 
-    /// [`SimpleSelector::write_css_string`].
     fn write_css_string(&self, buf: &mut String) {
         let value = self.value();
         match self.kind() {
-            SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
+            SimpleSelectorKind::Type
+            | SimpleSelectorKind::UnknownText
+            | SimpleSelectorKind::Attribute => {
                 buf.push_str(value);
             }
             SimpleSelectorKind::Class => {
@@ -329,11 +271,6 @@ pub(crate) trait ComponentRead {
             }
             SimpleSelectorKind::Id => {
                 buf.push('#');
-                buf.push_str(value);
-            }
-            SimpleSelectorKind::Attribute => {
-                // The encoder stores the generated attribute-selector text
-                // with its brackets already included (`[type=submit]`).
                 buf.push_str(value);
             }
             SimpleSelectorKind::PseudoClass => {
@@ -348,7 +285,6 @@ pub(crate) trait ComponentRead {
                 buf.push('*');
             }
             SimpleSelectorKind::Combinator => {
-                // The descendant combinator is encoded as a single space.
                 if value.trim().is_empty() {
                     buf.push(' ');
                 } else {
@@ -471,7 +407,6 @@ impl ComponentRead for ArchivedSimpleSelector {
     }
 }
 
-/// A field-less archived enum's value.
 fn unarchive<T, A: RkyvDeserialize<T, rkyv::Infallible>>(archived: &A) -> T {
     let Ok(value) = archived.deserialize(&mut rkyv::Infallible);
     value
@@ -492,11 +427,6 @@ mod tests {
         }
     }
 
-    /// Serializes a `Rule` chain `depth` levels deep.
-    ///
-    /// On a stack of its own because encoding recurses too. That side is ours
-    /// and is never fed by an attacker, so an overflow there would say nothing
-    /// about the decoder — but it would look identical in the test output.
     fn deep_section(depth: usize) -> Vec<u8> {
         std::thread::Builder::new()
             .stack_size(512 * 1024 * 1024)
@@ -526,18 +456,6 @@ mod tests {
             .expect("the encoder survived")
     }
 
-    /// The regression this whole bound exists for.
-    ///
-    /// `Rule` is self-referential with no depth bound and rkyv 0.7's derived
-    /// validator recurses per level, so a *well-formed* section — nothing for
-    /// validation to reject — used to abort the process inside
-    /// `check_archived_root` with `fatal runtime error: stack overflow`. That
-    /// is `SIGABRT`, not a panic, so this test could not have caught it with
-    /// `should_panic`: the whole test binary died.
-    ///
-    /// Decode directly on a 256 KiB caller. The decoder must reject the input
-    /// before following its 8000 levels (224 KB of archive), without spawning
-    /// a helper thread or requiring a stack sized from the input length.
     #[test]
     fn deep_nesting_is_refused_instead_of_aborting() {
         let bytes = deep_section(8000);
@@ -562,7 +480,6 @@ mod tests {
         );
     }
 
-    /// The limit has to leave the shape the format actually uses alone.
     #[test]
     fn nesting_within_the_limit_still_decodes() {
         let bytes = deep_section(MAX_RULE_DEPTH - 1);
@@ -823,9 +740,6 @@ mod tests {
         }
     }
 
-    /// The label-7 shape web-core's `RawStyleInfoMap::encode` writes: one
-    /// `StyleInfo` per section name, each holding css id 0. Encoded here the
-    /// way the native converter encodes it.
     #[test]
     fn style_info_map_round_trips_two_sections() {
         let original = StyleInfoMap {
@@ -854,7 +768,6 @@ mod tests {
             decode_style_info_map(&[0xFF; 64]),
             Err(DecodeError::CustomSectionsStyleInfo(_))
         ));
-        // A valid `StyleInfo` root is not a map root.
         let style_info = rkyv::to_bytes::<_, 1024>(&class_sheet("foo", "red")).unwrap();
         assert!(matches!(
             decode_style_info_map(&style_info),
@@ -865,8 +778,6 @@ mod tests {
         assert!(error.to_string().contains("over the"), "{error}");
     }
 
-    /// The rule depth limit holds per entry, and the map's own level leaves
-    /// a populated tree at the limit decodable.
     #[test]
     fn style_info_map_entries_keep_the_rule_depth_limit() {
         let deep = |levels: usize| {

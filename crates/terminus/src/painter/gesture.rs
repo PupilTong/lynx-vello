@@ -79,126 +79,60 @@
 use euclid::default::{Point2D, Vector2D};
 use smallvec::SmallVec;
 
-use crate::event::EventDetail;
-// The touch vocabulary is the event module's, because every layer that names
-// an event names it: the router fills the points in, the Rust walk reads them,
-// and the document's owner encodes them for its scripts.
-use crate::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
+use crate::event::{
+    EventDetail, TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
+};
 use crate::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
 use crate::scroll::ScrollAxes;
 use crate::tree::document::NodeId;
 use crate::visual::HitTarget;
 
-/// The gesture vocabulary and thresholds a [`GestureRouter`] synthesizes
-/// with: what a press and a hold are called, and how far and how long each
-/// may go. W3C names neither gesture, so the router has no defaults — its
-/// owner names the platform's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GesturePolicy {
-    /// How far a sequence may travel, in viewport CSS px, and still deliver
-    /// [`Self::tap_event`] at its release.
     pub tap_slop: f32,
-    /// Movement beyond this, in viewport CSS px, cancels a pending
-    /// [`Self::long_press_event`].
     pub long_press_move_slop: f32,
-    /// How far a pointer drag travels before it starts scrolling, in
-    /// viewport CSS px. The first movement subtracts the slop instead of
-    /// jumping.
     pub drag_slop: f32,
-    /// How long, in seconds, a pointer must stay down before
-    /// [`Self::long_press_event`] fires.
     pub long_press_seconds: f64,
-    /// The event name a released sequence synthesizes.
     pub tap_event: &'static str,
-    /// The event name a held sequence synthesizes.
     pub long_press_event: &'static str,
 }
 
-/// UI Events' `click`: the primary button pressed and released, at the
-/// nearest common inclusive ancestor of the two targets.
 pub(super) const CLICK_EVENT: &str = "click";
 
-/// Whether a pointer of this kind produces touch events.
-///
-/// Touch and pen do; a mouse produces none, which is what a browser does — a
-/// mouse gesture is reported through the pointer events, the compatibility
-/// mouse events and the synthesized gestures. Not the drag-to-scroll policy,
-/// which a mouse drag shares here.
 #[must_use]
 pub(super) fn produces_touch_events(device: PointerKind) -> bool {
     matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 
-/// The published-frame facts the router may ask for while deciding. Borrowed
-/// for exactly one call ([`GestureRouter::on_input`] or
-/// [`GestureRouter::on_tick`]); the router retains nothing of the host's.
-///
-/// The contract: no answer changes within one such call, so every decision
-/// of one pass sees the same facts, and an answer may lag the document — it
-/// describes the committed frame and the listeners as last known on the
-/// painter's thread, not the live document.
 pub trait RouterHost {
-    /// The nearest scroll container on the hit item's containing-block chain
-    /// (itself included) the user may scroll on any of `axes`.
     fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId>;
 
-    /// Whether `node` still names a scroll container in the current frame. A
-    /// latched scroller can be freed mid-gesture; a commit then drops it from
-    /// the slot table, and the drag simply ends.
     fn contains_node(&self, node: NodeId) -> bool;
 
-    /// Whether any listener for `name` exists anywhere in the document, as
-    /// of the pass this call belongs to: constant within the pass, and
-    /// possibly behind the document's own listeners.
     fn has_listener(&self, name: &str) -> bool;
 }
 
-/// One event this layer decided to dispatch: the type, the target and what
-/// it carries. The propagation chain is the event module's to compute from
-/// the target.
 #[derive(Clone, Debug)]
 pub struct EmitEvent {
-    /// The event's type.
     pub name: &'static str,
-    /// The node the event targets. It may have been freed since the decision
-    /// was formed — the executor checks liveness before building a path.
     pub target: NodeId,
-    /// What the event carries, in the event module's one description of it: a
-    /// pointer event's position and device, a wheel's delta, a touch event's
-    /// lists.
     pub detail: EventDetail,
-    /// For a `click` alone: the node the release routed to. The event's
-    /// target is then the nearest common inclusive ancestor of
-    /// [`Self::target`] (the down's) and this one, which the document's
-    /// owner resolves, because it holds the tree and this side holds none.
     pub release: Option<NodeId>,
 }
 
-/// One decision the painter executes, in order.
 #[derive(Clone, Debug)]
 pub enum InputDecision {
-    /// Drive the user-agent scroll chain from `from` by `delta` CSS px.
-    /// `pointer` names the drag the scroll belongs to, so consumption can be
-    /// reported back; a wheel scroll has none.
     Scroll {
-        /// The drag the scroll belongs to; `None` for a wheel.
         pointer: Option<PointerId>,
-        /// The scroll container the chain walk starts from.
         from: NodeId,
-        /// The scroll delta, in CSS px.
         delta: Vector2D<f32>,
     },
-    /// The drag `pointer` was scrolling has ended (release or cancel): the
-    /// containers it moved settle onto their snap positions.
     ScrollEnd {
-        /// The drag that ended.
         pointer: PointerId,
     },
-    /// Dispatch one event through the ordinary path.
     Emit(EmitEvent),
 }
 
-/// An inline-first batch of ordered decisions produced by the input router.
 pub type InputDecisions = SmallVec<[InputDecision; 4]>;
 
 fn emit(name: &'static str, target: NodeId, detail: EventDetail) -> InputDecision {
@@ -210,8 +144,6 @@ fn emit(name: &'static str, target: NodeId, detail: EventDetail) -> InputDecisio
     })
 }
 
-/// The detail every event a pointer produces carries, the synthesized ones
-/// included.
 fn pointer_detail(
     position: Point2D<f32>,
     id: PointerId,
@@ -228,10 +160,6 @@ fn pointer_detail(
     }
 }
 
-/// Pointer Events Level 3 §11's compatibility mouse event for a pointer
-/// event, dispatched at the same target right after it — for a mouse alone.
-/// A touch or pen pointer produces none (a recorded deviation: browsers do
-/// produce them for touch, after the touch events), and a cancel has none.
 fn compat_mouse_event_name(device: PointerKind, phase: PointerPhase) -> Option<&'static str> {
     if device != PointerKind::Mouse {
         return None;
@@ -244,8 +172,6 @@ fn compat_mouse_event_name(device: PointerKind, phase: PointerPhase) -> Option<&
     }
 }
 
-/// The W3C name a routed pointer phase dispatches under. The policy's two
-/// gestures are synthesized from the whole sequence beside these.
 fn pointer_event_name(phase: PointerPhase) -> &'static str {
     match phase {
         PointerPhase::Down => "pointerdown",
@@ -255,9 +181,6 @@ fn pointer_event_name(phase: PointerPhase) -> &'static str {
     }
 }
 
-/// The W3C UI Events name a key phase dispatches under: `keydown` and
-/// `keyup`, and nothing else (`keypress` is deprecated, and `input` and the
-/// composition events need an editing model).
 fn key_event_name(phase: KeyPhase) -> &'static str {
     match phase {
         KeyPhase::Down => "keydown",
@@ -265,8 +188,6 @@ fn key_event_name(phase: KeyPhase) -> &'static str {
     }
 }
 
-/// The W3C touch name the same phase dispatches under, beside the pointer
-/// event and before any press gesture the release synthesizes.
 fn touch_event_name(phase: PointerPhase) -> &'static str {
     match phase {
         PointerPhase::Down => "touchstart",
@@ -276,7 +197,6 @@ fn touch_event_name(phase: PointerPhase) -> &'static str {
     }
 }
 
-/// One pointer's latched scroll drag.
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     pointer: PointerId,
@@ -285,12 +205,6 @@ struct Drag {
     scrolling: bool,
 }
 
-/// One finger currently down, tracked for the touch lists.
-///
-/// `target` is the node the finger's *down* routed to and never changes: the
-/// standard's implicit capture makes it the finger's target for the whole
-/// touch, so a move that travels off the node still dispatches there and is
-/// never re-hit-tested.
 #[derive(Clone, Copy, Debug)]
 struct ActiveTouch {
     pointer: PointerId,
@@ -298,7 +212,6 @@ struct ActiveTouch {
     position: Point2D<f32>,
 }
 
-/// One pointer sequence being watched from down to release for synthesis.
 #[derive(Debug)]
 struct Sequence {
     pointer: PointerId,
@@ -306,14 +219,8 @@ struct Sequence {
     target: NodeId,
     down_position: Point2D<f32>,
     latest_position: Point2D<f32>,
-    /// Cleared by travel beyond [`GesturePolicy::tap_slop`] or a consumed
-    /// scroll.
     tap_allowed: bool,
-    /// Armed at down; disarmed by travel beyond
-    /// [`GesturePolicy::long_press_move_slop`], a consumed scroll, or expiry.
     longpress_deadline: Option<f64>,
-    /// The hold gesture was delivered for this sequence, which is what makes
-    /// the release not a press gesture.
     longpress_fired: bool,
 }
 
@@ -325,45 +232,23 @@ impl Sequence {
     }
 }
 
-/// The primary pointer's press, watched from down to release for `click`.
 #[derive(Clone, Copy, Debug)]
 struct ClickCandidate {
     pointer: PointerId,
-    /// What the down routed to.
     target: NodeId,
 }
 
-/// The per-view router state. Owned by the painter, fed on the painting side
-/// only.
 #[derive(Debug)]
 pub struct GestureRouter {
-    /// What the two synthesized gestures are called and where their
-    /// thresholds lie.
     policy: GesturePolicy,
-    /// Every pointer currently down, in down order. Length is what matters
-    /// for synthesis: more than one cancels it for the whole overlap. Drags
-    /// stay per-pointer regardless — each pointer scrolls independently.
     down_pointers: Vec<PointerId>,
-    /// The one sequence that can still synthesize. `None` while no pointer is
-    /// down, while more than one is, or after the sequence disqualified
-    /// itself.
     sequence: Option<Sequence>,
-    /// The scroll drags currently latched to a pointer.
     drags: Vec<Drag>,
-    /// Every finger currently down, in down order — the `touches` list the
-    /// next touch event reports. Independent of `sequence`: multi-touch is
-    /// always on here, while synthesis is single-finger.
     touches: SmallVec<[ActiveTouch; 2]>,
-    /// The primary pointer's press that can still become a `click`: armed by
-    /// a primary-button down with no other pointer down, ended by its
-    /// release, its cancel or a scroll its drag consumed. Independent of
-    /// `sequence`: there is no movement slop and a second pointer does not
-    /// end it.
     click: Option<ClickCandidate>,
 }
 
 impl GestureRouter {
-    /// A router with nothing down, synthesizing on `policy`.
     #[must_use]
     pub fn new(policy: GesturePolicy) -> Self {
         Self {
@@ -376,29 +261,11 @@ impl GestureRouter {
         }
     }
 
-    /// The policy this router synthesizes on.
     #[must_use]
     pub const fn policy(&self) -> GesturePolicy {
         self.policy
     }
 
-    /// Feeds one routed input event and appends the decisions it produces.
-    ///
-    /// `target` is what routing hit and `at` is the painter clock's reading
-    /// when the event arrived — arrival time rather than drain time, so a
-    /// sequence buffered behind a busy document keeps its real duration. Due
-    /// deadlines resolve first, so their emits precede the event's own on
-    /// the ordered channel. Within one pointer event the order is: a due hold
-    /// gesture, the scroll decision (the user-agent default action runs
-    /// first, as it always has), the raw event, the touch event, then a
-    /// synthesized press gesture — so a release delivers `pointerup`,
-    /// `touchend` and then the press gesture, the order a browser gives its
-    /// own events.
-    ///
-    /// The event's own `default_prevented` is the embedder's suppression
-    /// seam: a prevented event produces no scroll decision (a prevented move
-    /// re-bases the drag origin) but still dispatches and still feeds
-    /// synthesis.
     pub fn on_input(
         &mut self,
         event: &InputEvent,
@@ -462,10 +329,6 @@ impl GestureRouter {
                 ref text,
             } => {
                 let name = key_event_name(phase);
-                // No hit test, and no focus on this side: the document
-                // element is the target, as it is in a browser with nothing
-                // focused, and the document's owner retargets the key to the
-                // focused element when there is one.
                 out.push(emit(
                     name,
                     NodeId::DOCUMENT_ELEMENT,
@@ -481,10 +344,6 @@ impl GestureRouter {
         }
     }
 
-    /// The executor reports that a scroll decision for `pointer`'s drag
-    /// actually moved something. That consumption — not the drag alone — is
-    /// what claims the sequence away from synthesis, so a drag at a
-    /// scroller's boundary that moves nothing keeps its press gesture.
     pub fn note_scroll_consumed(&mut self, pointer: PointerId) {
         if self
             .click
@@ -502,16 +361,10 @@ impl GestureRouter {
         }
     }
 
-    /// Fires a due hold deadline against the frame clock.
-    ///
-    /// The painter calls this once per produced frame; while a deadline is
-    /// armed [`Self::needs_frame`] keeps frames coming, the same continuation
-    /// contract running animations use.
     pub fn on_tick(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
         self.fire_due(now, host, out);
     }
 
-    /// Whether a deadline is armed and so owes the timeline another frame.
     #[must_use]
     pub fn needs_frame(&self) -> bool {
         self.sequence
@@ -519,8 +372,6 @@ impl GestureRouter {
             .is_some_and(|sequence| sequence.longpress_deadline.is_some())
     }
 
-    /// The drag half of the pointer default action: latch at down, slop at
-    /// the first movement, one scroll decision per move.
     #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn drag_step(
         &mut self,
@@ -571,8 +422,6 @@ impl GestureRouter {
                         return;
                     }
                     drag.scrolling = true;
-                    // Subtract the slop from the first movement rather than
-                    // jumping by the full travel.
                     travel * ((distance - drag_slop) / distance)
                 };
                 drag.origin = event.position;
@@ -595,16 +444,6 @@ impl GestureRouter {
         }
     }
 
-    /// The touch half: track every finger from its down, and dispatch one
-    /// touch event per incoming pointer event at the finger's captured
-    /// target.
-    ///
-    /// A finger whose down hit nothing is not tracked and emits nothing for
-    /// the rest of its life — there is no node to dispatch at. A move for a
-    /// pointer no down tracked emits nothing for the same reason. A scroll
-    /// claim changes none of this: the stream goes on while the drag
-    /// recognizer scrolls, and only [`PointerPhase::Cancel`] produces
-    /// `touchcancel`.
     fn touch_step(
         &mut self,
         event: &InputEvent,
@@ -617,12 +456,6 @@ impl GestureRouter {
         if !produces_touch_events(device) {
             return;
         }
-        // A non-finite position would reach the wire as a `NaN` field. A down
-        // or a move carrying one is ignored outright — there is nowhere to put
-        // it. A release carrying one still ends its finger, because the
-        // alternative is a finger tracked forever in every later event's
-        // `touches`; what it reports instead is the last point the finger was
-        // tracked at, which is finite by this rule.
         let finite = event.position.x.is_finite() && event.position.y.is_finite();
         let name = touch_event_name(phase);
         let (target, changed) = match phase {
@@ -630,8 +463,6 @@ impl GestureRouter {
                 if !finite {
                     return;
                 }
-                // A repeated down for a tracked id replaces the record: the
-                // new down is where that finger is now.
                 self.touches.retain(|touch| touch.pointer != id);
                 let Some(hit) = target else {
                     return;
@@ -657,9 +488,6 @@ impl GestureRouter {
                 let Some(index) = self.touches.iter().position(|touch| touch.pointer == id) else {
                     return;
                 };
-                // Removed before the lists are built: the standard's
-                // `touches` is the fingers still down *after* the event, so
-                // the one lifting is in `changedTouches` alone.
                 let touch = self.touches.remove(index);
                 (
                     touch.target,
@@ -672,9 +500,6 @@ impl GestureRouter {
             }
         };
         let touches = self.touch_points(target, id, changed);
-        // The `{x, y}` detail is the first finger still down. When the last
-        // one just lifted there is none, and the changed finger's own point
-        // is reported.
         let position = touches
             .iter()
             .find(|point| point.flags & TOUCH_ACTIVE != 0)
@@ -689,9 +514,6 @@ impl GestureRouter {
         ));
     }
 
-    /// The three lists for one touch event, flagged per point: every finger
-    /// still down in down order, then the changed finger when it is no longer
-    /// among them.
     fn touch_points(
         &self,
         target: NodeId,
@@ -726,9 +548,6 @@ impl GestureRouter {
         points
     }
 
-    /// The wheel half of the default action: per-event nearest scrollable on
-    /// the delta's axes. The embedder has already normalized the delta to
-    /// viewport CSS pixels. Stateless — a wheel latches nothing.
     fn wheel_scroll(
         target: HitTarget,
         delta: Vector2D<f32>,
@@ -749,14 +568,6 @@ impl GestureRouter {
         });
     }
 
-    /// The `click` half (UI Events): a primary-button press of the primary
-    /// pointer, released anywhere, with no movement slop. The release emits
-    /// one `click` decision naming both targets, after the release's own
-    /// pointer, touch and mouse events and before any press gesture; the
-    /// owner targets it at their nearest common inclusive ancestor and decides a
-    /// `dblclick` from it. A release that routed to nothing clicks nothing,
-    /// and neither does a cancelled sequence or one whose drag consumed a
-    /// scroll ([`Self::note_scroll_consumed`]).
     fn click_step(
         &mut self,
         target: Option<HitTarget>,
@@ -767,8 +578,6 @@ impl GestureRouter {
         out: &mut InputDecisions,
     ) {
         match phase {
-            // Read before `synthesize` records this down: a pointer that goes
-            // down while another is down is not the primary one.
             PointerPhase::Down if self.down_pointers.is_empty() && button == 0 => {
                 self.click = target.map(|hit| ClickCandidate {
                     pointer: id,
@@ -795,7 +604,6 @@ impl GestureRouter {
         }
     }
 
-    /// The synthesis half: sequence lifecycle and the press-gesture decision.
     #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn synthesize(
         &mut self,
@@ -814,13 +622,8 @@ impl GestureRouter {
                     self.down_pointers.push(id);
                 }
                 if self.down_pointers.len() > 1 {
-                    // The press gesture is single-finger only: the overlap
-                    // disqualifies both fingers, and recognition resumes at
-                    // the next solitary down.
                     self.sequence = None;
                 } else {
-                    // A down that hit nothing can name no target later, so
-                    // it starts no sequence.
                     self.sequence = target.map(|target| Sequence {
                         pointer: id,
                         device,
@@ -886,16 +689,12 @@ impl GestureRouter {
         if now < deadline {
             return;
         }
-        // The deadline lapses exactly once, whatever the listener answer: the
-        // walk at this instant either finds a handler or the sequence's hold
-        // half is simply over.
         sequence.longpress_deadline = None;
         if host.has_listener(long_press_event) {
             sequence.longpress_fired = true;
             out.push(emit(
                 long_press_event,
                 sequence.target,
-                // Held down: no button changed, the primary one is held.
                 pointer_detail(
                     sequence.latest_position,
                     sequence.pointer,
@@ -917,9 +716,6 @@ mod tests {
     const OTHER: u64 = 5;
     const SCROLLER: u64 = 7;
 
-    /// The policy these cases are written against: a 50 px press radius, an
-    /// 8 px hold and drag slop, a half-second hold, and the two gestures
-    /// named `press` and `hold`.
     const POLICY: GesturePolicy = GesturePolicy {
         tap_slop: 50.0,
         long_press_move_slop: 8.0,
@@ -949,7 +745,6 @@ mod tests {
         InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Mouse, phase)
     }
 
-    /// A host whose answers the test scripts directly.
     struct MockHost {
         scroller: Option<NodeId>,
         live: bool,
@@ -1013,7 +808,6 @@ mod tests {
             self.router.on_tick(now, &self.host, &mut self.out);
         }
 
-        /// Every decision so far, flattened to a comparable line.
         fn trace(&self) -> Vec<String> {
             self.out
                 .iter()
@@ -1029,7 +823,6 @@ mod tests {
                 .collect()
         }
 
-        /// Only the emitted event names, for synthesis-focused tests.
         fn emitted(&self) -> Vec<&'static str> {
             self.out
                 .iter()
@@ -1040,10 +833,6 @@ mod tests {
                 .collect()
         }
 
-        /// Every touch emit's lists, one comparable line each: the name, the
-        /// target, the `{x, y}` detail point, and then per point its
-        /// identifier, position and list membership (`a`ctive, `t`arget,
-        /// `c`hanged, in flag order).
         fn touch_trace(&self) -> Vec<String> {
             self.out
                 .iter()
@@ -1095,7 +884,6 @@ mod tests {
             shift: true,
             ..Modifiers::default()
         };
-        // Routing hit nothing: a key event is never hit-tested.
         harness.feed_routed(
             InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift).with_text(Some("A".into())),
             None,
@@ -1134,7 +922,6 @@ mod tests {
         InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Pen, phase)
     }
 
-    /// The emitted `click`s, as `click@down>release`.
     fn clicks(harness: &Harness) -> Vec<String> {
         harness
             .out
@@ -1221,7 +1008,6 @@ mod tests {
             "no slop: the common ancestor is resolved where the tree is"
         );
 
-        // A release that routed to nothing clicks nothing.
         harness.out.clear();
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.2);
         harness.feed_routed(mouse(1, PointerPhase::Up, 10.0, 10.0), None, 0.3);
@@ -1336,7 +1122,6 @@ mod tests {
     fn travel_within_the_tap_slop_keeps_the_press_but_kills_the_hold() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        // 20px: beyond the 8px long-press slop, inside the 50px tap slop.
         harness.feed(touch(1, PointerPhase::Move, 30.0, 10.0), 0.05);
         assert!(!harness.router.needs_frame(), "the deadline is disarmed");
         harness.tick(1.0);
@@ -1400,7 +1185,6 @@ mod tests {
     fn a_release_arriving_after_the_deadline_emits_hold_before_its_pointerup() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        // No tick ran in between: the up itself is past the deadline.
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.9);
         assert_eq!(
             harness.emitted(),
@@ -1483,7 +1267,6 @@ mod tests {
             "the end is decided before the release's own events, on cancel too"
         );
 
-        // A drag that never crossed its slop scrolled nothing and ends nothing.
         harness.feed(touch(2, PointerPhase::Down, 10.0, 10.0), 0.2);
         harness.feed(touch(2, PointerPhase::Move, 12.0, 12.0), 0.25);
         harness.out.clear();
@@ -1503,8 +1286,6 @@ mod tests {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        // 20px drag: a scroll is decided, but the executor reports nothing
-        // consumed (the scroller sits at its boundary) — no claim.
         harness.feed(touch(1, PointerPhase::Move, 10.0, 30.0), 0.05);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 30.0), 0.1);
         assert_eq!(
@@ -1569,10 +1350,6 @@ mod tests {
         );
     }
 
-    /// A mouse drag scrolls (user ruling 2026-10-13): it latches the drag
-    /// recognizer like a finger, the compatibility `mousemove` goes on
-    /// flowing while it scrolls, and the consumed scroll claims the sequence
-    /// from `click` and `press` alike.
     #[test]
     fn a_mouse_drag_scrolls_and_its_consumed_scroll_suppresses_click_and_press() {
         let mut harness = Harness::new();
@@ -1586,7 +1363,6 @@ mod tests {
             [
                 format!("pointerdown@{TARGET}"),
                 format!("mousedown@{TARGET}"),
-                // 60px of travel less the 8px slop.
                 format!("scroll@{SCROLLER}:-0,-52"),
                 format!("pointermove@{TARGET}"),
                 format!("mousemove@{TARGET}"),
@@ -1598,8 +1374,6 @@ mod tests {
         );
     }
 
-    /// The wheel is no pointer sequence: a mouse wheel during a press scrolls
-    /// as any wheel does and claims nothing from the `click` and `press` its release emits.
     #[test]
     fn a_mouse_wheel_is_unaffected_by_the_mouse_drag_policy() {
         let mut harness = Harness::new();
@@ -1653,8 +1427,6 @@ mod tests {
             Some(target()),
             0.05,
         );
-        // The next unprevented move measures from the re-based origin: 5px
-        // of travel is inside the slop, so still no scroll.
         harness.feed(touch(1, PointerPhase::Move, 10.0, 65.0), 0.1);
         assert!(
             !harness
@@ -1662,8 +1434,6 @@ mod tests {
                 .iter()
                 .any(|decision| matches!(decision, InputDecision::Scroll { .. }))
         );
-        // Prevention is the scroll seam alone: the prevented move dispatched
-        // its touch event like the raw one, and moved the finger with it.
         assert_eq!(
             harness.touch_trace()[1],
             format!("touchmove@{TARGET} detail=10,60 [1@10,60:atc]")
@@ -1709,7 +1479,6 @@ mod tests {
             "no press from a two-finger overlap"
         );
 
-        // The next solitary sequence recognizes again.
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.2);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.3);
         assert!(harness.emitted().contains(&"press"));
@@ -1753,8 +1522,6 @@ mod tests {
             [
                 format!("touchstart@{TARGET} detail=10,10 [1@10,10:atc]"),
                 format!("touchmove@{TARGET} detail=20,12 [1@20,12:atc]"),
-                // The lifted finger is gone from `touches`, so it is in
-                // `changedTouches` alone and the detail is its own point.
                 format!("touchend@{TARGET} detail=22,12 [1@22,12:c]"),
             ]
         );
@@ -1784,8 +1551,6 @@ mod tests {
             ],
             "the down's node is the finger's target for the finger's whole life"
         );
-        // The raw pointer events are re-hit-tested as usual; only the touch
-        // stream is captured.
         assert!(harness.trace().contains(&format!("pointermove@{OTHER}")));
     }
 
@@ -1805,13 +1570,8 @@ mod tests {
             harness.touch_trace(),
             [
                 format!("touchstart@{TARGET} detail=10,10 [1@10,10:atc]"),
-                // The second finger's own event: the first is still down, so
-                // it is in `touches` — but its target is the other node, so
-                // not in `targetTouches`. The detail is `touches[0]`.
                 format!("touchstart@{OTHER} detail=10,10 [1@10,10:a 2@50,10:atc]"),
                 format!("touchmove@{TARGET} detail=12,10 [1@12,10:atc 2@50,10:a]"),
-                // The finger that lifted leaves `touches`; the one still down
-                // stays, and supplies the detail point.
                 format!("touchend@{TARGET} detail=50,10 [2@50,10:a 1@12,10:c]"),
                 format!("touchend@{OTHER} detail=50,10 [2@50,10:c]"),
             ]
@@ -1886,8 +1646,6 @@ mod tests {
             harness.touch_trace(),
             [
                 format!("touchstart@{TARGET} detail=10,10 [1@10,10:atc]"),
-                // The first finger is still where its down put it: a `NaN`
-                // would have reached the wire.
                 format!("touchstart@{OTHER} detail=10,10 [1@10,10:a 2@50,10:atc]"),
             ]
         );
@@ -1899,8 +1657,6 @@ mod tests {
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(touch(1, PointerPhase::Move, 20.0, 10.0), 0.05);
         harness.feed(touch(1, PointerPhase::Up, f32::NAN, 10.0), 0.1);
-        // A fresh finger: were the released one still tracked, it would be in
-        // this event's `touches` too.
         harness.feed(touch(2, PointerPhase::Down, 50.0, 10.0), 0.2);
         harness.feed(touch(2, PointerPhase::Up, 50.0, 10.0), 0.25);
         assert_eq!(
@@ -1908,8 +1664,6 @@ mod tests {
             [
                 format!("touchstart@{TARGET} detail=10,10 [1@10,10:atc]"),
                 format!("touchmove@{TARGET} detail=20,10 [1@20,10:atc]"),
-                // The release reports the last point the finger was tracked
-                // at rather than its own unusable one.
                 format!("touchend@{TARGET} detail=20,10 [1@20,10:c]"),
                 format!("touchstart@{TARGET} detail=50,10 [2@50,10:atc]"),
                 format!("touchend@{TARGET} detail=50,10 [2@50,10:c]"),
@@ -1967,7 +1721,6 @@ mod tests {
     fn moves_from_another_pointer_do_not_disturb_the_sequence() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        // A hover move from a different device id, no down.
         harness.feed(touch(9, PointerPhase::Move, 500.0, 500.0), 0.05);
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.1);
         assert!(harness.emitted().contains(&"press"));

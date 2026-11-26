@@ -125,12 +125,6 @@ fn string_return(bencher: divan::Bencher) {
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
-/// The other direction: the host calling a member the realm published.
-///
-/// This is the event path — one call per node an event reaches, with the
-/// event's name and JSON detail as arguments. Unlike the cases above, the
-/// driver is the host, so each iteration is `CALLS` boundary crossings made
-/// from Rust rather than from JavaScript.
 fn member_driver(body: &str) -> (Context, Value, quickjs_rust_bridge::Member) {
     let realm = Runtime::new()
         .expect("runtime")
@@ -176,8 +170,6 @@ fn member_two_number_arguments(bencher: divan::Bencher) {
     });
 }
 
-/// The `event_listener_callback` shape: two node handles, a capture flag, the
-/// event name, its JSON detail, the walk id, and whether this step is last.
 #[divan::bench]
 fn member_event_arguments(bencher: divan::Bencher) {
     drive_member(

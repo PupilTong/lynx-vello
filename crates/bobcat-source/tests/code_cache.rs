@@ -33,10 +33,6 @@ impl Drop for TempDir {
     }
 }
 
-/// How many entries the code cache under `dir` holds: the bodies whose
-/// record is beside them. Counted from the directory listing rather than
-/// through a second `FsStore`, whose scan sweeps a body with no record yet
-/// and so would delete an entry the cache is in the middle of writing.
 fn stored_entries(dir: &Path) -> usize {
     let Ok(items) = std::fs::read_dir(dir.join("code")) else {
         return 0;
@@ -51,19 +47,12 @@ fn stored_entries(dir: &Path) -> usize {
         .count()
 }
 
-/// Whether everything the process's tier holds is on disk under `dir`. The
-/// tier is this test's alone and holds only what the card compiled or what
-/// was preloaded from `dir`, so once nothing is queued and the Store holds
-/// as many entries as the tier, the last flush has finished writing.
 fn persisted(dir: &Path) -> bool {
     let global = Artifacts::global();
     let stored = stored_entries(dir);
     !global.has_pending() && stored > 0 && stored >= global.len()
 }
 
-/// Boots the card over a disk cache in `dir`, waits for its first frame and
-/// for the code cache to hold what it compiled, and answers the frame's
-/// pixels.
 async fn boot(dir: &Path) -> Vec<u8> {
     let input = Url::parse("app:///react-global-props.lynx.bundle").unwrap();
     let page = PageSource::from_native_bundle(
@@ -152,7 +141,6 @@ async fn a_card_boots_from_the_bytecode_an_earlier_resource_system_left_on_disk(
     );
     let _ = std::fs::remove_dir_all(&dir.0);
     let global = Artifacts::global();
-    // This binary runs this one test, so the process's tier is this test's.
     global.clear();
 
     let first = boot(&dir.0).await;
@@ -162,7 +150,6 @@ async fn a_card_boots_from_the_bytecode_an_earlier_resource_system_left_on_disk(
         "the main-thread and background scripts, at least"
     );
 
-    // Nothing resident: whatever the second boot reads, it read from disk.
     global.clear();
     let second = boot(&dir.0).await;
     assert_eq!(first, second, "the same frame from bytecode as from text");

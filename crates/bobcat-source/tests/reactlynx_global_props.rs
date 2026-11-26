@@ -22,8 +22,6 @@ use url::Url;
 mod support;
 use support::{DelayedBackground, PendingSource};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
 

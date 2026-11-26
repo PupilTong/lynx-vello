@@ -13,7 +13,6 @@ use std::str::FromStr;
 
 use crate::image_header;
 
-/// A parsed media type: a lowercase `type/subtype` essence plus parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaType {
     essence: String,
@@ -21,21 +20,14 @@ pub struct MediaType {
     parameters: Vec<(String, String)>,
 }
 
-/// What the preprocessing pipeline does with a resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceClass {
-    /// Decoded to UTF-8 text.
     Text,
-    /// Decoded to UTF-8 and validated as JSON.
     Json,
-    /// Container-sniffed and header-probed; the pixels stay encoded for the
-    /// platform decoder.
     Image(ImageFormat),
-    /// Passed through untouched.
     Binary,
 }
 
-/// The image containers the platform decoders and the header probe know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImageFormat {
     Png,
@@ -44,13 +36,10 @@ pub enum ImageFormat {
     WebP,
     Bmp,
     Svg,
-    /// An `image/*` type this crate has no header knowledge of; the platform
-    /// decoder may still know it.
     Other,
 }
 
 impl ImageFormat {
-    /// The canonical media type of the container.
     #[must_use]
     pub const fn media_type(self) -> &'static str {
         match self {
@@ -64,10 +53,6 @@ impl ImageFormat {
         }
     }
 
-    /// Whether a file of this container can hold more than one frame: GIF,
-    /// APNG (which is a PNG) and animated WebP. Only these are asked how
-    /// many frames they have ([`crate::ImageDecoder::frames_blocking`]); a
-    /// still PNG answers one.
     #[must_use]
     pub const fn may_animate(self) -> bool {
         matches!(self, Self::Gif | Self::Png | Self::WebP)
@@ -87,13 +72,6 @@ impl ImageFormat {
 }
 
 impl MediaType {
-    /// Parses a `Content-Type`-style value such as `text/html; charset=utf-8`.
-    ///
-    /// Type and subtype are lowercased, parameter names are lowercased, and
-    /// quoted parameter values are unquoted. A malformed parameter is
-    /// skipped rather than failing the whole value, which is what the
-    /// mimesniff "parse a MIME type" algorithm does; a malformed essence is
-    /// `None`.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim_matches(is_http_whitespace);
@@ -124,25 +102,21 @@ impl MediaType {
         Some(media_type)
     }
 
-    /// `type/subtype`, lowercase.
     #[must_use]
     pub fn essence(&self) -> &str {
         &self.essence
     }
 
-    /// The top-level type: `text` in `text/css`.
     #[must_use]
     pub fn kind(&self) -> &str {
         &self.essence[..self.slash]
     }
 
-    /// The subtype: `css` in `text/css`.
     #[must_use]
     pub fn subtype(&self) -> &str {
         &self.essence[self.slash + 1..]
     }
 
-    /// A parameter's value, by case-insensitive name.
     #[must_use]
     pub fn parameter(&self, name: &str) -> Option<&str> {
         self.parameters
@@ -151,13 +125,11 @@ impl MediaType {
             .map(|(_, value)| value.as_str())
     }
 
-    /// The `charset` parameter, if any.
     #[must_use]
     pub fn charset(&self) -> Option<&str> {
         self.parameter("charset")
     }
 
-    /// Sets a parameter, replacing an existing one of the same name.
     #[must_use]
     pub fn with_parameter(mut self, name: &str, value: &str) -> Self {
         let name = name.to_ascii_lowercase();
@@ -172,7 +144,6 @@ impl MediaType {
         self
     }
 
-    /// How the pipeline treats a payload of this type.
     #[must_use]
     pub fn class(&self) -> ResourceClass {
         let (kind, subtype) = (self.kind(), self.subtype());
@@ -199,8 +170,6 @@ impl MediaType {
         ResourceClass::Binary
     }
 
-    /// Whether this type says nothing a byte scan would not: the labels a
-    /// server puts on content it did not look at.
     fn is_placeholder(&self) -> bool {
         matches!(
             self.essence(),
@@ -231,7 +200,6 @@ impl fmt::Display for MediaType {
     }
 }
 
-/// The parse failure: the value had no well-formed `type/subtype`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvalidMediaType;
 
@@ -251,7 +219,6 @@ impl FromStr for MediaType {
     }
 }
 
-/// Walks `;`-separated `name=value` parameters, skipping malformed ones.
 struct ParameterIter<'a> {
     rest: &'a str,
 }
@@ -269,7 +236,6 @@ impl Iterator for ParameterIter<'_> {
             let name = rest[..name_end].to_ascii_lowercase();
             let after_name = &rest[name_end..];
             let Some(after_equals) = after_name.strip_prefix('=') else {
-                // No value: skip this parameter and continue after the `;`.
                 self.rest = after_name.strip_prefix(';').unwrap_or("");
                 continue;
             };
@@ -296,9 +262,6 @@ impl Iterator for ParameterIter<'_> {
     }
 }
 
-/// Collects an HTTP quoted-string body (the opening quote already consumed),
-/// returning the unescaped value and the number of bytes consumed including
-/// the closing quote when one exists.
 fn collect_quoted(input: &str) -> (String, usize) {
     let mut value = String::new();
     let mut characters = input.char_indices();
@@ -319,7 +282,6 @@ fn is_http_whitespace(character: char) -> bool {
     matches!(character, ' ' | '\t' | '\n' | '\r')
 }
 
-/// RFC 9110 `token` characters.
 fn is_token(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -327,15 +289,12 @@ fn is_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
-/// Characters an HTTP quoted-string may carry once unescaped.
 fn is_quotable(value: &str) -> bool {
     value.chars().all(|character| {
         character == '\t' || (' '..='~').contains(&character) || character as u32 >= 0x80
     })
 }
 
-/// The media type a file extension conventionally carries, for `file:` URLs
-/// and the like where nothing else labels the bytes.
 #[must_use]
 pub fn from_extension(path: &str) -> Option<MediaType> {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -368,16 +327,6 @@ pub fn from_extension(path: &str) -> Option<MediaType> {
     MediaType::parse(value)
 }
 
-/// Decides what `bytes` are, given what they were declared to be.
-///
-/// Image magic bytes always win: a server that labels a PNG `text/plain`
-/// still gets an image, and a script can never be mistaken for one because
-/// no text starts with a container signature. An SVG is the one image that
-/// is text, so it is recognised only where nothing specific was declared.
-/// Otherwise a declared type is trusted, unless it is a placeholder like
-/// `application/octet-stream`. With nothing to go on, a scan for binary
-/// data bytes separates `text/plain` from an opaque blob, and a Unicode BOM
-/// names the text's charset.
 #[must_use]
 pub fn sniff(bytes: &[u8], declared: Option<&MediaType>) -> MediaType {
     let specific = declared.filter(|declared| !declared.is_placeholder());
@@ -401,7 +350,6 @@ pub fn sniff(bytes: &[u8], declared: Option<&MediaType>) -> MediaType {
     }
 }
 
-/// The charset a leading byte-order mark names, if there is one.
 #[must_use]
 pub fn bom_charset(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -415,7 +363,6 @@ pub fn bom_charset(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// The mimesniff "binary data byte" scan over the resource header.
 fn looks_binary(bytes: &[u8]) -> bool {
     if bom_charset(bytes).is_some() {
         return false;

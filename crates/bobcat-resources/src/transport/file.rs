@@ -10,7 +10,6 @@ use vant::error::Failure;
 
 use crate::file_body::{self, Body};
 
-/// Reads the file `url` names, handed over as `body` says.
 pub(crate) fn read(url: &Url, body: Body) -> Result<Bytes, Failure> {
     let path = url.to_file_path().map_err(|()| {
         Failure::new(

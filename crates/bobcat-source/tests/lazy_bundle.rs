@@ -16,30 +16,20 @@ use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::{BundleInstaller, ContainerSources, PageSource};
 use url::Url;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(393.0, 727.0, 1.0);
 
-/// Where the fixtures are served from. The compiled card asks for its lazy
-/// container by a **rooted** path (webpack's `publicPath` is `/`), so each
-/// chunk is registered at this origin's root rather than beside the page.
 const ORIGIN: &str = "https://cdn.test";
 
-/// The page, its lazy chunks, and a resource system that installs containers.
 fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
     let fixture = fixtures::fixture(name);
     let input = Url::parse(&format!("{ORIGIN}/{name}.lynx.bundle")).expect("a page URL");
-    // A source-based `.lynx.bundle` names its main-thread module after the
-    // entry it was compiled from, so it is selected explicitly.
     let page =
         PageSource::from_native_bundle(&input, fixture.page, &format!("{name}__main-thread"))
             .expect("the card decodes");
     let resources = Resources::new(
         ResourcesConfig {
             base_url: Some(input.clone()),
-            // Without this every `lynx.fetchBundle` fails: installing a
-            // container is what makes its sections loadable.
             container_installer: Some(Arc::new(BundleInstaller)),
             ..ResourcesConfig::default()
         },
@@ -54,15 +44,8 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
     (page.view_sources(SCREEN, "en-US"), resources)
 }
 
-/// The 80px `.lazy-box` of `react-lazy-child.css`, sampled 40×40 into the
-/// page: blue only once the lazy container's `CSS` section was adopted
-/// through `__LoadStyleSheet`, which only happens if the container installed.
 const LAZY_BOX: &[((usize, usize), [u8; 4])] = &[((40, 40), [0, 0, 255, 255])];
 
-/// Boots one fixture and runs it until `expected` has been logged and every
-/// `probes` pixel shows its colour, painting as it goes so that the lazy
-/// components' own CSS reaches a frame. Any other runtime event fails the
-/// test.
 async fn boots(name: &str, expected: &str, probes: &[((usize, usize), [u8; 4])]) {
     let (sources, resources) = registered(name);
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
@@ -106,60 +89,29 @@ async fn boots(name: &str, expected: &str, probes: &[((usize, usize), [u8; 4])])
     }
 }
 
-/// The asynchronous shape: BTS fetches the container, its `.then` runs as a
-/// reaction of the fetch's Future, and MTS prepares its half through
-/// `rLynxPrepareLazyBundleMTS` — whose `lynx.loadScript('main-thread')` and
-/// `__LoadStyleSheet('CSS')` both run **inline**, because that second
-/// `fetchBundle` is a URL the view's fetcher already holds and its
-/// `fetch_probe` says so in the realm's own job.
-///
-/// That inline answer is the whole reason the probe exists. Without it the
-/// prepare returns having loaded nothing, the `callLepusMethod` reply
-/// resolves BTS's lazy import, BTS renders and sends `rLynxChange`, and MTS
-/// applies a patch naming a snapshot its `main-thread` section has not
-/// registered yet — `Snapshot not found`. See `docs/tracking/deviations.md`.
 #[tokio::test]
 async fn a_compiled_lazy_card_fetches_its_container_and_renders_it() {
     boots("react-lazy", "react-lazy-ready", LAZY_BOX).await;
 }
 
-/// The synchronous shape: `lynx.fetchBundle(url, {}).wait(5)` parks the BTS
-/// job until the container is installed, and the section loads before the
-/// call returns.
 #[tokio::test]
 async fn a_sync_lazy_card_waits_out_its_container_on_the_background_thread() {
     boots("react-lazy-sync", "react-lazy-sync-listening", LAZY_BOX).await;
 }
 
-/// The nested shape: an async lazy `Outer` whose container carries the
-/// `CSS` section of `react-lazy-nested-outer.css`, a sync lazy `Inner` inside
-/// it, and a JS module both of `Inner`'s imports share. The 100px orange
-/// `.nested-outer` is painted only once `Outer`'s `CSS` section was adopted;
-/// the 80px `Inner` in its corner turns purple once the shared module ran.
-///
-/// `Inner`'s container has no `CSS` section, yet `rLynxPrepareLazyBundleMTS`
-/// still runs `__LoadStyleSheet('CSS', url)` and adopts what it answers
-/// unless that is `null`. Native's `LoadStyleSheet` answers `undefined` for a
-/// missing section (`renderer_functions.cc:963-968`); here the fetcher's
-/// registry has nothing at `<inner>/custom_section/CSS.css`, so it answers
-/// `null`, and nothing is adopted, requested or reported.
 #[tokio::test]
 async fn a_nested_lazy_card_adopts_the_outer_containers_css() {
     boots(
         "react-lazy-nested",
         "react-lazy-nested-ready",
         &[
-            // Inside `.nested-outer`, outside the 80px `Inner`.
             ((90, 90), [255, 165, 0, 255]),
-            // Inside `Inner`, after the shared module recoloured it.
             ((40, 40), [128, 0, 128, 255]),
         ],
     )
     .await;
 }
 
-/// What the real `react-lazy` chunk decodes to, URL by URL: the one rule both
-/// realms write, over a container the compiler actually produced.
 #[test]
 fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
     let fixture = fixtures::fixture("react-lazy");
@@ -175,14 +127,9 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
             .map(|(url, _)| url.as_str())
             .collect::<Vec<_>>(),
         [
-            // `/background`, the manifest path the native decoder files the
-            // `background` section under too: `requireModule` would ask here.
             format!("{ORIGIN}/{name}/background"),
-            // `lynx.loadScript('background', {bundleName})` on BTS.
             format!("{ORIGIN}/{name}/background.js"),
-            // `/main-thread`, the same section's manifest path.
             format!("{ORIGIN}/{name}/main-thread"),
-            // `lynx.loadScript('main-thread', {bundleName})` on MTS.
             format!("{ORIGIN}/{name}/main-thread.js"),
         ]
     );
@@ -192,11 +139,8 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
             .iter()
             .map(|(url, _)| url.as_str())
             .collect::<Vec<_>>(),
-        // `__LoadStyleSheet('CSS', bundleName)` on MTS.
         [format!("{ORIGIN}/{name}/custom_section/CSS.css")]
     );
-    // Its own `StyleInfo` is registered when it holds any rule, and nothing
-    // asks for it: a lazy container's CSS is its `CSS` section.
     let template = bobcat_source::native::decode(bytes).expect("the container decodes");
     let has_style_info = template.style_info.as_ref().is_some_and(|info| {
         info.css_id_to_style_sheet
@@ -209,7 +153,6 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
             .then(|| format!("{ORIGIN}/{name}/style-info.css"))
             .as_deref()
     );
-    // A lazy container has no `root`, so no entry and no boot.
     assert!(sources.entry().is_none());
     assert!(sources.background_entry().is_none());
 
@@ -218,9 +161,6 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
         .iter()
         .find(|(url, _)| url.as_str().ends_with("/main-thread.js"))
         .expect("the MTS section");
-    // The MTS body is an *expression* the card calls, so it is the module's
-    // default export, after the entry's own bindings — exactly that, so a
-    // body keeps the line numbering it had in the container.
     let body = template.custom_sections.as_ref().unwrap()["main-thread"]["content"]
         .as_str()
         .expect("the MTS section's source");
@@ -231,10 +171,6 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
     assert!(main_thread.contains("export default (function"));
 }
 
-/// A full card fetched as a container is registered exactly as its page is:
-/// its `root` at `root.js` as the entry's module — the entry's own bindings
-/// and the body, no `export default` — rather than as a BTS body, whoever
-/// asked for it.
 #[test]
 fn a_fetched_full_card_registers_its_root_as_the_entry_module() {
     let bytes = fixtures::fixture("basic-class-selector").page;
@@ -261,9 +197,6 @@ fn a_fetched_full_card_registers_its_root_as_the_entry_module() {
     );
 }
 
-/// A full card whose page CSS lowers to nothing registers no page sheet, so a
-/// `<frame>` that adopts `<U>/style-info.css` by URL adopts nothing; its
-/// `root` is still the entry module, the container's `?#` suffix kept.
 #[test]
 fn a_fetched_full_card_without_page_css_registers_no_page_sheet() {
     let bytes = fixtures::fixture("basic-bindtap").page;

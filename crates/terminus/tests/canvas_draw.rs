@@ -30,7 +30,6 @@ fn solid(rgba: [u8; 4]) -> Style {
     Style::Color(color(rgba))
 }
 
-/// The unpremultiplied pixel at `(x, y)`.
 fn pixel(canvas: &mut OffscreenCanvas, x: i32, y: i32) -> [u8; 4] {
     let data = canvas.context_2d().get_image_data(x, y, 1, 1).unwrap();
     [data[0], data[1], data[2], data[3]]
@@ -45,7 +44,6 @@ fn filled(width: u32, height: u32, rgba: [u8; 4]) -> OffscreenCanvas {
     canvas
 }
 
-/// A `width` × `height` image of one color.
 fn image(width: u32, height: u32, rgba: [u8; 4]) -> Image {
     Image::from_unpremultiplied(width, height, rgba.repeat((width * height) as usize)).unwrap()
 }
@@ -80,7 +78,6 @@ fn flush_replays_what_is_recorded() {
     canvas.flush();
     assert!(!canvas.has_pending_draws());
     assert_eq!(pixel(&mut canvas, 10, 10), RED);
-    // A non-source-over draw after a flush still composites onto it.
     canvas
         .context_2d()
         .set_global_composite_operation(CompositeOp::DestinationOut);
@@ -101,7 +98,6 @@ fn many_draws_between_reads_accumulate() {
     assert_eq!(pixel(&mut canvas, 0, 1), RED);
     assert_eq!(pixel(&mut canvas, 1, 1), BLUE);
     assert_eq!(pixel(&mut canvas, 38, 1), RED);
-    // A draw after a read lands on the pixels read.
     canvas.context_2d().set_fill_style(solid(GREEN));
     canvas.context_2d().fill_rect(0.0, 0.0, 1.0, 4.0);
     assert_eq!(pixel(&mut canvas, 0, 1), GREEN);
@@ -110,7 +106,6 @@ fn many_draws_between_reads_accumulate() {
 
 #[test]
 fn fill_rules() {
-    // Two squares, the inner one wound the same way.
     let mut canvas = OffscreenCanvas::new(30, 30);
     canvas.context_2d().set_fill_style(solid(RED));
     canvas.context_2d().rect(0.0, 0.0, 30.0, 30.0);
@@ -156,7 +151,6 @@ fn strokes_and_caps() {
     canvas.context_2d().stroke();
     assert_eq!(pixel(&mut canvas, 20, 10), BLUE);
     assert_eq!(pixel(&mut canvas, 20, 15), CLEAR);
-    // Butt caps end at the endpoints.
     assert_eq!(pixel(&mut canvas, 8, 10), CLEAR);
 
     canvas.context_2d().set_line_cap(LineCap::Square);
@@ -174,7 +168,6 @@ fn stroke_width_follows_the_transform_at_stroke_time() {
     canvas.context_2d().set_line_width(2.0);
     canvas.context_2d().move_to(5.0, 20.0);
     canvas.context_2d().line_to(35.0, 20.0);
-    // The path is already in canvas space; scaling now widens the line.
     canvas.context_2d().scale(1.0, 5.0);
     canvas.context_2d().stroke();
     assert_eq!(pixel(&mut canvas, 20, 24), RED);
@@ -221,15 +214,10 @@ fn dashes() {
     );
 }
 
-/// A dash list that would cut the path into more than a million dashes is
-/// not applied and the path is stroked solid (Skia's `SkDashPath` limit):
-/// a 100-unit line under a 9e-5 period would be 1.1 million dashes. A
-/// period ten times longer still dashes.
 #[test]
 fn a_dash_past_a_million_dashes_strokes_solid() {
     let fine = [4e-5, 5e-5];
     let coarse = [4e-4, 5e-4];
-    // The middle of a gap of either list, on the line's axis.
     let gap = |dash: [f64; 2]| dash[0] + dash[1] / 2.0;
     let mut line = Path::new();
     line.move_to(0.0, 5.0);
@@ -253,7 +241,6 @@ fn a_dash_past_a_million_dashes_strokes_solid() {
             .is_point_in_stroke_path(&line, gap(coarse), 5.0)
     );
     assert!(!canvas.context_2d().is_point_in_stroke(gap(coarse), 5.0));
-    // A period of 2e-300: 5e301 dashes.
     canvas.context_2d().set_line_dash(&[1e-300]);
     assert!(
         canvas
@@ -261,8 +248,6 @@ fn a_dash_past_a_million_dashes_strokes_solid() {
             .is_point_in_stroke_path(&line, 50.0, 5.0)
     );
 
-    // Under the fine list every form strokes a solid line: full alpha in
-    // the middle of the line, where the dashes would cover under half.
     canvas.context_2d().set_line_dash(&fine);
     canvas.context_2d().set_stroke_style(solid(RED));
     canvas.context_2d().stroke();
@@ -279,7 +264,6 @@ fn a_dash_past_a_million_dashes_strokes_solid() {
     canvas.context_2d().set_stroke_style(solid(RED));
     canvas.context_2d().stroke_rect(0.0, 5.0, 100.0, 0.0);
     assert_eq!(pixel(&mut canvas, 50, 5), RED, "strokeRect");
-    // The coarse list dashes at the same place: under half the pixel.
     let mut canvas = OffscreenCanvas::new(100, 10);
     canvas.context_2d().set_line_width(4.0);
     canvas.context_2d().set_line_dash(&coarse);
@@ -314,7 +298,6 @@ fn clip_restricts_and_restore_lifts_it() {
     assert_eq!(pixel(&mut canvas, 15, 15), RED);
     assert_eq!(pixel(&mut canvas, 5, 5), CLEAR);
     canvas.context_2d().restore();
-    // The fill style was saved too: black again.
     canvas.context_2d().fill_rect(0.0, 0.0, 5.0, 5.0);
     assert_eq!(pixel(&mut canvas, 2, 2), [0, 0, 0, 255]);
 }
@@ -366,7 +349,6 @@ fn transforms() {
         [2.0, 0.0, 0.0, 2.0, 20.0, 0.0]
     );
 
-    // A quarter turn clockwise about (20, 20).
     canvas.context_2d().reset_transform();
     canvas.context_2d().translate(20.0, 20.0);
     canvas.context_2d().rotate(std::f64::consts::FRAC_PI_2);
@@ -395,7 +377,6 @@ fn default_path_keeps_the_transform_it_was_built_under() {
     assert_eq!(pixel(&mut canvas, 25, 5), RED);
     assert_eq!(pixel(&mut canvas, 5, 5), CLEAR);
 
-    // A Path2D takes the transform at draw time.
     let mut path = Path::new();
     path.rect(0.0, 0.0, 10.0, 10.0);
     canvas.context_2d().translate(0.0, 10.0);
@@ -426,10 +407,8 @@ fn linear_gradient_and_late_stops() {
     canvas
         .context_2d()
         .set_fill_style(Style::Gradient(gradient.clone()));
-    // No stops yet: transparent black, nothing drawn.
     canvas.context_2d().fill_rect(0.0, 0.0, 100.0, 4.0);
     assert_eq!(pixel(&mut canvas, 50, 2), CLEAR);
-    // Stops added to the shared gradient show in later draws.
     gradient.add_color_stop(0.0, color(RED)).unwrap();
     gradient.add_color_stop(1.0, color(BLUE)).unwrap();
     canvas.context_2d().fill_rect(0.0, 0.0, 100.0, 4.0);
@@ -455,8 +434,6 @@ fn linear_gradient_and_late_stops() {
 
 #[test]
 fn gradient_interpolates_unpremultiplied() {
-    // Transparent green to opaque blue: halfway is half-transparent
-    // cyan-ish, not half-transparent blue.
     let gradient = Gradient::linear(0.0, 0.0, 100.0, 0.0).unwrap();
     gradient.add_color_stop(0.0, color([0, 255, 0, 0])).unwrap();
     gradient.add_color_stop(1.0, color(BLUE)).unwrap();
@@ -505,13 +482,11 @@ fn radial_gradient() {
     canvas.context_2d().fill_rect(0.0, 0.0, 100.0, 100.0);
     let center = pixel(&mut canvas, 50, 50);
     assert!(center[0] > 240, "{center:?}");
-    // Past the outer circle the last stop pads.
     assert_eq!(pixel(&mut canvas, 98, 50), BLUE);
 }
 
 #[test]
 fn conic_gradient_starts_at_the_angle_clockwise() {
-    // Red over the first quarter turn clockwise from +x, blue after.
     let gradient = Gradient::conic(0.0, 50.0, 50.0).unwrap();
     gradient.add_color_stop(0.0, color(RED)).unwrap();
     gradient.add_color_stop(0.25, color(RED)).unwrap();
@@ -522,7 +497,6 @@ fn conic_gradient_starts_at_the_angle_clockwise() {
         .context_2d()
         .set_fill_style(Style::Gradient(gradient));
     canvas.context_2d().fill_rect(0.0, 0.0, 100.0, 100.0);
-    // Below-right of the center is within the first quarter (y is down).
     assert_eq!(pixel(&mut canvas, 80, 70), RED);
     assert_eq!(pixel(&mut canvas, 20, 70), BLUE);
     assert_eq!(pixel(&mut canvas, 80, 30), BLUE);
@@ -530,7 +504,6 @@ fn conic_gradient_starts_at_the_angle_clockwise() {
 
 #[test]
 fn patterns() {
-    // A 2×2 checker: red on the diagonal, blue off it.
     let checker = Image::from_unpremultiplied(2, 2, [RED, BLUE, BLUE, RED].concat()).unwrap();
 
     let mut canvas = OffscreenCanvas::new(8, 8);
@@ -554,7 +527,6 @@ fn patterns() {
     assert_eq!(pixel(&mut canvas, 4, 4), CLEAR);
     assert_eq!(pixel(&mut canvas, 4, 0), CLEAR);
 
-    // The pattern transform moves the tile; shared by clones.
     pattern
         .set_transform([1.0, 0.0, 0.0, 1.0, 4.0, 4.0])
         .unwrap();
@@ -591,8 +563,6 @@ fn composite_source_in_clears_outside_the_shape() {
     assert_eq!(pixel(&mut canvas, 15, 10), CLEAR);
 }
 
-/// HTML `fillRect` step 2: a zero width or height returns before anything
-/// is painted, so not even a destructive operation clears the canvas.
 #[test]
 fn a_zero_size_fill_rect_has_no_effect() {
     for op in [
@@ -623,9 +593,7 @@ fn composite_copy_respects_the_clip() {
     canvas.context_2d().set_fill_style(solid(RED));
     canvas.context_2d().fill_rect(0.0, 0.0, 5.0, 5.0);
     assert_eq!(pixel(&mut canvas, 2, 2), RED);
-    // Inside the clip, outside the shape: replaced by transparent.
     assert_eq!(pixel(&mut canvas, 15, 5), CLEAR);
-    // Outside the clip: untouched.
     assert_eq!(pixel(&mut canvas, 15, 15), BLUE);
 }
 
@@ -744,8 +712,6 @@ fn draw_image_forms() {
     assert_eq!(pixel(&mut canvas, 16, 16), BLUE);
     assert_eq!(pixel(&mut canvas, 19, 16), CLEAR);
 
-    // Source rectangle half outside the image: clipped, and the destination
-    // with it.
     let left_red = Image::from_unpremultiplied(2, 1, [RED, GREEN].concat()).unwrap();
     canvas
         .context_2d()
@@ -786,8 +752,6 @@ fn canvas_draws_itself() {
     let own = canvas.image();
     let kept = own.crop(None).unwrap();
     canvas.context_2d().draw_image(&own, 10.0, 0.0).unwrap();
-    // Drawing over the left half afterwards reaches neither the right half
-    // nor the copy kept as an image bitmap is.
     canvas.context_2d().set_fill_style(solid(BLUE));
     canvas.context_2d().fill_rect(0.0, 0.0, 10.0, 10.0);
     assert_eq!(pixel(&mut canvas, 15, 5), RED);
@@ -804,7 +768,6 @@ fn one_canvas_draws_another_as_it_was_at_the_call() {
         .context_2d()
         .draw_image(&source.image(), 0.0, 0.0)
         .unwrap();
-    // Recorded on the source after the draw: not in the target's copy.
     source.context_2d().set_fill_style(solid(BLUE));
     source.context_2d().fill_rect(0.0, 0.0, 4.0, 4.0);
     target
@@ -813,7 +776,6 @@ fn one_canvas_draws_another_as_it_was_at_the_call() {
         .unwrap();
     assert_eq!(pixel(&mut target, 1, 1), RED);
     assert_eq!(pixel(&mut target, 5, 1), BLUE);
-    // A pattern copies the canvas as it is when made.
     let pattern = Pattern::new(source.image(), Repetition::Repeat).unwrap();
     source.context_2d().clear_rect(0.0, 0.0, 4.0, 4.0);
     target.context_2d().set_fill_style(Style::Pattern(pattern));
@@ -832,10 +794,6 @@ fn image_bitmaps_from_pixels_and_canvases_crop() {
     assert_eq!((from_canvas.width(), from_canvas.height()), (2, 1));
 }
 
-/// `createImageBitmap`'s crop: a zero side is `RangeError` and a side past
-/// the longest texture is `InvalidStateError`, from every kind of image and
-/// before anything is allocated; an origin far outside the image crops
-/// transparent black.
 #[test]
 fn image_bitmap_crop_sizes_are_checked_first() {
     let mut canvas = filled(4, 4, BLUE);
@@ -876,7 +834,6 @@ fn image_bitmap_crop_sizes_are_checked_first() {
 
 #[test]
 fn a_long_recording_is_replayed_before_a_read() {
-    // Enough draws to pass the recording bound several times over.
     let mut canvas = OffscreenCanvas::new(64, 1);
     for i in 0..40_000 {
         let rgba = if i % 2 == 0 { RED } else { BLUE };
@@ -886,7 +843,6 @@ fn a_long_recording_is_replayed_before_a_read() {
             .fill_rect(f64::from(i % 64), 0.0, 1.0, 1.0);
     }
     assert!(canvas.has_pending_draws());
-    // The last pass over the row: even draws red, odd ones blue.
     assert_eq!(pixel(&mut canvas, 0, 0), RED);
     assert_eq!(pixel(&mut canvas, 1, 0), BLUE);
 }
@@ -894,7 +850,6 @@ fn a_long_recording_is_replayed_before_a_read() {
 #[test]
 fn get_and_put_image_data() {
     let mut canvas = OffscreenCanvas::new(4, 4);
-    // Half-transparent white premultiplies on the way in and comes back.
     let data = [[255, 255, 255, 128], [10, 20, 30, 255]].concat();
     canvas
         .context_2d()
@@ -904,14 +859,11 @@ fn get_and_put_image_data() {
     assert_eq!(back[4..], [10, 20, 30, 255]);
     assert!(back[..3].iter().all(|c| *c >= 254), "{back:?}");
     assert_eq!(back[3], 128);
-    // Premultiplied in the bitmap.
     let bitmap = canvas.image().read().unwrap();
     let at = (4 + 1) * 4;
     assert_eq!(bitmap[at + 3], 128);
     assert!((127..=128).contains(&bitmap[at]));
 
-    // Negative sizes read the same rectangle from its other corner; pixels
-    // outside the bitmap are transparent black.
     let read = canvas.context_2d().get_image_data(3, 2, -3, -2).unwrap();
     assert_eq!(read.len(), 3 * 2 * 4);
     assert_eq!(read[(3 + 2) * 4..(3 + 2) * 4 + 4], [10, 20, 30, 255]);
@@ -933,7 +885,6 @@ fn put_image_data_replaces_and_ignores_state() {
     canvas.context_2d().translate(2.0, 2.0);
     canvas.context_2d().clip(FillRule::NonZero);
     let data = [CLEAR, RED, RED, RED].concat();
-    // Only the dirty rectangle's second column, at dx = 1.
     canvas
         .context_2d()
         .put_image_data(&data, 2, 2, 1, 0, Some([1, 0, 1, 2]))
@@ -941,7 +892,6 @@ fn put_image_data_replaces_and_ignores_state() {
     assert_eq!(pixel(&mut canvas, 2, 0), RED);
     assert_eq!(pixel(&mut canvas, 2, 1), RED);
     assert_eq!(pixel(&mut canvas, 1, 0), BLUE);
-    // A transparent source pixel replaces rather than composites.
     canvas
         .context_2d()
         .put_image_data(&data, 2, 2, 0, 0, None)
@@ -961,22 +911,17 @@ fn shadows() {
     canvas.context_2d().set_shadow_color(color(BLUE));
     canvas.context_2d().set_shadow_offset_x(15.0);
     canvas.context_2d().set_shadow_offset_y(15.0);
-    // Offsets are in canvas space whatever the transform.
     canvas.context_2d().scale(2.0, 2.0);
     canvas.context_2d().set_fill_style(solid(RED));
     canvas.context_2d().fill_rect(0.0, 0.0, 5.0, 5.0);
     assert_eq!(pixel(&mut canvas, 5, 5), RED);
     assert_eq!(pixel(&mut canvas, 20, 20), BLUE);
     assert_eq!(pixel(&mut canvas, 30, 30), CLEAR);
-    // A transparent shadow color casts nothing.
     canvas.context_2d().set_shadow_color(Color::TRANSPARENT);
     canvas.context_2d().fill_rect(10.0, 0.0, 5.0, 5.0);
     assert_eq!(pixel(&mut canvas, 35, 25), CLEAR);
 }
 
-/// A shadow blur or offset past what the GPU can filter is limited, not an
-/// error: the shape is drawn whatever finite values the script set, on any
-/// canvas up to the longest side, and the attributes read back as set.
 #[test]
 fn a_shadow_past_the_device_limits_still_draws_the_shape() {
     let draw = |canvas: &mut OffscreenCanvas, blur: f64, offset: f64, rect: [f64; 4]| {
@@ -1008,21 +953,16 @@ fn a_shadow_past_the_device_limits_still_draws_the_shape() {
             "blur {blur}, offset {offset}"
         );
     }
-    // A shape across the longest canvas side.
     for blur in [2.0, 20_000.0] {
         let mut canvas = OffscreenCanvas::new(8192, 4);
         draw(&mut canvas, blur, 0.0, [0.0, 0.0, 8192.0, 4.0]);
         assert_eq!(pixel(&mut canvas, 8000, 2), RED, "blur {blur}");
     }
-    // A shape far past the canvas under the largest blur.
     let mut canvas = OffscreenCanvas::new(16, 16);
     draw(&mut canvas, 20_000.0, 0.0, [-1e6, -1e6, 2e6, 2e6]);
     assert_eq!(pixel(&mut canvas, 5, 5), RED);
 }
 
-/// A draw that needs the bitmap as its backdrop, with a shadow blur far
-/// past what a render takes, keeps what the canvas held: `destination-over`
-/// under opaque red changes no pixel.
 #[test]
 fn a_large_shadow_blur_under_a_backdrop_draw_keeps_the_bitmap() {
     let mut canvas = filled(16, 16, RED);
@@ -1043,18 +983,14 @@ fn shadow_blur_spreads_and_is_clipped() {
     canvas.context_2d().rect(0.0, 0.0, 60.0, 60.0);
     canvas.context_2d().clip(FillRule::NonZero);
     canvas.context_2d().set_shadow_color(color(BLUE));
-    // σ = 4.
     canvas.context_2d().set_shadow_blur(8.0);
     canvas.context_2d().set_shadow_offset_y(30.0);
     canvas.context_2d().set_fill_style(solid(RED));
     canvas.context_2d().fill_rect(10.0, 5.0, 40.0, 40.0);
     assert_eq!(pixel(&mut canvas, 30, 20), RED);
-    // Inside the shadow by more than 3σ, outside the shape.
     assert_eq!(pixel(&mut canvas, 30, 50), BLUE);
-    // Blurred past the shadow's edge.
     let edge = pixel(&mut canvas, 52, 50);
     assert!(edge[3] > 0 && edge[3] < 255, "{edge:?}");
-    // Below the clip.
     assert_eq!(pixel(&mut canvas, 30, 65), CLEAR);
 }
 
@@ -1110,8 +1046,6 @@ fn hit_tests() {
     assert!(!canvas.context_2d().is_point_in_stroke(15.0, 15.0));
 }
 
-/// HTML "is point in path": points on the path itself are inside it, under
-/// either fill rule and for either form; points just off it are not.
 #[test]
 fn points_on_the_path_are_inside_it() {
     let mut canvas = OffscreenCanvas::new(40, 40);
@@ -1151,9 +1085,6 @@ fn points_on_the_path_are_inside_it() {
             );
         }
     }
-    // HTML "is point in stroke": points on the traced outline are inside
-    // too. A 2 px butt stroke of a horizontal line is the rectangle from
-    // y = 4 to y = 6.
     let mut line = Path::new();
     line.move_to(0.0, 5.0);
     line.line_to(10.0, 5.0);
@@ -1188,7 +1119,6 @@ fn arcs_and_ellipses() {
         Err(CanvasError::IndexSize)
     );
 
-    // Half a disc: clockwise from 0 to π covers the lower half (y down).
     let mut canvas = OffscreenCanvas::new(40, 40);
     canvas.context_2d().set_fill_style(solid(RED));
     canvas
@@ -1198,7 +1128,6 @@ fn arcs_and_ellipses() {
     canvas.context_2d().fill(FillRule::NonZero);
     assert_eq!(pixel(&mut canvas, 20, 25), RED);
     assert_eq!(pixel(&mut canvas, 20, 15), CLEAR);
-    // Anticlockwise over the same angles covers the upper half.
     canvas.context_2d().begin_path();
     canvas.context_2d().set_fill_style(solid(BLUE));
     canvas
@@ -1241,7 +1170,6 @@ fn arc_to_rounds_a_corner() {
     canvas.context_2d().line_to(30.0, 30.0);
     canvas.context_2d().line_to(0.0, 30.0);
     canvas.context_2d().fill(FillRule::NonZero);
-    // The corner at (30, 0) is cut by the arc.
     assert_eq!(pixel(&mut canvas, 29, 1), CLEAR);
     assert_eq!(pixel(&mut canvas, 15, 2), RED);
     assert_eq!(pixel(&mut canvas, 28, 15), RED);
@@ -1264,8 +1192,6 @@ fn round_rect() {
     assert_eq!(pixel(&mut canvas, 20, 6), RED);
     assert_eq!(pixel(&mut canvas, 20, 20), RED);
 
-    // A negative width mirrors: the one rounded corner (upper-left) lands
-    // on the right.
     let mut canvas = OffscreenCanvas::new(40, 40);
     canvas.context_2d().set_fill_style(solid(RED));
     canvas
@@ -1309,8 +1235,6 @@ fn path2d_from_svg_and_add_path() {
     assert_eq!(pixel(&mut canvas, 15, 5), CLEAR);
 }
 
-/// SVG path data error handling, which `new Path2D(d)` follows: the path up
-/// to the last correct segment is kept.
 #[test]
 fn path2d_from_svg_keeps_the_segments_before_an_error() {
     let mut canvas = OffscreenCanvas::new(40, 20);
@@ -1326,8 +1250,6 @@ fn path2d_from_svg_keeps_the_segments_before_an_error() {
     assert_eq!(pixel(&mut canvas, 5, 5), RED);
     assert_eq!(pixel(&mut canvas, 25, 5), RED);
     assert_eq!(pixel(&mut canvas, 35, 15), CLEAR);
-    // Data that does not start with a move is in error from its first
-    // segment.
     canvas
         .context_2d()
         .fill_path(&Path::from_svg("L0 0 L40 0 L40 20"), FillRule::NonZero);
@@ -1367,7 +1289,6 @@ fn zero_sized_canvas_draws_nothing() {
         CLEAR
     );
     assert_eq!(canvas.image().width(), 0);
-    // Past the longest texture side: no bitmap either.
     let mut canvas = OffscreenCanvas::new(8193, 1);
     canvas.context_2d().fill_rect(0.0, 0.0, 10.0, 10.0);
     assert_eq!(
@@ -1386,7 +1307,6 @@ fn take_image_leaves_transparent_and_keeps_state() {
     assert_eq!(pixel(&mut canvas, 5, 5), CLEAR);
     canvas.context_2d().fill_rect(0.0, 0.0, 1.0, 1.0);
     assert_eq!(pixel(&mut canvas, 0, 0), RED);
-    // The taken image is not drawn into afterwards.
     assert_eq!(taken.read().unwrap()[..4], RED);
     let mut other = OffscreenCanvas::new(10, 10);
     other.context_2d().draw_image(&taken, 0.0, 0.0).unwrap();
@@ -1405,8 +1325,6 @@ fn changes_are_tracked_until_a_commit() {
 
 #[test]
 fn shadow_and_shape_composite_separately() {
-    // Under `copy` the shape's own composite replaces the shadow composited
-    // just before it.
     let mut canvas = filled(40, 40, BLUE);
     canvas.context_2d().set_shadow_color(color(GREEN));
     canvas.context_2d().set_shadow_offset_x(20.0);
@@ -1422,8 +1340,6 @@ fn shadow_and_shape_composite_separately() {
 
 #[test]
 fn bitmap_carries_through_a_destructive_op_exactly() {
-    // Every premultiplied value survives the recording that draws the
-    // bitmap as its backdrop.
     let pixels: Vec<u8> = (0..=255u8)
         .flat_map(|i| [i, i.wrapping_mul(7), 255 - i, 255])
         .collect();

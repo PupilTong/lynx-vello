@@ -15,7 +15,6 @@ use terminus::link::painter::ScrollIntentsTestUtils as _;
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 use crate::test_support::{TestEngine, TestViewSpec};
 
-/// One 8x8 red square, animated by an author `@keyframes` rule.
 const SLIDER_SCRIPT: &str = r"
     globalThis.renderPage = function renderPage() {
       const page = __CreatePage('card', 0);
@@ -34,8 +33,6 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     }
 }
 
-/// `.slider` plus a `slide` keyframes rule that translates it 16px right over
-/// one second, linearly.
 fn slider_sheet() -> PreparsedStyleSheet {
     PreparsedStyleSheet {
         rules: vec![
@@ -65,7 +62,6 @@ fn slider_sheet() -> PreparsedStyleSheet {
     }
 }
 
-/// A 32x24 offscreen view with the sheet mounted and the page built.
 fn booted() -> TestEngine {
     TestViewSpec::new(SLIDER_SCRIPT)
         .with_preparsed_style_sheet(slider_sheet())
@@ -73,7 +69,6 @@ fn booted() -> TestEngine {
         .boot()
 }
 
-/// The same square, inside a box that skips its contents.
 const SKIPPED_SLIDER_SCRIPT: &str = r"
     globalThis.renderPage = function renderPage() {
       const page = __CreatePage('card', 0);
@@ -87,7 +82,6 @@ const SKIPPED_SLIDER_SCRIPT: &str = r"
     };
 ";
 
-/// [`slider_sheet`] plus the `content-visibility: hidden` box that wraps it.
 fn skipping_sheet() -> PreparsedStyleSheet {
     let mut sheet = slider_sheet();
     sheet.rules.push(PreparsedRule::Style {
@@ -101,7 +95,6 @@ fn skipping_sheet() -> PreparsedStyleSheet {
     sheet
 }
 
-/// The x of the leftmost red pixel in the committed frame.
 fn red_left_edge(engine: &mut TestEngine) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
@@ -139,9 +132,6 @@ fn a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock() {
     );
 }
 
-/// The point of the whole exercise: the frame moved without the script thread
-/// being asked for anything. The entry module has already finished, so the
-/// realm is parked on its command channel for the whole sequence above.
 #[test]
 fn animation_frames_need_no_script_thread_work() {
     let mut engine = booted();
@@ -166,14 +156,10 @@ fn animation_frames_need_no_script_thread_work() {
     );
 }
 
-/// Wall time cannot move a pinned frame: the engine reads its clock once per
-/// frame and every animation in that frame lands on the one reading.
 #[test]
 fn one_reading_places_every_animation_in_a_frame() {
     let mut engine = booted();
 
-    // The boot flush created the animation; the first frame is what starts it,
-    // so taking that frame at zero puts the animation's origin on the clock's.
     engine.painter.clock_mut().pin(0.0);
     engine
         .tick(true)
@@ -199,12 +185,6 @@ fn one_reading_places_every_animation_in_a_frame() {
     );
 }
 
-/// css-contain-2 §4: an animation whose element is in a skipped subtree does
-/// not advance, so it is not something the engine owes a frame for. The same
-/// infinite animation that keeps
-/// [`a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock`]
-/// asking forever leaves the host idle from here, which is what a host reads
-/// off `Painter::is_animating` (and, on a window, `owes_frame`).
 #[test]
 fn an_animation_inside_a_skipped_subtree_leaves_the_painter_idle() {
     let mut engine = TestViewSpec::new(SKIPPED_SLIDER_SCRIPT)
@@ -232,9 +212,6 @@ fn an_animation_inside_a_skipped_subtree_leaves_the_painter_idle() {
     );
 }
 
-/// A red header driven by a `scroll-timeline: --list` below it, in a 64x64
-/// view: the header slides `slide` px right over the list's `max` px scroll
-/// range, and the list holds `list_css`.
 fn booted_scroll_driven(slide: u32, max: u32, header_css: &str, list_css: &str) -> TestEngine {
     let script = r"
         globalThis.renderPage = function renderPage() {
@@ -268,7 +245,6 @@ fn booted_scroll_driven(slide: u32, max: u32, header_css: &str, list_css: &str) 
         .boot()
 }
 
-/// One touch on the list at `y`, at the pinned instant `at`.
 fn touch_list(
     engine: &mut TestEngine,
     at: f64,
@@ -295,10 +271,6 @@ fn list_intent(engine: &TestEngine) -> f32 {
         .y
 }
 
-/// scroll-animations-1 on the painter: dragging the list moves the header
-/// it drives, pixel for pixel, with no commit and no frame post — the
-/// exported curve samples the list's offset at compose time — and at rest
-/// nothing is owed.
 #[test]
 fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
     use terminus::link::input::PointerPhase;
@@ -310,17 +282,14 @@ fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
     engine.painter.clock_mut().pin(0.0);
     assert_eq!(red_left_edge(&mut engine), 0);
 
-    // Past the 8px drag slop, then inside half the 48px encode window.
     touch_list(&mut engine, 0.0, PointerPhase::Down, 60.0);
     touch_list(&mut engine, 0.05, PointerPhase::Move, 48.0);
     assert!((list_intent(&engine) - 4.0).abs() < 0.5);
     assert_eq!(red_left_edge(&mut engine), 4, "the header follows the drag");
     touch_list(&mut engine, 0.1, PointerPhase::Move, 40.0);
     assert_eq!(red_left_edge(&mut engine), 12);
-    // Held still, then let go: no fling.
     touch_list(&mut engine, 0.5, PointerPhase::Up, 40.0);
     assert!(!engine.is_animating(), "at rest nothing is owed");
-    // Past the curve's nominal one-second duration, which it never ends at.
     assert!(
         engine.painter.begin_frame(2.0, false).is_none(),
         "no frame post"
@@ -340,8 +309,6 @@ fn a_drag_moves_a_scroll_driven_header_with_no_commit_and_no_frame_post() {
     assert_eq!(red_left_edge(&mut engine), 12);
 }
 
-/// A fling keeps the header following the list frame by frame after the
-/// finger lifts, to where the fling comes to rest.
 #[test]
 fn a_fling_keeps_a_scroll_driven_header_following() {
     use terminus::link::input::PointerPhase;
@@ -358,7 +325,6 @@ fn a_fling_keeps_a_scroll_driven_header_following() {
         engine.painter.clock_mut().pin(at);
         engine.painter.service_gesture_clock(at);
         let edge = red_left_edge(&mut engine);
-        // A tenth of the offset, anti-aliased on its left column.
         let expected = list_intent(&engine) / 10.0;
         assert!(
             (f32::from(u8::try_from(edge).expect("inside the view")) - expected).abs() <= 1.0,
@@ -372,11 +338,6 @@ fn a_fling_keeps_a_scroll_driven_header_following() {
     assert!(!engine.is_animating(), "and rests with the fling");
 }
 
-/// A `contain-bounce` stretch past the list's end holds a header with no
-/// fill at its last keyframe. The frame composed may be the one main
-/// commits at the end, where a missing clamp shows the same pixels, so the
-/// clamp itself is pinned by terminus's
-/// `a_scroll_self_timeline_binds_the_scrollers_own_slot`.
 #[test]
 fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
     use terminus::link::input::PointerPhase;
@@ -403,9 +364,6 @@ fn a_bounce_stretch_holds_a_scroll_driven_header_at_the_edge() {
     );
 }
 
-/// `scroll(self)` on a scroller that animates by its own offset: its box
-/// slides as its content scrolls, while the drag that scrolls it stays
-/// latched on it.
 #[test]
 fn a_scroll_self_timeline_moves_its_scroller_with_its_own_offset() {
     use terminus::link::input::PointerPhase;

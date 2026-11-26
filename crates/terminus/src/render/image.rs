@@ -145,18 +145,6 @@ use crate::render::picture::{
 };
 use crate::svg::image::VectorDocument;
 
-/// A parsed SVG document, encoded and drawable at any size.
-///
-/// Built by [`VectorImage::new`] on the document thread from the drawing of
-/// a [`VectorDocument`] a host parsed and reported (`crate::svg::image`). It
-/// carries what a draw needs: the encoded scene and the **viewport**, the
-/// rectangle in scene units that a draw maps onto its destination rectangle
-/// (the `viewBox` size when the root has one, else the natural size). How a viewport of another
-/// ratio maps onto the destination is the root's [`AspectRatio`]. The natural size layout reads
-/// (CSS Images 3 default sizing; see `docs/svg-lynx-component-design.md`) is the
-/// registry entry's, as a bitmap's intrinsic size is.
-///
-/// Cloning shares the scene.
 #[derive(Clone)]
 pub(crate) struct VectorImage {
     scene: Arc<DisplayList>,
@@ -165,8 +153,6 @@ pub(crate) struct VectorImage {
     key: u64,
 }
 
-/// One side of a `preserveAspectRatio` alignment: where the viewport sits
-/// along an axis of a box with another ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum AspectAlign {
     Min,
@@ -175,11 +161,6 @@ pub(crate) enum AspectAlign {
     Max,
 }
 
-/// The root's `preserveAspectRatio` (SVG 2 §8.6): how the viewport maps
-/// onto a destination box whose ratio differs. `align: None` is `none`, a
-/// stretch per axis; otherwise the viewport is scaled uniformly to `meet`
-/// (fit inside) or `slice` (cover) the box and aligned per axis. The
-/// default is `xMidYMid meet`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AspectRatio {
     pub(crate) align: Option<(AspectAlign, AspectAlign)>,
@@ -195,14 +176,8 @@ impl Default for AspectRatio {
     }
 }
 
-/// The source of every [`VectorImage::key`]: a counter, so two images
-/// never share a key within a process.
 static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// The parsed document crosses from the thread the host parsed it on (its
-/// decode pool) to the document's inside an [`ImageEvent`], shared by every
-/// report the host makes of that one parse, and the encoded scene is
-/// published inside the registry, so both must be `Send + Sync`.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VectorDocument>();
@@ -211,9 +186,6 @@ const _: () = {
 };
 
 impl VectorImage {
-    /// A vector image drawing `scene`, a display list in viewport units, with
-    /// the viewport and `preserveAspectRatio` of the document it was drawn
-    /// from, under a key of its own.
     #[must_use]
     pub(crate) fn new(scene: DisplayList, viewport: (f32, f32), aspect: AspectRatio) -> Self {
         Self {
@@ -224,36 +196,27 @@ impl VectorImage {
         }
     }
 
-    /// Parses and draws `svg` in one call, with a text context of its own
-    /// created only if the document has text: the shortcut for a test that
-    /// wants an image and has no document to apply an event to.
     #[cfg(test)]
     pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, crate::svg::image::SvgError> {
         let document = VectorDocument::parse(svg)?;
         Ok(crate::svg::image::vector_image(&document, &mut None))
     }
 
-    /// A process-unique identity for this image's picture: the painter's
-    /// raster cache keys its textures by it and a device size. Clones share
-    /// it, because they share the picture.
     #[must_use]
     pub(crate) fn key(&self) -> u64 {
         self.key
     }
 
-    /// How the viewport maps onto a destination box of another ratio.
     #[must_use]
     pub(crate) fn aspect(&self) -> AspectRatio {
         self.aspect
     }
 
-    /// The rectangle in scene units a draw maps onto its destination.
     #[must_use]
     pub(crate) fn viewport(&self) -> (f32, f32) {
         self.viewport
     }
 
-    /// The document recorded as a display list in viewport units.
     #[must_use]
     pub(crate) fn scene(&self) -> &Arc<DisplayList> {
         &self.scene
@@ -271,26 +234,13 @@ impl std::fmt::Debug for VectorImage {
     }
 }
 
-/// Largest per-axis pixel count of a bitmap the rasterizer can draw.
-///
-/// The `max_texture_dimension_2d` of the limits every device of this crate
-/// is created with (`render::gpu::SharedGpu::LIMITS`, wgpu's defaults): a
-/// bitmap is drawn from a texture of its own, and no texture may be longer. A constant rather than
-/// a reading of a device, because a host sizes its decodes by it before any device exists.
 pub const MAX_RENDERABLE_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
-/// Whether the rasterizer can draw this bitmap.
-///
-/// Tested against the bitmap a frame actually draws, never against an image's
-/// intrinsic size. A zero axis is refused for a second reason: the brush
-/// transform divides the draw's extent by these dimensions, and dividing by
-/// zero encodes a non-finite transform that the scene accepts without complaint.
 #[must_use]
 pub fn is_renderable(data: &ImageData) -> bool {
     renders_at(data.width, data.height)
 }
 
-/// [`is_renderable`] of a bitmap known by its size alone.
 pub(crate) const fn renders_at(width: u32, height: u32) -> bool {
     width > 0
         && height > 0
@@ -300,36 +250,15 @@ pub(crate) const fn renders_at(width: u32, height: u32) -> bool {
 
 pub use vant::image::{ImageDescriptor, ImageSizeHint};
 
-/// What a frame draws for one picture ([`FrameImages::describe`]): the
-/// bitmap's descriptor, its pixels when the store holds them, its
-/// generation, and when it will next change by itself.
-///
-/// `P` is the store's platform frame type ([`FrameImages::PlatformFrame`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameImage<P = Infallible> {
-    /// The bitmap the frame draws. With `pixels`, it is theirs; for a
-    /// platform frame it is the one minted for it, whose size is the
-    /// frame's.
     pub descriptor: ImageDescriptor,
-    /// `None` when the store does not hold the bitmap: a rasterizer that
-    /// still holds an upload of it draws it from there, and one that does not
-    /// draws nothing and says the picture is wanted ([`FrameImages::want`]).
-    /// Always `None` for an [`PictureKey::Id`] picture, whose frames are
-    /// taken ([`FrameImages::take_frame`]).
     pub pixels: Option<PictureFrame<P>>,
-    /// A number that changes exactly when the picture's pixels do. A picture
-    /// whose pixels never change answers one constant; a store with no live
-    /// pictures answers zero for every one.
     pub generation: u64,
-    /// The instant the generation will next change by itself, when the
-    /// picture knows it (an animated image does; a video does not). The
-    /// painter describes such a picture again at every adoption and arms no
-    /// timer: the store wakes its host at the instant itself.
     pub next_change: Option<ClockInstant>,
 }
 
 impl<P> FrameImage<P> {
-    /// A bitmap the store holds, whose pixels never change.
     #[must_use]
     pub fn resident(image: ImageData) -> Self {
         Self {
@@ -340,8 +269,6 @@ impl<P> FrameImage<P> {
         }
     }
 
-    /// A frame of either kind the store holds, named by `descriptor`, whose
-    /// pixels never change.
     #[must_use]
     pub const fn held(frame: PictureFrame<P>, descriptor: ImageDescriptor) -> Self {
         Self {
@@ -352,8 +279,6 @@ impl<P> FrameImage<P> {
         }
     }
 
-    /// A bitmap the store let go of, whose pixels never change: drawn from
-    /// the rasterizer's upload, or wanted.
     #[must_use]
     pub const fn released(descriptor: ImageDescriptor) -> Self {
         Self {
@@ -365,121 +290,32 @@ impl<P> FrameImage<P> {
     }
 }
 
-/// The pixel source a frame's image draws resolve against.
-///
-/// The embedder's resource system is one implementation; the painter's
-/// per-commit resolved set is another; a test double is a third. This is the
-/// only image-shaped type the compose path knows.
-///
-/// It answers for both kinds of picture ([`PictureKey`]): a URL the page
-/// wrote and a picture one element owns, whose frames a producer publishes
-/// into a slot ([`crate::render::picture::PictureSlot`]).
-///
-/// **No method may block.** Each is called on the painter's thread, and the
-/// painter never decodes and never waits for a decode or for I/O (see the
-/// module docs).
 pub trait FrameImages {
-    /// The embedder's own frame type, which a [`PictureFrame::Platform`]
-    /// carries and which writes itself into a texture the painter created
-    /// ([`FrameWriter`]). A store with none names
-    /// [`std::convert::Infallible`].
     type PlatformFrame: FrameWriter;
 
-    /// What the frame draws for `picture`: the descriptor of the bitmap, its
-    /// pixels when the store holds them, its generation and its next change,
-    /// or `None` when there is nothing to draw.
-    ///
-    /// A store that dropped the pixels answers their descriptor with
-    /// `pixels: None`: a rasterizer that still holds an upload of that bitmap
-    /// draws it from there, and one that does not draws nothing and says so
-    /// ([`Self::want`]). An [`PictureKey::Id`] picture is always answered
-    /// without pixels: its newest frame is taken ([`Self::take_frame`]) when
-    /// the generation differs from the one the painter drew.
-    ///
-    /// A URL picture is only ever one the host has already reported loaded.
-    /// `hint` is how large the frame draws it; a store that decodes on
-    /// demand sizes its decode from it, and one that already holds pixels may
-    /// ignore it. The bitmap need not match the hint or the intrinsic size
-    /// that was reported with the load: a reduced-scale decode composes
-    /// correctly.
     fn describe(
         &self,
         picture: &PictureKey,
         hint: ImageSizeHint,
     ) -> Option<FrameImage<Self::PlatformFrame>>;
 
-    /// Takes `picture`'s newest frame out of its slot, if one is there that
-    /// has not been taken.
-    ///
-    /// The default answers `None`: a store with no [`PictureKey::Id`]
-    /// pictures, which is a complete policy rather than a decision left
-    /// unmade.
     fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<Self::PlatformFrame>> {
         let _ = picture;
         None
     }
 
-    /// The frame draws `picture` at `hint`, the store answered it without
-    /// pixels, and the rasterizer holds no upload of it either (for an `Id`
-    /// picture: its slot held no frame to take): the frame draws nothing for
-    /// it until the store holds its pixels again.
-    ///
-    /// The store restores it off the calling thread and, once it holds the
-    /// pixels, wakes its host the way a finished load does; [`Self::describe`]
-    /// then answers them. A store that cannot restore it any more answers
-    /// `None` from [`Self::describe`] instead. Asked once per picture per
-    /// resolve pass, and a store asked again while a restore is in flight
-    /// starts nothing.
-    ///
-    /// There is no default, for the reason [`Self::retain`] has none: a
-    /// store that drops pixels has to decide how they come back, and a
-    /// silent no-op inherited from the trait would leave a picture blank for
-    /// good. A store that keeps every bitmap it answers is never asked, and
-    /// writes `{}`.
     fn want(&self, picture: &PictureKey, hint: ImageSizeHint);
 
-    /// The pictures the frame draws, deduplicated in paint order: the
-    /// drawn set. A picture is drawn when the adopted commit draws it, which
-    /// the commit's walk has already culled to its encode window. A
-    /// producer of a picture that is not in it may stop producing; the
-    /// painter asks nothing of a picture that is not in it.
-    ///
-    /// Advisory: it informs residency and nothing else, and a store that
-    /// ignores it is still correct. Called once per resolve pass, immediately
-    /// after the descriptions that pass made.
-    ///
-    /// There is no default, deliberately. A store that keeps bitmaps has to
-    /// decide what its working set is, and a silent no-op inherited from the
-    /// trait is the one answer that cannot be reviewed — writing `{}` says
-    /// the same thing where someone can see it.
     fn retain(&self, drawn: &[PictureKey]);
 
-    /// The rasterizer holds the upload of each of `pictures` the frame last
-    /// described draws, and will keep it while that frame is drawn:
-    /// the store may drop their pixels. One of them is wanted again
-    /// ([`Self::want`]) only if the rasterizer loses an upload. Only URL
-    /// pictures are named: an `Id` picture's frames are taken, not lent.
-    ///
-    /// Advisory, as [`Self::retain`] is. The default drops nothing — a store
-    /// that keeps every bitmap it answers, which is a correct store — and is
-    /// a default because it is a complete policy rather than a decision
-    /// left unmade.
     fn release(&self, pictures: &[PictureKey]) {
         let _ = pictures;
     }
 }
 
-/// Composes every image draw as nothing: the pixel source for a scene built
-/// without an embedder, and for the many call sites that render pages with no
-/// images at all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoImages;
 
-/// A shared handle serves whatever it points at, so an embedder holding its
-/// resource system behind an [`Rc`] needs no forwarding wrapper of its own.
-///
-/// `Rc` rather than `Arc` because a resource system never leaves the painter's
-/// thread; an atomic count here would be paid on every clone and never used.
 impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
     type PlatformFrame = T::PlatformFrame;
 
@@ -515,59 +351,23 @@ impl FrameImages for NoImages {
         None
     }
 
-    /// Nothing is ever answered, so nothing is ever wanted.
     fn want(&self, _picture: &PictureKey, _hint: ImageSizeHint) {}
 
-    /// Nothing is held, so there is no working set to narrow.
     fn retain(&self, _drawn: &[PictureKey]) {}
 }
 
-/// Completed loads waiting for the painter to take its next turn.
-///
-/// The buffer exists for re-entrancy and teardown, not for synchronisation: a
-/// store may report from inside the `request_image` the painter is in the
-/// middle of calling, so a report cannot land directly in the `&mut` path
-/// that asked for it.
 #[derive(Debug, Default)]
 struct ImageQueue {
     events: RefCell<Vec<ImageEvent>>,
     detached: Cell<bool>,
 }
 
-/// The host's end: how a store says a load finished.
-///
-/// A concrete handle rather than a trait object, so reporting costs a direct
-/// call and no vtable exists to dispatch through. It is thread-bound by
-/// construction — an [`Rc`] cannot be moved to another thread — so a host
-/// that decodes off-thread must marshal completions back to the painter's
-/// thread itself, which costs it nothing it does not already have: it drives
-/// the painter's turns, so it drains its own completions just before the next
-/// one.
-///
-/// Waking the painter is the host's too. A report made between turns needs a
-/// turn to be drained, and the host holds the wakeup it gave the view — it
-/// knows whether it reported inside a turn, where the wake would be
-/// wasted, or outside one, where it is needed.
 #[derive(Clone, Debug)]
 pub struct ImageReports {
     queue: Rc<ImageQueue>,
 }
 
 impl ImageReports {
-    /// `source`'s bytes are readable, and the image's own full-resolution
-    /// size is `width` x `height`.
-    ///
-    /// Reported once per source: one URL has one content, so a second report
-    /// for a source already resolved changes nothing. There is deliberately
-    /// no way to say that an image stopped being loaded — eviction is
-    /// invisible here, which is what keeps a document's state from
-    /// regressing.
-    ///
-    /// Neither dimension is bounded. This is the image's intrinsic size,
-    /// which layout uses; what a host may actually decode to is bounded, and
-    /// checked where the pixels are drawn.
-    ///
-    /// Non-blocking, and it must not re-enter the store.
     pub fn loaded(&self, source: &str, width: u32, height: u32) {
         self.post(ImageEvent::Loaded {
             source: Arc::from(source),
@@ -577,11 +377,6 @@ impl ImageReports {
         });
     }
 
-    /// [`Self::loaded`], for a source whose decoder answered more than one
-    /// frame to play: the document learns that it animates
-    /// ([`ImageStatus::Bitmap`]'s `animated`), and an owner of an `Id`
-    /// picture may ask for it to be played under a playhead of its own
-    /// ([`PlaybackRequest`](crate::render::picture::PlaybackRequest)).
     pub fn loaded_animated(&self, source: &str, width: u32, height: u32) {
         self.post(ImageEvent::Loaded {
             source: Arc::from(source),
@@ -591,27 +386,10 @@ impl ImageReports {
         });
     }
 
-    /// `picture`'s player reports `report`: its playhead's loops, or what
-    /// its media player did. Nothing about the URL the picture plays
-    /// settles: the report is for whoever asked for the playback.
-    ///
-    /// Non-blocking, and it must not re-enter the store.
     pub fn playback(&self, picture: PictureId, report: PlaybackReport) {
         self.post(ImageEvent::Playback { picture, report });
     }
 
-    /// `source` is a document the engine draws itself, and `document` is
-    /// what [`ImageEvent::parse_document`] made of its bytes.
-    ///
-    /// The host parses, with the engine's parser, wherever it decodes a
-    /// bitmap; a document that does not parse is reported with
-    /// [`ImageReports::failed`] instead. Otherwise the same contract as
-    /// [`ImageReports::loaded`]: never retracted. The engine owns the scene
-    /// it encodes from the report, so the host keeps nothing of the
-    /// document, and a report for a source that has already settled moves
-    /// nothing.
-    ///
-    /// Non-blocking, and it must not re-enter the store.
     pub fn parsed_document(&self, source: &str, document: Arc<VectorDocument>) {
         self.post(ImageEvent::ParsedDocument {
             source: Arc::from(source),
@@ -619,7 +397,6 @@ impl ImageReports {
         });
     }
 
-    /// `source` will not produce pixels. Terminal; the engine does not retry.
     pub fn failed(&self, source: &str) {
         self.post(ImageEvent::Failed {
             source: Arc::from(source),
@@ -627,8 +404,6 @@ impl ImageReports {
     }
 
     fn post(&self, event: ImageEvent) {
-        // A load completing against a torn-down view is dropped rather than
-        // buffered into a painter that will never read it.
         if self.queue.detached.get() {
             return;
         }
@@ -636,17 +411,12 @@ impl ImageReports {
     }
 }
 
-/// The painter's end: where reports are taken from.
-///
-/// Separate from [`ImageReports`] so each side holds only what it may do —
-/// the host can report and not drain, the painter can drain and not report.
 #[derive(Debug)]
 pub struct ImageInbox {
     queue: Rc<ImageQueue>,
 }
 
 impl ImageInbox {
-    /// The host end this inbox receives from, and the inbox itself.
     #[must_use]
     pub fn new() -> (ImageReports, Self) {
         let queue = Rc::new(ImageQueue::default());
@@ -658,45 +428,22 @@ impl ImageInbox {
         )
     }
 
-    /// Takes everything reported since the last drain.
     #[must_use]
     pub fn drain(&self) -> Vec<ImageEvent> {
         std::mem::take(&mut *self.queue.events.borrow_mut())
     }
 
-    /// Stops accepting reports, at teardown. The host may still hold its
-    /// [`ImageReports`] and call it; the calls do nothing.
-    ///
-    /// The flag lives on the shared queue rather than on the host's handle
-    /// because the painter cannot reach into the store it handed that handle
-    /// to.
     pub fn detach(&self) {
         self.queue.detached.set(true);
     }
 }
 
-/// The engine's image store type: [`vant::image::residency::Residency`]
-/// over [`ImageReports`], with what the engine fixes about it.
-///
-/// It supplies [`MAX_RENDERABLE_DIMENSION`], so no host passes it, and it
-/// dispatches the reports: every transition that hands waiters back reports
-/// to them here, once, so a host cannot forget or reorder a report. It runs
-/// no IO; the host starts the loads it is told to start and feeds their
-/// completions in. The host's own notes ("image `…` failed to load") stay
-/// with the host, which these methods answer enough to write.
-///
-/// `P` is the host decoder's platform frame type
-/// ([`vant::ImageDecoder::Frame`]), [`Infallible`] for one that answers CPU
-/// pixels only.
 #[derive(Debug)]
 pub struct ImageResidency<P = Infallible> {
     residency: Residency<ImageReports, P>,
 }
 
 impl<P: Clone> ImageResidency<P> {
-    /// A residency with a bitmap budget of `budget_bytes`, first decodes
-    /// bounded by `initial_bound`, and refinements past `downsample_ratio`
-    /// (see [`ResidencyConfig`]).
     #[must_use]
     pub fn new(budget_bytes: usize, initial_bound: u32, downsample_ratio: f32) -> Self {
         Self {
@@ -709,14 +456,10 @@ impl<P: Clone> ImageResidency<P> {
         }
     }
 
-    /// A key for one more view's working set.
     pub fn new_view(&mut self) -> ViewKey {
         self.residency.new_view()
     }
 
-    /// Names `source` for `reports`, reporting at once what is already
-    /// known. Answers the bound to decode at when the caller must start the
-    /// load.
     pub fn request(&mut self, source: &str, reports: &ImageReports) -> Option<(u32, u32)> {
         match self.residency.request(source, reports.clone()) {
             Requested::Loaded {
@@ -735,13 +478,10 @@ impl<P: Clone> ImageResidency<P> {
         }
     }
 
-    /// Files a document request for `source`, whose parse the caller starts
-    /// and whose outcome is reported to `reports`.
     pub fn request_document(&mut self, source: Arc<str>, reports: &ImageReports) {
         self.residency.request_document(source, reports.clone());
     }
 
-    /// `source`'s load decoded: reported loaded to every view that asked.
     pub fn complete_loaded(&mut self, source: &Arc<str>, decoded: Decoded<P>) {
         let animated = decoded.animated;
         if let Some((waiters, intrinsic)) = self.residency.loaded(source, decoded) {
@@ -751,8 +491,6 @@ impl<P: Clone> ImageResidency<P> {
         }
     }
 
-    /// `source`'s load was a document and it parsed: reported to every view
-    /// that asked.
     pub fn complete_parsed(&mut self, source: &str, document: &Arc<VectorDocument>) {
         if let Some(waiters) = self.residency.parsed(source) {
             for reports in waiters {
@@ -761,9 +499,6 @@ impl<P: Clone> ImageResidency<P> {
         }
     }
 
-    /// A document request's parse for `source` completed: reported to one
-    /// view that asked. Answers the parse's failure when it was reported,
-    /// for the host's note.
     pub fn complete_requested_document(
         &mut self,
         source: &str,
@@ -782,9 +517,6 @@ impl<P: Clone> ImageResidency<P> {
         }
     }
 
-    /// `source`'s load failed, or it could not be started: reported failed
-    /// to every view that asked. Answers whether a load was in flight, which
-    /// is when the host notes the failure.
     pub fn complete_failed(&mut self, source: &str) -> bool {
         let Some(waiters) = self.residency.failed(source) else {
             return false;
@@ -795,7 +527,6 @@ impl<P: Clone> ImageResidency<P> {
         true
     }
 
-    /// See [`Residency::refined`].
     pub fn refined(
         &mut self,
         source: &Arc<str>,
@@ -805,32 +536,26 @@ impl<P: Clone> ImageResidency<P> {
         self.residency.refined(source, target, bitmap);
     }
 
-    /// See [`Residency::refine_failed`].
     pub fn refine_failed(&mut self, source: &str) {
         self.residency.refine_failed(source);
     }
 
-    /// See [`Residency::describe`].
     pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described<P> {
         self.residency.describe(source, hint)
     }
 
-    /// See [`Residency::release`].
     pub fn release(&mut self, sources: &[Arc<str>]) {
         self.residency.release(sources);
     }
 
-    /// See [`Residency::want`].
     pub fn want(&mut self, source: &str, hint: ImageSizeHint) -> Option<Refinement> {
         self.residency.want(source, hint)
     }
 
-    /// See [`Residency::retain`].
     pub fn retain(&mut self, view: ViewKey, frame: &[Arc<str>]) {
         self.residency.retain(view, frame);
     }
 
-    /// See [`Residency::release_view`].
     pub fn release_view(&mut self, view: ViewKey) {
         self.residency.release_view(view);
     }
@@ -840,44 +565,36 @@ impl<P: Clone> ImageResidency<P> {
         self.residency.budget()
     }
 
-    /// See [`Residency::set_budget`].
     pub fn set_budget(&mut self, budget: usize) {
         self.residency.set_budget(budget);
     }
 
-    /// See [`Residency::bitmap_bytes`].
     #[must_use]
     pub fn bitmap_bytes(&self) -> usize {
         self.residency.bitmap_bytes()
     }
 
-    /// See [`Residency::encoded_bytes`].
     #[must_use]
     pub fn encoded_bytes(&self) -> usize {
         self.residency.encoded_bytes()
     }
 
-    /// See [`Residency::knows`].
     #[must_use]
     pub fn knows(&self, source: &str) -> bool {
         self.residency.knows(source)
     }
 
-    /// See [`Residency::is_resident`].
     #[must_use]
     pub fn is_resident(&self, source: &str) -> bool {
         self.residency.is_resident(source)
     }
 
-    /// See [`Residency::resident_size`].
     #[must_use]
     pub fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
         self.residency.resident_size(source)
     }
 }
 
-/// Reports `source` loaded at `intrinsic` to `reports`, as an animated
-/// source when its decoder said so.
 fn report_loaded(reports: &ImageReports, source: &str, intrinsic: (u32, u32), animated: bool) {
     if animated {
         reports.loaded_animated(source, intrinsic.0, intrinsic.1);
@@ -886,59 +603,27 @@ fn report_loaded(reports: &ImageReports, source: &str, intrinsic: (u32, u32), an
     }
 }
 
-/// Which kind of document a host hands the engine's parser
-/// ([`ImageEvent::parse_document`]): what the bytes are parsed as. The host
-/// learns it from its own sniffing for a fetched document, and from the
-/// document request for markup a page handed over.
-///
-/// Non-exhaustive so that a second engine-drawn format is one more variant
-/// rather than a second protocol method.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentKind {
-    /// An SVG document (`image/svg+xml`).
     Svg,
 }
 
-/// One report from the store, on its way to the document.
-///
-/// `Send` by construction: an `Arc<str>`, integers and a shared
-/// [`VectorDocument`], which is `Send + Sync`. Unlike the sink, this really
-/// does cross a thread — the painter forwards a batch of these to the Lynx
-/// main thread — and the `Arc`s are what make that legal. There is no variant
-/// that could carry pixels (a parsed command list is not pixels), which is
-/// what makes "`ImageData` never crosses a channel" a property of the type
-/// rather than a rule to remember.
-///
-/// Not `PartialEq`: a [`VectorDocument`] has no meaningful equality, and
-/// every consumer matches events by pattern.
 #[derive(Clone, Debug)]
 pub enum ImageEvent {
-    /// Pixels exist for this source, with these intrinsic dimensions, and
-    /// `animated` when its decoder answered more than one frame to play.
     Loaded {
         source: Arc<str>,
         width: u32,
         height: u32,
         animated: bool,
     },
-    /// This source is a document the engine draws itself, parsed by the host
-    /// ([`ImageReports::parsed_document`]) and not yet encoded. Applying it
-    /// shapes the document's text and encodes its scene on the document
-    /// thread. Its natural size is the intrinsic size layout reads.
-    ///
-    /// The document is shared, so one parse reports to every view that
-    /// waited on the load without a copy of the command list.
     ParsedDocument {
         source: Arc<str>,
         document: Arc<VectorDocument>,
     },
-    /// This source will never produce pixels.
-    Failed { source: Arc<str> },
-    /// The player of `picture`, an `Id` picture its owner asked to play a
-    /// URL ([`PlaybackRequest`](crate::render::picture::PlaybackRequest)),
-    /// reports `report`. It settles no source, and the document applies
-    /// nothing for it: it is its owner's to read.
+    Failed {
+        source: Arc<str>,
+    },
     Playback {
         picture: PictureId,
         report: PlaybackReport,
@@ -946,26 +631,11 @@ pub enum ImageEvent {
 }
 
 impl ImageEvent {
-    /// The report `bytes`, a document of `kind` fetched or handed over for
-    /// `source`, ends as: [`ImageEvent::ParsedDocument`] when the document
-    /// parses, [`ImageEvent::Failed`] when it does not. The engine's one
-    /// parser entry, for the host that reports the document.
-    ///
-    /// The parse reads the markup into an owned value with the tree's XML
-    /// parser (`crate::tree::xml`): it reads nothing outside the document and
-    /// needs no fonts. It runs on the calling thread and may take as long as
-    /// the document is large, so a host runs it where it decodes bitmaps,
-    /// off the thread it reports on. Its recursion is not bounded: a
-    /// document nested deeper than the calling thread's stack holds
-    /// overflows it (`docs/svg-dom-design.md`, "Risk: element nesting is
-    /// not bounded before the XML parse").
     #[must_use]
     pub fn parse_document(source: Arc<str>, bytes: &[u8], kind: DocumentKind) -> Self {
         let parsed = match kind {
             DocumentKind::Svg => VectorDocument::parse(bytes),
         };
-        // The error itself goes nowhere: the source's failure is what the
-        // document records, and the engine has no log to write it to.
         match parsed {
             Ok(document) => Self::ParsedDocument {
                 source,
@@ -975,8 +645,6 @@ impl ImageEvent {
         }
     }
 
-    /// The source this event reports on; `None` for a playback report,
-    /// which reports on a picture.
     pub(crate) fn source(&self) -> Option<&Arc<str>> {
         match self {
             Self::Loaded { source, .. }
@@ -987,28 +655,19 @@ impl ImageEvent {
     }
 }
 
-/// What the document knows about one image. Never any pixels.
-///
-/// `Pending` is the only state with outgoing edges; both others are sinks,
-/// which is the whole of "the document's image state never regresses".
 #[derive(Debug, Default)]
 enum ImageState {
-    /// Asked for; no pixels yet.
     #[default]
     Pending,
-    /// The only drawable state — so a frame naming an image that is not
-    /// loaded is unrepresentable rather than filtered out later.
     Ready {
         width: u32,
         height: u32,
         kind: ImageKind,
     },
-    /// Terminal.
     Failed,
 }
 
 impl ImageState {
-    /// The state as the URL image service answers it.
     fn status(&self) -> ImageStatus {
         match self {
             Self::Pending => ImageStatus::Pending,
@@ -1034,47 +693,28 @@ impl ImageState {
     }
 }
 
-/// What a loaded image draws from.
 #[derive(Debug)]
 enum ImageKind {
-    /// Pixels the host holds, described through [`FrameImages`] at compose
-    /// time; `animated` when they have more than one frame to play.
     Raster { animated: bool },
-    /// A parsed SVG document, encoded into the frame on the document thread.
     Vector(VectorImage),
 }
 
-/// What the document knows of one image source: the URL image service's
-/// answer ([`Document::request_image`](crate::tree::document::Document::request_image),
-/// [`Document::image_status`](crate::tree::document::Document::image_status)),
-/// and what a settled source reports
-/// ([`Document::apply_image_events`](crate::tree::document::Document::apply_image_events)).
-///
-/// `Pending` is the only state that moves, and it moves once: a source with
-/// one URL has one content, so a settled status is final.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageStatus {
-    /// Asked for, and not settled yet; or a synthetic source no element
-    /// handed the bytes of, which never settles.
     Pending,
-    /// Pixels the host holds, with the image's own intrinsic size, and
-    /// whether its frames animate: a URL picture of it plays under the
-    /// count its file states, and an `Id` picture may play it under a
-    /// playhead of its own.
     Bitmap {
         width: u32,
         height: u32,
         animated: bool,
     },
-    /// A document the engine draws itself, with its natural size.
-    Vector { width: u32, height: u32 },
-    /// The source will never produce anything to draw.
+    Vector {
+        width: u32,
+        height: u32,
+    },
     Failed,
 }
 
 impl ImageStatus {
-    /// The natural size of a loaded source, bitmap or vector; `None` while
-    /// pending and for a failure.
     #[must_use]
     pub const fn natural_size(self) -> Option<(u32, u32)> {
         match self {
@@ -1086,35 +726,14 @@ impl ImageStatus {
     }
 }
 
-/// What [`ImageRegistry::resolve`] hands a draw: the source's name (the
-/// registry's own key), its intrinsic dimensions, and its encoded picture
-/// when it is a vector image.
 pub(crate) type Resolved<'a> = (Arc<str>, (f64, f64), Option<&'a VectorImage>);
 
-/// The prefix of every synthetic source: the name the registry files a
-/// document handed over as markup under
-/// ([`Document::insert_image_document`](crate::tree::document::Document::insert_image_document)),
-/// `svg-content:<32 hex digits>`. Such an entry is never asked of the host,
-/// and is forgotten when the last replaced box presenting it lets go.
-///
-/// A host URL that happened to start with this prefix would be neither asked
-/// for nor kept; no host scheme does.
 pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "svg-content:";
 
-/// Whether `source` is a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]).
 pub(crate) fn is_synthetic_source(source: &str) -> bool {
     source.starts_with(SYNTHETIC_SOURCE_PREFIX)
 }
 
-/// The synthetic source naming `bytes` as a document of `kind`.
-///
-/// The hash is SipHash-1-3 with its 128-bit output, from `siphasher` (already
-/// in the dependency tree through `phf`), keyed with zeros so one markup has
-/// one name in every document and every run. The hash folds the length into
-/// its last block, so a prefix of a document is not its collision. Keyed
-/// with a known key it is not collision-resistant against a page that sets
-/// out to collide two of its own pictures; such a page only confuses its own
-/// drawing, which it could do by writing the same markup twice.
 pub(crate) fn synthetic_source(bytes: &[u8], kind: DocumentKind) -> String {
     let hash = siphasher::sip128::SipHasher13::new().hash(bytes).as_u128();
     match kind {
@@ -1122,49 +741,18 @@ pub(crate) fn synthetic_source(bytes: &[u8], kind: DocumentKind) -> String {
     }
 }
 
-/// A document handed over as markup that the host is to parse: its
-/// synthetic source, its bytes, and what to parse them as.
 pub type DocumentRequest = (Arc<str>, Bytes, DocumentKind);
 
-/// What the registry holds for one source.
 #[derive(Debug, Default)]
 struct Entry {
     state: ImageState,
-    /// How many replaced boxes present this source
-    /// ([`ImageRegistry::bind`]): the count that forgets a synthetic source
-    /// when it reaches zero. A `background-image` user is not counted: a
-    /// host source is never forgotten, and no stylesheet names a synthetic
-    /// one.
     presenters: u32,
 }
 
-/// The document's whole image state: a name table keyed by the raw source
-/// string the page wrote.
-///
-/// Holds no pixels and no store. One source is one entry with one content —
-/// there is no per-image identity to mint and no generation to track, because
-/// nothing per-image is stored behind a name. Two specifiers a host
-/// canonicalises to one resource stay two entries, and that duplication costs
-/// an `Arc<str>` and a few words.
-///
-/// The invariant that makes it work: **an entry exists exactly when the
-/// source has been asked for.** There is no window in which a source is known
-/// but has no key, because the key *is* the source. A synthetic source
-/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: the document files it
-/// itself, so its entry exists from the moment its bytes are queued in
-/// [`ImageRegistry::document_requests`], and existing is exactly what keeps
-/// the host from being asked to fetch it.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: FxHashMap<Arc<str>, Entry>,
-    /// Sources met by a walk that have not been requested yet.
-    ///
-    /// `RefCell` because the paint walk takes the document shared, and the
-    /// walk is exactly where sources are discovered.
     wanted: RefCell<Vec<Arc<str>>>,
-    /// Synthetic sources created since the last drain, with the bytes the
-    /// host parses for each. Every one names a `Pending` entry: a source
-    /// forgotten before the drain leaves this list with its entry.
     document_requests: Vec<DocumentRequest>,
 }
 
@@ -1179,17 +767,6 @@ impl std::fmt::Debug for ImageRegistry {
 }
 
 impl ImageRegistry {
-    /// The draw name and intrinsic dimensions for `source`, and its encoded
-    /// picture when it is a vector image, requesting it if this is the
-    /// registry's first sighting.
-    ///
-    /// `None` means "paint nothing this frame": pending, or failed. A pending
-    /// image is the one-frame gap between a source appearing and its pixels
-    /// arriving, which is what a browser shows for a not-yet-loaded image.
-    ///
-    /// The name handed back is the map's own key, so every draw of one source
-    /// in one frame shares one allocation. The vector image is a borrow of
-    /// the entry's own, so a draw clones nothing.
     pub(crate) fn resolve(&self, source: &str) -> Option<Resolved<'_>> {
         let (key, entry) = self.sight(source)?;
         match &entry.state {
@@ -1209,21 +786,9 @@ impl ImageRegistry {
         }
     }
 
-    /// The entry for `source`, asking for it if this is the registry's first
-    /// sighting.
-    ///
-    /// Taking `&self` is what lets this run inside the walk, the only place
-    /// that knows which sources a frame actually needs.
     fn sight(&self, source: &str) -> Option<(&Arc<str>, &Entry)> {
         let found = self.entries.get_key_value(source);
-        // A synthetic source with no entry has no bytes anywhere: no binder
-        // holds it, and the host has nothing to answer it with.
         if found.is_none() && !is_synthetic_source(source) {
-            // Deduplicated here rather than on the way out: a list of 200 rows
-            // sharing one `url(...)` resolves it 200 times on its first
-            // commit, and allocating a copy of the URL per *draw* to request
-            // one image is the wrong shape on the most latency-sensitive
-            // commit there is. The list is tiny, so the scan beats a set.
             let mut wanted = self.wanted.borrow_mut();
             if !wanted.iter().any(|pending| &**pending == source) {
                 wanted.push(Arc::from(source));
@@ -1232,25 +797,6 @@ impl ImageRegistry {
         found
     }
 
-    /// Asks for `source` if this is the registry's first sighting of it, and
-    /// answers its name and what is known of it.
-    ///
-    /// Asking has to file the entry at once, not merely queue the request.
-    /// The entry is exactly what [`ImageRegistry::resolve`] reads as "already
-    /// asked for", and an embedder asks for a source before any walk could
-    /// have resolved it.
-    ///
-    /// A synthetic source is never asked for: its entry already exists when
-    /// it was filed by [`ImageRegistry::insert_document`]. One named any
-    /// other way (a page writing `svg-content:…` into an attribute) has no
-    /// bytes to ask for, so it files no entry and stays pending: an entry
-    /// without bytes would make the markup's own later
-    /// [`ImageRegistry::insert_document`] read it as known and never queue
-    /// its parse.
-    ///
-    /// The name is the map's own key, so every holder of one source shares
-    /// one allocation of it, or, for such an unfiled synthetic source, a copy
-    /// of `source`.
     pub(crate) fn request(&mut self, source: &str) -> (Arc<str>, ImageStatus) {
         if let Some((key, entry)) = self.entries.get_key_value(source) {
             return (Arc::clone(key), entry.state.status());
@@ -1258,10 +804,6 @@ impl ImageRegistry {
         if is_synthetic_source(source) {
             return (Arc::from(source), ImageStatus::Pending);
         }
-        // Deduplicated against a walk that met the same source first and
-        // whose request has not been drained yet, the same way `resolve`
-        // deduplicates against itself, in discovery order. That request's
-        // name becomes the key; otherwise one name is minted for both.
         let wanted = self.wanted.get_mut();
         let key = if let Some(pending) = wanted.iter().find(|pending| &***pending == source) {
             Arc::clone(pending)
@@ -1274,15 +816,12 @@ impl ImageRegistry {
         (key, ImageStatus::Pending)
     }
 
-    /// What is known of `source`, asking for nothing.
     pub(crate) fn status(&self, source: &str) -> ImageStatus {
         self.entries
             .get(source)
             .map_or(ImageStatus::Pending, |entry| entry.state.status())
     }
 
-    /// Records one more replaced box presenting `source`, asking for it as
-    /// [`ImageRegistry::request`] does. Answers the name for the box to hold.
     pub(crate) fn bind(&mut self, source: &str) -> Arc<str> {
         let (key, _) = self.request(source);
         if let Some(entry) = self.entries.get_mut(source) {
@@ -1291,12 +830,6 @@ impl ImageRegistry {
         key
     }
 
-    /// Drops one replaced box's claim on `source`.
-    ///
-    /// The last claim on a synthetic source forgets it: its entry, its
-    /// picture, and its bytes if they were still waiting for a parse. A later
-    /// [`ImageRegistry::insert_document`] of the same markup files it afresh.
-    /// A host source is never forgotten, because one URL is reported once.
     pub(crate) fn unbind(&mut self, source: &str) {
         let Some(entry) = self.entries.get_mut(source) else {
             return;
@@ -1309,13 +842,6 @@ impl ImageRegistry {
         }
     }
 
-    /// Files `bytes` as a document of `kind` under its synthetic source and
-    /// answers that source, queueing the bytes for a parse only when no entry
-    /// holds them yet: identical markup, from any number of elements, is one
-    /// entry and one parse.
-    ///
-    /// Answers the map's own key when the entry exists, so every binder of
-    /// one markup shares one allocation of its name.
     pub(crate) fn insert_document(&mut self, bytes: &[u8], kind: DocumentKind) -> Arc<str> {
         let source = synthetic_source(bytes, kind);
         if let Some((known, _)) = self.entries.get_key_value(source.as_str()) {
@@ -1328,19 +854,10 @@ impl ImageRegistry {
         source
     }
 
-    /// The documents filed by [`ImageRegistry::insert_document`] since the
-    /// last drain, for the embedder to hand the host, which parses them.
-    /// Each names an entry that is still `Pending`.
     pub(crate) fn take_document_requests(&mut self) -> Vec<DocumentRequest> {
         std::mem::take(&mut self.document_requests)
     }
 
-    /// The sources discovered since the last drain, for the painter to ask
-    /// the host for. Already deduplicated — `resolve` never queues one twice.
-    ///
-    /// Recording each one here is what makes a source asked-for exactly once:
-    /// its entry exists from this moment, so `resolve` finds it and never
-    /// queues it again.
     pub(crate) fn take_wanted(&mut self) -> Vec<Arc<str>> {
         let wanted = std::mem::take(self.wanted.get_mut());
         for source in &wanted {
@@ -1349,22 +866,6 @@ impl ImageRegistry {
         wanted
     }
 
-    /// Applies one report from the host, answering the status it settled
-    /// the source at.
-    ///
-    /// `None` when nothing moved — a source reported twice, which one URL
-    /// with one content makes a no-op.
-    ///
-    /// A [`ImageEvent::ParsedDocument`] becomes an image here, on the
-    /// calling thread, through `draw` (the document's: it builds the SVG
-    /// document, records it and encodes it with its own text context), and
-    /// only when its source is still pending. Nothing is parsed here: the
-    /// host parsed it.
-    ///
-    /// A report on a synthetic source that has been forgotten since its bytes
-    /// were requested (every element let go while the host parsed) moves nothing:
-    /// filing it would keep an entry nobody can bind to without
-    /// [`ImageRegistry::insert_document`] queueing a parse of its own.
     pub(crate) fn apply(
         &mut self,
         event: &ImageEvent,
@@ -1379,12 +880,6 @@ impl ImageRegistry {
             return None;
         }
         entry.state = match event {
-            // Well-formedness, not the texture bound: an image with a zero axis
-            // has neither an intrinsic size nor an aspect ratio, so it would
-            // stretch an unknown bitmap over the whole content box, and it is
-            // refused as a failure. `MAX_RENDERABLE_DIMENSION` is deliberately
-            // not tested here — see `is_renderable`, which tests the bitmap
-            // instead.
             ImageEvent::Loaded {
                 width,
                 height,
@@ -1397,8 +892,6 @@ impl ImageRegistry {
                     animated: *animated,
                 },
             },
-            // A natural size is rounded to at least one px on each axis, so a
-            // parsed document is never refused for a zero axis.
             ImageEvent::ParsedDocument { document, .. } => {
                 let (width, height) = document.natural;
                 ImageState::Ready {
@@ -1413,12 +906,10 @@ impl ImageRegistry {
         Some(entry.state.status())
     }
 
-    /// How many replaced boxes present `source`.
     pub(crate) fn presenters(&self, source: &str) -> u32 {
         self.entries.get(source).map_or(0, |entry| entry.presenters)
     }
 
-    /// The key of `source`'s vector image, when it has settled as one.
     pub(crate) fn vector_key(&self, source: &str) -> Option<u64> {
         match &self.entries.get(source)?.state {
             ImageState::Ready {
@@ -1429,8 +920,6 @@ impl ImageRegistry {
         }
     }
 
-    /// Replaces the vector image a settled `source` draws: an animated SVG
-    /// image recorded again (`crate::svg::image`). The natural size stays.
     pub(crate) fn replace_vector(&mut self, source: &str, image: VectorImage) {
         if let Some(Entry {
             state:
@@ -1445,14 +934,11 @@ impl ImageRegistry {
         }
     }
 
-    /// Whether the registry holds an entry for `source`.
     pub(crate) fn knows(&self, source: &str) -> bool {
         self.entries.contains_key(source)
     }
 
     fn entry_for(&mut self, source: &str) -> &mut Entry {
-        // `raw_entry` is unstable, so a miss costs one allocation of a string
-        // the registry is about to own anyway.
         if !self.entries.contains_key(source) {
             self.entries.insert(Arc::from(source), Entry::default());
         }
@@ -1465,11 +951,6 @@ impl ImageRegistry {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    /// Regression: an embedder asks for a source before any walk can
-    /// resolve it, so the request is the first sighting. If it creates the
-    /// entry without asking, `resolve` reads that entry as "already asked
-    /// for" and the source is never requested from the host: the image never
-    /// loads, with no error.
     #[test]
     fn requesting_a_source_asks_the_host_for_it() {
         let mut registry = ImageRegistry::default();
@@ -1487,9 +968,6 @@ mod tests {
         assert!(registry.take_wanted().is_empty(), "and asks exactly once");
     }
 
-    /// A walk that met the source first has already queued it; requesting
-    /// it, or presenting it, must not queue it twice, and the request shares
-    /// the walk's name for it.
     #[test]
     fn requesting_a_source_a_walk_already_met_asks_once() {
         let mut registry = ImageRegistry::default();
@@ -1501,7 +979,6 @@ mod tests {
         assert_eq!(registry.take_wanted().len(), 1, "one source, one request");
     }
 
-    /// Two requests of one source ask for it once between them.
     #[test]
     fn two_requests_of_one_source_ask_once() {
         let mut registry = ImageRegistry::default();
@@ -1511,15 +988,12 @@ mod tests {
         assert_eq!(registry.take_wanted().len(), 1);
     }
 
-    /// What the document does with a parsed SVG, with no text context.
     fn draw(document: &crate::svg::image::VectorDocument) -> super::VectorImage {
         crate::svg::image::vector_image(document, &mut None)
     }
 
     use super::{ImageInbox, ImageReports};
 
-    /// Reports are readable in the order they were made, and a drain empties
-    /// the inbox.
     #[test]
     fn reports_are_drained_once_in_the_order_they_were_made() {
         let (reports, inbox) = ImageInbox::new();
@@ -1546,8 +1020,6 @@ mod tests {
         assert!(inbox.drain().is_empty(), "a drain empties the inbox");
     }
 
-    /// A host outliving its view must not keep buffering into a painter that
-    /// will never read again.
     #[test]
     fn a_detached_inbox_takes_nothing() {
         let (reports, inbox) = ImageInbox::new();
@@ -1558,8 +1030,6 @@ mod tests {
         assert!(inbox.drain().is_empty());
     }
 
-    /// The host's handle is thread-bound by construction, so a store cannot
-    /// hand it to a loader thread even by mistake.
     const _: () = {
         const fn assert_not_send<T>() {}
         assert_not_send::<ImageReports>();
@@ -1591,8 +1061,6 @@ mod tests {
 
     fn image(width: u32, height: u32) -> crate::peniko::ImageData {
         use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-        // Declares the size without allocating it: every check under test
-        // reads the declared dimensions, not the buffer.
         ImageData {
             data: Blob::from(vec![0_u8; 4]),
             format: ImageFormat::Rgba8,
@@ -1602,19 +1070,6 @@ mod tests {
         }
     }
 
-    /// A decoded-image report must cross to the thread that owns the tree.
-    ///
-    /// This used to assert `Document<()>: Send`, because a document was built
-    /// on one thread and moved to the one that ran it. A document does not
-    /// move any more — `spawn_main_thread` hands `bobcat-main` the *sources*
-    /// and the document is created there — and it is now structurally unable
-    /// to (`Node`'s arena backpointer is a raw pointer). The registry itself
-    /// therefore needs nothing.
-    ///
-    /// What still genuinely crosses is the report: a host answers an image
-    /// load on whatever thread it likes, the painter forwards the batch as
-    /// `ToMain::ImageEvents`, and `bobcat-main` applies it. That send is the
-    /// requirement worth pinning here.
     #[test]
     fn an_image_report_crosses_to_the_thread_that_owns_the_tree() {
         const fn assert_send<T: Send>() {}
@@ -1624,8 +1079,6 @@ mod tests {
     #[test]
     fn a_source_is_asked_for_once_however_often_it_is_drawn() {
         let mut registry = ImageRegistry::default();
-        // A page whose every box shares one background image resolves the
-        // same source once per draw.
         for _ in 0..5 {
             assert!(registry.resolve("app:///a.png").is_none());
         }
@@ -1658,8 +1111,6 @@ mod tests {
         assert!((dimensions.1 - 20.0).abs() < f64::EPSILON);
     }
 
-    /// The whole of issue 3: an intrinsic size is a CSS input and is not
-    /// bounded. A host may report a huge image and decode it small.
     #[test]
     fn an_intrinsic_size_past_the_texture_bound_still_lays_out_and_draws() {
         let mut registry = ImageRegistry::default();
@@ -1672,8 +1123,6 @@ mod tests {
             .expect("a huge image is drawable — it is the bitmap that is bounded, not this");
         assert!((dimensions.0 - 12_000.0).abs() < f64::EPSILON);
 
-        // And the bitmap the host actually decoded is what the texture bound
-        // is tested against.
         assert!(is_renderable(&image(6_000, 3_000)));
         assert!(!is_renderable(&image(12_000, 6_000)));
     }
@@ -1691,8 +1140,6 @@ mod tests {
         assert!(!is_renderable(&image(4, 0)));
     }
 
-    /// A zero axis is not a texture question: such an image has neither an
-    /// intrinsic size nor a ratio, so it is refused as malformed.
     #[test]
     fn a_zero_intrinsic_axis_is_a_load_failure() {
         for (width, height) in [(0, 4), (4, 0)] {
@@ -1707,8 +1154,6 @@ mod tests {
         }
     }
 
-    /// One URL, one content: a host repeating itself changes nothing, and a
-    /// late failure cannot un-load an image that already resolved.
     #[test]
     fn a_loaded_image_never_regresses() {
         let mut registry = ImageRegistry::default();
@@ -1755,8 +1200,6 @@ mod tests {
         assert!(registry.resolve("app:///a.png").is_none());
     }
 
-    /// Applying a report answers the status it settled the source at, which
-    /// is what an embedder learns a source's outcome from.
     #[test]
     fn a_report_answers_the_status_it_settled() {
         let mut registry = ImageRegistry::default();
@@ -1776,8 +1219,6 @@ mod tests {
         );
     }
 
-    /// A zero axis is a failure, and settles as one rather than as the load
-    /// the host wrote.
     #[test]
     fn a_zero_axis_load_settles_as_a_failure() {
         let mut registry = ImageRegistry::default();
@@ -1789,9 +1230,6 @@ mod tests {
         assert_eq!(registry.status("app:///bad.png"), ImageStatus::Failed);
     }
 
-    /// A source that settled before a later request is never reported again,
-    /// so the request is where its status is learnt; a status read asks for
-    /// nothing.
     #[test]
     fn a_settled_source_answers_a_later_request() {
         let mut registry = ImageRegistry::default();
@@ -1860,8 +1298,6 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod vector_tests {
-    //! The registry's half of a vector image: the sizes and the drawing
-    //! rules themselves are the image corpus (`svg/record_tests.rs`).
 
     use std::sync::Arc;
 
@@ -1869,11 +1305,6 @@ mod vector_tests {
 
     use super::{DocumentKind, ImageEvent, ImageInbox, ImageRegistry, VectorImage};
 
-    /// What a host does with a document's bytes: parse them with the
-    /// engine's parser and report the document through `parsed_document`.
-    /// The report shares the host's parse rather than copying it, and
-    /// applying it encodes the scene there and then and settles a vector
-    /// image with the document's natural size.
     #[test]
     fn a_document_the_host_parsed_and_reported_settles_as_a_vector_image() {
         let ImageEvent::ParsedDocument { document, .. } = ImageEvent::parse_document(
@@ -1916,7 +1347,6 @@ mod vector_tests {
         assert_eq!(vector.viewport(), (10.0, 10.0));
     }
 
-    /// A document that does not parse is the source's failure.
     #[test]
     fn an_unparsable_document_fails_its_source() {
         let event = ImageEvent::parse_document(
@@ -1936,8 +1366,6 @@ mod vector_tests {
         assert!(registry.resolve("app:///bad.svg").is_none());
     }
 
-    /// Markup that does not parse as an SVG document is a failure too: not
-    /// UTF-8, or a root that is not `svg`.
     #[test]
     fn a_markup_error_reports_failed() {
         for bytes in [
@@ -1950,10 +1378,6 @@ mod vector_tests {
         }
     }
 
-    /// Applying a parsed document leaves the registry holding the encoded
-    /// image and nothing else: the isolated document it was recorded from
-    /// is gone with the apply. A `Document` is not `Send`, and the settled
-    /// entry's image is, so the entry cannot hold one.
     #[test]
     fn the_isolated_document_is_gone_after_apply() {
         fn sendable<T: Send + Sync>(_: &T) {}
@@ -1978,7 +1402,6 @@ mod vector_tests {
         assert!(!image.scene().is_empty());
     }
 
-    /// Two images never share a key, and clones share theirs.
     #[test]
     fn keys_are_unique_per_image_and_shared_by_clones() {
         let first = VectorImage::parse_sealed(
@@ -1998,9 +1421,6 @@ mod vector_tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod synthetic_tests {
-    //! Documents handed over as markup: the synthetic source, its single
-    //! parse, and its eviction with the last binder. The document-level
-    //! half (`Document::insert_image_document`) is in `tests/svg_images.rs`.
 
     use std::sync::Arc;
 
@@ -2014,8 +1434,6 @@ mod synthetic_tests {
     const ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
     const OTHER: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6"/>"#;
 
-    /// The source is the prefix and 32 lowercase hex digits, the same for
-    /// the same bytes, and different for different ones.
     #[test]
     fn the_source_names_the_markup() {
         let source = synthetic_source(ICON, DocumentKind::Svg);
@@ -2039,8 +1457,6 @@ mod synthetic_tests {
         );
     }
 
-    /// Two elements handing over identical markup share one entry and one
-    /// queued parse, and the parse settles it for both.
     #[test]
     fn identical_markup_is_one_entry_and_one_parse() {
         let mut registry = ImageRegistry::default();
@@ -2069,16 +1485,12 @@ mod synthetic_tests {
             })
         );
 
-        // A third element on the same markup binds a settled entry and
-        // queues nothing.
         let third = registry.insert_document(ICON, DocumentKind::Svg);
         registry.bind(&third);
         assert_eq!(registry.take_document_requests(), []);
         assert!(registry.status(&third).natural_size().is_some());
     }
 
-    /// The request list drains once, and markup filed after a drain is a
-    /// list of its own.
     #[test]
     fn document_requests_drain_once() {
         let mut registry = ImageRegistry::default();
@@ -2094,8 +1506,6 @@ mod synthetic_tests {
         assert!(Arc::ptr_eq(&requests[0].0, &other));
     }
 
-    /// The host is never asked for a synthetic source: not at the bind, not
-    /// when a walk meets one, and not when a walk meets one nobody holds.
     #[test]
     fn a_synthetic_source_is_never_asked_of_the_host() {
         let mut registry = ImageRegistry::default();
@@ -2110,8 +1520,6 @@ mod synthetic_tests {
         assert_eq!(registry.take_wanted(), []);
     }
 
-    /// A page naming a synthetic source itself files nothing, so the markup
-    /// that source names is still parsed when an element hands it over.
     #[test]
     fn a_synthetic_source_named_by_a_page_files_nothing() {
         let mut registry = ImageRegistry::default();
@@ -2126,9 +1534,6 @@ mod synthetic_tests {
         assert_eq!(registry.take_document_requests().len(), 1, "still parsed");
     }
 
-    /// The last binder letting go forgets the entry and takes the
-    /// still-unparsed bytes with it; a host source survives losing every
-    /// binder.
     #[test]
     fn the_last_unbind_forgets_a_synthetic_source() {
         let mut registry = ImageRegistry::default();
@@ -2150,11 +1555,6 @@ mod synthetic_tests {
         assert!(registry.knows("app:///a.svg"), "a host source never goes");
     }
 
-    /// A parse that returns after every binder let go applies to nothing
-    /// and recreates nothing; the same markup set again is a new entry with
-    /// a parse of its own, and the first report to find it pending settles
-    /// it: the host keeps nothing, so a markup that left and came back can
-    /// be reported twice, and the second report moves nothing.
     #[test]
     fn a_parse_for_a_forgotten_source_moves_nothing() {
         let mut registry = ImageRegistry::default();
@@ -2202,8 +1602,6 @@ mod synthetic_tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod residency_tests {
-    //! What [`ImageResidency`] reports for each transition, to whom, and how
-    //! often. The policy itself is tested in `vant::image::residency`.
 
     use std::sync::Arc;
 
@@ -2293,9 +1691,6 @@ mod residency_tests {
         assert!(first_inbox.drain().is_empty());
     }
 
-    /// A source whose decoder answered more than one frame is reported
-    /// animated, to the views that waited and to every later request, and
-    /// the document's status says so; a playback report settles no source.
     #[test]
     fn an_animated_load_says_so_to_every_view_and_the_status() {
         let mut residency = residency();

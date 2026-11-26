@@ -27,14 +27,6 @@ use crate::tree::document::{Document, NodeId};
 use crate::tree::xml::{XmlItem, XmlMarkup, XmlNamespace};
 
 impl<T> Document<T> {
-    /// Builds `markup` under `parent` and answers its root element.
-    /// `payload` is called once per node made, in document order, and once
-    /// per node of every `use` instance after that.
-    ///
-    /// # Panics
-    ///
-    /// When `parent` is inside a shadow tree: the markup's `style` sheets
-    /// are document sheets.
     pub(crate) fn append_svg_markup(
         &mut self,
         parent: NodeId,
@@ -46,7 +38,6 @@ impl<T> Document<T> {
             "Document::append_svg_markup: the markup's style elements are document sheets, so \
              it cannot be built inside a shadow tree"
         );
-        // The first element with an id wins, as `getElementById` says.
         let mut ids: FxHashMap<&str, NodeId> = FxHashMap::default();
         let mut uses: Vec<(NodeId, u32)> = Vec::new();
         let mut sheets: Vec<String> = Vec::new();
@@ -84,9 +75,6 @@ impl<T> Document<T> {
     }
 }
 
-/// The CSS a `style` element at `index` contributes: its text, when its
-/// `type` is absent, empty or `text/css` (SVG 2 §6.3, HTML's `style`
-/// processing model).
 fn style_sheet(markup: &XmlMarkup, index: usize) -> Option<String> {
     let XmlItem::Element { attributes, .. } = markup.item(index) else {
         return None;

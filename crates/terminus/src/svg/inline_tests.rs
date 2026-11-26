@@ -25,14 +25,9 @@ use crate::visual::{LayerKind, PaintItemKind};
 
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// The page every inline root here sits on: positioned at (20, 30) on a
-/// 400 × 300 viewport, its text in the family an SVG image's sheet gives
-/// text with none of its own (`svg/ua.rs`), so the two paths shape alike.
 const PAGE: &str = "page { display: flex; position: relative; width: 400px; height: 300px; }
      svg { display: flex; position: absolute; left: 20px; top: 30px; font-family: sans-serif; }";
 
-/// A page at `ratio` device px per CSS px with Ahem registered, `css` after
-/// [`PAGE`], holding `markup` as an inline root; answers the root.
 fn page(markup: &str, ratio: f32, css: &str) -> (Doc, NodeId) {
     let mut doc = Doc::with_device(device_with(400.0, 300.0, ratio, PrefersColorScheme::Light));
     doc.add_css(&format!("{PAGE} {css}"));
@@ -51,15 +46,11 @@ fn by_id(doc: &Doc, id: &str) -> NodeId {
         .expect("an element with that id")
 }
 
-/// The composed scene of `doc`'s committed frame.
 fn scene(doc: &mut Doc) -> DisplayList {
     doc.dom.commit();
     doc.dom.scene(&NoImages).clone()
 }
 
-/// What the image path draws for `markup`: parsed, built as an isolated
-/// document, recorded, shaped through `doc`'s own text context (as an image
-/// applied to `doc` is), planned and painted with nothing culled.
 fn image_list(doc: &mut Doc, markup: &str) -> DisplayList {
     let parsed = VectorDocument::parse(markup.as_bytes()).expect("the image parses");
     let image =
@@ -67,10 +58,6 @@ fn image_list(doc: &mut Doc, markup: &str) -> DisplayList {
     DisplayList::clone(image.scene())
 }
 
-/// `scene` without what is not the root's recording: every clip that is
-/// not a path (the root's content clip, which the walk pushes again inside
-/// every group, and the page's own clips) and its pop. A recorded clip is
-/// always a path, a recorded layer never a clip.
 fn recorded_part(scene: &DisplayList) -> Vec<&ListItem> {
     let mut open = Vec::new();
     let mut kept = Vec::new();
@@ -98,11 +85,6 @@ fn recorded_part(scene: &DisplayList) -> Vec<&ListItem> {
     kept
 }
 
-/// The tolerance a coefficient of the walk's transform is held to against
-/// the image's mapped by the root's placement: the walk's matrices are the
-/// frame's f32 world matrices, so each coefficient carries one f32
-/// rounding, about 6e-8 of its size; 1e-5 of it plus 1e-4 device px holds
-/// that with room and is far below what a misplaced drawing shows.
 fn close(walk: Affine, expected: Affine) -> bool {
     walk.as_coeffs()
         .iter()
@@ -160,9 +142,6 @@ fn same_region(
         && same_shape(walk, left.shape, image, right.shape)
 }
 
-/// Whether item `left` of the walk's `walk` list draws what item `right` of
-/// the image's `image` list draws, `map` (the root's placement in device
-/// px) applied to the image's transforms.
 pub(super) fn same_item(
     walk: &DisplayList,
     left: &ListItem,
@@ -226,8 +205,6 @@ pub(super) fn same_item(
     }
 }
 
-/// Compares the recorded part of an inline root's scene with the image's
-/// list for the same markup, and answers the difference with both lists.
 fn compare(markup: &str) -> Result<usize, String> {
     const RATIO: f32 = 2.0;
     let (mut doc, root) = page(markup, RATIO, "");
@@ -256,8 +233,6 @@ fn compare(markup: &str) -> Result<usize, String> {
     Ok(recorded.len())
 }
 
-/// Every document of `svg/record_tests.rs` written as one literal: a body
-/// goes into a 100 × 100 root, a full document stands as it is.
 const RECORD_CORPUS: &[&str] = &[
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="10" height="10" fill="#ff0000" fill-opacity="0.5"/></svg>"##,
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><path d="M0 10 L90 10 L90 60" fill="none" stroke="#0000ff" stroke-width="4"
@@ -409,8 +384,6 @@ const RECORD_CORPUS: &[&str] = &[
     r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="10" height="10" fill="currentColor"/><text>a</text></svg>"#,
 ];
 
-/// The parametric documents of `svg/record_tests.rs`, one value each, and
-/// the documents of `tests/svg_images.rs`.
 const MORE_CORPUS: &[&str] = &[
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><path d="M0 0 H50 V50 H0 Z M10 10 H40 V40 H10 Z" fill-rule="evenodd" fill="#ff0000"/></svg>"##,
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse"
@@ -461,16 +434,8 @@ const MORE_CORPUS: &[&str] = &[
 </svg>"##,
 ];
 
-/// The one corpus document whose two lists differ. Its only shape lies
-/// outside its `viewBox`, so outside the root's content clip: the walk's
-/// cull leaves its item unencoded, since none of its ink can reach the
-/// screen, while the image's walk, which culls nothing, draws it and the
-/// texture's edge cuts it away. [`a_shape_outside_the_view_box_is_planned_and_culled`] pins that.
 const CULLED: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 100 50"><rect width="5" height="5"/></svg>"#;
 
-/// For every corpus document, the recorded part of the inline root's
-/// scene is the image's list, item for item, under the root's placement
-/// ([`close`] states the tolerance). [`CULLED`] is the one exception.
 #[test]
 fn an_inline_root_paints_what_the_image_of_its_markup_encodes() {
     let mut failures = Vec::new();
@@ -491,8 +456,6 @@ fn an_inline_root_paints_what_the_image_of_its_markup_encodes() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// [`CULLED`]'s shape is a planned item that the walk does not encode,
-/// and the image's list draws it.
 #[test]
 fn a_shape_outside_the_view_box_is_planned_and_culled() {
     assert!(RECORD_CORPUS.contains(&CULLED));
@@ -522,9 +485,6 @@ fn a_shape_outside_the_view_box_is_planned_and_culled() {
     assert!(encoded[at], "the root's own box is");
 }
 
-/// Two shapes and a group with `opacity`: the root's box item, then one
-/// item per shape in document order, and one group scope around the
-/// group's two shapes.
 #[test]
 fn the_plan_appends_each_recorded_item_and_one_scope_per_group() {
     let (mut doc, root) = page(
@@ -565,7 +525,6 @@ fn the_plan_appends_each_recorded_item_and_one_scope_per_group() {
     assert_eq!(layers[0].node, g);
     assert_eq!(layers[0].kind, LayerKind::Svg { root, index: 1 });
     assert_eq!(layers[0].items, at + 2..at + 4);
-    // The first rect's item is its box on the page: the root at (20, 30).
     let first = order.matrix(order.items()[at + 1].transform);
     assert_eq!((first.m41, first.m42), (20.0, 30.0));
     assert_eq!(
@@ -574,8 +533,6 @@ fn the_plan_appends_each_recorded_item_and_one_scope_per_group() {
     );
 }
 
-/// A page with no `svg` element plans exactly what it did before: one item
-/// per box and one layer per group.
 #[test]
 fn a_page_without_svg_plans_as_before() {
     let mut doc = Doc::with_css(
@@ -595,8 +552,6 @@ fn a_page_without_svg_plans_as_before() {
     assert_eq!(order.clips().len(), 0);
 }
 
-/// `clip-path: url()` on a group is a clip scope shaped by the recorded
-/// path, a program push of that path around the group's items.
 #[test]
 fn a_clip_path_on_a_group_is_a_clip_scope_of_its_path() {
     let (mut doc, root) = page(
@@ -629,7 +584,6 @@ fn a_clip_path_on_a_group_is_a_clip_scope_of_its_path() {
     assert_eq!(paths.len(), 1, "one recorded clip push");
     let (path, transform) = &paths[0];
     let bounds = transform.transform_rect_bbox(crate::kurbo::Shape::bounding_box(&**path));
-    // The circle's box, on the page at the root's place.
     let expected = Rect::new(30.0, 40.0, 50.0, 60.0);
     assert!(
         (bounds.x0 - expected.x0).abs() < 1e-3
@@ -641,8 +595,6 @@ fn a_clip_path_on_a_group_is_a_clip_scope_of_its_path() {
     assert!(!frame.draws_vectors());
 }
 
-/// Text in a root draws its glyph run, and the bounds layer around it
-/// takes the text's box, which only shaping knows.
 #[test]
 fn text_in_a_root_draws_its_run_inside_a_layer_that_holds_it() {
     let (mut doc, _) = page(
@@ -665,16 +617,11 @@ fn text_in_a_root_draws_its_run_inside_a_layer_that_holds_it() {
     let Shape::Rect(rect) = region.shape else {
         panic!("a bounds layer: {region:?}");
     };
-    // Ahem's em box: "ab" at 10 px from (10, 20), 8 px over the baseline
-    // and 2 under, in the group's coordinates.
     assert_eq!(rect, Rect::new(10.0, 12.0, 30.0, 22.0));
     let on_page = scene.transform(region.transform).transform_rect_bbox(rect);
     assert_eq!(on_page, Rect::new(35.0, 47.0, 55.0, 57.0));
 }
 
-/// A root whose box differs from its `viewBox` in ratio lands its drawing
-/// where an `<image>` of the same markup, at the same place and size,
-/// lands its picture.
 #[test]
 fn a_view_box_root_lands_where_the_image_did() {
     const MARKUP: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 10 10" preserveAspectRatio="xMaxYMid meet"><rect width="10" height="10" fill="#ff0000"/></svg>"##;
@@ -719,13 +666,9 @@ fn a_view_box_root_lands_where_the_image_did() {
         .all(|(a, b)| (a - b).abs() < 1e-3),
         "{inline:?} against {expected:?}"
     );
-    // `xMaxYMid meet` in the 90 × 50 content box at (23, 33): a 50 px
-    // square at its right edge, in device px.
     assert_eq!(expected, Rect::new(126.0, 66.0, 226.0, 166.0));
 }
 
-/// A shape's attribute change records the root again and the next frame
-/// draws the change.
 #[test]
 fn an_attribute_change_records_again_and_the_next_list_differs() {
     let (mut doc, _) = page(
@@ -742,8 +685,6 @@ fn an_attribute_change_records_again_and_the_next_list_differs() {
     assert!(crate::paint::equivalence::compare_scenes(&after, &scene(&mut doc)).is_ok());
 }
 
-/// A point over a shape and a point over empty space inside the root both
-/// answer the root: the recorded items are not hit-testable.
 #[test]
 fn points_inside_the_root_hit_the_root() {
     let (mut doc, root) = page(
@@ -767,7 +708,6 @@ fn points_inside_the_root_hit_the_root() {
     );
 }
 
-/// A frame whose only picture is an inline root has no vector op.
 #[test]
 fn an_inline_root_makes_no_vector_draw() {
     let (mut doc, _) = page(

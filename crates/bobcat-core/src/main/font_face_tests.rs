@@ -14,11 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
-/// Solid em squares: five characters at 16px are exactly 80px of advance.
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// One text element holding one carrier, which is what a compiled card's
-/// update slots produce.
 const ENTRY: &str = r"
     const page = __CreatePage('card', 0);
     const text = __CreateText(0);
@@ -27,7 +24,6 @@ const ENTRY: &str = r"
     __FlushElementTree();
 ";
 
-/// The advance the page's one text element measured, once it has one.
 fn measured_width(engine: &mut TestEngine) -> Option<f32> {
     engine
         .probe_document(|tree| {
@@ -37,9 +33,6 @@ fn measured_width(engine: &mut TestEngine) -> Option<f32> {
         .flatten()
 }
 
-/// Turns until the page's text measures `width`, or says what it measured
-/// instead. A declared face arrives after boot — the load is a task of its
-/// own — so every assertion here is a wait rather than a read.
 fn wait_for_width(engine: &mut TestEngine, width: f32) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = None;
@@ -57,12 +50,6 @@ fn wait_for_width(engine: &mut TestEngine, width: f32) {
     }
 }
 
-/// The whole seam: a card declares a face with `@font-face`, the host serves
-/// its `src`, and the text naming that family is shaped by it.
-///
-/// Before the load lands the family is unknown and the run falls back to
-/// whatever the platform answers with, so the 80px this waits for can only
-/// come from the declared face having reached shaping.
 #[test]
 fn a_declared_font_face_is_fetched_and_shapes_the_text_naming_it() {
     let mut engine = TestViewSpec::new(ENTRY)
@@ -77,12 +64,6 @@ fn a_declared_font_face_is_fetched_and_shapes_the_text_naming_it() {
     wait_for_width(&mut engine, 80.0);
 }
 
-/// A `src` list is tried in author order until one source loads: the two the
-/// host serves nothing for fail, and the third is what shapes the text.
-///
-/// The `local()` in the middle is skipped rather than requested — this engine
-/// has no platform font enumerator — and a rule whose sources all failed would
-/// leave the run on its fallback, so reaching 80px is the pass.
 #[test]
 fn a_failing_font_face_source_falls_through_to_the_next_one() {
     let mut engine = TestViewSpec::new(ENTRY)

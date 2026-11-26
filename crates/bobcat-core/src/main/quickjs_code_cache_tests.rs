@@ -17,17 +17,13 @@ use vant::artifact::Artifacts;
 use super::*;
 use crate::code_cache::script_engine_id;
 
-/// Where the tests' own host members live: `report` and `load`.
 const PROBE: &str = "bobcat-internal:code-cache-test";
 
-/// Comment lines that take a text over the cache's threshold without
-/// changing what it does.
 fn padding() -> String {
     let line = format!("// padding {}\n", "x".repeat(64));
     line.repeat(16)
 }
 
-/// An ES module over the threshold that exports what the probes read.
 fn module_text() -> String {
     format!(
         "export const answer = 42;\n\
@@ -42,7 +38,6 @@ fn module_text() -> String {
     )
 }
 
-/// A `CommonJS` file over the threshold with the same three exports.
 fn commonjs_text() -> String {
     format!(
         "exports.answer = 42;\n\
@@ -56,20 +51,14 @@ fn commonjs_text() -> String {
     )
 }
 
-/// What a synchronous load of a URL answers in these tests.
 type Sources = Rc<RefCell<FxHashMap<String, quickjs::RequiredSource>>>;
 
-/// One realm on a runtime of its own, over `artifacts`, with the probe
-/// members registered.
 struct Realm {
     runtime: ScriptRuntime,
     engine: ScriptEngine,
     reports: Rc<RefCell<Vec<String>>>,
     required: Sources,
-    /// The modules this realm's imports are answered from: name to response
-    /// URL and text.
     modules: FxHashMap<String, (String, String)>,
-    /// Numbers the probe modules, each a module of its own.
     probes: usize,
 }
 
@@ -129,8 +118,6 @@ impl Realm {
         );
     }
 
-    /// Answers every module request from what [`Self::serve`] set up, until
-    /// none is left.
     fn answer_requests(&mut self) {
         while let Some(name) = self.engine.take_module_request() {
             let (url, text) = self
@@ -144,7 +131,6 @@ impl Realm {
         }
     }
 
-    /// Imports `name` dynamically and answers the whole graph.
     fn import(&mut self, name: &str) {
         self.engine
             .execute_script(
@@ -158,8 +144,6 @@ impl Realm {
         self.answer_requests();
     }
 
-    /// Runs `body` in a module that imports [`PROBE`]'s members, and answers
-    /// with the one string it reported.
     fn probe(&mut self, body: &str) -> String {
         self.probes += 1;
         self.engine
@@ -175,8 +159,6 @@ impl Realm {
         self.reports.borrow_mut().pop().expect("the probe reported")
     }
 
-    /// What a page sees of the module `name`, whose exports are
-    /// [`module_text`]'s.
     fn module_view(&mut self, name: &str) -> String {
         self.probe(&format!(
             "import * as loaded from '{name}';\n\
@@ -184,8 +166,6 @@ impl Realm {
         ))
     }
 
-    /// What a page sees of a `CommonJS` file required as `asked` with
-    /// `parameters`, whose exports are [`commonjs_text`]'s.
     fn commonjs_view(&mut self, asked: &str, parameters: &str) -> String {
         self.probe(&format!(
             "const loaded = load('{asked}', '{parameters}');\n\
@@ -226,8 +206,6 @@ fn a_second_realm_reads_the_module_bytecode_the_first_one_compiled() {
     );
     assert_eq!(artifacts.len(), 1);
 
-    // The same exports, stack and function text; each realm's own
-    // `import.meta.url`.
     assert_eq!(
         first_view.replace("https://a.test/lib.js", "<url>"),
         second_view.replace("https://b.test/lib.js", "<url>"),
@@ -339,7 +317,6 @@ fn a_required_commonjs_file_is_read_back_by_a_second_realm_under_the_same_parame
     assert!(second_view.contains("kept as written"));
     assert!(artifacts.take_pending().is_empty(), "the wrapper was read");
 
-    // Another parameter list is another wrapper: a miss, compiled and kept.
     let mut third = Realm::new(&artifacts);
     serve(&third);
     let third_view = third.commonjs_view("app:///lib.cjs", "exports, module, require");
@@ -494,8 +471,6 @@ fn every_module_of_an_import_graph_is_cached_on_its_own() {
     );
 }
 
-/// A worker realm's root is loaded the way an `import()` of its URL is
-/// ([`ScriptEngine::load_root_module`]), and completed as any module.
 #[test]
 fn a_worker_root_module_is_cached_as_a_module() {
     let artifacts = Arc::new(Artifacts::new(Artifacts::DEFAULT_BUDGET_BYTES));

@@ -92,26 +92,13 @@ use crate::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 pub(crate) type Filter = stylo::values::computed::effects::Filter;
 
-/// One element's `filter` list, split at its first `blur()`.
-///
-/// `before` and `after` are index ranges into the computed list, and are
-/// exactly the two halves [`apply`] is called with. With no `blur()` the list
-/// is entirely `after`, which reproduces the pre-blur behavior: every
-/// adjustment draws at scope close, over the group's own pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilterPlan {
-    /// Adjustments preceding the first `blur()` — drawn inside the bake.
     pub(crate) before: Range<usize>,
-    /// Adjustments following it — drawn over the blurred result.
     pub(crate) after: Range<usize>,
-    /// The folded blur σ in the element's own CSS px: `sqrt(Σ σᵢ²)` over
-    /// every `blur()` in the list. `None` when the list holds none, and
-    /// never zero or non-finite — a σ that would blur nothing is no blur.
     pub(crate) sigma: Option<f32>,
 }
 
-/// Splits a computed `filter` or `backdrop-filter` list at its first
-/// `blur()` and folds every `blur()` σ into one.
 pub(crate) fn plan(filters: &[Filter]) -> FilterPlan {
     let len = filters.len();
     let mut first_blur = None;
@@ -141,7 +128,6 @@ pub(crate) fn plan(filters: &[Filter]) -> FilterPlan {
     }
 }
 
-/// Draws the adjustment passes of `range`, in list order.
 pub(crate) fn apply(
     scene: &mut DisplayList,
     filters: &[Filter],
@@ -156,11 +142,6 @@ pub(crate) fn apply(
     }
 }
 
-/// The blend passes of `range`, in list order.
-///
-/// [`apply`] over a style the caller still holds; this is the form a
-/// `backdrop-filter` entry carries them in, since its two halves are drawn
-/// by a bake and by a replay, neither of which can reach a computed style.
 pub(crate) fn passes(filters: &[Filter], range: Range<usize>) -> Vec<Pass> {
     filters[clamp(range, filters.len())]
         .iter()
@@ -168,7 +149,6 @@ pub(crate) fn passes(filters: &[Filter], range: Range<usize>) -> Vec<Pass> {
         .collect()
 }
 
-/// Draws already-collected passes bounded by `bounds`.
 pub(crate) fn draw_passes_rect(
     scene: &mut DisplayList,
     passes: &[Pass],
@@ -180,8 +160,6 @@ pub(crate) fn draw_passes_rect(
     }
 }
 
-/// Draws already-collected passes bounded by a rounded box — a backdrop's
-/// `after` half, whose bound is the element's own border box.
 pub(crate) fn draw_passes_shape(
     scene: &mut DisplayList,
     passes: &[Pass],
@@ -223,8 +201,6 @@ fn clamp(range: Range<usize>, len: usize) -> Range<usize> {
     range.start.min(len)..range.end.min(len)
 }
 
-/// One filter function's blend pass: a flat achromatic fill composited
-/// `SrcAtop` under `mix` at the layer's `alpha`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Pass {
     mix: Mix,
@@ -393,7 +369,6 @@ mod tests {
     fn a_zero_or_non_finite_blur_is_no_blur_at_all() {
         assert_eq!(plan(&[blur(0.0)]).sigma, None);
         assert_eq!(plan(&[blur(f32::INFINITY)]).sigma, None);
-        // The list still splits at the first blur that carries a σ.
         let plan = plan(&[blur(0.0), blur(2.0)]);
         assert_eq!(plan.sigma, Some(2.0));
         assert_eq!(plan.before, 0..1);

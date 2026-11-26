@@ -94,50 +94,27 @@ use crate::layout::text_block::{ATOM_SPACE, Atom, margin_box, out_of_flow};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
-/// One inline box's used border and padding, physical, for the painter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InlineBoxInsets {
-    /// The box's `Open` item.
     pub(crate) item: u32,
     pub(crate) border: Edges<f32>,
     pub(crate) padding: Edges<f32>,
 }
 
-/// One block container's inline formatting context, plus the table that maps
-/// it back to the DOM.
 pub(crate) struct InlineFlowStore {
     pub(crate) flow: InlineFlow,
-    /// Item index → the node behind it: a run's element (the paint identity
-    /// `InlineFlow::source_of` names), an atom, an inline box for both its
-    /// boundaries.
     pub(crate) source_ids: Vec<NodeId>,
-    /// Each inline box's border and padding, in open order.
     pub(crate) insets: Vec<InlineBoxInsets>,
-    /// What the flow's content was built from: its structure and every run's
-    /// text. Style is compared rather than hashed, against what the flow
-    /// itself was shaped with ([`InlineFlow::shaped_with`]), as the Lynx
-    /// block's store does: a missed rebuild would paint glyphs shaped at an
-    /// old font, or an edge at an old width.
     fingerprint: u64,
-    /// How many times this element's flow has been shaped from scratch.
     pub(crate) rebuilds: u32,
 }
 
 impl InlineFlowStore {
-    /// The flow, if a commit has produced one.
     pub(crate) fn committed(&self) -> Option<&InlineFlow> {
         self.flow.has_committed().then_some(&self.flow)
     }
 }
 
-/// Whether `node` is a non-atomic inline box of the inline formatting context
-/// around it (CSS 2.2 §9.2.2): an element whose display is `inline`, which is
-/// not replaced and no Lynx text element, and whose box parent lays its
-/// content out in line boxes — a block container, or an inline box itself.
-///
-/// The same element under a relative container or inside a Lynx paragraph is
-/// no inline box: it lays its own content out, as a block container or as an
-/// atom of that paragraph.
 pub(crate) fn is_inline_box<T>(node: &Node<T>) -> bool {
     use seldon::style::Display;
     if !node.is_element() || node.is_replaced() || node.is_lynx_text() {
@@ -154,14 +131,11 @@ pub(crate) fn is_inline_box<T>(node: &Node<T>) -> bool {
         })
 }
 
-/// What one child of the content walk is.
 enum Role {
     Hidden,
     Contents,
     InlineBox,
     Atom,
-    /// An absolutely positioned or fixed box: no content, but laid out (or
-    /// recorded for its containing block) from its place in the content.
     OutOfFlow,
 }
 
@@ -186,35 +160,19 @@ fn role_of<T>(node: &Node<T>, view: &StyleView<'_, T>) -> Role {
     }
 }
 
-/// One step of the content walk: a node to visit, or the end of the inline
-/// box a node opened.
 enum Visit {
     Node(NodeSlot),
     Close(NodeSlot),
 }
 
-/// The source text of the inline formatting context `element` establishes
-/// (a block container, or an anonymous block box): its runs in order, with
-/// one U+FFFC per atomic box and nothing for an inline box's boundaries
-/// ([`super::paragraph::source_text_of`]). Built by the same walk
-/// [`refresh`] runs, from the tree as it is now; no percentage basis is
-/// needed, since only an inline box's edges read one.
 pub(crate) fn source_text<T>(tree: &TreeArenas<T>, element: NodeSlot) -> String {
     super::paragraph::source_text_of(&collect_flow(tree, element, None).0)
 }
 
-/// `node`'s flat children, text nodes included.
 fn flat_children<T>(tree: &TreeArenas<T>, node: NodeSlot) -> impl Iterator<Item = NodeSlot> + '_ {
     tree.at(node).flat_children().iter().copied()
 }
 
-/// The block's content, in order: runs, atoms and inline box boundaries;
-/// and every out-of-flow box among it, with the index of the item that
-/// follows it.
-///
-/// Iterative, like the Lynx block's walk, because nesting depth is
-/// author-controlled. `basis` is what an inline box's percentage margin and
-/// padding resolve against.
 fn collect_flow<T>(
     tree: &TreeArenas<T>,
     element: NodeSlot,
@@ -225,8 +183,6 @@ fn collect_flow<T>(
     if collect_generated(tree, element, &mut collected) {
         return (collected, out_of_flow);
     }
-    // The flat children, text included: `LayoutTree::children` answers only
-    // the ones that can generate a box, and the text is this paragraph's.
     let mut stack: Vec<Visit> = flat_children(tree, element).map(Visit::Node).collect();
     stack.reverse();
     while let Some(visit) = stack.pop() {
@@ -253,7 +209,6 @@ fn collect_flow<T>(
                     white_space: run_white_space(node),
                     text_security: run_text_security(node),
                 },
-                // The element the run's style came from: its flat parent.
                 source: node
                     .flat_parent()
                     .map_or(slot, |parent| tree.slot(parent.id()).unwrap_or(slot)),
@@ -278,8 +233,6 @@ fn collect_flow<T>(
                     item: open_of(&view, basis),
                     source: slot,
                 });
-                // A string `content` list is the box's content, as `br`'s
-                // `"\A"` is; otherwise its children are.
                 if collect_generated(tree, slot, &mut collected) {
                     collected.push(Collected {
                         item: OwnedItem::Close,
@@ -307,10 +260,6 @@ fn collect_flow<T>(
     (collected, out_of_flow)
 }
 
-/// An inline box's start: its font, line breaking, direction, and its used
-/// edges with percentages resolved against `basis` (CSS 2.2 §8.3, §8.4: the
-/// containing block's width). `auto` margins are zero on an inline box
-/// (§10.3.1).
 fn open_of<T>(view: &StyleView<'_, T>, basis: Option<f32>) -> OwnedItem<'static> {
     let (margin, border, padding) = used_insets(view, basis);
     let direction: Direction = view.direction().into();
@@ -339,7 +288,6 @@ fn open_of<T>(view: &StyleView<'_, T>, basis: Option<f32>) -> OwnedItem<'static>
     }
 }
 
-/// An inline box's used margin, border and padding.
 fn used_insets<T>(
     view: &StyleView<'_, T>,
     basis: Option<f32>,
@@ -351,15 +299,6 @@ fn used_insets<T>(
     )
 }
 
-/// An atom's `vertical-align`, from the two longhands the fork parses it
-/// into (css-inline-3 §4: `alignment-baseline` and `baseline-shift`).
-///
-/// The vocabulary is CSS 2.2's, one value per box, so a shift keyword wins
-/// over a non-`baseline` alignment: `text-top` and `super` together cannot be
-/// written as `vertical-align` either. A length shift raises the box; a
-/// percentage is one of the atom's own `line-height`, which
-/// [`resolve_percent_alignments`] writes in as a length once the block's
-/// text context is at hand.
 fn vertical_align(style: &ComputedValues) -> VerticalAlign {
     use stylo::values::computed::{AlignmentBaseline, BaselineShift};
     use stylo::values::generics::box_::BaselineShiftKeyword;
@@ -378,8 +317,6 @@ fn vertical_align(style: &ComputedValues) -> VerticalAlign {
             AlignmentBaseline::Baseline => match (shift.to_length(), shift.to_percentage()) {
                 (Some(length), _) => VerticalAlign::Length(length.px()),
                 (None, Some(percent)) => VerticalAlign::Percent(percent.0),
-                // A calc() mixing both: its length part, the percentage
-                // taken at zero.
                 (None, None) => VerticalAlign::Length(
                     shift
                         .resolve(stylo::values::computed::Length::new(0.0))
@@ -390,15 +327,6 @@ fn vertical_align(style: &ComputedValues) -> VerticalAlign {
     }
 }
 
-/// Where an atom's baseline is, from the top of its border box: the one its
-/// `baseline-source` names, `auto` taking the last for a box that lays its
-/// content out in line boxes — what `inline-block` is (CSS 2.2 §10.8.1,
-/// css-inline-3 `baseline-source`) — and the first for every other.
-///
-/// Such a box that is a scroll container has its bottom margin edge as its
-/// baseline instead (§10.8.1, as css-align-3 §9.1 narrows "`overflow` other
-/// than `visible`"): `None` here, which puts that edge on the line's
-/// baseline.
 fn atom_baseline<T>(node: &Node<T>, output: &seldon::tree::LayoutOutput) -> Option<f32> {
     use stylo::values::computed::BaselineSource;
     let view = StyleView::of(node);
@@ -415,29 +343,15 @@ fn atom_baseline<T>(node: &Node<T>, output: &seldon::tree::LayoutOutput) -> Opti
     }
 }
 
-/// A run's line-breaking values, from the computed style it carries.
 fn breaking_of(style: &ComputedValues) -> BreakStyle {
     let text = style.get_inherited_text();
     BreakStyle {
         word_break: (*text.get_word_break()).into(),
         text_wrap: (*text.get_text_wrap_mode()).into(),
-        // `overflow-wrap` is not compiled into the `lynx` engine at all
-        // (`vendor/stylo/style/tests/lynx_disabled_properties.rs`), so every
-        // element computes its initial value: a word wider than its line
-        // overflows it.
         overflow_wrap: OverflowWrap::Normal,
     }
 }
 
-/// The block's own parameters, from its computed style and, for an editing
-/// host or a text control's editor, [`crate::editing::has_line_if_empty`]:
-/// such a block's paragraph keeps one empty line of its strut when it has no
-/// content, so the block is one line tall and a caret has a line to sit on,
-/// as an HTML text control is never shorter than one line.
-///
-/// An anonymous block box is never a host: a host that establishes no
-/// paragraph of its own (a flex `view`) lays its loose text out in one, and
-/// is left to `crate::editing`'s caret for a host with no paragraph.
 fn flow_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> InlineFlowStyle {
     let node = tree.at(element);
     let view = StyleView::of(node);
@@ -447,17 +361,11 @@ fn flow_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> InlineFlowStyle {
     }
 }
 
-/// What [`refresh`] found in the block's content.
 struct Refreshed {
-    /// Each atom, as `(node, item)`.
     atoms: Vec<(NodeSlot, u32)>,
-    /// Each out-of-flow box, as `(node, the item after it)`.
     out_of_flow: Vec<(NodeSlot, u32)>,
 }
 
-/// Rebuilds `element`'s flow when its content or the values it is shaped
-/// with moved, otherwise hands it the block's current parameters, and
-/// reports its atoms and its out-of-flow boxes.
 fn refresh<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -485,10 +393,6 @@ fn refresh<T>(
         })
         .collect();
 
-    // The strut is parley's style 0 and the direction its bidi paragraph
-    // level, and whether empty content keeps one line of the strut decides
-    // whether it is shaped at all: all are read when the flow is shaped, so
-    // a change to any is a new flow, like an item change.
     let needs_build = state
         .text_store(element)
         .and_then(TextStore::as_flow)
@@ -526,15 +430,11 @@ fn refresh<T>(
     } else if let Some((_, store)) = context_and_store(state, element)
         && let Some(store) = store.as_flow_mut()
     {
-        // Same content, possibly a different alignment or indent keyword.
         store.flow.set_style(style);
     }
     Refreshed { atoms, out_of_flow }
 }
 
-/// Writes each atom's `vertical-align` percentage in as the length it is:
-/// that fraction of the atom's own used `line-height` (CSS 2.2 §10.8.1),
-/// which for `normal` takes the atom's font, and so the block's text context.
 fn resolve_percent_alignments<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -558,8 +458,6 @@ fn resolve_percent_alignments<T>(
     }
 }
 
-/// Borrows the collected items as the flow's input vocabulary, each run with
-/// the line breaking of the element its style came from.
 fn items_of<'a, T>(
     tree: &TreeArenas<T>,
     collected: &'a [Collected<'_>],
@@ -601,13 +499,6 @@ fn items_of<'a, T>(
         .collect()
 }
 
-/// What an inline box's percentage margins and padding resolve against: the
-/// block's content-box width, as far as this call knows it — its own width
-/// when the input fixes one, else the width its parent offers — less its own
-/// horizontal border and padding.
-///
-/// The edges are shaping inputs (`seldon::text::inline`'s edge clusters), so a box
-/// with a percentage edge re-shapes the paragraph when this moves.
 fn percentage_basis<T>(view: &StyleView<'_, T>, input: &seldon::tree::LayoutInput) -> Option<f32> {
     let width = input.known_dimensions.width.or(input.parent_size.width)?;
     let border = seldon::compute::used_border(view);
@@ -615,9 +506,6 @@ fn percentage_basis<T>(view: &StyleView<'_, T>, input: &seldon::tree::LayoutInpu
     Some((width - border.horizontal_sum() - padding.horizontal_sum()).max(0.0))
 }
 
-/// The width a line is laid out at in one measurement — what an atom on it
-/// shrinks to fit: the content width when the input fixes it, else the width
-/// available to the content, zero at min-content; `None` at max-content.
 fn line_width(measure_input: &LeafMeasureInput) -> Option<f32> {
     measure_input
         .known_dimensions
@@ -629,9 +517,6 @@ fn line_width(measure_input: &LeafMeasureInput) -> Option<f32> {
         })
 }
 
-/// An atom's containing block in one measurement (CSS 2.2 §10.1: the block
-/// container's content box), as far as it is definite: what the atom's
-/// percentages resolve against.
 fn containing_block(measure_input: &LeafMeasureInput) -> Size<Option<f32>> {
     Size::new(
         measure_input
@@ -645,15 +530,9 @@ fn containing_block(measure_input: &LeafMeasureInput) -> Size<Option<f32>> {
     )
 }
 
-/// How an atom's own `width` sizes it on a line.
 enum AtomWidth {
-    /// `auto` (or `fit-content`) on a non-replaced box: shrink-to-fit, CSS
-    /// 2.2 §10.3.9.
     ShrinkToFit,
-    /// `stretch`: the line's whole width, less the margins.
     Fill,
-    /// Anything else, a replaced element's `auto` included (§10.3.2): the
-    /// box sizes itself, the line's width playing no part.
     Own,
 }
 
@@ -669,12 +548,6 @@ fn atom_width<T>(node: &Node<T>, view: &StyleView<'_, T>) -> AtomWidth {
     }
 }
 
-/// The shrink-to-fit width of `atom` (CSS 2.2 §10.3.9) for `available`, the
-/// line's width less the atom's margins: `min(max(min-content, available),
-/// max-content)`, both intrinsic widths measured — and kept in the atom's own
-/// measurement cache — as border boxes with its `min-width` and `max-width`
-/// applied, so the result already lies between them. The min-content width
-/// is measured only when the max-content one does not fit.
 fn shrink_to_fit<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -705,15 +578,6 @@ fn shrink_to_fit<T>(
         .min(preferred)
 }
 
-/// Lays every atom out for a line `line` wide and writes its margin box into
-/// the flow: an auto width shrinks to fit the line (CSS 2.2 §10.3.9), any
-/// other width is the atom's own. A commit commits each atom's subtree at
-/// the size it is given; a probe measures it.
-///
-/// What the line's width is per measurement — the content width, the width
-/// available, zero at min-content, unbounded at max-content — makes an
-/// atom's contribution the CSS intrinsic one at the two extremes, so the
-/// flow's min-content and max-content widths are CSS's too.
 fn size_atoms<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -733,8 +597,6 @@ fn size_atoms<T>(
                 Some(shrink_to_fit(tree, state, atom, containing, available))
             }
             (AtomWidth::Fill, Some(available)) => Some(available),
-            // At max-content an auto width is the box's max-content width,
-            // which it takes laid out against an unbounded line by itself.
             _ => None,
         };
         let known = Size::new(width, None);
@@ -760,8 +622,6 @@ fn size_atoms<T>(
         if let Some((_, store)) = context_and_store(state, element)
             && let Some(store) = store.as_flow_mut()
         {
-            // A baseline is measured from the border box's top edge, so it
-            // moves down with the margin box's.
             let baseline = atom_baseline(tree.at(atom), &output)
                 .map(|baseline| (baseline + margin.top).max(0.0));
             store
@@ -777,15 +637,6 @@ fn size_atoms<T>(
     placed
 }
 
-/// Lays `element` out as a block container whose content is one inline
-/// formatting context.
-///
-/// Refresh the flow, then probe or commit it inside seldon's leaf box
-/// wrapper, sizing its atoms there first — inside, because an atom's size
-/// depends on the width the wrapper lays the line out at — and on a commit
-/// place the atoms and hide everything else the paragraph consumed. A Lynx
-/// paragraph (`crate::layout::text_block`) measures its atoms once, at
-/// max-content, outside the wrapper instead.
 pub(crate) fn compute_inline_flow_layout<T>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -837,19 +688,6 @@ pub(crate) fn compute_inline_flow_layout<T>(
     output
 }
 
-/// The out-of-flow boxes of the committed flow's content, each at its static
-/// position: where the content after it begins on its line (CSS 2.2
-/// §10.3.7, §10.6.4, `InlineFlow::static_position`), moved from the
-/// paragraph's space to the block's border box.
-///
-/// An absolutely positioned box whose box parent is an inline box of the
-/// paragraph has that box for its containing block (§10.1.4): the bounding
-/// box of the padding boxes of its first and last fragments. Every other one
-/// is the block's, or is hoisted past it.
-///
-/// A block-level box among inline content is an atom here rather than a box
-/// that splits the line (`docs/tracking/deviations.md`), and its static
-/// position is taken the same way, at its place on the line.
 fn out_of_flow_boxes<T>(
     tree: &TreeArenas<T>,
     element: NodeSlot,
@@ -892,10 +730,6 @@ fn out_of_flow_boxes<T>(
         .collect()
 }
 
-/// The containing block an inline box establishes for an absolutely
-/// positioned descendant (CSS 2.2 §10.1.4): the bounding box around the
-/// padding boxes of its first and its last fragment, in the paragraph's
-/// space. `None` for a box with no fragment.
 fn inline_box_padding_box(store: &InlineFlowStore, id: NodeId, rtl: bool) -> Option<Rect<f32>> {
     let insets = store
         .insets
@@ -909,8 +743,6 @@ fn inline_box_padding_box(store: &InlineFlowStore, id: NodeId, rtl: bool) -> Opt
     };
     let first = of_box().find(|fragment| fragment.first)?;
     let last = of_box().rev().find(|fragment| fragment.last)?;
-    // A fragment carries the box's border only on the sides it has: its
-    // inline-start border on the first, its inline-end border on the last.
     let padding_box = |fragment: &seldon::text::inline::InlineFragment| {
         let border = insets.border;
         let (start, end) = (fragment.first, fragment.last);
@@ -950,17 +782,6 @@ mod tests {
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
     impl<T: Sync> Document<T> {
-        /// Gives `id` the style of an anonymous block box under its flat
-        /// parent: every inherited property from the parent, every other one
-        /// initial (CSS 2.2 §9.2.1.1), and the internal block container
-        /// display.
-        ///
-        /// The producer's own style ([`Document::anonymous_block_style`]) on
-        /// an ordinary element, so these tests reach the inline formatting
-        /// context without the loose-text grouping in front of it
-        /// (`tree::anonymous`). It writes through `replace_pseudo_style`, the
-        /// writer for engine-built styles, so it survives every flush that
-        /// does not restyle `id` — none of these tests restyles it.
         pub(crate) fn make_anonymous_block(&mut self, id: NodeId) {
             let style = {
                 let parent = self
@@ -974,15 +795,11 @@ mod tests {
                 .get_mut(id)
                 .expect("a live element")
                 .replace_pseudo_style(style);
-            // The record the style harvest leaves for a changed `display`,
-            // which this write bypasses: loose text the element boxed as a
-            // flex container is its paragraph's content now.
             self.note_loose_text_change(id);
             self.invalidate_layout(id);
         }
     }
 
-    /// A page of `css` with one anonymous block holding `text`, laid out.
     fn page(css: &str, text: &str) -> (Document<()>, NodeId, NodeId) {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
         doc.register_fonts(FontBlob::from_static(AHEM));
@@ -1011,14 +828,11 @@ mod tests {
         let (doc, block, _) = page(COLUMN, "aaaa bbbb");
         let flow = doc.inline_flow(block).expect("a committed flow");
         assert_eq!(flow.line_geometry().len(), 2);
-        // Not stretched, so its width is the fit-content size: the 60px
-        // offered, not the 40px widest line a Lynx `<text>` would take.
         assert_eq!(size(&doc, block), Size::new(60.0, 20.0));
     }
 
     #[test]
     fn the_strut_is_the_blocks_inherited_font() {
-        // The empty text node `page` adds is no run.
         let (mut doc, block, _) = page(
             "page { display: flex; align-items: flex-start; width: 200px; height: 200px;
                     font-family: Ahem; font-size: 20px; }
@@ -1030,7 +844,6 @@ mod tests {
         let run = doc.create_text_node("aa", ());
         doc.append_child(small, run);
         doc.layout();
-        // 10px glyphs on a 20px line box, on the block's 20px baseline.
         let flow = doc.inline_flow(block).expect("a committed flow");
         let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
@@ -1098,10 +911,6 @@ mod tests {
         let view = doc.create_element("view", ());
         doc.append_child(block, view);
         doc.layout();
-        // "aa bbcc": the span's text joins the run, the label's generated
-        // text replaces its child. The view is an atomic inline box, laid
-        // out by its own display: it does not fit after "bbcc" on the 60px
-        // line, so it starts the third line.
         let flow = doc.inline_flow(block).expect("a flow");
         assert_eq!(flow.size().width, 60.0);
         assert_eq!(flow.line_geometry().len(), 3);
@@ -1110,9 +919,6 @@ mod tests {
         assert_eq!((layout.location.x, layout.location.y), (0.0, 20.0));
     }
 
-    /// A page whose UA sheet writes flow layout, as an engine sheet does: `p`
-    /// a block container, `span` and `a` inline boxes, `view` an atom. The
-    /// Ahem page is `width` wide; `css` adds author rules.
     fn flow_page(width: f32, css: &str) -> (Document<()>, NodeId) {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
         doc.register_fonts(FontBlob::from_static(AHEM));
@@ -1144,7 +950,6 @@ mod tests {
         node
     }
 
-    /// `(left, top, width, height)` of every fragment of `item`'s box.
     fn fragment_rects(doc: &Document<()>, p: NodeId, item: u32) -> Vec<(f32, f32, f32, f32)> {
         doc.inline_flow(p)
             .expect("a committed flow")
@@ -1164,9 +969,6 @@ mod tests {
 
     #[test]
     fn a_block_container_lays_out_inline_boxes_and_atoms() {
-        // aa <span>bb</span> cc <view>: the span's start edge is a 2px
-        // border and 5px of padding, its end edge 5px of padding; the view
-        // is an atom on the baseline.
         let (mut doc, p) = flow_page(
             300.0,
             "span { padding: 3px 5px; border-left: 2px solid red; }",
@@ -1182,18 +984,12 @@ mod tests {
         let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
         };
-        // The 20px atom sits on the baseline: 20px above it, the strut's 2px
-        // below. The span's vertical padding moves nothing.
         assert_eq!((line.height, line.baseline), (22.0, 20.0));
-        // aa␣ 0–30, start edge 30–37, bb 37–57, end edge 57–62, ␣cc 62–92;
-        // the content area 8px above the baseline and 2px below, grown by
-        // the 3px of vertical padding.
         assert_eq!(fragment_rects(&doc, p, 1), [(30.0, 9.0, 32.0, 16.0)]);
         assert_eq!(size(&doc, p), Size::new(112.0, 22.0));
         let placed = doc.rounded_layout(view).expect("placed");
         assert_eq!((placed.location.x, placed.location.y), (92.0, 0.0));
         assert_eq!(size(&doc, view), Size::new(20.0, 20.0));
-        // An inline box generates no layout box of its own.
         assert_eq!(size(&doc, span), Size::new(0.0, 0.0));
     }
 
@@ -1205,8 +1001,6 @@ mod tests {
         text(&mut doc, span, "bb cc");
         text(&mut doc, p, " dd");
         doc.layout();
-        // "aa ", the start edge and "bb " fill the 70px line; "cc", the end
-        // edge and " dd" the next.
         assert_eq!(
             fragment_rects(&doc, p, 1),
             [(30.0, 0.0, 30.0, 10.0), (0.0, 10.0, 30.0, 10.0)]
@@ -1214,7 +1008,6 @@ mod tests {
         let flow = doc.inline_flow(p).expect("a flow");
         let fragments: Vec<_> = flow.fragments().iter().map(|f| (f.first, f.last)).collect();
         assert_eq!(fragments, [(true, false), (false, true)]);
-        // CSSOM-View: the union of the fragments' border boxes.
         doc.render();
         let rect = doc.bounding_client_rect(span).expect("a rect");
         assert_eq!(
@@ -1238,12 +1031,8 @@ mod tests {
         text(&mut doc, p, " cc");
         doc.layout();
         doc.render();
-        // The span's start padding: 30–40, the link holding it.
         let hits = doc.elements_from_point(Point2D::new(35.0, 5.0));
         assert_eq!(hits[..3], [span, link, p]);
-        // Its top padding reaches 4px above the content area, past the top
-        // of the line box and of the paragraph's own box: it is still the
-        // span's (CSS 2.2 §10.6.1 lets it overflow the line).
         assert_eq!(
             doc.elements_from_point(Point2D::new(45.0, -2.0)).first(),
             Some(&span)
@@ -1253,7 +1042,6 @@ mod tests {
             None,
             "past the padding nothing of the page is there"
         );
-        // Plain text past the span is the paragraph.
         assert_eq!(
             doc.elements_from_point(Point2D::new(85.0, 5.0)).first(),
             Some(&p)
@@ -1279,8 +1067,6 @@ mod tests {
         assert_eq!(doc.inline_source_range(span), Some(2..4));
         assert_eq!(doc.inline_source_range(view), Some(6..7));
         assert_eq!(doc.inline_source_range(p), None, "the paragraph itself");
-        // aa 0–20, start edge 20–25, bb 25–45, end edge 45–50, cc 50–70,
-        // the atom 70–90; the line is the atom's 22px.
         let boxes = doc.text_range_boxes(p, 2, 4).expect("in range");
         assert_eq!(
             boxes,
@@ -1302,7 +1088,6 @@ mod tests {
             doc.text_index_at_point(p, Point2D::new(75.0, 15.0)),
             Some(6)
         );
-        // An inline box is no paragraph of its own.
         assert_eq!(doc.text_range_boxes(span, 0, 1), None);
     }
 
@@ -1313,12 +1098,10 @@ mod tests {
         let span = element(&mut doc, p, "span");
         text(&mut doc, span, "bb");
         doc.layout();
-        // 5% of the 200px content box.
         assert_eq!(fragment_rects(&doc, p, 1), [(20.0, 0.0, 30.0, 10.0)]);
         doc.set_inline_style(p, "width: 100px;");
         doc.layout();
         assert_eq!(fragment_rects(&doc, p, 1), [(20.0, 0.0, 25.0, 10.0)]);
-        // A padding change is a new edge: the flow is shaped again.
         let before = doc.text_block_rebuilds(p).expect("a flow");
         doc.set_inline_style(span, "padding-left: 1px;");
         doc.layout();
@@ -1337,8 +1120,6 @@ mod tests {
         doc.set_text_node_data(inner, "bbbb");
         doc.layout();
         assert_eq!(size(&doc, p).width, 70.0);
-        // An inline box is never the paragraph's establishing element, even
-        // where `display: inline` would be a block container elsewhere.
         assert!(super::is_inline_box(doc.get(span).expect("live")));
         assert!(!super::is_inline_box(doc.get(p).expect("live")));
     }
@@ -1352,14 +1133,12 @@ mod tests {
         let run = text(&mut doc, label, "bb");
         text(&mut doc, p, "cc");
         doc.layout();
-        // An atom of the block's line, laid out as the Lynx paragraph it is.
         let placed = doc.rounded_layout(label).expect("placed");
         assert_eq!(
             (placed.location.x, placed.location.y, placed.size.width),
             (20.0, 0.0, 20.0)
         );
         assert_eq!(size(&doc, p), Size::new(60.0, 10.0));
-        // Its run belongs to its own paragraph, not to the block's.
         assert_eq!(doc.paragraph_of(run), Some(label));
         assert_eq!(doc.paragraph_of(label), Some(label));
         assert_eq!(
@@ -1372,8 +1151,6 @@ mod tests {
             Some(&label)
         );
 
-        // A text change re-lays the `<text>` out, and the block's line with
-        // it: the upward invalidation reaches the block through the atom.
         let builds = doc.text_block_rebuilds(label).expect("a paragraph");
         doc.set_text_node_data(run, "bbbb");
         doc.layout();
@@ -1386,8 +1163,6 @@ mod tests {
             Some(&label)
         );
 
-        // Inside an inline box the invalidation walks through the box, which
-        // runs no layout of its own, to the block.
         let (mut doc, p) = flow_page(300.0, "");
         crate::test_common::define_lynx_text(&mut doc, "text");
         let span = element(&mut doc, p, "span");
@@ -1403,10 +1178,6 @@ mod tests {
 
     #[test]
     fn an_inline_element_under_a_relative_container_lays_its_own_content_out() {
-        // A relative container is no item container (the fork's
-        // `Display::is_item_container`), so an `inline` child keeps `inline`.
-        // Its box parent is no block container, so it is no inline box: it
-        // lays its own content out, inline boxes included, as one.
         let (mut doc, _) = flow_page(
             300.0,
             "rel { display: relative; width: 200px; height: 100px; } a { padding: 0 5px; }",
@@ -1428,8 +1199,6 @@ mod tests {
         );
         assert!(!super::is_inline_box(doc.get(span).expect("live")));
         assert!(super::is_inline_box(doc.get(link).expect("live")));
-        // Its own paragraph, with the link's fragment in it: "aa " then the
-        // 5px start padding.
         assert_eq!(doc.paragraph_of(link), Some(span));
         assert_eq!(fragment_rects(&doc, span, 1), [(30.0, 0.0, 30.0, 10.0)]);
         assert_eq!(doc.text_block_size(span), Some(Size::new(60.0, 10.0)));
@@ -1442,8 +1211,6 @@ mod tests {
 
     #[test]
     fn an_inline_box_s_generated_content_is_its_content() {
-        // `br` as the engine writes it: an inline box whose `content` is a
-        // preserved newline. Only an engine sheet writes `inline`.
         let (mut doc, p) = flow_page(
             300.0,
             r"br { content: '\A'; white-space-collapse: preserve-breaks; }",
@@ -1458,7 +1225,6 @@ mod tests {
         assert_eq!(size(&doc, p), Size::new(20.0, 20.0));
     }
 
-    /// `(x, y, width, height)` of `id`'s rounded box, from its parent's.
     fn placed_box(doc: &Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
         let layout = doc.rounded_layout(id).expect("laid out");
         (
@@ -1480,10 +1246,6 @@ mod tests {
 
     #[test]
     fn an_absolute_box_s_static_position_is_its_place_in_the_line() {
-        // CSS 2.2 §10.3.7, §10.6.4. aa<abs> bbb<abs> at 50px: "aa " and
-        // "bbb" on two lines. Before the space the box is on the first line,
-        // where the space hangs; before "bbb", after the wrap, on the second;
-        // at the end, after "bbb".
         let (mut doc, p) = flow_page(300.0, "p { position: relative; width: 50px; }");
         text(&mut doc, p, "aa");
         let before_space = absolute(&mut doc, p, "");
@@ -1496,11 +1258,8 @@ mod tests {
         assert_eq!(placed_box(&doc, before_space), (20.0, 0.0, 5.0, 5.0));
         assert_eq!(placed_box(&doc, after_wrap), (0.0, 10.0, 5.0, 5.0));
         assert_eq!(placed_box(&doc, at_end), (30.0, 10.0, 5.0, 5.0));
-        // The boxes take nothing from the line, and white space collapses
-        // across them: the same lines as without them.
         assert_eq!(size(&doc, p), Size::new(50.0, 20.0));
 
-        // Insets win over the static position, against the padding box.
         let (mut doc, p) = flow_page(300.0, "p { position: relative; padding: 3px; }");
         text(&mut doc, p, "aa");
         let inset = absolute(&mut doc, p, "right: 0; bottom: 0;");
@@ -1510,10 +1269,6 @@ mod tests {
 
     #[test]
     fn an_out_of_flow_box_whose_block_is_further_up_is_placed_from_its_place_in_the_line() {
-        // The block is not positioned, so its absolute child's containing
-        // block is the initial one and a fixed child's the viewport: the
-        // block records their static positions, and they are laid out once,
-        // from there, not hidden.
         let (mut doc, p) = flow_page(300.0, "");
         text(&mut doc, p, "aa");
         let escaping = absolute(&mut doc, p, "");
@@ -1528,10 +1283,6 @@ mod tests {
 
     #[test]
     fn an_absolute_box_in_an_inline_box_takes_the_box_s_padding_box() {
-        // CSS 2.2 §10.1.4: a positioned inline box is the containing block of
-        // its absolutely positioned descendants, the bounding box of its
-        // first and last fragments' padding boxes. The span starts after
-        // "aa" with a 2px border, so its padding box starts at 22.
         let (mut doc, p) = flow_page(
             300.0,
             "span { position: relative; border-left: 2px solid; padding: 0 3px; }",
@@ -1543,16 +1294,9 @@ mod tests {
         let flowing = absolute(&mut doc, span, "");
         doc.layout();
         assert_eq!(fragment_rects(&doc, p, 1), [(20.0, 0.0, 28.0, 10.0)]);
-        // Its location is from the span's, which is the block's border box.
         assert_eq!(placed_box(&doc, pinned), (22.0, 0.0, 5.0, 5.0));
-        // Without insets, its static position: after "bb", before the end
-        // padding.
         assert_eq!(placed_box(&doc, flowing), (45.0, 0.0, 5.0, 5.0));
 
-        // In an inline box that is not positioned, the containing block is
-        // the positioned block: the box is hoisted to it from the inline
-        // box, laid out once by the block's absolute pass, and not hidden
-        // with the inline box's subtree.
         let (mut doc, p) = flow_page(300.0, "p { position: relative; }");
         text(&mut doc, p, "aa");
         let span = element(&mut doc, p, "span");
@@ -1566,8 +1310,6 @@ mod tests {
 
     #[test]
     fn a_box_hoisted_out_of_an_atom_is_laid_out_by_the_block() {
-        // The atom's absolute child escapes it to the positioned block, whose
-        // absolute pass lays it out against its padding box.
         let (mut doc, p) = flow_page(300.0, "p { position: relative; }");
         text(&mut doc, p, "aa");
         let atom = element(&mut doc, p, "view");
@@ -1576,8 +1318,6 @@ mod tests {
         assert_eq!(placed_box(&doc, atom).0, 20.0);
         assert_eq!(placed_box(&doc, escaping), (-19.0, 2.0, 5.0, 5.0));
 
-        // Past the block, when the containing block is further up: the block
-        // is a box like any other on the way.
         let (mut doc, p) = flow_page(300.0, "page { position: relative; padding: 4px; }");
         text(&mut doc, p, "aa");
         let atom = element(&mut doc, p, "view");
@@ -1589,9 +1329,6 @@ mod tests {
 
     #[test]
     fn a_right_to_left_block_puts_the_static_position_on_the_right_edge() {
-        // CSS 2.2 §10.3.7: in a right-to-left containing block `right` is set
-        // to the static position. "aabb" fills 60..100 of the 100px line, and
-        // the box between "aa" and "bb" ends at 80, where "bb" starts.
         let (mut doc, p) = flow_page(
             300.0,
             "p { position: relative; direction: rtl; width: 100px; }",
@@ -1610,7 +1347,6 @@ mod tests {
         let view = element(&mut doc, p, "view");
         doc.layout();
         let flow = doc.inline_flow(p).expect("a flow");
-        // Raised 5px: the line's baseline drops from 20 to 25.
         let [line] = flow.line_geometry()[..] else {
             panic!("one line expected")
         };
@@ -1621,11 +1357,6 @@ mod tests {
 
     #[test]
     fn a_measured_line_reads_a_linear_atom_s_first_baseline() {
-        // The `linear` atom's baseline is its first item's, the 8px of the
-        // fixed-size block's one Ahem line, not one synthesized from its
-        // 20px bottom edge: it reaches 8px above the line's baseline and
-        // 12px below. The page measures `p` before committing it, so its
-        // size is the measured line's.
         let (mut doc, p) = flow_page(
             300.0,
             "view { display: linear; } b { display: block; width: 20px; height: 20px; }",
@@ -1646,10 +1377,6 @@ mod tests {
 
     #[test]
     fn an_atom_s_vertical_align_percentage_is_of_its_own_line_height() {
-        // CSS 2.2 §10.8.1: 50% of the atom's own 10px line-height raises it
-        // 5px, not 20px, half the block's 40px. The strut reaches 17px below
-        // the baseline (8px ascent, 2px descent, 15px half-leading each
-        // side), the raised 20px atom 25px above it.
         let (mut doc, p) = flow_page(
             300.0,
             "p { line-height: 40px; } view { vertical-align: 50%; line-height: 10px; }",
@@ -1662,8 +1389,6 @@ mod tests {
         };
         assert_eq!((line.height, line.baseline), (42.0, 25.0));
 
-        // `normal` is the atom's own font's: Ahem at 20px is 20px, so the
-        // atom rises 10px.
         let (mut doc, p) = flow_page(
             300.0,
             "p { line-height: 40px; }
@@ -1680,8 +1405,6 @@ mod tests {
 
     #[test]
     fn an_atom_inside_an_inline_box_is_placed_and_its_carrier_clips_nothing() {
-        // The Lynx UA sheet clips every element; an inline box has no box to
-        // clip to, so the atom inside it must still paint and hit.
         let (mut doc, p) = flow_page(300.0, "span { overflow: clip; padding: 0 5px; }");
         text(&mut doc, p, "aa");
         let span = element(&mut doc, p, "span");
@@ -1709,8 +1432,6 @@ mod tests {
         );
     }
 
-    /// A 400px page of 10px Ahem: every glyph, the space included, advances
-    /// 10px, and the block is as wide as its widest line.
     const WIDE: &str = "page { display: flex; flex-direction: column; align-items: flex-start;
                                width: 400px; height: 200px;
                                font-family: Ahem; font-size: 10px; }";
@@ -1721,8 +1442,6 @@ mod tests {
 
     #[test]
     fn a_run_takes_its_white_space_from_computed_style() {
-        // `white-space-collapse` inherits into the anonymous block, so its
-        // run reads the page's value.
         for (css, width) in [
             ("", 10.0),
             ("page { white-space-collapse: preserve; }", 50.0),
@@ -1735,8 +1454,6 @@ mod tests {
 
     #[test]
     fn a_preserved_tab_lands_on_column_eight_and_each_break_restarts_the_columns() {
-        // `abc` ends at 30 and the tab runs to the stop at 80; after the
-        // break the tab starts at the edge and runs to 80 again.
         let (doc, block, _) = page(
             &format!("{WIDE} page {{ white-space: pre; }}"),
             "abc\tx\n\ty",
@@ -1768,11 +1485,8 @@ mod tests {
         let inner = doc.create_text_node("  b", ());
         doc.append_child(span, inner);
         doc.layout();
-        // `a`, the collapsed pair as one space, then the two preserved
-        // spaces: the collapsible space is kept by the preserved one after it.
         assert_eq!(flow_size(&doc, block).width, 50.0);
 
-        // Turning the mode off rebuilds the flow: `a b`.
         doc.remove_class(span, "pre");
         doc.layout();
         assert_eq!(flow_size(&doc, block).width, 30.0);
@@ -1780,8 +1494,6 @@ mod tests {
 
     #[test]
     fn a_run_takes_its_text_security_from_computed_style() {
-        // Inherited into the anonymous block: every character, the spaces
-        // and the newline included, is one mask, and nothing collapses.
         let (doc, block, _) = page(
             &format!("{WIDE} page {{ -webkit-text-security: disc; }}"),
             "a  b\n",
@@ -1807,15 +1519,12 @@ mod tests {
         let inner = doc.create_text_node("  b", ());
         doc.append_child(span, inner);
         doc.layout();
-        // `a`, the collapsible pair as one space the first mask keeps, then
-        // three masks.
         let flow = doc.inline_flow(block).expect("a flow");
         assert_eq!(
             flow.offset_map().display_text(),
             format!("a {}", "\u{25E6}".repeat(3))
         );
 
-        // Turning the mask off rebuilds the flow: `a b`.
         doc.remove_class(span, "masked");
         doc.layout();
         let flow = doc.inline_flow(block).expect("a flow");
@@ -1825,15 +1534,11 @@ mod tests {
 
     #[test]
     fn break_spaces_keeps_its_spaces_and_the_unparsed_keywords_collapse() {
-        // `break-spaces` keeps every space, as `preserve` does: `x` follows
-        // four of them.
         let (doc, block, _) = page(
             &format!("{WIDE} page {{ white-space-collapse: break-spaces; }}"),
             "    x",
         );
         assert_eq!(flow_size(&doc, block).width, 50.0);
-        // `preserve-spaces` and `discard` do not parse in the fork, leaving
-        // the initial `collapse`.
         for keyword in ["preserve-spaces", "discard"] {
             let (doc, block, _) = page(
                 &format!("{WIDE} page {{ white-space-collapse: {keyword}; }}"),
@@ -1843,8 +1548,6 @@ mod tests {
         }
     }
 
-    /// `card` is an atom with an auto width: a flex container, its text an
-    /// anonymous item that wraps at the width the card is given.
     const CARD: &str = "card { display: flex; }";
 
     fn card(doc: &mut Document<()>, parent: NodeId, class: &str, content: &str) -> NodeId {
@@ -1858,10 +1561,6 @@ mod tests {
 
     #[test]
     fn a_wide_auto_width_atom_shrinks_to_the_line_and_wraps_its_own_content() {
-        // CSS 2.2 §10.3.9: min(max(min-content, available), max-content),
-        // the available width the block's 100px content box. The card's
-        // max-content width is 190px, so it takes the 100px and wraps its
-        // text over two lines inside, on a line of its own after "x".
         let (mut doc, p) = flow_page(300.0, "p { width: 100px; }");
         doc.add_stylesheet(CARD, StylesheetOrigin::UserAgent);
         text(&mut doc, p, "x ");
@@ -1877,8 +1576,6 @@ mod tests {
     fn a_probe_at_another_width_hands_the_atoms_back_their_committed_sizes() {
         use seldon::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis};
 
-        // The card shrinks to the 100px line the page offers and wraps over
-        // two lines.
         let (mut doc, p) = flow_page(100.0, "");
         doc.add_stylesheet(CARD, StylesheetOrigin::UserAgent);
         text(&mut doc, p, "x ");
@@ -1890,9 +1587,6 @@ mod tests {
         let shaped_lines = flow.display().lines().count();
         assert_eq!(size(&doc, wide), Size::new(100.0, 20.0));
 
-        // A probe at 45px, which a pass can end without committing again:
-        // the card shrinks to 45px there, four lines tall, and the flow is
-        // broken around it.
         let slot = doc.live_slot(p);
         let (tree, state) = doc.layout_parts();
         tree.compute_layout(
@@ -1907,8 +1601,6 @@ mod tests {
         );
         assert!(doc.text_block_is_probe_dirty(p));
 
-        // The end of the pass puts the committed sizes back before the
-        // committed break, so paint reads the commit's lines and places.
         doc.layout_state_mut().restore_probed_text();
         assert!(!doc.text_block_is_probe_dirty(p));
         let flow = doc.inline_flow(p).expect("a flow");
@@ -1925,7 +1617,6 @@ mod tests {
 
     #[test]
     fn a_narrow_auto_width_atom_stays_at_its_max_content_width() {
-        // Not the 100px the line offers: shrink-to-fit, not fill.
         let (mut doc, p) = flow_page(300.0, "p { width: 100px; }");
         doc.add_stylesheet(CARD, StylesheetOrigin::UserAgent);
         text(&mut doc, p, "x");
@@ -1935,7 +1626,6 @@ mod tests {
         assert_eq!(size(&doc, narrow), Size::new(20.0, 10.0));
         let placed = doc.rounded_layout(narrow).expect("placed");
         assert_eq!(placed.location.x, 10.0);
-        // An atom no line holds keeps its min-content width and overflows.
         let (mut doc, p) = flow_page(300.0, "p { width: 30px; }");
         doc.add_stylesheet(CARD, StylesheetOrigin::UserAgent);
         let wide = card(&mut doc, p, "", "aaaa bbbb");
@@ -1957,11 +1647,8 @@ mod tests {
         let capped = card(&mut doc, p, "capped", "aaaa bbbb cccc");
         let floored = card(&mut doc, p, "floored", "ab");
         doc.layout();
-        // 50% of the 200px content box, whatever the content.
         assert_eq!(size(&doc, half).width, 100.0);
-        // Shrink-to-fit inside `max-width`: three lines of one word each.
         assert_eq!(size(&doc, capped), Size::new(60.0, 30.0));
-        // And never below `min-width`.
         assert_eq!(size(&doc, floored).width, 80.0);
     }
 
@@ -1974,8 +1661,6 @@ mod tests {
              view.percent { position: relative; left: 10%; right: 4px; }
              view.raised { position: relative; right: 4px; bottom: 2px; }",
         );
-        // aa 0–20, moved 20–40, bb 40–60, percent 60–80, cc 80–100,
-        // raised 100–120: the line is laid out as if none were relative.
         text(&mut doc, p, "aa");
         let moved = element(&mut doc, p, "view");
         doc.set_classes(moved, "moved");
@@ -1991,7 +1676,6 @@ mod tests {
             (layout.location.x, layout.location.y)
         };
         assert_eq!(at(moved), (25.0, 3.0));
-        // `left` wins over `right`, 10% of the 200px content box.
         assert_eq!(at(percent), (80.0, 0.0));
         assert_eq!(at(raised), (96.0, -2.0));
         assert_eq!(size(&doc, p), Size::new(200.0, 22.0));
@@ -1999,8 +1683,6 @@ mod tests {
         doc.render();
         let rect = doc.bounding_client_rect(moved).expect("a rect");
         assert_eq!((rect.origin.x, rect.origin.y), (25.0, 3.0));
-        // Hit and painted where it moved to: its old left edge is the
-        // paragraph's now, and its new right edge is the atom's.
         assert_eq!(
             doc.elements_from_point(Point2D::new(22.0, 5.0)).first(),
             Some(&p)
@@ -2013,9 +1695,6 @@ mod tests {
 
     #[test]
     fn a_block_s_intrinsic_widths_take_its_atoms_intrinsic_widths() {
-        // The page sizes the block to fit its content: max-content with room
-        // for it, the atom unwrapped beside "x"; min-content without, the
-        // atom at its own min-content width, a word.
         for (page, block, atom) in [
             (300.0, Size::new(100.0, 10.0), Size::new(90.0, 10.0)),
             (30.0, Size::new(40.0, 30.0), Size::new(40.0, 20.0)),

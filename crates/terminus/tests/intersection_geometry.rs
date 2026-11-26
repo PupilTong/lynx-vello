@@ -21,11 +21,8 @@ use terminus::link::{
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-/// `(x, y, width, height)`.
 type Rect4 = (f32, f32, f32, f32);
 
-/// Every box is a flex container, and a `view` a non-shrinking one, unless a
-/// case says otherwise, so the sizes a case writes are the sizes it gets.
 const BASE: &str = "page { display: flex; } view { display: flex; flex-shrink: 0; }";
 
 fn page(css: &str) -> Doc {
@@ -47,7 +44,6 @@ fn tuple(rect: Rect<f32>) -> Rect4 {
     )
 }
 
-/// Against the viewport, with no margin.
 fn geo(doc: &Doc, target: NodeId) -> IntersectionGeometry {
     doc.dom.intersection_geometry(
         target,
@@ -57,7 +53,6 @@ fn geo(doc: &Doc, target: NodeId) -> IntersectionGeometry {
     )
 }
 
-/// Against an element root, with no margin.
 fn geo_in(doc: &Doc, target: NodeId, root: NodeId) -> IntersectionGeometry {
     doc.dom.intersection_geometry(
         target,
@@ -88,8 +83,6 @@ fn assert_close(actual: Rect<f32>, expected: Rect4) {
     );
 }
 
-/// A rendered target that is no descendant of its root: nothing of its own
-/// is reported.
 #[track_caller]
 fn assert_not_a_descendant(geometry: IntersectionGeometry, root_bounds: Rect4) {
     assert!(geometry.rendered);
@@ -100,10 +93,6 @@ fn assert_not_a_descendant(geometry: IntersectionGeometry, root_bounds: Rect4) {
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
 
-// --- Agreement with the untransformed geometry ----------------------------
-
-/// With no transform anywhere, the target rect is `bounding_client_rect`:
-/// the same chain, the same offsets, the same scroll offsets.
 #[test]
 fn an_untransformed_target_is_its_bounding_client_rect() {
     let mut doc = page(
@@ -133,7 +122,6 @@ fn an_untransformed_target_is_its_bounding_client_rect() {
     assert_eq!(child_geometry.intersection_rect, child_geometry.target_rect);
     assert_eq!(child_geometry.intersection_ratio(), 1.0);
 
-    // Scrolled by 50, the tall box shows the scrollport's 100px of its 400.
     let tall_geometry = geo(&doc, tall);
     assert_eq!(client_rect(&doc, tall), (220.0, -40.0, 80.0, 400.0));
     assert_eq!(
@@ -143,11 +131,6 @@ fn an_untransformed_target_is_its_bounding_client_rect() {
     assert_eq!(tall_geometry.intersection_ratio(), 0.25);
 }
 
-// --- Transforms -------------------------------------------------------------
-
-/// The transform ruling: a 100px target moved 500px right in a 300px
-/// viewport is not intersecting, while its `bounding_client_rect` stays the
-/// untransformed box.
 #[test]
 fn a_transform_moves_the_target_but_not_its_bounding_client_rect() {
     let mut doc = sized_page(
@@ -202,7 +185,6 @@ fn a_scaled_ancestor_scales_its_descendants() {
     doc.flush();
     assert_close(geo(&doc, child).target_rect, (20.0, 20.0, 100.0, 100.0));
 
-    // About the centre instead, the child lands mostly off the top left.
     doc.set_inline(parent, "transform-origin: 50% 50%");
     doc.flush();
     let geometry = geo(&doc, child);
@@ -211,9 +193,6 @@ fn a_scaled_ancestor_scales_its_descendants() {
     assert!((geometry.intersection_ratio() - 0.04).abs() < 1e-6);
 }
 
-/// The individual `translate`/`rotate`/`scale` are storage-only in the
-/// fork's grammar, so a list stands in for them here; the walk folds both
-/// through the painter's own matrix either way.
 #[test]
 fn a_transform_list_composes_about_its_origin() {
     assert!(
@@ -251,8 +230,6 @@ fn the_document_elements_transform_moves_everything() {
     );
 }
 
-/// A parent's `perspective` projects its child's 3D transform, about the
-/// parent's centre: `translateZ(d / 2)` doubles the child.
 #[test]
 fn a_perspective_parent_projects_its_childs_depth() {
     let mut doc = page(
@@ -267,8 +244,6 @@ fn a_perspective_parent_projects_its_childs_depth() {
     assert_close(geometry.target_rect, (0.0, 0.0, 200.0, 200.0));
     assert!(geometry.is_intersecting);
 
-    // Past the eye, no corner has a projection: rendered, but nothing to
-    // report and nothing intersecting.
     doc.set_inline(child, "transform: translateZ(150px)");
     doc.flush();
     let geometry = geo(&doc, child);
@@ -278,11 +253,6 @@ fn a_perspective_parent_projects_its_childs_depth() {
     assert_eq!(tuple(geometry.root_bounds), (0.0, 0.0, 800.0, 600.0));
 }
 
-// --- Clips ------------------------------------------------------------------
-
-/// The containing-block escape on the clip chain: a fixed box is not clipped
-/// by a scroller that is not its containing block, and is once a transform
-/// makes it one.
 #[test]
 fn a_fixed_box_escapes_an_untransformed_scrollers_clip_but_not_a_transformed_ones() {
     let mut doc = page(
@@ -306,9 +276,6 @@ fn a_fixed_box_escapes_an_untransformed_scrollers_clip_but_not_a_transformed_one
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
 
-/// An `overflow: hidden` scroller (a programmatic-only scroll container)
-/// clips a 20px cell below a 110px spacer: out, on the edge, half, whole as
-/// it scrolls by 10px steps. No render runs between them.
 #[test]
 fn a_scrollers_clip_cuts_its_content_as_it_scrolls() {
     let mut doc = page(
@@ -344,8 +311,6 @@ fn a_scrollers_clip_cuts_its_content_as_it_scrolls() {
     assert_eq!(geometry.intersection_ratio(), 1.0);
 }
 
-/// `overflow-x: clip` with `overflow-y: visible` clips one axis: an infinite
-/// strip, as the frame's clip node is.
 #[test]
 fn a_one_axis_clip_is_a_strip() {
     let mut doc = page(
@@ -383,10 +348,6 @@ fn paint_containment_clips() {
     assert!(geo(&doc, target).is_intersecting);
 }
 
-// --- Element roots ----------------------------------------------------------
-
-/// A root that clips is its padding box; one that does not is its border
-/// box, and its overflowing content still intersects it where it overlaps.
 #[test]
 fn an_element_root_is_its_padding_box_when_it_clips() {
     let mut doc = page(
@@ -436,14 +397,10 @@ fn a_target_must_descend_from_its_root_on_its_containing_block_chain() {
     doc.flush();
     assert_not_a_descendant(geo_in(&doc, sibling, other), (100.0, 0.0, 100.0, 100.0));
     assert_not_a_descendant(geo_in(&doc, other, other), (100.0, 0.0, 100.0, 100.0));
-    // Inside the scroller in the DOM, but its containing block is the
-    // viewport: the scroller is off its chain.
     assert_not_a_descendant(geo_in(&doc, fixed, scroller), (200.0, 0.0, 100.0, 100.0));
     assert!(geo(&doc, fixed).is_intersecting);
 }
 
-/// The root's own scroll offset moves its content against it; its bounds
-/// stay put.
 #[test]
 fn a_scrolled_element_root_sees_its_content_move() {
     let mut doc = page(
@@ -474,10 +431,6 @@ fn a_scrolled_element_root_sees_its_content_move() {
     assert_eq!(geometry.intersection_ratio(), 0.5);
 }
 
-// --- Root margins -----------------------------------------------------------
-
-/// The `rootMargin` ruling: top and bottom percentages take the root's
-/// height, left and right its width.
 #[test]
 fn margin_percentages_take_the_roots_height_and_width() {
     let doc = page("");
@@ -532,8 +485,6 @@ fn negative_margins_shrink_the_root() {
     );
     assert_eq!(geometry.intersection_ratio(), 0.25);
 
-    // A margin that eats the rect leaves a zero-size root, not a negative
-    // one.
     let eaten = IntersectionMargin {
         top: MarginLength::Percent(-60.0),
         right: MarginLength::Px(0.0),
@@ -577,8 +528,6 @@ fn element_root_margins_resolve_against_the_element() {
     assert!(!geo_in(&doc, target, root).is_intersecting);
 }
 
-/// A zero-area sentinel on the viewport's bottom edge intersects with ratio
-/// 1; a pixel past it, it does not.
 #[test]
 fn a_zero_area_sentinel_on_the_edge_intersects() {
     let mut doc = page(
@@ -602,9 +551,6 @@ fn a_zero_area_sentinel_on_the_edge_intersects() {
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
 
-// --- Target margins ---------------------------------------------------------
-
-/// `px` on each side, in `top, right, bottom, left` order.
 fn px(top: f32, right: f32, bottom: f32, left: f32) -> IntersectionMargin {
     IntersectionMargin {
         top: MarginLength::Px(top),
@@ -614,8 +560,6 @@ fn px(top: f32, right: f32, bottom: f32, left: f32) -> IntersectionMargin {
     }
 }
 
-/// Against the viewport, with no root margin and `target_margin` on the
-/// target.
 fn geo_dilated(
     doc: &Doc,
     target: NodeId,
@@ -625,9 +569,6 @@ fn geo_dilated(
         .intersection_geometry(target, None, &IntersectionMargin::ZERO, target_margin)
 }
 
-/// A target 10px below the viewport is reached by a 20px margin on the side
-/// that faces it, and not by one on the far side. The entry's rects and its
-/// ratio are over the dilated rect: 10px of its 50px height show.
 #[test]
 fn a_target_margin_reaches_a_target_outside_the_viewport() {
     let mut doc = page(
@@ -657,9 +598,6 @@ fn a_target_margin_reaches_a_target_outside_the_viewport() {
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
 
-/// A row scrolled 10px out of the top of an `overflow: scroll` scrollport is
-/// reached by a 20px margin on its bottom: the scroller's clip cuts the
-/// dilated rect, so 10px of it is left.
 #[test]
 fn a_target_margin_reaches_back_into_a_scrollport() {
     let mut doc = page(
@@ -683,8 +621,6 @@ fn a_target_margin_reaches_back_into_a_scrollport() {
     assert_eq!(geometry.intersection_ratio(), 0.2);
 }
 
-/// The same through an `overflow: clip` ancestor, which is no scroll
-/// container: a target 10px below it is reached by a 20px margin on its top.
 #[test]
 fn a_target_margin_reaches_past_an_overflow_clip_ancestors_edge() {
     let mut doc = page(
@@ -703,9 +639,6 @@ fn a_target_margin_reaches_past_an_overflow_clip_ancestors_edge() {
     assert_eq!(geometry.intersection_ratio(), 0.2);
 }
 
-/// What motivates the target margin: a root margin moves the root's edges
-/// only after every clip below the root has cut, so no root margin reaches
-/// the targets the two cases above reach.
 #[test]
 fn a_root_margin_alone_does_not_reach_past_a_clip() {
     let mut doc = page(
@@ -736,11 +669,6 @@ fn a_root_margin_alone_does_not_reach_past_a_clip() {
     }
 }
 
-/// The margin is in the target's own border-box space, so its transform
-/// moves it: a 20px right margin on a target rotated a quarter turn grows
-/// its bounding box downward, and under `scale(2)` it grows by 40px. The
-/// rotation is about the undilated box's centre, `transform-origin` being
-/// the border box's.
 #[test]
 fn a_transformed_target_dilates_in_its_own_space() {
     let mut doc = page(
@@ -764,8 +692,6 @@ fn a_transformed_target_dilates_in_its_own_space() {
     );
 }
 
-/// Percentages resolve against the undilated border box, per axis: top and
-/// bottom by its 50px height, left and right by its 200px width.
 #[test]
 fn target_margin_percentages_take_the_targets_height_and_width() {
     let mut doc =
@@ -784,9 +710,6 @@ fn target_margin_percentages_take_the_targets_height_and_width() {
     assert_eq!(geometry.intersection_ratio(), 1.0);
 }
 
-/// A negative margin that eats the box clamps its size at 0 at the moved
-/// origin, as an eaten root does, and the zero-area rule then answers:
-/// intersecting with ratio 1 inside the viewport, ratio 0 outside it.
 #[test]
 fn an_eaten_target_clamps_to_zero_at_the_moved_origin() {
     let mut doc =
@@ -812,10 +735,6 @@ fn an_eaten_target_clamps_to_zero_at_the_moved_origin() {
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
 
-// --- Live offsets -----------------------------------------------------------
-
-/// `tests/sticky.rs`'s fixture: stuck 10px below the scrollport's top at
-/// offset 80, through a transformed scroller too.
 #[test]
 fn a_sticky_target_is_where_it_sticks() {
     let css = "page { width: 800px; height: 600px; }
@@ -848,9 +767,6 @@ fn a_sticky_target_is_where_it_sticks() {
     }
 }
 
-/// `tests/anchor_positioning.rs`'s default-scroll-shift fixture: the
-/// anchored box follows its scrolled anchor, as `bounding_client_rect`
-/// reports it.
 #[test]
 fn an_anchored_target_includes_the_default_scroll_shift() {
     let mut doc = page(
@@ -884,8 +800,6 @@ fn an_anchored_target_includes_the_default_scroll_shift() {
     assert!(geometry.is_intersecting);
 }
 
-/// `position-visibility` hides a box from paint and hit testing only: its
-/// geometry is still the box's, as `bounding_client_rect`'s is.
 #[test]
 fn a_box_position_visibility_hides_is_still_geometric() {
     let mut doc = page(
@@ -913,7 +827,6 @@ fn a_box_position_visibility_hides_is_still_geometric() {
         Some(&anchored)
     );
 
-    // The anchor scrolled wholly out of the scroller's clip: the box hides.
     doc.dom.scroll_to(scroller, Vector2D::new(0.0, 70.0));
     doc.dom.render();
     assert_eq!(client_rect(&doc, anchored), (120.0, 70.0, 40.0, 20.0));
@@ -930,11 +843,6 @@ fn a_box_position_visibility_hides_is_still_geometric() {
     assert_eq!(geometry.intersection_ratio(), 1.0);
 }
 
-// --- The top layer ----------------------------------------------------------
-
-/// `tests/top_layer.rs`'s membership fixture: the dialog is placed against
-/// the viewport past a transformed, clipping ancestor, which is therefore
-/// not on its chain — it neither moves, clips, nor roots it.
 #[test]
 fn a_top_layer_element_escapes_its_ancestors() {
     let mut doc = page(
@@ -967,8 +875,6 @@ fn a_top_layer_element_escapes_its_ancestors() {
     );
     assert_eq!(tuple(in_dialog.root_bounds), (7.0, 0.0, 50.0, 50.0));
 }
-
-// --- Rendered or not --------------------------------------------------------
 
 #[test]
 fn a_target_with_no_box_is_not_rendered() {
@@ -1009,8 +915,6 @@ fn a_target_with_no_box_is_not_rendered() {
     assert_eq!(geo(&doc, removed_child), IntersectionGeometry::UNRENDERED);
 }
 
-/// css-contain-2 §4.5: skipped contents are never intersecting — they have
-/// no box. The box that skips them still does.
 #[test]
 fn skipped_contents_are_not_rendered() {
     let mut doc = page(
@@ -1028,9 +932,6 @@ fn skipped_contents_are_not_rendered() {
     assert!(geo(&doc, cell).is_intersecting);
 }
 
-/// `tests/content_visibility.rs`'s scroller of `content-visibility: auto`
-/// rows: after a render, a row past the encode window skips its label,
-/// which is then not rendered; the rows in view lay theirs out.
 #[test]
 fn an_off_screen_auto_rows_contents_are_not_rendered() {
     let mut doc = sized_page(

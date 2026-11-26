@@ -55,11 +55,7 @@ use crate::main::quickjs::{ScriptEngine, normalize_module_url};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 
-/// Resolves a specifier against a base URL, the way an `import` in a module at
-/// that base resolves it.
 const RESOLVE_EXPORT: &str = "resolveModuleUrl";
-/// Loads and compiles one URL, resolved against the view's base,
-/// synchronously.
 const LOAD_EXPORT: &str = "loadModuleSync";
 
 pub(crate) fn install(
@@ -80,13 +76,7 @@ pub(crate) fn install(
     )?;
     let token = sources.token().clone();
     engine.register_synchronous_loader(HOST_MODULE_SPECIFIER, LOAD_EXPORT, move |url| {
-        // This receiver lives only for this call, as a stylesheet's does:
-        // caching and in-flight sharing are the fetcher's, and the realm's
-        // own cache is what makes a URL loaded at most once anyway.
         let url = sources.resolve(url)?;
-        // A native module's ES module is never fetched, and has no text to
-        // compile here: it is bytecode alone, which an `import` loads. A
-        // realm that has imported it never asks this loader for it again.
         if url.starts_with(NATIVE_MODULE_ESM_PREFIX) {
             return Err(format!(
                 "'{url}' is a native module's ES module, which loads by `import` and \
@@ -116,12 +106,6 @@ pub(crate) fn install(
     })
 }
 
-/// One argument of a host call, as the string it must be.
-///
-/// Strict, unlike the tree members' own helper: a base and a specifier are
-/// URLs, and nothing a missing or null argument could be read as stands in for
-/// one, where an id those members are handed has a whole tree to be wrong
-/// about.
 fn string_argument<'a>(
     function: &str,
     arguments: &[HostArgument<'a>],
@@ -133,14 +117,6 @@ fn string_argument<'a>(
     }
 }
 
-/// How the *response* URL's path says the source is to be read, which is
-/// Node 24's rule with the one thing it has that a URL does not — the nearest
-/// `package.json` `"type"` — missing: `.json` is JSON, `.mjs` is an ES
-/// module, `.cjs` is `CommonJS`, and everything else is the engine's to detect
-/// from the text.
-///
-/// The path alone, so a query or a fragment is no part of the answer, and a
-/// URL that does not parse has no path to read: it is detected too.
 #[expect(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "a URL path is case-sensitive, as is Node's own extension match"

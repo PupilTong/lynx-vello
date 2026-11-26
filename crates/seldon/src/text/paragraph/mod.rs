@@ -84,20 +84,14 @@ pub use style::{
 use crate::style::TextBrush;
 use crate::text::TextContext;
 
-/// Where one laid-out line sits in its paragraph's block axis: parley's own
-/// line box, which is also where it placed the line's glyphs and boxes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineGeometry {
-    /// The top of the line box, from the paragraph's top.
     pub top: f32,
-    /// The line box's block size.
     pub height: f32,
-    /// The line's alphabetic baseline, from the paragraph's top.
     pub baseline: f32,
 }
 
 impl LineGeometry {
-    /// Parley's placement of `line`.
     pub(in crate::text) fn of(line: &parley::Line<'_, TextBrush>) -> Self {
         let metrics = line.metrics();
         Self {
@@ -108,13 +102,9 @@ impl LineGeometry {
     }
 }
 
-/// The line-breaking values each content item is shaped with.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::text) enum RunBreaking<'a> {
-    /// One value for every item: a paragraph whose values are
-    /// container-wide.
     Uniform(BreakStyle),
-    /// One value per item, indexed like the items the flow was built from.
     PerItem(&'a [BreakStyle]),
 }
 
@@ -127,38 +117,21 @@ impl RunBreaking<'_> {
     }
 }
 
-/// One owned flattened item.
 #[derive(Debug)]
 pub(in crate::text) enum OwnedItem {
     Run {
         style: RunStyle,
-        /// How the run's whitespace hangs at a line end and whether a wrap
-        /// opportunity follows each space, in parley's vocabulary
-        /// (`white_space_hanging`).
         hanging: ParleyWhiteSpace,
     },
     Box(InlineBoxSpec),
-    /// A marker ([`InlineItem::Marker`]).
     Marker,
 }
 
-/// What a consumer laid into a flow after building it that the core reads
-/// at every shaping and break: the segments it spliced into the normalized
-/// text, the advance it laid beside each atomic box, and its line-break
-/// override. `()` is a flow with none of them, the Lynx block's.
 pub(in crate::text) trait Additions: Default {
-    /// The segments [`content::NormalizedBlock::splice`] inserted into the
-    /// normalized text, ascending. The flow's styled ranges cover every byte
-    /// but theirs.
     fn inserted(&self) -> &[InsertedSegment];
 
-    /// The advance laid beside atomic box `slot`, before it and after it in
-    /// visual order. The breaker sees the box that much wider; the box
-    /// itself does not grow.
     fn box_advance(&self, slot: usize) -> (f32, f32);
 
-    /// The line-break override for the pairs the inserted segments take
-    /// part in. `None` shapes with the paragraph's alone.
     fn break_override(&self) -> Option<BreakOverride>;
 }
 
@@ -176,25 +149,16 @@ impl Additions for () {
     }
 }
 
-/// One owned flattened flow: the main content, or the truncation content.
 #[derive(Debug)]
 pub(in crate::text) struct Flow<A = ()> {
     pub(in crate::text) items: Vec<OwnedItem>,
     pub(in crate::text) block: NormalizedBlock,
-    /// The extra letter-spacing each preserved tab's space is shaped with,
-    /// indexed like `block.tabs`. Zero — one plain space — until the tab pass
-    /// settles it (`tab::resolve`).
     pub(in crate::text) tab_spacing: Vec<f32>,
-    /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
-    /// like `block.tabs`. Measured once, for the content flow only.
     pub(in crate::text) tab_min: Vec<f32>,
-    /// What the consumer laid in after building; none until it does.
     pub(in crate::text) additions: A,
 }
 
 impl<A: Additions> Flow<A> {
-    /// Builds the flow of `items`, returning beside it where their markers
-    /// fell.
     pub(in crate::text) fn build(
         items: &[InlineItem<'_>],
         processing: WhiteSpaceProcessing,
@@ -221,7 +185,6 @@ impl<A: Additions> Flow<A> {
         (flow, places)
     }
 
-    /// The run item holding byte `byte` of the normalized text.
     pub(in crate::text) fn item_at(&self, byte: u32) -> u32 {
         let ranges = &self.block.ranges;
         ranges[ranges.partition_point(|range| range.bytes.end <= byte)].item
@@ -241,8 +204,6 @@ impl<A: Additions> Flow<A> {
         }
     }
 
-    /// How run item `item`'s whitespace hangs and breaks, in parley's
-    /// vocabulary.
     pub(in crate::text) fn hanging(&self, item: u32) -> ParleyWhiteSpace {
         match &self.items[item as usize] {
             OwnedItem::Run { hanging, .. } => *hanging,
@@ -250,13 +211,6 @@ impl<A: Additions> Flow<A> {
         }
     }
 
-    /// The shaper spans for this flow, offset into a combined display string.
-    ///
-    /// One span per styled range, except that every preserved tab's space is
-    /// a span of its own carrying its tab spacing — the only way to give one
-    /// cluster an advance of its own in parley — and every inserted segment
-    /// is one in its own style, with its extra spacing and the paint identity
-    /// of its item.
     pub(in crate::text) fn spans<S>(
         &self,
         byte_offset: u32,
@@ -292,7 +246,6 @@ impl<A: Additions> Flow<A> {
         };
         let mut next_tab = 0;
         for range in &self.block.ranges {
-            // Inserted segments sit between styled ranges, never inside one.
             while let Some(segment) = inserted.get(next_inserted)
                 && segment.bytes.start < range.bytes.start
             {
@@ -323,19 +276,6 @@ impl<A: Additions> Flow<A> {
     }
 }
 
-/// How a run's whitespace hangs at a line end, and whether a wrap
-/// opportunity follows each space, under `processing`.
-///
-/// The normalizer has already collapsed or kept every character, so parley
-/// reads this only for hanging and for `break-spaces`' opportunities
-/// (`parley::WhiteSpaceCollapse` on a `StyleRunBuilder`). A CSS paragraph
-/// hands each run its own value: collapsible spaces always hang, preserved
-/// ones hang when the line wraps (conditionally before a forced break, CSS
-/// Text 4 §4.3.2), `break-spaces` ones never hang. A verbatim paragraph
-/// hangs every space at a line end, unconditionally — native Lynx's line
-/// extent leaves trailing whitespace out (Android `Layout.getLineMax`)
-/// whether or not the line wraps and whatever follows — which is parley's
-/// `Collapse` hanging.
 fn white_space_hanging(
     processing: WhiteSpaceProcessing,
     white_space: WhiteSpaceCollapse,
@@ -351,39 +291,20 @@ fn white_space_hanging(
     }
 }
 
-/// One paragraph's content flow, shaped once into its natural layout.
-///
-/// `S` is the consumer's paint identity for a parley style index; the
-/// natural layout records [`Self::source`] of each content item. `A` is
-/// what the consumer laid into the content ([`Additions`]).
 pub(in crate::text) struct Paragraph<S, A = ()> {
     pub(in crate::text) content: Flow<A>,
-    /// The content shaped as one paragraph, broken at the constraint the last
-    /// [`Self::break_lines`] was given.
     pub(in crate::text) natural: Layout<TextBrush>,
-    /// The natural layout's style-index → paint-identity table.
     pub(in crate::text) natural_sources: Vec<S>,
-    /// The paint identity of content item `n`.
     source: fn(u32) -> S,
-    /// Where the content's preserved tabs stop: css-text-3's stops, or native
-    /// Lynx's for a paragraph whose white space is processed verbatim.
     tab_stops: tab::TabStops,
-    /// The root inline box every line starts with.
     pub(in crate::text) root: ParagraphRoot<S>,
-    /// What a `vertical-align` percentage of an atomic box is a fraction
-    /// of: the root inline box's line height (`position::percent_basis`).
     pub(in crate::text) percent_basis: f32,
 }
 
-/// The root inline box of a paragraph, owned: its strut style with the paint
-/// identity parley's style 0 records, and the base direction
-/// ([`shape::LineRoot`]).
 #[derive(Debug, Clone)]
 pub(in crate::text) struct ParagraphRoot<S> {
     pub(in crate::text) strut: Option<(RunStyle, S)>,
     pub(in crate::text) direction: parley::BaseDirection,
-    /// Whether content with no text and no box lays out one empty line of
-    /// the strut rather than none ([`shape::LineRoot::strut_line_when_empty`]).
     pub(in crate::text) strut_line_when_empty: bool,
 }
 
@@ -398,13 +319,6 @@ impl<S: Copy> ParagraphRoot<S> {
 }
 
 impl<S: Copy, A: Additions> Paragraph<S, A> {
-    /// Builds and shapes the content flow of `items`, which lays nothing
-    /// in: its markers' places are dropped.
-    ///
-    /// `breaking` is the line-breaking style each item's spans are shaped
-    /// with, `processing` how its white space is processed, `source` the
-    /// paint identity a content item's spans record, and `root` the root
-    /// inline box every line starts with.
     pub(in crate::text) fn new(
         context: &mut TextContext,
         breaking: RunBreaking<'_>,
@@ -417,11 +331,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         Self::from_flow(context, breaking, processing, flow, source, root)
     }
 
-    /// Shapes `flow`, a flow [`Flow::build`] built with `processing`, once a
-    /// consumer has used the hooks between building and shaping: its
-    /// markers' places, the segments it splices in, its line-break override,
-    /// and the advance it lays beside atomic boxes. The rest is as
-    /// [`Self::new`].
     pub(in crate::text) fn from_flow(
         context: &mut TextContext,
         breaking: RunBreaking<'_>,
@@ -433,15 +342,11 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         let tab_stops = match processing {
             WhiteSpaceProcessing::Verbatim { .. } => tab::TabStops::Native,
             WhiteSpaceProcessing::Css => {
-                // Native stops take no minimum shift, so only css-text-3's
-                // `0.5ch` is measured.
                 flow.tab_min = tab_minimums(context, breaking, &flow, source);
                 tab::TabStops::Css
             }
         };
         let spans = flow.spans(0, source, breaking);
-        // Box sizes are written in before every break; at construction the
-        // percentage basis is not known yet, and nothing reads the boxes.
         let boxes = parley_boxes(&flow, 0, 0, 0.0);
         let mut natural_sources = Vec::new();
         let natural = shape::shape_overriding(
@@ -454,8 +359,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
             flow.additions.break_override(),
         );
         drop(spans);
-        // With no strut the first run stands in for the root, as it does as
-        // parley's style 0.
         let basis_style = root.strut.as_ref().map(|(style, _)| style).or_else(|| {
             flow.items.iter().find_map(|item| match item {
                 OwnedItem::Run { style, .. } => Some(style),
@@ -474,24 +377,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         }
     }
 
-    /// Breaks the natural layout at `constraint`, committing at most
-    /// `max_lines` lines, and reads the committed lines back in the
-    /// content's own offset spaces, trailing blank lines dropped — except
-    /// the one line fully empty content keeps when the root asks for it
-    /// ([`ParagraphRoot::strut_line_when_empty`]), which is reported as an
-    /// empty line at the start of the source.
-    ///
-    /// The atomic boxes' current sizes, baselines and `vertical-align` values
-    /// are written in first, and the constraint's indent goes
-    /// on the lines `keywords` name. Shaping is not re-run, except that a
-    /// paragraph with preserved tabs re-shapes when a break moved a tab to a
-    /// different stop (`tab`), at most `tab::MAX_ROUNDS` times; `breaking` is
-    /// what such a re-shape uses.
-    ///
-    /// The committed lines are aligned by `alignment`: parley 0.13 aligns
-    /// every break as it ends. The tab rounds read the advances a break
-    /// leaves, which `Justify` widens, so a paragraph with preserved tabs
-    /// settles them unjustified and is broken once more to justify them.
     pub(in crate::text) fn break_lines(
         &mut self,
         context: &mut TextContext,
@@ -503,8 +388,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
     ) -> Vec<NaturalLine> {
         let width = constraint.max_advance();
 
-        // Box sizes, baselines and alignments feed the breaker, which sizes
-        // and places the line boxes around them.
         self.write_boxes();
 
         let indent = constraint.indent;
@@ -516,7 +399,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         };
         let mut tab_rounds = 0;
         loop {
-            // A re-shape is a new layout, which parley builds with neither.
             self.natural.set_text_indent(indent, keywords.options());
             self.natural
                 .set_alignment(rounds_alignment, AlignmentOptions::default());
@@ -524,8 +406,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
             if tab_rounds == tab::MAX_ROUNDS {
                 break;
             }
-            // Empty-checked first thing: a paragraph without preserved tabs
-            // leaves here on its first break.
             let Some(spacing) = tab::resolve(
                 &self.natural,
                 &self.content.block.tabs,
@@ -552,11 +432,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
                 1,
                 "parley breaks empty text into one line"
             );
-            // The one line empty content was shaped into: parley 0.13 lays
-            // out one line of the strut for empty text, with no item, which
-            // every `text-align` places where it places a zero-wide line. No
-            // source text, so it is read as an empty line at the start of
-            // the source that consumes none of it.
             return vec![NaturalLine {
                 start_unit: 0,
                 end_unit: 0,
@@ -573,25 +448,12 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         )
     }
 
-    /// Whether the content is fully empty — no text and no atomic box once
-    /// white space is processed — and the root lays out one empty line of
-    /// the strut for it ([`ParagraphRoot::strut_line_when_empty`]).
-    ///
-    /// Parley lays that line out with no item, and counts the indent toward
-    /// the natural layout's width and its content widths. The paragraph's
-    /// own width is zero: [`Self::content_widths`] answers so, and each
-    /// consumer reports a zero-wide line.
     pub(in crate::text) fn is_empty_strut_line(&self) -> bool {
         self.root.line_root().shapes_empty_content()
             && self.content.block.text.is_empty()
             && self.content.block.boxes.is_empty()
     }
 
-    /// Breaks the natural layout once more at the `width` and `max_lines` the
-    /// last [`Self::break_lines`] was given, aligned by `alignment`: the same
-    /// lines, aligned anew, since parley 0.13 aligns only as a break ends.
-    /// Nothing is written in first, so this is sound only straight after
-    /// that break. A no-op when the lines already have that alignment.
     pub(in crate::text) fn realign(
         &mut self,
         alignment: Alignment,
@@ -606,12 +468,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         shape::break_clamped(&mut self.natural, width, max_lines);
     }
 
-    /// Writes the atomic boxes' current sizes, baselines and alignments into
-    /// the natural layout, each widened by the advance laid beside it.
-    ///
-    /// Parley 0.13 edits one box at a time and places its object there — its
-    /// advance and its baseline — which is constant work per box: no break,
-    /// no reshaping.
     fn write_boxes(&mut self) {
         let count = self.natural.inline_boxes().len();
         for slot in 0..count {
@@ -628,11 +484,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         }
     }
 
-    /// The min- and max-content widths of the full content at `indent`, on
-    /// the lines `keywords` name, at the atomic boxes' current sizes and the
-    /// tab stops the last break settled: [`Self::content_widths`] with no
-    /// break. The committed lines are left as they were, while the boxes
-    /// and the indent written in are this call's.
     pub(in crate::text) fn content_widths_at(
         &mut self,
         indent: f32,
@@ -643,7 +494,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         self.content_widths()
     }
 
-    /// The width of every atomic box as the next break writes it in.
     pub(in crate::text) fn box_widths(&self) -> impl Iterator<Item = f32> + '_ {
         self.content
             .block
@@ -656,28 +506,10 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
             })
     }
 
-    /// Frees the line storage an earlier break left in the natural layout
-    /// beyond what its current lines hold.
-    ///
-    /// Parley keeps a layout's line and line item buffers across breaks and
-    /// never shrinks them, so after a break at a narrow width they hold
-    /// about one line per word for as long as the paragraph lives. A copy of
-    /// the layout holds exactly its current contents.
     pub(in crate::text) fn release_line_capacity(&mut self) {
         self.natural = self.natural.clone();
     }
 
-    /// The min- and max-content widths of the full content at the box sizes,
-    /// indent and tab stops the last [`Self::break_lines`] wrote in.
-    ///
-    /// Read on demand rather than with every break: parley measures them
-    /// from the shaped content, the inline boxes and the indent alone, never
-    /// from the committed lines or an alignment, so the widths are the same
-    /// whenever after that break they are asked for, and a justified
-    /// alignment does not change them.
-    ///
-    /// Both are zero for the one empty line fully empty content keeps
-    /// ([`Self::is_empty_strut_line`]): it shows nothing.
     pub(in crate::text) fn content_widths(&self) -> ContentWidths {
         if self.is_empty_strut_line() {
             return ContentWidths { min: 0.0, max: 0.0 };
@@ -685,9 +517,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
         self.natural.calculate_content_widths()
     }
 
-    /// Shapes the natural layout again, at the content's current tab
-    /// spacing and box sizes. Only the tab pass needs this: nothing else a
-    /// layout changes is a shaping input.
     fn reshape(&mut self, context: &mut TextContext, breaking: RunBreaking<'_>) {
         let spans = self.content.spans(0, self.source, breaking);
         let boxes = parley_boxes(&self.content, 0, 0, self.percent_basis);
@@ -704,11 +533,6 @@ impl<S: Copy, A: Additions> Paragraph<S, A> {
 }
 
 impl<S, A> Paragraph<S, A> {
-    /// The source units content item `item` contributed: a run's whole
-    /// pre-collapse text, an atomic box's one unit. Fixed when the paragraph
-    /// is built.
-    ///
-    /// `None` when `item` is past the content items.
     pub(in crate::text) fn item_source_range(&self, item: u32) -> Option<Range<u32>> {
         self.content
             .block
@@ -718,12 +542,6 @@ impl<S, A> Paragraph<S, A> {
     }
 }
 
-/// Each preserved tab's `0.5ch` — half the advance of `0` in the tab's own
-/// run, without its letter-spacing (`ch` is a font metric).
-///
-/// One shaping per distinct run item holding a tab, at construction: `ch`
-/// never changes without a rebuild, and a paragraph without preserved tabs
-/// shapes nothing here.
 fn tab_minimums<S: Copy, A: Additions>(
     context: &mut TextContext,
     breaking: RunBreaking<'_>,
@@ -756,7 +574,6 @@ fn tab_minimums<S: Copy, A: Additions>(
         .collect()
 }
 
-/// The parley boxes of one flow, sized and aligned from the current specs.
 pub(in crate::text) fn parley_boxes<A: Additions>(
     flow: &Flow<A>,
     byte_offset: u32,
@@ -782,12 +599,6 @@ pub(in crate::text) fn parley_boxes<A: Additions>(
         .collect()
 }
 
-/// One atomic box as parley lays it out: its margin box, its baseline from
-/// the box's top edge (`None` puts the bottom edge on the baseline), and its
-/// `vertical-align`, which parley resolves against the root inline box: the
-/// style its object is shaped in is a copy of the root's
-/// (`shape::build_into_scratch`). `index` is the box's byte in the
-/// normalized text; the shaper moves it to its object's.
 pub(in crate::text) fn sized_box(
     spec: &InlineBoxSpec,
     slot: usize,

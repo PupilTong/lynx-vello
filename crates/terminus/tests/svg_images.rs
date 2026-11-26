@@ -34,8 +34,6 @@ use terminus::link::{DocumentKind, ImageStatus, NodeId, PictureKey};
 const SCREEN_WIDTH: f32 = 393.0;
 const SCREEN_HEIGHT: f32 = 727.0;
 
-/// A 2:1 icon with its own outline, so a cell shows exactly where the
-/// document's viewport landed and whether its ratio survived.
 const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="24" viewBox="0 0 48 24">
   <rect width="48" height="24" fill="#dbeafe"/>
   <circle cx="12" cy="12" r="8" fill="#dc2626"/>
@@ -43,8 +41,6 @@ const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height
   <rect x="1" y="1" width="46" height="22" fill="none" stroke="#1f2937" stroke-width="2"/>
 </svg>"##;
 
-/// A square tile: an object-bounding-box gradient, a dashed ring, and a
-/// clip-path, so a tiled background exercises three walker rules at once.
 const TILE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -57,16 +53,11 @@ const TILE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height
   <circle cx="10" cy="10" r="5" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="2 1.5"/>
 </svg>"##;
 
-/// An opaque star and, in the top-right corner, a half-transparent disc, as
-/// a mask: what shows through is the star's silhouette at full strength and
-/// the disc at half.
 const STAR: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
   <path d="M20 2 L25 15 L38 15 L27 23 L31 37 L20 29 L9 37 L13 23 L2 15 L15 15 Z" fill="#000000"/>
   <circle cx="35" cy="5" r="4" fill="#000000" fill-opacity="0.5"/>
 </svg>"##;
 
-/// Fine detail that a bitmap scaled tenfold would show as blocks: hairline
-/// strokes, a radial gradient with a focal point, small circles.
 const DETAIL: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
   <defs>
     <radialGradient id="r" cx="12" cy="12" r="11" fx="8" fy="8" gradientUnits="userSpaceOnUse">
@@ -80,9 +71,6 @@ const DETAIL: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
   <circle cx="17" cy="7" r="1.5" fill="#be123c"/>
 </svg>"##;
 
-/// The `mode` rules of the Lynx `<image>` UA sheet
-/// (`crates/bobcat-core/src/main/tree/image.rs`), so these cells read the
-/// way a page's `<image mode>` does.
 const IMAGE_MODES: &str = r#"
     image[mode="aspectFit"] { object-fit: contain; }
     image[mode="aspectFill"] { object-fit: cover; }
@@ -102,8 +90,6 @@ fn page(css: &str) -> Doc {
     )
 }
 
-/// Renders `doc` until its images settle, with each `(node, url)` of
-/// `presented` presented at its URL's natural size, and captures it.
 fn capture(
     test: &str,
     doc: &mut Doc,
@@ -120,8 +106,6 @@ fn capture(
     image
 }
 
-/// `<image src="icon.svg">` under every `mode`, plus the clips a replaced
-/// element adds: a rounded content box and a border.
 #[test]
 fn image_element_modes_match_reference() {
     let mut doc = page(
@@ -163,9 +147,6 @@ fn image_element_modes_match_reference() {
     screenshot::assert_golden(&["svg", "image-modes"], &actual);
 }
 
-/// `background-image: url(tile.svg)` under `background-size`,
-/// `background-repeat` and `background-position`, plus a rounded clip that
-/// cuts tiles and a `content-box` clip.
 #[test]
 fn background_image_tiles_match_reference() {
     let mut doc = page(
@@ -208,8 +189,6 @@ fn background_image_tiles_match_reference() {
     screenshot::assert_golden(&["svg", "background"], &actual);
 }
 
-/// `mask-image: url(star.svg)`: one star, a repeated star, and a star mask
-/// over a rounded box with a gradient background.
 #[test]
 fn mask_image_matches_reference() {
     let mut doc = page(
@@ -233,9 +212,6 @@ fn mask_image_matches_reference() {
     screenshot::assert_golden(&["svg", "mask"], &actual);
 }
 
-/// One document drawn at 24 px and at 240 px: the large one has the same
-/// edges a 24 px draw has, ten times as long, because the walker encodes
-/// paths, not a bitmap.
 #[test]
 fn one_document_at_two_sizes_matches_reference() {
     let mut doc = page(
@@ -258,9 +234,6 @@ fn one_document_at_two_sizes_matches_reference() {
     screenshot::assert_golden(&["svg", "two-sizes"], &actual);
 }
 
-/// The natural size layout reads follows CSS Images 3 default sizing: both
-/// dimensions; one plus the `viewBox` ratio; the `viewBox` ratio fitted into
-/// 300x150; neither, 300x150.
 #[test]
 fn an_unsized_image_lays_out_at_the_documents_natural_size() {
     let cases = [
@@ -293,7 +266,6 @@ fn an_unsized_image_lays_out_at_the_documents_natural_size() {
     }
 }
 
-/// The source `node` presents, owned, so the document can be borrowed again.
 fn source_of(doc: &Doc, node: NodeId) -> String {
     doc.dom
         .picture(node)
@@ -302,14 +274,10 @@ fn source_of(doc: &Doc, node: NodeId) -> String {
         .to_owned()
 }
 
-/// Presents `url` on `node` at the natural size the document knows of it,
-/// as an embedder's element does when it names the URL and when it settles.
 fn present(doc: &mut Doc, node: NodeId, url: &str) {
     prime_radiant::present_urls(&mut doc.dom, &[(node, url)]);
 }
 
-/// Hands `node` `markup` as a document, as the Lynx `<svg content>` does:
-/// files it, presents the source it is filed under, and answers that source.
 fn present_markup(doc: &mut Doc, node: NodeId, markup: &str) -> String {
     let source = doc
         .dom
@@ -318,23 +286,18 @@ fn present_markup(doc: &mut Doc, node: NodeId, markup: &str) -> String {
     source.to_string()
 }
 
-/// The border-box size `node` laid out at.
 fn size_of(doc: &mut Doc, node: NodeId) -> (f32, f32) {
     doc.dom.layout();
     let layout = doc.dom.rounded_layout(node).expect("laid out");
     (layout.size.width, layout.size.height)
 }
 
-/// What a host makes of one document request: the engine's parser run over
-/// its bytes, reported for its source.
 fn host_parse(
     (source, bytes, kind): terminus::link::DocumentRequest,
 ) -> terminus::link::ImageEvent {
     terminus::link::ImageEvent::parse_document(source, &bytes, kind)
 }
 
-/// Answers every document request the way a host does, and applies what
-/// it reported, answering the sources that settled.
 fn answer_requests(doc: &mut Doc) -> Vec<(String, ImageStatus)> {
     let events: Vec<_> = doc
         .dom
@@ -345,7 +308,6 @@ fn answer_requests(doc: &mut Doc) -> Vec<(String, ImageStatus)> {
     settled(doc, &events)
 }
 
-/// Applies `events`, answering the sources that settled by name.
 fn settled(doc: &mut Doc, events: &[terminus::link::ImageEvent]) -> Vec<(String, ImageStatus)> {
     doc.dom
         .apply_image_events(events)
@@ -359,11 +321,6 @@ const ICON_STATUS: ImageStatus = ImageStatus::Vector {
     height: 24,
 };
 
-/// An element handed [`ICON`] as markup draws exactly what an `<image>`
-/// whose URL the host answers with the same document draws: the markup goes
-/// through the same parse, the same kind of registry entry and the same
-/// raster cache, and reaches the host as a document request with its bytes
-/// rather than as a source to fetch.
 #[test]
 fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     const TEST: &str = "a_document_set_as_markup_draws_as_one_loaded_from_a_url";
@@ -397,10 +354,6 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     );
 }
 
-/// An `svg` element in the page draws its own subtree, recorded from the
-/// cascade, exactly as an `<image>` draws the same markup through the
-/// converter: a presentation-attribute-only document, laid out at the same
-/// place and size, gives the same pixels.
 #[test]
 fn an_inline_svg_root_draws_as_the_same_document_as_an_image() {
     const TEST: &str = "an_inline_svg_root_draws_as_the_same_document_as_an_image";
@@ -414,7 +367,6 @@ fn an_inline_svg_root_draws_as_the_same_document_as_an_image() {
     let node = as_image.el_tag(root, "image", "icon");
     let as_image = capture(TEST, &mut as_image, &images, &[(node, "app:///icon.svg")]);
 
-    // `ICON`, element by element, through the DOM's own operations.
     let mut doc = page(css);
     doc.dom.add_svg_user_agent_stylesheet();
     let svg = doc.dom.create_element("svg", ());
@@ -480,8 +432,6 @@ fn an_inline_svg_root_draws_as_the_same_document_as_an_image() {
     );
 }
 
-/// Two elements handed identical markup share one synthetic source and one
-/// parse, and it settles once, with the document's natural size, for both.
 #[test]
 fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     let mut doc = page("");
@@ -515,7 +465,6 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     assert_eq!(size_of(&mut doc, first), (48.0, 24.0));
     assert_eq!(size_of(&mut doc, second), (48.0, 24.0));
 
-    // A third element on a settled markup learns it at once.
     let third = doc.el_tag(root, "image", "");
     assert_eq!(present_markup(&mut doc, third, ICON), source);
     assert_eq!(doc.dom.request_image(&source), ICON_STATUS);
@@ -523,9 +472,6 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
     assert_eq!(doc.dom.take_document_requests(), []);
 }
 
-/// New markup presents a new source and forgets the old one, whose bytes
-/// are never parsed if the parse had not started; presenting the same markup
-/// again is no change at all.
 #[test]
 fn changed_markup_rebinds_and_forgets_the_old_source() {
     let mut doc = page("");
@@ -560,7 +506,6 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
     );
     assert_eq!(doc.dom.take_document_requests(), []);
 
-    // Back to the first markup: a new parse, and the settled one is gone.
     let icon = present_markup(&mut doc, node, ICON);
     assert!(!doc.dom.knows_image_source(&tile));
     assert_eq!(answer_requests(&mut doc), [(icon.clone(), ICON_STATUS)]);
@@ -568,9 +513,6 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
     assert_eq!(size_of(&mut doc, node), (48.0, 24.0));
 }
 
-/// A synthetic source outlives every element but the last presenting it:
-/// freeing one of two keeps it, freeing the second forgets it, and a host's
-/// report that lands afterwards applies to nothing.
 #[test]
 fn freeing_the_last_element_forgets_its_source() {
     let mut doc = page("");
@@ -596,7 +538,6 @@ fn freeing_the_last_element_forgets_its_source() {
     assert!(!doc.dom.knows_image_source(&source), "and stays forgotten");
 }
 
-/// The RGBA of `image` at `(x, y)`.
 fn pixel(image: &prime_radiant::Image, x: u32, y: u32) -> [u8; 4] {
     let index = ((y * image.width() + x) * 4) as usize;
     image.pixels()[index..index + 4]
@@ -604,13 +545,10 @@ fn pixel(image: &prime_radiant::Image, x: u32, y: u32) -> [u8; 4] {
         .expect("four channels")
 }
 
-/// Whether `actual` is `expected` within a rasterizer's rounding.
 fn near(actual: [u8; 4], expected: [u8; 4]) -> bool {
     actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2)
 }
 
-/// Draws `svg` as an `<image>` at (20, 20) and as a `background-image` at
-/// (100, 20), each 40 × 40, and answers the capture.
 fn image_and_background(test: &str, svg: &str) -> prime_radiant::Image {
     let mut doc = page(
         ".shown { left: 20px; top: 20px; width: 40px; height: 40px; }
@@ -625,8 +563,6 @@ fn image_and_background(test: &str, svg: &str) -> prime_radiant::Image {
     capture(test, &mut doc, &images, &[(node, "app:///drawn.svg")])
 }
 
-/// CSS inside an SVG image applies: a `style` element's class rule beats
-/// the presentation attribute, in an `<image>` and in a background.
 #[test]
 fn a_style_element_in_an_image_colours_its_class() {
     let actual = image_and_background(
@@ -642,8 +578,6 @@ fn a_style_element_in_an_image_colours_its_class() {
     }
 }
 
-/// A `use` draws its target and a gradient paints through a reference, in
-/// an image: left half a red-to-blue gradient, right half a green `use`.
 #[test]
 fn a_use_and_a_gradient_draw_in_an_image() {
     let actual = image_and_background(
@@ -668,7 +602,6 @@ fn a_use_and_a_gradient_draw_in_an_image() {
     }
 }
 
-/// Markup without `xmlns` draws, as its elements count as SVG.
 #[test]
 fn markup_without_a_namespace_draws_in_an_image() {
     let actual = image_and_background(
@@ -681,8 +614,6 @@ fn markup_without_a_namespace_draws_in_an_image() {
     }
 }
 
-/// A CSS animation on an inline root's `fill`, sampled at two clock values,
-/// draws two colours: the root records again on each tick.
 #[test]
 fn an_inline_fill_animation_draws_two_colours() {
     const TEST: &str = "an_inline_fill_animation_draws_two_colours";
@@ -721,8 +652,6 @@ fn an_inline_fill_animation_draws_two_colours() {
     );
 }
 
-/// An SVG image whose `rect` fades from red to blue over one second and
-/// stays blue (`forwards`).
 const FADING: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
   <style>
     @keyframes paint { from { fill: #ff0000; } to { fill: #0000ff; } }
@@ -731,16 +660,12 @@ const FADING: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" heigh
   <rect width="20" height="20"/>
 </svg>"#;
 
-/// Whether the committed frame asks the host for further ticks.
 fn ticks_wanted(doc: &Doc) -> bool {
     doc.dom
         .committed_frame()
         .is_some_and(|frame| frame.needs_main_ticks())
 }
 
-/// `FADING` drawn at (20, 20) by an `<image>` when `presented`, else as a
-/// CSS background, sampled at 0.1 s and 0.9 s: red, then blue, with frames
-/// asked for while it runs; at its end the frames stop and blue stays.
 fn assert_fades(test: &str, presented: bool) {
     let mut doc = page(
         ".shown { left: 20px; top: 20px; width: 40px; height: 40px; }
@@ -793,8 +718,6 @@ fn an_animated_background_ticks_with_the_host() {
     assert_fades("an_animated_background_ticks_with_the_host", false);
 }
 
-/// Removing every use of an animated image stops the frame requests: the
-/// presenting element is freed, the background's element removed.
 #[test]
 fn an_unused_animated_image_asks_for_no_frames() {
     let mut doc = page(
@@ -821,8 +744,6 @@ fn an_unused_animated_image_asks_for_no_frames() {
     assert!(!doc.dom.has_active_animations());
 }
 
-/// SMIL is not run: `animate` is an unknown element, the static state
-/// draws, and nothing animates.
 #[test]
 fn smil_markup_draws_the_static_state() {
     let actual = image_and_background(

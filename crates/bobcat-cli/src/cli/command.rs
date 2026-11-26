@@ -31,21 +31,15 @@ pub(crate) enum Command {
     Screenshot(PathBuf),
     SetVsync(NonZeroU32),
     ShowVsync,
-    /// A finger's tap — down and up — at a viewport CSS px position.
     Tap(f32, f32),
-    /// A key pressed and released: its W3C `key` value and the text it
-    /// typed, which the `keydown` carries.
     Key {
         key: String,
         text: Option<String>,
     },
-    /// An input-method composition, its selection in UTF-16 units relative
-    /// to the start of the text.
     Compose {
         text: String,
         selection: Range<usize>,
     },
-    /// An input-method commit.
     Commit(String),
     ShowTextInput,
     Help,
@@ -140,9 +134,6 @@ fn parse_show(arguments: &str) -> Command {
     }
 }
 
-/// The words of a command's arguments: split at white space, except inside
-/// a pair of double quotes, which a word may use to hold spaces (`" "`) or
-/// be empty (`""`). `None` for an unclosed quote.
 fn words(arguments: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut rest = arguments.trim_start();
@@ -211,9 +202,6 @@ fn parse_commit(arguments: &str) -> Command {
     }
 }
 
-/// One line describing a [`TextInputState`], as `show text-input` prints
-/// it: the value and the UTF-16 selection and composition, and the caret in
-/// viewport CSS px.
 pub(crate) fn describe_text_input(state: Option<&TextInputState>) -> String {
     let Some(state) = state.filter(|state| state.host.is_some()) else {
         return "text-input: none".to_owned();

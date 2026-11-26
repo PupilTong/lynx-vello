@@ -9,7 +9,6 @@ mod common;
 use common::Doc;
 use terminus::link::{CssDeclaration, CssRule, NodeId, ShadowRootMode, StylesheetOrigin};
 
-/// A host with a shadow tree, plus the ids of interest.
 struct Harness {
     doc: Doc,
     host: NodeId,
@@ -132,8 +131,6 @@ fn document_rules_stop_at_the_boundary_and_scoped_rules_stay_inside() {
     assert_eq!(harness.doc.value(outside, "color"), "rgb(255, 0, 0)");
 }
 
-/// Clearing a shadow root's sheets unstyles its tree and its `:host`, and a
-/// sheet mounted afterwards styles it alone.
 #[test]
 fn clearing_a_shadow_roots_sheets_drops_their_rules() {
     let mut harness = Harness::new();
@@ -486,10 +483,6 @@ fn removing_a_host_removes_its_shadow_tree_with_it() {
     assert!(harness.doc.dom.get(harness.host).is_none());
 }
 
-/// A host dropped on its own takes its shadow tree with it. Nothing else
-/// could: a shadow tree can be neither re-parented nor reached again, so
-/// leaving it behind would leak it — unlike a light-tree element child, which
-/// its own owner still names.
 #[test]
 fn dropping_a_host_takes_its_shadow_tree_and_leaves_its_light_children() {
     let mut harness = Harness::new();
@@ -581,9 +574,6 @@ fn a_class_change_inside_a_shadow_tree_restyles_against_its_scoped_rules() {
     assert_eq!(harness.doc.value(inside, "width"), "auto");
 }
 
-/// A sheet a component rewrites keeps its place among the tree's sheets:
-/// the replacement still loses to a later sheet on equal specificity and
-/// still beats an earlier one, and the old text stops applying.
 #[test]
 fn a_replaced_shadow_stylesheet_keeps_its_place_in_the_order() {
     let mut harness = Harness::new();
@@ -650,7 +640,6 @@ fn a_class_change_on_the_host_restyles_the_shadow_tree_through_host() {
     );
 }
 
-/// One pre-built style rule with a single declaration.
 fn rule(doc: &Doc, selectors: &str, property: &str, value: &str) -> CssRule {
     doc.dom
         .build_style_rule(
@@ -789,11 +778,6 @@ fn a_slotted_text_node_lays_out_under_its_slot() {
     );
 }
 
-/// A slot that is detached but kept alive must let go of what it was
-/// assigning. Its links name arena storage that the assigned nodes can be
-/// freed out of while the detached slot is still readable, and an unassigned
-/// slot renders fallback content anyway — so the empty list is both the safe
-/// answer and the correct one.
 #[test]
 fn a_detached_slot_drops_its_assignments_and_survives_their_removal() {
     let mut harness = Harness::new();
@@ -803,8 +787,6 @@ fn a_detached_slot_drops_its_assignments_and_survives_their_removal() {
     assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
     assert_eq!(harness.doc.dom.assigned_nodes(slot), [slottable]);
 
-    // Detach the slot without freeing it: `assign_slots` can no longer reach
-    // it, so nothing else will rewrite what it holds.
     harness.doc.dom.remove_element(slot);
     assert!(
         harness.doc.dom.assigned_nodes(slot).is_empty(),
@@ -812,19 +794,15 @@ fn a_detached_slot_drops_its_assignments_and_survives_their_removal() {
     );
     assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
 
-    // Freeing what it used to hold must leave the detached slot readable.
     harness.doc.dom.drop_element(slottable);
     assert!(harness.doc.dom.get(slottable).is_none());
     assert_eq!(harness.doc.dom.assigned_nodes(slot), []);
 
-    // And it must still be usable as an ordinary element afterwards.
     harness.doc.dom.append_child(harness.doc.root, slot);
     harness.doc.flush();
     assert!(harness.doc.dom.get(slot).is_some());
 }
 
-/// The same hazard one level down: the slot leaves inside a detached
-/// container rather than on its own.
 #[test]
 fn a_slot_detached_inside_a_container_also_drops_its_assignments() {
     let mut harness = Harness::new();
@@ -1108,16 +1086,6 @@ fn a_document_with_no_shadow_root_keeps_its_child_list_as_the_flat_tree() {
     assert_eq!(doc.dom.shadow_root(parent), None);
 }
 
-/// A structural selector on a shadow host still invalidates the light children
-/// whose sibling positions moved.
-///
-/// `note_child_list_change` collapses "restyle every child" into a single
-/// `RESTYLE_DESCENDANTS` on the parent only in a document with no shadow root,
-/// because Stylo propagates that hint along the flat tree: a host's flat
-/// children are its shadow root's children, so the hint would arrive at the
-/// slotted light children by way of the shadow tree, restyling the shadow
-/// tree's own elements on the way. This pins the light children's side of that
-/// — the part a reader of the collapsed form would expect to be at risk.
 #[test]
 fn a_structural_selector_on_a_shadow_host_still_restyles_its_light_children() {
     let mut doc = Doc::new();
@@ -1138,7 +1106,6 @@ fn a_structural_selector_on_a_shadow_host_still_restyles_its_light_children() {
         "the first of two is second-from-last"
     );
 
-    // A third light child shifts every position counted from the end.
     let third = doc.el(host, "item");
     doc.flush();
 
@@ -1155,10 +1122,6 @@ fn a_structural_selector_on_a_shadow_host_still_restyles_its_light_children() {
     assert_eq!(doc.color(third), common::rgb(0, 0, 255));
 }
 
-/// A scroll container inside a shadow tree snaps to the light children its
-/// slot renders, and of two slotted initial targets it starts on the first
-/// in flat tree order: snap areas and initial targets are boxes, found over
-/// the flat tree, not the node tree the slotted children are not in.
 #[test]
 fn a_shadow_scroller_snaps_to_and_starts_on_its_slotted_children() {
     let mut harness = Harness::new();
@@ -1203,8 +1166,6 @@ fn a_shadow_scroller_snaps_to_and_starts_on_its_slotted_children() {
     );
 }
 
-/// A sheet the engine wrote can give its shadow content the flow layout the
-/// `lynx` grammar keeps from authors; an author's shadow sheet cannot.
 #[test]
 fn an_engine_shadow_sheet_writes_block_and_inline_and_an_author_one_does_not() {
     let mut harness = Harness::new();
@@ -1233,15 +1194,6 @@ fn an_engine_shadow_sheet_writes_block_and_inline_and_an_author_one_does_not() {
     assert_eq!(display(inline), "inline");
 }
 
-/// An element of a shadow tree whose `pseudo` attribute is
-/// `-webkit-input-placeholder` (Blink's name for the element behind
-/// `::placeholder`) is its host's `::placeholder`: `host::placeholder` rules
-/// of the host's tree reach it with the host as the originating element,
-/// through a later class change too, and win over its own tree's normal
-/// declarations as an outer context does (CSS Scoping §3.3); its own tree
-/// still styles it as the element it is, and `:host::placeholder` reaches it
-/// from there. Without the attribute, or outside a shadow tree, nothing of
-/// this applies.
 #[test]
 fn a_placeholder_pseudo_attribute_makes_a_shadow_element_the_hosts_placeholder() {
     let mut harness = Harness::new();
@@ -1321,12 +1273,6 @@ fn a_placeholder_pseudo_attribute_makes_a_shadow_element_the_hosts_placeholder()
     assert_eq!(harness.doc.value(placeholder, "color"), "rgb(255, 0, 0)");
 }
 
-/// `::placeholder` takes the properties css-pseudo-4 §4.2 lists (those of
-/// `::first-line`, `opacity`, the text alignment, wrapping and overflow
-/// properties) from author rules — the restriction Stylo applies to the
-/// pseudo-element — including its own tree's rules, which style it as an
-/// element; a UA rule is exempt, which is how an engine lays the element
-/// out.
 #[test]
 fn a_placeholders_author_declarations_are_restricted_to_the_pseudo_elements_properties() {
     let mut harness = Harness::new();

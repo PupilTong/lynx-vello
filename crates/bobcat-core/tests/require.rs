@@ -14,8 +14,6 @@ use bobcat_core::{
     DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources,
 };
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -24,8 +22,6 @@ const BACKGROUND_URL: &str = "app:///background.js";
 const MAIN_MODULE_URL: &str = "app:///module-main.js";
 const BACKGROUND_MODULE_URL: &str = "app:///module-background.js";
 
-/// The card: two `require`s before the render hook exists, so the page cannot
-/// be built at all unless both answered.
 const MAIN_ENTRY: &str = r"
 import { createRequire } from 'bobcat:module';
 const require = createRequire(import.meta.url);
@@ -37,8 +33,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The background entry, which imports its own bindings as a BTS entry that
-/// is not a card's body does.
 const BACKGROUND_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import { createRequire } from 'bobcat:module';
@@ -46,8 +40,6 @@ const shared = createRequire(import.meta.url)('./bts/shared.cjs');
 console.log('background ' + shared.tag + ' ' + shared.dir);
 ";
 
-/// The card of the second test: every shape of ES module `require` has to
-/// answer for, taken while the entry itself is still evaluating.
 const MAIN_MODULE_ENTRY: &str = r"
 import { createRequire } from 'bobcat:module';
 const require = createRequire(import.meta.url);
@@ -74,7 +66,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The same of a worker realm, whose entry is fetched as this one is.
 const BACKGROUND_MODULE_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import { createRequire } from 'bobcat:module';
@@ -82,7 +73,6 @@ const module = createRequire(import.meta.url)('./bts/module.mjs');
 console.log(['background', module.tag, module.fromDep, module.url].join(' '));
 ";
 
-/// Every source a page is made of, answered from memory.
 struct Files {
     source: fn(&str) -> Option<&'static str>,
 }
@@ -98,7 +88,6 @@ impl bobcat_core::FrameImages for Files {
         None
     }
 
-    /// Nothing is ever answered, so nothing is ever wanted.
     fn want(&self, _picture: &bobcat_core::PictureKey, _hint: bobcat_core::ImageSizeHint) {}
 
     fn retain(&self, _frame: &[bobcat_core::PictureKey]) {}
@@ -117,8 +106,6 @@ impl Files {
         }
     }
 
-    /// `.mjs` is a module by its extension; `detected.js` has neither
-    /// extension nor a `package.json` to say, so its own text does.
     fn modules(specifier: &str) -> Option<&'static str> {
         match specifier {
             MAIN_MODULE_URL => Some(MAIN_MODULE_ENTRY),
@@ -164,9 +151,6 @@ impl ResourceFetcher for Files {
                 .into())
             },
             |source| {
-                // A main-thread entry is a card's MTS body, served as
-                // `bobcat-source` registers a card's root; every other file
-                // is served as it stands.
                 let source = if [MAIN_URL, MAIN_MODULE_URL].contains(&specifier.as_str()) {
                     format!("{}{source}", bobcat_core::MTS_CHUNK_PREAMBLE)
                 } else {
@@ -181,7 +165,6 @@ impl ResourceFetcher for Files {
     }
 }
 
-/// Boots one view and collects what its two realms logged.
 async fn logs_of(
     main: &'static str,
     background: &'static str,
@@ -202,8 +185,6 @@ async fn logs_of(
             sources,
         )
         .expect("the view is built");
-    // Boot's first flush waits for a painter to bind the view, and this
-    // collects what both realms logged past it.
     let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
         .await
         .expect("the painter is built");
@@ -246,11 +227,6 @@ async fn both_realms_require_commonjs_and_json_while_their_entry_evaluates() {
     );
 }
 
-/// The same of ES modules: the extension or the text names the shape, an
-/// import inside a required module is loaded inline against the response
-/// URL, a `module.exports` export is what `require` answers, one URL is one
-/// module however often it is required, and a graph that awaits at its top
-/// level is refused rather than waited for.
 #[tokio::test]
 async fn both_realms_require_es_modules_while_their_entry_evaluates() {
     assert_eq!(

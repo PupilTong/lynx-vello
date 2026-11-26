@@ -89,9 +89,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::byte_cache::touch_due;
 use crate::platform::{AsyncStore, Meta, Store};
 
-/// The 128-bit SipHash-1-3 of a source text, with fixed zero keys: the
-/// digest names content across processes and runs, so it must not be
-/// seeded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SourceDigest(pub u128);
 
@@ -102,22 +99,13 @@ impl SourceDigest {
     }
 }
 
-/// Which engine build wrote an artifact: everything that decides whether it
-/// can be read back (the artifact format version, the engine's sources, its
-/// flags). Supplied by the engine; opaque here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EngineId(pub u64);
 
-/// What a derivation depends on beyond the text: the kind of compile and
-/// the names it bakes in (a module's name; a `CommonJS` wrapper's file name
-/// and parameter list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Variant(pub u64);
 
 impl Variant {
-    /// The 64-bit SipHash-1-3 of `parts`, with fixed zero keys. Each part is
-    /// prefixed with its length as a little-endian `u64`, so `["ab", "c"]`
-    /// and `["a", "bc"]` differ and the hash is the same on every target.
     #[must_use]
     pub fn of(parts: &[&[u8]]) -> Self {
         let mut hasher = siphasher::sip::SipHasher13::new();
@@ -129,39 +117,23 @@ impl Variant {
     }
 }
 
-/// One artifact's name within an engine build's namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ArtifactKey {
     pub source: SourceDigest,
     pub variant: Variant,
 }
 
-/// The name an artifact is resident under in [`Artifacts`].
 type Name = (EngineId, ArtifactKey);
 
-/// How many inserted artifacts may wait for persistence; past it the oldest
-/// is dropped from the queue (it stays resident).
 const PENDING_LIMIT: usize = 256;
 
-/// The process-wide memory tier: artifacts least recently used first out
-/// under a byte budget, and the queue of those the engine derived that no
-/// Store has been given yet.
-///
-/// Entry counts are small (a page runs tens of scripts), so recency is a
-/// monotonic stamp per entry and eviction scans for the smallest, as in
-/// [`MemoryCache`](crate::memory::MemoryCache). That type is not reused: it
-/// is keyed by string, so every lookup would format a key, and it keeps an
-/// oversized entry its caller inserted, which this tier refuses.
 pub struct Artifacts {
     state: Mutex<State>,
-    /// Whether `state.pending` is non-empty, readable without the lock.
     has_pending: AtomicBool,
 }
 
 struct State {
     entries: FxHashMap<Name, Resident>,
-    /// Inserted artifacts not yet taken for persistence, oldest first. Each
-    /// name is resident and appears once.
     pending: VecDeque<Name>,
     budget: usize,
     used: usize,
@@ -179,9 +151,6 @@ impl State {
         self.clock
     }
 
-    /// Makes `artifact` resident under `name`, replacing what was there.
-    /// `false` when it does not fit the budget on its own, in which case
-    /// nothing is resident under `name` afterwards.
     fn keep(&mut self, name: Name, artifact: Bytes) -> bool {
         if let Some(previous) = self.entries.remove(&name) {
             self.used -= previous.artifact.len();
@@ -210,8 +179,6 @@ impl State {
         }
     }
 
-    /// Evicts least recently used entries other than `spared` until the
-    /// budget holds.
     fn trim(&mut self, spared: Option<Name>) {
         while self.used > self.budget {
             let victim = self
@@ -242,7 +209,6 @@ impl std::fmt::Debug for Artifacts {
 }
 
 impl Artifacts {
-    /// The budget of [`Self::global`] until [`Self::set_budget`] changes it.
     pub const DEFAULT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
     #[must_use]
@@ -259,9 +225,6 @@ impl Artifacts {
         }
     }
 
-    /// The tier every engine and resource system in the process shares,
-    /// with a budget of [`Self::DEFAULT_BUDGET_BYTES`] until
-    /// [`Self::set_budget`] changes it.
     pub fn global() -> &'static Arc<Artifacts> {
         static GLOBAL: OnceLock<Arc<Artifacts>> = OnceLock::new();
         GLOBAL.get_or_init(|| Arc::new(Self::new(Self::DEFAULT_BUDGET_BYTES)))
@@ -272,8 +235,6 @@ impl Artifacts {
         self.state().budget
     }
 
-    /// Changes the budget, evicting whatever no longer fits. 0 disables the
-    /// tier: nothing is kept, and every [`get`](Self::get) misses.
     pub fn set_budget(&self, budget_bytes: usize) {
         let mut state = self.state();
         state.budget = budget_bytes;
@@ -296,8 +257,6 @@ impl Artifacts {
         self.state().entries.is_empty()
     }
 
-    /// The artifact `engine` derived for `key`, when it is resident. A hit
-    /// marks the entry most recently used.
     #[must_use]
     pub fn get(&self, engine: EngineId, key: ArtifactKey) -> Option<Bytes> {
         let mut state = self.state();
@@ -307,15 +266,11 @@ impl Artifacts {
         Some(resident.artifact.clone())
     }
 
-    /// Whether an artifact is resident for `key`, without touching recency.
     #[must_use]
     pub fn contains(&self, engine: EngineId, key: ArtifactKey) -> bool {
         self.state().entries.contains_key(&(engine, key))
     }
 
-    /// An artifact the engine just derived: made resident, and queued for
-    /// whoever persists the tier ([`Self::take_pending`]). An artifact
-    /// larger than the whole budget is not kept.
     pub fn insert(&self, engine: EngineId, key: ArtifactKey, artifact: Bytes) {
         let name = (engine, key);
         let mut state = self.state();
@@ -328,13 +283,10 @@ impl Artifacts {
         self.sync_pending(&state);
     }
 
-    /// An artifact read back from a Store: made resident, and not queued,
-    /// since it is persisted already.
     pub fn admit(&self, engine: EngineId, key: ArtifactKey, artifact: Bytes) {
         self.admitted(engine, key, artifact);
     }
 
-    /// [`Self::admit`], answering whether the artifact is resident now.
     fn admitted(&self, engine: EngineId, key: ArtifactKey, artifact: Bytes) -> bool {
         let name = (engine, key);
         let mut state = self.state();
@@ -344,15 +296,11 @@ impl Artifacts {
         kept
     }
 
-    /// Whether [`Self::take_pending`] would return anything: one atomic
-    /// load, cheap enough to ask on every turn of a loop.
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.has_pending.load(Ordering::Acquire)
     }
 
-    /// Drains the queue of inserted artifacts not yet persisted, oldest
-    /// first. Only resident artifacts are queued, and they stay resident.
     #[must_use]
     pub fn take_pending(&self) -> Vec<(EngineId, ArtifactKey, Bytes)> {
         let mut state = self.state();
@@ -367,15 +315,12 @@ impl Artifacts {
             .collect()
     }
 
-    /// Forgets the artifact `engine` derived for `key`, and drops it from
-    /// the queue if it was waiting there. What a Store holds is untouched.
     pub fn remove(&self, engine: EngineId, key: ArtifactKey) {
         let mut state = self.state();
         state.remove((engine, key));
         self.sync_pending(&state);
     }
 
-    /// Forgets every artifact and the queue.
     pub fn clear(&self) {
         let mut state = self.state();
         state.entries.clear();
@@ -388,8 +333,6 @@ impl Artifacts {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Mirrors the queue's emptiness into the flag; called under the lock
-    /// after every change to the queue.
     fn sync_pending(&self, state: &State) {
         self.has_pending
             .store(!state.pending.is_empty(), Ordering::Release);
@@ -398,11 +341,8 @@ impl Artifacts {
 
 const MAGIC: &[u8; 8] = b"VANTART\0";
 const FORMAT: u32 = 1;
-/// magic, format, engine, source, variant, payload length, checksum.
 const HEADER_LEN: usize = 8 + 4 + 8 + 16 + 8 + 8 + 8;
 
-/// The entry a Store holds for `artifact`: the header that names it and
-/// checks it, then the payload (see the module docs for the layout).
 #[must_use]
 pub fn encode(engine: EngineId, key: ArtifactKey, artifact: &[u8]) -> Vec<u8> {
     let mut entry = Vec::with_capacity(HEADER_LEN + artifact.len());
@@ -417,10 +357,6 @@ pub fn encode(engine: EngineId, key: ArtifactKey, artifact: &[u8]) -> Vec<u8> {
     entry
 }
 
-/// The payload of `entry`, as a zero-copy slice of it, when the entry is
-/// `engine`'s artifact for `key`: every header field matches and the
-/// checksum holds. `None` for a truncated entry, another format, another
-/// engine, another key or a corrupt payload.
 #[must_use]
 pub fn decode(entry: &Bytes, engine: EngineId, key: ArtifactKey) -> Option<Bytes> {
     let header = entry.get(..HEADER_LEN)?;
@@ -435,15 +371,12 @@ pub fn decode(entry: &Bytes, engine: EngineId, key: ArtifactKey) -> Option<Bytes
     valid.then(|| entry.slice(HEADER_LEN..))
 }
 
-/// The `N` bytes of `header` at `at`, which the caller has bounds-checked.
 fn field<const N: usize>(header: &[u8], at: usize) -> [u8; N] {
     header[at..at + N]
         .try_into()
         .expect("the header is HEADER_LEN bytes long")
 }
 
-/// The ECMA-182 polynomial, as CRC-64/ECMA-182 uses it: most significant
-/// bit first, zero initial value, no final XOR.
 const CRC64_POLY: u64 = 0x42F0_E1EB_A9EA_3693;
 
 const CRC64_TABLE: [u64; 256] = crc64_table();
@@ -468,23 +401,15 @@ const fn crc64_table() -> [u64; 256] {
     table
 }
 
-/// CRC-64/ECMA-182 of `bytes`. A checksum, not a hash: it catches a
-/// corrupt payload, while the key fields catch a misfiled one.
 fn crc64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |crc, &byte| {
         CRC64_TABLE[usize::from((crc >> 56) as u8 ^ byte)] ^ (crc << 8)
     })
 }
 
-/// How an [`ArtifactCache`] or an [`AsyncArtifactCache`] bounds what it
-/// keeps in its store.
 #[derive(Clone, Copy, Debug)]
 pub struct ArtifactConfig {
-    /// The most the store holds, in encoded entry bytes; clamped further to
-    /// the store's quota.
     pub budget_bytes: u64,
-    /// How long an entry may go unused before [`ArtifactCache::open`] (or
-    /// [`AsyncArtifactCache::open`]) deletes it.
     pub ttl: Duration,
 }
 
@@ -492,8 +417,6 @@ impl ArtifactConfig {
     pub const DEFAULT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_TTL: Duration = Duration::from_hours(15 * 24);
 
-    /// The budget the tier keeps to: the configured one, or the store's
-    /// quota when that is smaller.
     fn budget(&self, quota: Option<u64>) -> u64 {
         quota.map_or(self.budget_bytes, |quota| self.budget_bytes.min(quota))
     }
@@ -508,42 +431,23 @@ impl Default for ArtifactConfig {
     }
 }
 
-/// What the store holds, by source, so a preload finds a text's variants
-/// without a scan. A hint: the store is the truth.
-///
-/// Every decision the tier makes is a method here, taken under the index
-/// lock and free of IO: it answers the IO to do, and a second method takes
-/// the IO's result. [`ArtifactCache`] runs the IO under the lock, between the
-/// two; [`AsyncArtifactCache`] releases the lock while it awaits the IO.
 #[derive(Default)]
 struct Index {
     sources: FxHashMap<SourceDigest, Vec<Stored>>,
     len: usize,
     used: u64,
-    /// The generation the next indexed entry gets.
     next_generation: u64,
-    /// Keys whose put has been issued and has not answered. They are not
-    /// listed until the put succeeds, and no second put of them is planned.
     writing: FxHashSet<ArtifactKey>,
-    /// Keys whose delete has been issued and has not answered. No put of
-    /// them is planned meanwhile, so a delete cannot land after a re-put.
     deleting: FxHashSet<ArtifactKey>,
 }
 
 struct Stored {
     variant: Variant,
-    /// The entry as the store keeps it, with `last_used` as this tier last
-    /// saw it used.
     meta: Meta,
-    /// The `last_used` the store last recorded (or is being told), which
-    /// rate-limits [`Store::touch`] and [`AsyncStore::touch`].
     persisted: SystemTime,
-    /// Distinguishes this indexing of the key from an earlier or later one,
-    /// so the answer to a read issued for one is not applied to another.
     generation: u64,
 }
 
-/// A stored variant a preload reads from the store.
 struct Read {
     key: ArtifactKey,
     name: String,
@@ -551,32 +455,24 @@ struct Read {
     generation: u64,
 }
 
-/// A touch the store is due: the entry's recency, recorded at most once per
-/// day.
 struct Touch {
     key: ArtifactKey,
     name: String,
     generation: u64,
-    /// What `Stored::persisted` was before the touch was planned, restored if
-    /// the store refuses it.
     previous: SystemTime,
 }
 
-/// An entry a flush puts into the store.
 struct Write {
     key: ArtifactKey,
     meta: Meta,
     entry: Vec<u8>,
 }
 
-/// An entry the tier deletes from the store.
 struct Delete {
     key: ArtifactKey,
     name: String,
 }
 
-/// What a preload does for one source: the variants to read, and the touches
-/// due for the variants already resident.
 #[derive(Default)]
 struct PreloadPlan {
     reads: Vec<Read>,
@@ -584,10 +480,6 @@ struct PreloadPlan {
 }
 
 impl Index {
-    /// The index of what [`Store::scan`] or [`AsyncStore::scan`] found, and
-    /// the store keys to delete: entries whose record does not parse or does
-    /// not match its key, entries another engine build wrote, and entries
-    /// not used within `ttl` of `now`.
     fn scanned(
         metas: Vec<Meta>,
         engine: EngineId,
@@ -675,8 +567,6 @@ impl Index {
             })
     }
 
-    /// What a preload of `source` does: read every listed variant that is
-    /// not resident in `memory`, and mark every resident one used at `now`.
     fn plan_preload(
         &mut self,
         memory: &Artifacts,
@@ -708,9 +598,6 @@ impl Index {
         plan
     }
 
-    /// Marks `key` used at `now`, and answers the touch the store is due, if
-    /// one is. The touch is recorded as done when it is planned, so a second
-    /// use before it answers plans none; [`Self::touch_failed`] undoes that.
     fn mark_used(&mut self, key: ArtifactKey, now: SystemTime) -> Option<Touch> {
         let stored = self.get_mut(key)?;
         stored.meta.last_used = now;
@@ -726,8 +613,6 @@ impl Index {
         })
     }
 
-    /// The store refused `touch`: the recency it last recorded is what it
-    /// was, unless the entry was indexed again or touched again since.
     fn touch_failed(&mut self, touch: &Touch, now: SystemTime) {
         if let Some(stored) = self.get_mut(touch.key)
             && stored.generation == touch.generation
@@ -737,10 +622,6 @@ impl Index {
         }
     }
 
-    /// The read of `read` did not verify. When the index still lists the
-    /// same indexing of the key, it is dropped and the store entry is to be
-    /// deleted; when the key was dropped or indexed again meanwhile, nothing
-    /// is.
     fn read_failed(&mut self, read: &Read) -> Option<Delete> {
         let current = self
             .get_mut(read.key)
@@ -756,11 +637,6 @@ impl Index {
         })
     }
 
-    /// The entry a flush puts for `engine`'s artifact, or `None` when it is
-    /// skipped: another engine build's artifact, a key already listed, a key
-    /// a put or a delete is in flight for, or an entry larger than `budget`.
-    /// A planned key is in flight until [`Self::written`] or
-    /// [`Self::put_settled`].
     fn plan_write(
         &mut self,
         owner: EngineId,
@@ -795,28 +671,20 @@ impl Index {
         })
     }
 
-    /// The put of `key` succeeded: it is listed from now on.
     fn written(&mut self, key: ArtifactKey, meta: Meta) {
         self.writing.remove(&key);
         let persisted = meta.last_used;
         self.insert(key, meta, persisted);
     }
 
-    /// The put of `key` was refused, or will not answer: it is no longer in
-    /// flight. A delete of the key in flight is another call's, and stays.
     fn put_settled(&mut self, key: ArtifactKey) {
         self.writing.remove(&key);
     }
 
-    /// The delete of `key` answered, or will not answer: it is no longer in
-    /// flight.
     fn delete_settled(&mut self, key: ArtifactKey) {
         self.deleting.remove(&key);
     }
 
-    /// The least recently used entries to delete until the index fits
-    /// `budget`. They are dropped from the index now, and are in flight
-    /// until [`Self::delete_settled`].
     fn plan_trim(&mut self, budget: u64) -> Vec<Delete> {
         let mut victims = Vec::new();
         while self.used > budget {
@@ -834,8 +702,6 @@ impl Index {
         victims
     }
 
-    /// Every listed entry, to delete. The index is empty afterwards; the
-    /// deletes are in flight until [`Self::delete_settled`].
     fn plan_clear(&mut self) -> Vec<Delete> {
         let sources = std::mem::take(&mut self.sources);
         self.len = 0;
@@ -858,9 +724,6 @@ impl Index {
     }
 }
 
-/// `key`'s payload from what the store answered for `read`, or `None` when
-/// the entry is missing, filed under another key, not `len` bytes long, or
-/// fails [`decode`].
 fn verified(
     engine: EngineId,
     key: ArtifactKey,
@@ -878,11 +741,6 @@ fn verified(
     }
 }
 
-/// Persistence for one engine build's artifacts over an embedder [`Store`],
-/// in front of which sits the shared memory tier ([`Artifacts`]).
-///
-/// Owned by the resource system and used on its threads; the engine never
-/// touches it. Store IO runs under the index lock.
 pub struct ArtifactCache<S: Store> {
     memory: Arc<Artifacts>,
     engine: EngineId,
@@ -904,13 +762,6 @@ impl<S: Store> std::fmt::Debug for ArtifactCache<S> {
 }
 
 impl<S: Store> ArtifactCache<S> {
-    /// Opens the tier over `store` for `engine`'s artifacts and indexes what
-    /// [`Store::scan`] finds. Deleted on the way: entries whose record does
-    /// not parse or does not match its key, entries another engine build
-    /// wrote, and entries not used within `config.ttl` of `now`. Then trims
-    /// least recently used entries to `config.budget_bytes`, or to the
-    /// Store's quota when that is smaller. A scan that fails opens an empty
-    /// tier.
     #[must_use]
     pub fn open(
         memory: Arc<Artifacts>,
@@ -938,11 +789,6 @@ impl<S: Store> ArtifactCache<S> {
         cache
     }
 
-    /// Run before a script's text is delivered: reads every stored variant
-    /// of `source` that is not already resident, verifies it (the Store's
-    /// key and length, then [`decode`]) and admits it to the memory tier.
-    /// An entry that fails is a miss and is deleted. Every variant found is
-    /// marked used at `now`. Returns how many were admitted.
     pub fn preload(&self, source: SourceDigest, now: SystemTime) -> usize {
         let mut index = self.index();
         let plan = index.plan_preload(&self.memory, self.engine, source, now);
@@ -969,12 +815,6 @@ impl<S: Store> ArtifactCache<S> {
         admitted
     }
 
-    /// Writes what the engine derived since the last flush
-    /// ([`Artifacts::take_pending`]) to the Store, then trims to the budget.
-    /// Skipped: artifacts of another engine build (one process runs one
-    /// build, so they are dropped from the queue), keys already stored, and
-    /// entries larger than the whole budget. A write the Store refuses is
-    /// lost; the artifact stays resident. Returns how many were written.
     pub fn flush(&self, now: SystemTime) -> usize {
         if !self.memory.has_pending() {
             return 0;
@@ -1000,7 +840,6 @@ impl<S: Store> ArtifactCache<S> {
         written
     }
 
-    /// The memory tier this cache preloads into and flushes from.
     #[must_use]
     pub fn memory(&self) -> &Arc<Artifacts> {
         &self.memory
@@ -1011,7 +850,6 @@ impl<S: Store> ArtifactCache<S> {
         self.engine
     }
 
-    /// How many entries the Store holds, as far as the index knows.
     #[must_use]
     pub fn len(&self) -> usize {
         self.index().len
@@ -1022,7 +860,6 @@ impl<S: Store> ArtifactCache<S> {
         self.index().len == 0
     }
 
-    /// The encoded bytes the Store holds, as far as the index knows.
     #[must_use]
     pub fn used_bytes(&self) -> u64 {
         self.index().used
@@ -1033,15 +870,12 @@ impl<S: Store> ArtifactCache<S> {
         self.budget
     }
 
-    /// Forgets every entry and deletes each from the Store. The memory tier
-    /// is untouched.
     pub fn clear(&self) {
         let mut index = self.index();
         let doomed = index.plan_clear();
         self.delete_all(&mut index, doomed);
     }
 
-    /// The Store the tier is built on.
     #[must_use]
     pub fn store_ref(&self) -> &S {
         &self.store
@@ -1065,40 +899,6 @@ impl<S: Store> ArtifactCache<S> {
     }
 }
 
-/// Persistence for one engine build's artifacts over an embedder
-/// [`AsyncStore`], in front of which sits the shared memory tier
-/// ([`Artifacts`]): [`ArtifactCache`]'s policy, driven by awaiting the store.
-///
-/// The decisions are [`ArtifactCache`]'s, step for step: the same entries
-/// are kept and deleted at open, read and verified by a preload, written and
-/// trimmed by a flush. What differs is that the index lock is never held
-/// across an await: each decision is taken under the lock, the lock is
-/// released while the store answers, and the answer is applied under the
-/// lock again. Calls may therefore overlap on one thread (two tasks awaiting
-/// the same cache), and each overlap follows one rule:
-///
-/// - **Two preloads of one source** both read every variant that is not resident when each starts,
-///   and both admit what verifies; entries are content-addressed, so the second admit replaces
-///   identical bytes. A variant's touch is recorded as done when it is planned, so the two plan one
-///   touch between them.
-/// - **A preload during a flush** reads only what the index lists when it starts. An entry whose
-///   put is in flight is not listed until the put succeeds, so the preload does not read it; the
-///   artifact being written is resident anyway, since a flush writes only resident artifacts.
-/// - **A flush during a flush** writes what it took from the memory tier's queue, which no other
-///   flush holds. A key whose put or delete another call has in flight is skipped (it stays
-///   resident), so one key is never put twice at once and a delete never lands after a re-put. The
-///   trims that follow pick their victims under the lock and drop them from the index before
-///   deleting, so two trims never pick one entry.
-/// - **An entry trimmed, cleared or failed while its read is in flight**: a read that verifies is
-///   still admitted to the memory tier (the bytes are correct, whatever the index did meanwhile),
-///   and is marked used only if the key is listed again. A read that does not verify deletes the
-///   entry only if the index still lists the same indexing of the key it was issued for; one
-///   dropped, or written again, since is left alone.
-/// - **A touch that lands after a delete** can leave the store holding an entry the index does not
-///   list. It is valid, and the next [`open`](Self::open) indexes it or trims it.
-///
-/// A future dropped before it finishes (its task cancelled) leaves no key in
-/// flight: the puts and deletes it issued are settled when it drops.
 pub struct AsyncArtifactCache<A: AsyncStore> {
     memory: Arc<Artifacts>,
     engine: EngineId,
@@ -1119,11 +919,6 @@ impl<A: AsyncStore> std::fmt::Debug for AsyncArtifactCache<A> {
     }
 }
 
-/// A put or a delete of `key` in flight, settled in the index when it is
-/// dropped: when its answer has been applied, or when the future awaiting
-/// the answer is dropped first. Each settles only its own kind, so a put
-/// that has just been listed does not settle a delete another call issued
-/// for the key since.
 struct InFlight<'a> {
     index: &'a Mutex<Index>,
     key: ArtifactKey,
@@ -1146,9 +941,6 @@ fn lock(index: &Mutex<Index>) -> MutexGuard<'_, Index> {
 }
 
 impl<A: AsyncStore> AsyncArtifactCache<A> {
-    /// Opens the tier over `store` for `engine`'s artifacts and indexes what
-    /// [`AsyncStore::scan`] finds, deleting and trimming as
-    /// [`ArtifactCache::open`] does. A scan that fails opens an empty tier.
     pub async fn open(
         memory: Arc<Artifacts>,
         store: A,
@@ -1175,10 +967,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         }
     }
 
-    /// [`ArtifactCache::preload`], awaited: run before a script's text is
-    /// delivered, it admits every stored variant of `source` that verifies
-    /// and is not already resident, deletes each that fails, and marks every
-    /// variant found used at `now`. Returns how many were admitted.
     pub async fn preload(&self, source: SourceDigest, now: SystemTime) -> usize {
         let plan = self
             .index()
@@ -1208,9 +996,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         admitted
     }
 
-    /// [`ArtifactCache::flush`], awaited: writes what the engine derived
-    /// since the last flush to the store, one put at a time, then trims to
-    /// the budget. Returns how many were written.
     pub async fn flush(&self, now: SystemTime) -> usize {
         if !self.memory.has_pending() {
             return 0;
@@ -1247,8 +1032,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         written
     }
 
-    /// Forgets every entry and deletes each from the store. The memory tier
-    /// is untouched, and a put in flight lands and is listed.
     pub async fn clear(&self) {
         let doomed = self.index().plan_clear();
         for delete in doomed {
@@ -1256,7 +1039,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         }
     }
 
-    /// The memory tier this cache preloads into and flushes from.
     #[must_use]
     pub fn memory(&self) -> &Arc<Artifacts> {
         &self.memory
@@ -1267,7 +1049,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         self.engine
     }
 
-    /// How many entries the store holds, as far as the index knows.
     #[must_use]
     pub fn len(&self) -> usize {
         self.index().len
@@ -1278,7 +1059,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         self.index().len == 0
     }
 
-    /// The encoded bytes the store holds, as far as the index knows.
     #[must_use]
     pub fn used_bytes(&self) -> u64 {
         self.index().used
@@ -1289,7 +1069,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         self.budget
     }
 
-    /// The store the tier is built on.
     #[must_use]
     pub fn store_ref(&self) -> &A {
         &self.store
@@ -1299,7 +1078,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
         lock(&self.index)
     }
 
-    /// Deletes an entry the index has already dropped and marked in flight.
     async fn delete(&self, delete: Delete) {
         let in_flight = InFlight {
             index: &self.index,
@@ -1311,7 +1089,6 @@ impl<A: AsyncStore> AsyncArtifactCache<A> {
     }
 }
 
-/// The Store key of `engine`'s artifact for `key`.
 fn store_key(engine: EngineId, key: ArtifactKey) -> String {
     format!(
         "{:016x}/{:032x}/{:016x}",
@@ -1319,8 +1096,6 @@ fn store_key(engine: EngineId, key: ArtifactKey) -> String {
     )
 }
 
-/// The record a Store keeps beside an entry. The fields are hex strings,
-/// since a `u128` does not fit a JSON number.
 fn record(engine: EngineId, key: ArtifactKey) -> serde_json::Value {
     serde_json::json!({
         "engine": format!("{:016x}", engine.0),
@@ -1384,7 +1159,6 @@ mod tests {
         )
     }
 
-    /// The encoded size of an entry whose payload is `payload` bytes.
     fn entry_len(payload: usize) -> u64 {
         (HEADER_LEN + payload) as u64
     }
@@ -1507,7 +1281,6 @@ mod tests {
         assert_eq!((artifacts.len(), artifacts.used_bytes()), (1, 4));
         assert!(artifacts.has_pending());
 
-        // Replacing keeps the accounting and queues the key once.
         artifacts.insert(ENGINE, key, bytes(b"longer"));
         assert_eq!((artifacts.len(), artifacts.used_bytes()), (1, 6));
         let pending = artifacts.take_pending();
@@ -1530,7 +1303,6 @@ mod tests {
         assert!(artifacts.contains(ENGINE, a));
         assert!(!artifacts.has_pending());
         artifacts.insert(ENGINE, b, bytes(b"bb"));
-        // Admitting a queued key means a Store has it already.
         artifacts.admit(ENGINE, b, bytes(b"bb"));
         assert!(!artifacts.has_pending());
         assert_eq!(artifacts.take_pending(), []);
@@ -1704,7 +1476,6 @@ mod tests {
         cache.flush(at(1));
         cache.memory().insert(ENGINE, b, bytes(b"bbbb"));
         cache.flush(at(2));
-        // Preloading `a` marks it used, so `b` is the oldest.
         cache.memory().clear();
         assert_eq!(cache.preload(a.source, at(3)), 1);
         cache.memory().insert(ENGINE, c, bytes(b"cccc"));
@@ -1759,7 +1530,6 @@ mod tests {
 
         store.delete(&vanished).unwrap();
 
-        // The index still lists all five; each read fails and drops one.
         cache.memory().clear();
         for key in &keys[..4] {
             assert_eq!(cache.preload(key.source, at(1)), 0);
@@ -1768,8 +1538,6 @@ mod tests {
         assert_eq!((cache.len(), cache.used_bytes()), (1, entry_len(8)));
         assert!(!store.holds(&flipped) && !store.holds(&collided) && !store.holds(&truncated));
 
-        // At open: a record that names another key than the one it is filed
-        // under, and one that does not parse.
         let (mut meta, entry) = store.get(&misnamed).unwrap().unwrap();
         meta.record = record(ENGINE, key_of("elsewhere", "m"));
         store.forge(&misnamed, meta.clone(), &entry);
@@ -1942,7 +1710,6 @@ mod async_tests {
         open_with(store, ENGINE, budget_bytes, now)
     }
 
-    /// Inserts `key` into the cache's memory tier and flushes it at `now`.
     fn stored(cache: &AsyncArtifactCache<AsyncMemStore>, key: ArtifactKey, now: SystemTime) {
         cache.memory().insert(ENGINE, key, bytes(b"code"));
         assert_eq!(block_on(cache.flush(now)), 1);
@@ -2159,7 +1926,6 @@ mod async_tests {
         store.hold(Op::Put);
         let mut first = pin!(cache.flush(at(1)));
         assert!(poll_once(first.as_mut()).is_pending());
-        // The engine derives the same artifact again: it is queued again.
         cache.memory().remove(ENGINE, key);
         cache.memory().insert(ENGINE, key, bytes(b"code"));
         assert_eq!(block_on(cache.flush(at(2))), 0, "its put is in flight");
@@ -2167,7 +1933,6 @@ mod async_tests {
         assert_eq!(block_on(first), 1);
         assert_eq!((cache.len(), store.inner.entries().len()), (1, 1));
 
-        // Once the put has answered, nothing about the key is in flight.
         cache.memory().insert(ENGINE, key, bytes(b"code"));
         assert_eq!(block_on(cache.flush(at(3))), 0, "already listed");
     }
@@ -2213,7 +1978,6 @@ mod async_tests {
         store.hold(Op::Get);
         let mut preload = pin!(cache.preload(a.source, at(3)));
         assert!(poll_once(preload.as_mut()).is_pending());
-        // `a` is still the oldest: its preload has not marked it yet.
         stored(&cache, c, at(4));
         assert!(!holds(&store, a), "trimmed");
         store.release(Op::Get);
@@ -2229,7 +1993,6 @@ mod async_tests {
         let cache = open(&store, 1 << 20, at(0));
         let key = key_of("a", "m");
         stored(&cache, key, at(0));
-        // The store loses the entry behind the index's back.
         Store::delete(&store.inner, &store_key(ENGINE, key)).unwrap();
         cache.memory().clear();
 

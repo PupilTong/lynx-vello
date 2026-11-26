@@ -23,75 +23,44 @@ use terminus::link::{CssDeclaration, CssKeyframe, CssRule, NodeId, StylesheetOri
 
 use crate::main::tree::LynxDocument;
 
-/// An author stylesheet whose CSS the host parsed before the engine saw it.
-///
-/// Rules are in cascade order: later rules win ties, exactly as in a
-/// stylesheet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PreparsedStyleSheet {
-    /// The sheet's rules, in source order.
     pub rules: Vec<PreparsedRule>,
 }
 
 impl PreparsedStyleSheet {
-    /// Whether this sheet would contribute nothing to the cascade.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 }
 
-/// One pre-parsed rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PreparsedRule {
-    /// A style rule: a selector list plus its declaration block.
     Style {
-        /// The selector list, as CSS selector text.
-        ///
-        /// Selector text is the boundary because the pre-parsed forms this
-        /// contract accepts keep attribute selectors and functional
-        /// pseudo-classes as text; there is nothing finer to hand over.
         selectors: String,
-        /// The rule's declarations, in source order.
         declarations: Vec<PreparsedDeclaration>,
     },
-    /// An `@keyframes` rule. Names are global to the view and are not scoped.
     Keyframes {
-        /// The animation name.
         name: String,
-        /// The keyframe blocks, in source order.
         keyframes: Vec<PreparsedKeyframe>,
     },
-    /// An `@font-face` rule.
-    ///
-    /// Font-face descriptors are not CSS properties, so this variant carries
-    /// the descriptor block text rather than parsed declarations.
     FontFace {
-        /// The descriptor block body, without the surrounding braces.
         descriptors: String,
     },
 }
 
-/// One `@keyframes` child block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparsedKeyframe {
-    /// The keyframe selector text (`from`, `to`, `50%`, or a comma list).
     pub selector: String,
-    /// The block's declarations, in source order.
     pub declarations: Vec<PreparsedDeclaration>,
 }
 
-/// One `property: value` declaration whose value text the host already has.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparsedDeclaration {
-    /// The property name. Borrowed when the host's decoder already holds it
-    /// as a `'static` name — an interned property id's canonical name — so a
-    /// lowered sheet does not allocate one string per declaration for it.
     pub property: Cow<'static, str>,
-    /// The value text, without a trailing `!important`.
     pub value: String,
-    /// Whether the declaration carries `!important`.
     pub important: bool,
 }
 
@@ -103,11 +72,6 @@ fn declarations(source: &[PreparsedDeclaration]) -> impl Iterator<Item = CssDecl
     })
 }
 
-/// Lowers a pre-parsed sheet into rules the document owns.
-///
-/// Rules that do not parse are dropped, which is what a browser does with a
-/// stylesheet: an unsupported selector or value invalidates its own rule or
-/// declaration and nothing else.
 fn lower(document: &LynxDocument, sheet: &PreparsedStyleSheet) -> Vec<CssRule> {
     sheet
         .rules
@@ -131,33 +95,16 @@ fn lower(document: &LynxDocument, sheet: &PreparsedStyleSheet) -> Vec<CssRule> {
         .collect()
 }
 
-/// Mounts a pre-parsed author stylesheet on the document.
 pub(crate) fn add_preparsed_style_sheet(document: &mut LynxDocument, sheet: &PreparsedStyleSheet) {
     let rules = lower(document, sheet);
     document.append_rules(rules);
 }
 
-/// Mounts an author stylesheet supplied as CSS text.
-///
-/// The CSS Syntax §3.2 decode step is applied here rather than at the fetch
-/// boundary, so every caller gets it: a leading BOM is decoding metadata, and
-/// left in place U+FEFF is an ident code point that fuses with the first
-/// selector, costing the sheet its first rule.
 pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
     let css = css.strip_prefix('\u{feff}').unwrap_or(css);
     document.add_stylesheet(css, StylesheetOrigin::Author);
 }
 
-/// Mounts a pre-parsed author stylesheet on one shadow tree.
-///
-/// The shadow-root counterpart of [`add_preparsed_style_sheet`]: the rules
-/// match only inside `shadow_root`'s tree (the host through `:host`), and the
-/// sheet's implicit `@scope` root is the host. An `@font-face` rule in the
-/// sheet is not loaded ([`terminus::link::Document::append_shadow_rules`]).
-///
-/// # Panics
-///
-/// Panics if `shadow_root` is not a live shadow root of `document`.
 pub(crate) fn add_preparsed_style_sheet_to_shadow(
     document: &mut LynxDocument,
     shadow_root: NodeId,
@@ -167,12 +114,6 @@ pub(crate) fn add_preparsed_style_sheet_to_shadow(
     document.append_shadow_rules(shadow_root, rules);
 }
 
-/// Mounts an author stylesheet supplied as CSS text on one shadow tree,
-/// stripping a leading BOM as [`add_style_sheet_text`] does.
-///
-/// # Panics
-///
-/// Panics if `shadow_root` is not a live shadow root of `document`.
 pub(crate) fn add_style_sheet_text_to_shadow(
     document: &mut LynxDocument,
     shadow_root: NodeId,
@@ -405,7 +346,6 @@ mod tests {
         assert!((document.rounded_layout(view).unwrap().size.height - 77.0).abs() < f32::EPSILON);
     }
 
-    /// A sheet mounted on a shadow root styles that tree and its host only.
     #[test]
     fn a_preparsed_sheet_mounted_on_a_shadow_root_stays_inside_it() {
         let mut document = document();
@@ -452,7 +392,6 @@ mod tests {
         );
     }
 
-    /// A BOM is decoding metadata, not the first character of a selector.
     #[test]
     fn a_byte_order_mark_does_not_cost_the_sheet_its_first_rule() {
         let mut document = document();
@@ -490,9 +429,6 @@ mod tests {
         );
     }
 
-    /// No fixture bundle carries `@font-face`, so this is the only thing
-    /// exercising its lowering: the rule must build, mount, and leave the rest
-    /// of the sheet intact.
     #[test]
     fn a_font_face_rule_mounts_without_disturbing_the_sheet() {
         let mut document = document();
@@ -517,8 +453,6 @@ mod tests {
         assert!((layout.size.width - 21.0).abs() < f32::EPSILON);
     }
 
-    /// A descriptor block that parses to nothing must not cause the rule, or
-    /// the whole sheet, to be rejected.
     #[test]
     fn an_empty_font_face_block_is_harmless() {
         let mut document = document();
@@ -542,11 +476,6 @@ mod tests {
         assert!((document.rounded_layout(view).unwrap().size.width - 22.0).abs() < f32::EPSILON);
     }
 
-    /// A keyframe block keyed by a scroll-animations-1 range selector, as a
-    /// lowered `.web.bundle` hands it over, reaches stylo's keyframes rule
-    /// and places its keyframe on the subject's view timeline: halfway
-    /// through `entry` (`[200, 400]` of a 400px scrollport over 600px, the
-    /// 200px subject, and 600px) the fade is halfway.
     #[test]
     fn a_range_keyframe_selector_places_its_keyframe_on_the_timeline() {
         let mut document = document();
@@ -618,10 +547,6 @@ mod tests {
         assert_eq!(opacity, Some(0.5));
     }
 
-    /// That the rule itself carries its name, offsets and blocks is asserted
-    /// in `terminus`, where the built rule is still readable. This covers the part
-    /// visible from here: a keyframes rule mounts alongside style rules
-    /// without disturbing them, and `animation-name` cascades.
     #[test]
     fn a_keyframes_rule_mounts_alongside_the_style_rules_that_use_it() {
         let mut document = document();

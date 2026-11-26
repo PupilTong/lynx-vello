@@ -27,7 +27,6 @@ const fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
 }
 
-/// What the host reports of a loaded source: animated or still.
 fn loaded(source: &str, animated: bool) -> ImageEvent {
     ImageEvent::Loaded {
         source: Arc::from(source),
@@ -37,10 +36,6 @@ fn loaded(source: &str, animated: bool) -> ImageEvent {
     }
 }
 
-/// A host that serves the playback requests as the store does, every frame
-/// ready: three frames of 100, 200 and 300 ms per picture, a playhead per
-/// picture drawn from the moment it plays, advanced at the instants the test
-/// names, and each completed loop reported.
 #[derive(Default)]
 struct Host {
     pictures: FxHashMap<PictureId, Playhead>,
@@ -56,7 +51,6 @@ impl Host {
         ))
     }
 
-    /// Serves what the entry's epilogue hands over.
     fn serve(&mut self, document: &LynxDocument, sources: &ImageSources) {
         let timeline = Self::timeline();
         for request in sources.take_playback(document) {
@@ -84,8 +78,6 @@ impl Host {
         }
     }
 
-    /// Advances every playhead to `until`, frame by frame, and answers the
-    /// reports that owes, in order.
     fn run(&mut self, until: Duration) -> Vec<ImageEvent> {
         let timeline = Self::timeline();
         let mut events = Vec::new();
@@ -117,7 +109,6 @@ impl Host {
     }
 }
 
-/// A document with its component events and sources, and a host.
 struct Page {
     document: LynxDocument,
     events: ComponentEvents,
@@ -140,14 +131,11 @@ impl Page {
         child(&mut self.document, "image", "width: 40px; height: 20px")
     }
 
-    /// The host's reports applied, as a turn does.
     fn report(&mut self, events: &[ImageEvent]) {
         let outcomes = apply_image_events(&mut self.document, &self.sources, events);
         self.events.extend_images(outcomes);
     }
 
-    /// The end of the entry: the requests handed to the host, then the
-    /// events the entry queued, as the runtime names them at delivery.
     fn settle(&mut self) -> Vec<String> {
         self.host.serve(&self.document, &self.sources);
         self.events
@@ -172,7 +160,6 @@ impl Page {
             .collect()
     }
 
-    /// Runs the host's playheads to `until` and applies their reports.
     fn run(&mut self, until: Duration) -> Vec<String> {
         let events = self.host.run(until);
         self.report(&events);
@@ -189,21 +176,14 @@ impl Page {
     }
 }
 
-/// How the events below name an element.
 fn node_name(node: NodeId) -> String {
     format!("{node:?}")
 }
 
-/// `name` at `node`, as [`Page::settle`] names it.
 fn at(node: NodeId, name: &str) -> String {
     format!("{}:{name}", node_name(node))
 }
 
-/// An animated `src` with `loop-count` N: the element presents a picture
-/// of its own at the source's natural size, asks the host to play it N
-/// times regardless of the file, fires `startplay` before `load`, then
-/// `currentloopcomplete` at the end of every loop and `finalloopcomplete`
-/// after the last, and nothing more.
 #[test]
 fn an_animated_src_plays_its_loop_count_and_fires_its_events_in_order() {
     let mut page = Page::new();
@@ -245,8 +225,6 @@ fn an_animated_src_plays_its_loop_count_and_fires_its_events_in_order() {
     assert!(page.run(ms(60_000)).is_empty(), "the last frame stays");
 }
 
-/// `loop-count` absent, zero, negative or not a number plays forever, and
-/// a fraction plays its whole part: the file's own count is never read.
 #[test]
 fn loop_count_reads_as_native() {
     for (value, loops) in [
@@ -273,8 +251,6 @@ fn loop_count_reads_as_native() {
     }
 }
 
-/// `autoplay` off: the picture is played paused on its first frame, and no
-/// `startplay` fires; a resume plays it, and never fires one either.
 #[test]
 fn autoplay_off_shows_the_first_frame_and_owes_no_startplay() {
     let mut page = Page::new();
@@ -295,11 +271,6 @@ fn autoplay_off_shows_the_first_frame_and_owes_no_startplay() {
     assert_eq!(page.run(ms(60_600)), [at(image, "currentloopcomplete")]);
 }
 
-/// Both attributes are read when the `src` loads: a `src` this document has
-/// already settled loads inside the write, and an `autoplay` written after
-/// it in the same entry still counts; a change after the load does nothing
-/// until the next one. A `src` change ends the picture, and the next load
-/// plays a new one from the start.
 #[test]
 fn attributes_are_read_when_the_src_loads_and_a_src_change_starts_over() {
     let mut page = Page::new();
@@ -349,9 +320,6 @@ fn attributes_are_read_when_the_src_loads_and_a_src_change_starts_over() {
     );
 }
 
-/// The four UI methods answer code 0 with native's message whether or not
-/// anything plays, and each sends its control to the playing picture; on
-/// a still image they send nothing.
 #[test]
 fn the_four_methods_answer_and_control_the_playing_picture() {
     let mut page = Page::new();
@@ -401,9 +369,6 @@ fn the_four_methods_answer_and_control_the_playing_picture() {
     assert_eq!(page.invoke(image, "play"), MethodOutcome::NotFound);
 }
 
-/// The methods against the host: a stop owes no final loop, a resume
-/// after it plays the whole count again, and `startAnimate` from a
-/// pause restarts with the loops reset.
 #[test]
 fn stop_resume_and_start_animate_play_whole_counts_again() {
     let mut page = Page::new();
@@ -446,9 +411,6 @@ fn stop_resume_and_start_animate_play_whole_counts_again() {
     );
 }
 
-/// An animated `placeholder` is a URL picture under the file's count on the
-/// shared playhead: nothing is asked of the host and nothing fires; the
-/// `src` taking over is what plays a picture of its own.
 #[test]
 fn an_animated_placeholder_plays_the_shared_url_and_fires_nothing() {
     let mut page = Page::new();
@@ -465,7 +427,6 @@ fn an_animated_placeholder_plays_the_shared_url_and_fires_nothing() {
     assert_eq!(page.sources.playing(image), None);
 }
 
-/// A still `src` is untouched: a URL picture, a `load`, no request.
 #[test]
 fn a_still_src_is_unaffected() {
     let mut page = Page::new();
@@ -480,8 +441,6 @@ fn a_still_src_is_unaffected() {
     assert_eq!(page.host.take_requests(), []);
 }
 
-/// A freed `image` ends its picture, and a report the host made before it
-/// heard is nobody's.
 #[test]
 fn a_freed_image_ends_its_picture_and_a_late_report_is_dropped() {
     let mut page = Page::new();

@@ -27,26 +27,16 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// The base of a sheet the engine wrote itself: a `chrome` URL, which is what
-/// enables chrome rules in stylo's parser (`UrlExtraData::chrome_rules_enabled`)
-/// for a sheet that still cascades as an author sheet.
 pub(crate) fn engine_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("chrome://engine/").expect("a valid URL"))
 }
 
-/// How a scheduled committed-input relayout is allowed to finish.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RelayoutKind {
-    /// A `contain: strict` boundary: containment guarantees nothing escapes,
-    /// so the recompute is final whatever it produces.
     Boundary,
-    /// An ordinary node whose committed input is content-independent: the
-    /// recompute stands only if it reproduces the previous output bit for
-    /// bit; any difference escalates to a whole-tree pass.
     InPlace { previous: LayoutOutput },
 }
 
-/// A node scheduled for a committed-input relayout.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingRelayout {
     pub node_id: NodeId,
@@ -54,87 +44,32 @@ pub(crate) struct PendingRelayout {
     pub kind: RelayoutKind,
 }
 
-/// One DOM tree, including its actual document node at primary-arena slot
-/// zero.
-///
-/// A document belongs to the thread that created it and cannot leave: it is
-/// not `Send`, twice over. Its [`Node`](crate::tree::node::Node)s hold a raw backpointer
-/// into the arena set that owns them, and the [`Device`](crate::style::device::Device)
-/// it is built with owns a Stylo `Box<dyn FontMetricsProvider>` that is `Sync`
-/// but not `Send`. An embedder therefore builds a document *on* its owning
-/// thread rather than handing one over — which is what `bobcat-main` does.
 pub struct Document<T> {
     style_engine: StyleEngine,
-    /// The worker threads this document's style traversals run on. `None`
-    /// traverses on the thread that flushes; a pool is shared only with the
-    /// documents that flush on this same thread, which is what lets two
-    /// documents on two threads restyle at once.
     style_pool: Option<std::rc::Rc<crate::style::pool::StylePool>>,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::FramePainter>,
-    /// The document's image name table. Holds no pixels and no host handle:
-    /// a page whose images have not loaded paints without them rather than
-    /// failing.
     pub(crate) images: crate::render::image::ImageRegistry,
-    /// The `content-visibility: auto` skipping changes committed renders have
-    /// produced and no one has drained yet, in frame order — css-contain-2
-    /// §4.4's event queue, as [`crate::visual::relevance`] fills it and
-    /// [`Document::dispatch_content_visibility_changes`] empties it.
     pub(crate) content_visibility_changes: Vec<crate::visual::ContentVisibilityChange>,
-    /// The intersection observers and their queues
-    /// ([`crate::visual::intersection`]). A field rather than a
-    /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
-    /// its one reader, the update, holds the document mutably.
     pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
-    /// The resize observers and their queues ([`crate::visual::resize`]). A
-    /// field rather than a [`TreeArenas`] table for the reason
-    /// `intersections` is one; the layout pass writes only its stale bit.
     pub(crate) resizes: crate::visual::resize::ResizeObservers<T>,
-    /// The event listener table ([`crate::event`]'s `listeners` module, which
-    /// says why it is a side table). A field rather than a [`TreeArenas`]
-    /// table for the reason `intersections` is one: style, layout and paint
-    /// never read it.
     pub(crate) listeners: crate::event::listeners::Listeners,
-    /// The focused element, its selection and composition, and the focus
-    /// events not yet taken ([`crate::editing`]). A field, not a
-    /// [`TreeArenas`] table: it names at most one element.
     pub(crate) editing: crate::editing::EditingState,
-    /// Where the events this document's own elements queue go
-    /// ([`crate::event::QueuedEventSink`]); `None` drops them.
     pub(crate) queued_events: Option<std::rc::Rc<dyn crate::event::QueuedEventSink>>,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
-    /// The state of the document's `canvas` elements
-    /// ([`crate::html::canvas`]), shared with their component.
     pub(crate) canvases: crate::html::canvas::Canvases,
     animations: crate::style::animation::AnimationDriver,
-    /// The id the most recently built frame carries; monotone per build, so
-    /// it orders commits for every consumer of published frames.
     commit_id: u64,
-    /// Whether renders record their phases' instants, and the last record
-    /// ([`crate::visual::timing`]). Beside `commit_id` because a record is
-    /// one commit's.
     pub(crate) commit_timer: crate::visual::timing::CommitTimer,
-    /// Whether the paint walk decides Paint Timing's contentful test
-    /// ([`Self::set_content_detection`]). Off by default: the walk then
-    /// tests one `bool` per item and nothing else.
     pub(crate) content_detection: crate::visual::timing::ContentDetection,
-    /// The Container Timing roots ([`crate::visual::container_timing`]):
-    /// what the paint walk and every insertion test before anything else.
     pub(crate) container_roots: crate::visual::container_timing::ContainerRoots,
-    /// What each outermost SVG `svg` element draws, and which owe a record
-    /// ([`crate::svg::present`]). Empty and unallocated without one.
     pub(crate) svg_roots: crate::svg::present::SvgRoots,
-    /// The isolated documents of SVG images that still animate
-    /// ([`crate::svg::image`]). Empty and unallocated without one.
     pub(crate) animated_images: crate::svg::image::AnimatedImages,
-    /// Whether anything visually observable changed since the retained
-    /// frame was built. This is the whole invalidation state: one bit, not
-    /// a counter — a frame's identity is its commit id.
     visual_dirty: bool,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -152,7 +87,6 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 }
 
 impl<T> Document<T> {
-    /// Creates a document with a permanent document element.
     #[must_use]
     pub fn new(device: crate::style::device::Device, root_tag: &str, root_payload: T) -> Self {
         let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
@@ -214,17 +148,6 @@ impl<T> Document<T> {
         &self.style_engine
     }
 
-    /// Gives this document the style worker threads of the thread it flushes
-    /// on, returning whatever pool it had before.
-    ///
-    /// One pool belongs to one thread — rayon takes the thread that builds it
-    /// over as index zero, permanently — so the documents that share a pool
-    /// are exactly the documents that flush on that thread. `Rc` is what says
-    /// so: a pool cannot reach a second thread, and two documents on one
-    /// thread cannot traverse at once, because the thread driving one
-    /// traversal is inside it. The aliasing hazard [`crate::style::pool::StylePool`]
-    /// describes needs two concurrent traversals over one worker, and this
-    /// leaves nowhere for the second to come from.
     pub fn set_style_pool(
         &mut self,
         pool: std::rc::Rc<crate::style::pool::StylePool>,
@@ -279,8 +202,6 @@ impl<T> Document<T> {
         self.layout_dirty || self.last_layout_inputs != Some((viewport, scale))
     }
 
-    /// Whether the next `layout()` has a flush or a pass to run at the
-    /// viewport and scale of the last pass.
     pub(crate) fn layout_owed(&self) -> bool {
         self.layout_dirty || self.document_element().needs_style_flush()
     }
@@ -289,14 +210,10 @@ impl<T> Document<T> {
         self.layout_root_dirty || self.layout_inputs_changed(viewport, scale)
     }
 
-    /// Whether the viewport or device scale moved since the last pass. Both
-    /// feed the rounding function itself, so nothing about the previous
-    /// rounding survives them — including for boxes no layout write touched.
     pub(crate) fn layout_inputs_changed(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.last_layout_inputs != Some((viewport, scale))
     }
 
-    /// Whether any layout pass has completed in this document.
     pub(crate) const fn has_laid_out(&self) -> bool {
         self.last_layout_inputs.is_some()
     }
@@ -327,8 +244,6 @@ impl<T> Document<T> {
             .expect("stale NodeId passed to a Document mutation method")
     }
 
-    /// Resolves a node to its arena slot, for the state that lives outside
-    /// [`TreeArenas`].
     #[inline]
     pub(crate) fn slot(&self, id: NodeId) -> Option<NodeSlot> {
         self.tree.slot(id)
@@ -347,9 +262,6 @@ impl<T> Document<T> {
         &mut self.layout
     }
 
-    /// The image registry beside the layout state's text context, borrowed
-    /// together: applying a parsed vector document shapes its text through
-    /// the one and files the encoded image in the other.
     pub(crate) fn image_apply_parts(
         &mut self,
     ) -> (
@@ -367,17 +279,11 @@ impl<T> Document<T> {
         (&self.tree, &self.layout)
     }
 
-    /// The id of the most recently built frame.
     #[must_use]
     pub(crate) fn commit_id(&self) -> u64 {
         self.commit_id
     }
 
-    /// Claims the next commit id for the frame about to be built, clearing
-    /// the dirty bit with it: mutations from here on belong to the *next*
-    /// frame. A build or paint that panics leaves the previously retained
-    /// frame carrying an older id, which is what keeps `needs_render`
-    /// reporting stale without a counter.
     pub(crate) fn next_commit_id(&mut self) -> u64 {
         self.commit_id += 1;
         self.visual_dirty = false;
@@ -389,26 +295,14 @@ impl<T> Document<T> {
         self.visual_dirty
     }
 
-    /// Notes that the retained frame is painted for a state that no longer
-    /// exists.
     pub(crate) fn note_visual_mutation(&mut self) {
         self.visual_dirty = true;
     }
 
-    /// Clears the dirty bit without claiming a commit id.
-    ///
-    /// The one caller is the `content-visibility: auto` pass loop
-    /// ([`crate::visual::relevance`]): a relevance flip invalidates layout,
-    /// which dirties the frame that flip was decided on, and the loop answers
-    /// that by rebuilding the *same* commit rather than by starting another
-    /// one. Nothing else may use it — for any other mutation, a cleared bit
-    /// with no rebuild behind it is a frame that never repaints.
     pub(crate) const fn clear_visual_dirty(&mut self) {
         self.visual_dirty = false;
     }
 
-    /// Every layout state entry, freed keys' included: this walks storage,
-    /// not identity.
     pub(crate) fn layout_data_mut(&mut self) -> impl Iterator<Item = &mut NodeLayoutState> {
         self.layout.iter_mut()
     }
@@ -417,7 +311,6 @@ impl<T> Document<T> {
         (&self.tree, &mut self.pending_snapshots)
     }
 
-    /// Whether the element at `opaque` already has a snapshot pending.
     pub(crate) fn has_pending_snapshot(&self, opaque: stylo::dom::OpaqueNode) -> bool {
         self.pending_snapshots.contains_key(&opaque)
     }
@@ -429,9 +322,6 @@ impl<T> Document<T> {
             .expect("the document node is never removed")
     }
 
-    /// The document element — the permanent root element created with the
-    /// document itself. The document node's child list is structurally
-    /// immutable after construction: this is its only child, forever.
     #[must_use]
     pub fn document_element(&self) -> &Node<T> {
         self.tree
@@ -451,11 +341,6 @@ impl<T> Document<T> {
         FlushPhaseToken { flag }
     }
 
-    /// Creates an element with the local name `tag`.
-    ///
-    /// `svg` is the SVG namespace's `svg` element, as HTML's tree
-    /// construction makes an `svg` start tag in HTML content
-    /// ([`crate::svg`]); every other tag is an HTML-namespace element.
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         if tag == crate::svg::SVG_TAG {
             return self.create_svg_namespace_element(tag, payload);
@@ -473,17 +358,10 @@ impl<T> Document<T> {
         id
     }
 
-    /// Creates an SVG-namespace element with the local name `tag`, case
-    /// kept (`linearGradient`): the DOM's `createElementNS` for the SVG
-    /// namespace. [`Self::create_element`] makes only the `svg` element in it.
     pub fn create_svg_element(&mut self, tag: &str, payload: T) -> NodeId {
         self.create_svg_namespace_element(tag, payload)
     }
 
-    /// An SVG-namespace element. It never takes a custom element
-    /// definition: definitions are keyed by local name in the HTML
-    /// namespace. An `svg` element is replaced content from the start
-    /// ([`crate::svg::root`]).
     pub(crate) fn create_svg_namespace_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
         let id = self.allocate_node(|owner, id| {
@@ -500,7 +378,6 @@ impl<T> Document<T> {
         self.allocate_node(|owner, id| Node::new_text(owner, id, text).with_payload(payload))
     }
 
-    /// Files a node in the node arena under one freshly issued id.
     pub(crate) fn allocate_node(
         &mut self,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
@@ -613,7 +490,6 @@ impl<T> Document<T> {
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.note_child_inserted(parent, child);
-        // An `svg` root's drawing is its subtree (`svg::present`).
         if self.tree.at(child_slot).in_svg_namespace()
             || self.tree.at(parent_slot).in_svg_namespace()
         {
@@ -630,8 +506,6 @@ impl<T> Document<T> {
         self.insert_before(parent, child, None);
     }
 
-    /// Exchanges the positions of two distinct attached elements, within one
-    /// parent or across parents.
     pub fn swap_element(&mut self, a: NodeId, b: NodeId) {
         assert_ne!(a, b, "swap_element: the operands must differ");
         let position = |document: &Self, node: NodeId| {
@@ -653,33 +527,12 @@ impl<T> Document<T> {
         }
     }
 
-    /// Unlinks `child` from its parent, leaving it allocated as a detached
-    /// root. Freeing is [`Self::drop_element`]'s and
-    /// [`Self::drop_subtree`]'s; a removal never frees anything, because the
-    /// owner outside the tree that named the node still names it.
     pub fn remove_element(&mut self, child: NodeId) {
         let base = self.begin_reactions();
         self.unlink_from_parent(child);
         self.drain_reactions(base);
     }
 
-    /// Frees `root`, a detached node, together with everything under it that
-    /// belongs to it alone — its non-element descendants and its shadow tree
-    /// in full — and returns the root's payload with the number of nodes
-    /// freed.
-    ///
-    /// An **element** child is unlinked where the walk meets it and stays
-    /// allocated as a detached root, because an element is what an embedder
-    /// names: in Bobcat every element carries a script handle, and that
-    /// handle is what decides when the element goes. Nothing else in a tree
-    /// is handed out that way — a text node is minted by whatever reflects
-    /// it (`raw-text`'s run), and a shadow tree is a component's own — so
-    /// leaving those behind would leak them, and they go with their owner.
-    ///
-    /// A surviving child is unlinked while its parent is still live, so the
-    /// removal bookkeeping runs against a node that exists — by
-    /// [`Self::unlink_from_doomed_parent`], since everything this walk
-    /// touches is detached already.
     fn free_owned_subtree(&mut self, root: NodeId, in_shadow_tree: bool) -> (Option<T>, usize) {
         debug_assert!(
             self.live(root).parent_id().is_none(),
@@ -687,10 +540,6 @@ impl<T> Document<T> {
         );
         let mut payload = None;
         let mut freed = 0;
-        // A node inside a shadow tree is freed whole, elements included:
-        // nothing in one is reachable from outside, so an element there has
-        // no owner to survive for. Whether `root` is one has to be decided by
-        // the caller, before it unlinks the node that would have answered.
         let mut stack = vec![(root, in_shadow_tree)];
         while let Some((current, in_shadow_tree)) = stack.pop() {
             self.assert_not_pinned(current);
@@ -718,18 +567,6 @@ impl<T> Document<T> {
         )
     }
 
-    /// Takes `child` out of a `parent` that is about to be freed, leaving it
-    /// a detached root.
-    ///
-    /// The structural half of [`Self::unlink_from_parent`] and no more. Every
-    /// node [`Self::free_owned_subtree`] walks is inside a detached subtree,
-    /// so nothing here is rendered, laid out, animating, or connected: the
-    /// invalidation, the animation cancel, the child-list style hint and the
-    /// disconnected reaction the general path records would all be work
-    /// against a node about to stop existing — and the first of them would
-    /// schedule a whole-document layout for a frame in which nothing visible
-    /// changed. The removal that detached the subtree recorded all of it
-    /// already, for the subtree as a whole.
     fn unlink_from_doomed_parent(&mut self, child: NodeId, parent: NodeId) {
         self.tree.remove_child(parent, child);
         self.note_slot_assignment_removed(parent, child);
@@ -773,24 +610,10 @@ impl<T> Document<T> {
         self.note_child_list_change(parent, removed_index);
         self.note_child_removed(parent);
         self.note_custom_elements_removed(child, was_connected);
-        // HTML's removing steps: an element that left the document leaves
-        // the top layer with it (`tree::top_layer`, "Removal").
         self.drop_disconnected_top_layer_entries();
-        // ...and is no longer focused nor selected (the focus fixup rule
-        // and its selectable-element counterpart, `editing`).
         self.fix_up_selection();
     }
 
-    /// Frees `id`, returning its payload. Its element children are unlinked
-    /// and stay allocated as detached roots, each for its own owner to free;
-    /// everything else under it — its text nodes, its shadow tree — is freed
-    /// with it, as `Self::free_owned_subtree` describes.
-    ///
-    /// Only the named node's payload comes back. The payloads of what goes
-    /// with it are dropped, because nothing outside the tree named those
-    /// nodes to be given one back for; an embedder whose `T` owns a resource
-    /// and that mints text nodes or shadow trees wants
-    /// [`Self::drop_subtree`], which answers with every payload it frees.
     pub fn drop_element(&mut self, id: NodeId) -> T {
         assert_ne!(
             id, DOCUMENT_NODE_ID,
@@ -808,29 +631,15 @@ impl<T> Document<T> {
             self.get(id).is_some(),
             "stale NodeId passed to Document::drop_element"
         );
-        // Before anything is mutated, as `drop_subtree`'s preflight is: a
-        // refused drop must leave the document exactly as it found it, not
-        // detached and half-destroyed.
         self.assert_not_pinned(id);
-        // Read while the node still has the parent that answers it: an
-        // element inside a shadow tree is not reachable from outside, so the
-        // whole subtree under it goes, elements and all.
         let in_shadow_tree = self.containing_shadow_root(id).is_some();
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.run_reactions(base);
-        // No visual mutation is noted here. Every node this frees was either
-        // detached already or detached by the unlink above, which noted one
-        // itself; freeing what is not rendered changes no frame.
-        // The document node and a shadow root are refused above, and no
-        // generated node is ever handed out, so the root is an element or a
-        // text node an embedder created with a payload.
         let payload = self
             .free_owned_subtree(id, in_shadow_tree)
             .0
             .expect("a node an embedder can name carries its payload");
-        // `slotchange` waits for the free: a handler run inside the removal
-        // could re-attach the node about to go.
         self.fire_slot_changes();
         payload
     }
@@ -857,8 +666,6 @@ impl<T> Document<T> {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let node = self.free_node(current);
-            // The node is already out of the arenas, so its child links have
-            // to be turned back into ids before the walk can follow them.
             stack.extend(
                 node.child_slots()
                     .iter()
@@ -871,24 +678,15 @@ impl<T> Document<T> {
                 !node.is_backdrop_node() && !node.is_anonymous_box(),
                 "a generated box's node is in no child list"
             );
-            // A shadow root is the one node here with no payload.
             if let Some(payload) = node.into_payload() {
                 removed.push(payload);
             }
         }
         self.prune_relayout_roots();
-        // As in `drop_element`: no `slotchange` handler runs with a free
-        // pending.
         self.fire_slot_changes();
         removed
     }
 
-    /// Cancels the animations of a subtree that is leaving its parent.
-    ///
-    /// A node taken out of the tree stops being rendered, so its animations
-    /// end — and a move, which unlinks before re-inserting, restarts them,
-    /// which is what browsers do too. Costs one map read on a document that
-    /// never animates.
     fn cancel_animations_in_subtree(&mut self, root: NodeId) {
         if self.animations.is_empty() {
             return;
@@ -899,9 +697,6 @@ impl<T> Document<T> {
             let Some(node) = self.tree.get(current) else {
                 continue;
             };
-            // The node survives an unlink, so its animation bits have to be
-            // cleared with its animations rather than left to the next flush,
-            // which no longer visits it.
             node.set_may_have_animations(false);
             node.replace_animates(0);
             subtree.push(current);
@@ -917,52 +712,24 @@ impl<T> Document<T> {
         self.animations.forget(&subtree);
     }
 
-    /// Empties the arenas of one node and retires its id.
     pub(crate) fn free_node(&mut self, id: NodeId) -> Node<T> {
         let removed_snapshot = self
             .pending_snapshots
             .remove(&OpaqueNode(id.arena_key()))
             .is_some();
         self.animations.forget(&[id]);
-        // An intersection observer names nodes three ways — as the node its
-        // handler is bound to, as a target, as its root — and an entry names
-        // its target. This is the one place a name stops meaning anything,
-        // and an id retired here is never reissued, so the registry forgets
-        // the node here, before the arenas do: an observer never outlives the
-        // node it is bound to, an entry handed out always names a live node,
-        // and a freed root becomes one whose targets report leaving. One test
-        // when nothing observes.
         if !self.intersections.is_empty() {
             self.intersections.forget_node(id);
         }
-        // A resize observer names nodes two ways — as the node its handler is
-        // bound to, as a target — and an entry names its target; the same
-        // retired-id rule makes this its one cleanup. One test when nothing
-        // observes.
         if !self.resizes.is_empty() {
             self.resizes.forget_node(id);
         }
-        // The listener table names nodes as registration targets, and the
-        // same retired-id rule makes this its one cleanup: a freed node's
-        // registrations leave here, and a name they were the last of is
-        // queued for `Document::take_pending_last_removals`, since no caller
-        // of a free has a change to return. One test when nothing is
-        // registered.
         if !self.listeners.is_empty() {
             self.listeners.forget_node(id);
         }
-        // A container takes the anonymous boxes it generated with it; a
-        // source or a node whose layout children were overridden leaves its
-        // entry, which names a dead node from here on. One test when no
-        // loose text was ever boxed.
         self.forget_anonymous_boxes(id);
-        // An `svg` root's recorded drawing. One test without one.
         self.forget_svg_root(id);
         let node = self.tree.remove_node(id);
-        // A replaced box presenting a URL holds it in the image registry,
-        // which is what keeps a document handed over as bytes alive while
-        // something draws it; this is the one place a box stops presenting
-        // without saying so.
         if let Some(crate::render::picture::PictureKey::Url(source)) = node.picture() {
             self.images.unbind(source);
             self.forget_animated_image(source);
@@ -981,21 +748,13 @@ impl<T> Document<T> {
         }
         self.note_freed_editing_node(&node);
         self.layout.remove(slot);
-        // The pin preflight keeps a pinned node from reaching here. A
-        // reaction still queued for `id` stays queued and runs nothing: ids
-        // are never reissued, and every reaction looks its element up first.
         #[cfg(debug_assertions)]
         self.assert_not_pinned(id);
-        // Every free comes through here, one node at a time, so a defined
-        // element in a freed subtree or in a freed shadow tree is told once.
         self.note_custom_element_freed(id, node.custom_definition);
         node
     }
 
     fn prune_relayout_roots(&mut self) {
-        // Freeing is per node now — one call per script handle the collector
-        // takes — so the empty case is the one that has to be free, rather
-        // than two `retain` passes over vectors that hold nothing.
         if self.relayout_roots.is_empty() && self.relayout_root_ids.is_empty() {
             return;
         }
@@ -1024,9 +783,6 @@ impl<T> Document<T> {
         std::mem::replace(&mut self.pending_snapshots, SnapshotMap::new())
     }
 
-    /// Collects the flush's damage and answers the restyled elements whose
-    /// anchor-positioning state (`layout::anchors`) has to be re-read — empty,
-    /// and unallocated, for every flush of a page that declares none.
     pub(crate) fn harvest_flush<F>(
         &mut self,
         root: NodeId,
@@ -1072,12 +828,6 @@ impl<T> Document<T> {
         });
     }
 
-    /// Drops the shaped text a node retains, keeping its box measurements.
-    ///
-    /// The explicit half of what `invalidate_layout` used to imply. Reshaping
-    /// is the expensive part of a text pass, so it is asked for by the
-    /// mutations that actually change what was shaped, never by geometry
-    /// moving around a node.
     pub(crate) fn invalidate_text_artifact(&mut self, id: NodeId) {
         if let Some(slot) = self.tree.slot(id) {
             self.layout.clear_text_artifact(slot);
@@ -1102,12 +852,7 @@ impl<T> Document<T> {
                         data.clear_restyle_state();
                         damage
                     });
-                    // Reads the primary style after the clear above, which is
-                    // sound only because clearing restyle state touches the
-                    // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
-                    // `Some(declares)` for a restyled element: whether its new
-                    // style declares anything the anchor registry indexes.
                     let anchor_restyle = refresh.changed.then(|| {
                         node.layout_computed_style()
                             .is_some_and(crate::layout::anchors::declares_anchor_state)
@@ -1131,8 +876,6 @@ impl<T> Document<T> {
                         svg,
                     )
                 };
-                // An element that declares nothing now may have declared
-                // something before, which only the registry remembers.
                 if let Some(declares) = anchor_restyle
                     && (declares || self.tree.anchors().knows(current))
                 {
@@ -1152,44 +895,26 @@ impl<T> Document<T> {
                 }
                 (harvested, refresh, svg)
             };
-            // Before the damage test: a first or a last style carries no
-            // damage at all, and it still decides whether the element's text
-            // is boxed.
             self.note_box_restyle(
                 current,
                 refresh,
                 harvested.is_some_and(StyleDamage::needs_relayout),
             );
             let Some(damage) = harvested else {
-                // A first style carries no damage: an outermost `svg` styled
-                // again after a `display: none` ancestor is shown owes a
-                // record of what changed while it had no style.
                 if svg && refresh.first {
                     self.note_svg_first_style(current);
                 }
                 continue;
             };
-            // An SVG element's new style is its `svg` root's new drawing
-            // (`svg::present`); one bit test for every other element. One
-            // below its root has no box, so it relays nothing out.
             let boxless = svg && self.note_svg_restyle(current);
             if refresh.containing_block_changed {
                 containing_blocks.push(current);
             }
             if damage.needs_relayout() && !boxless {
-                // Reconstruction damage needs no second walk from the parent:
-                // this one already cleared the parent's cache (or stopped
-                // because it was empty, or because the parent skips its
-                // contents and cannot see the change), and the ancestor it
-                // parked on relays the reconstructed box tree under its own
-                // algorithm. A second walk would restart above that park and
-                // clear past it.
                 self.invalidate_layout(current);
             }
             sink(current, damage);
         }
-        // After the walk, so every descendant it reads holds its post-flush
-        // style. Only elements whose role flipped get here.
         for id in containing_blocks {
             self.invalidate_containing_block(id);
         }
@@ -1197,7 +922,6 @@ impl<T> Document<T> {
     }
 }
 
-/// Marks the lifetime of a Stylo flush phase.
 pub(crate) struct FlushPhaseToken {
     flag: std::sync::Arc<AtomicBool>,
 }
@@ -1285,8 +1009,6 @@ pub(crate) mod tests {
         assert!(document.render());
     }
 
-    /// Checks every child of `parent` against `expected`: the child list, and
-    /// each child's siblings and position as read from its stored index.
     fn assert_children(document: &Document<()>, parent: NodeId, expected: &[NodeId]) {
         assert_eq!(document.live(parent).child_ids(), expected);
         for (index, &child) in expected.iter().enumerate() {
@@ -1316,8 +1038,6 @@ pub(crate) mod tests {
 
         let mut model: Vec<NodeId> = Vec::new();
         let mut other_model: Vec<NodeId> = Vec::new();
-        // Appends, then insertions before the first child, then insertions
-        // in the middle, so both sides of an insertion point get moved.
         for _ in 0..64 {
             let child = document.create_element("view", ());
             document.append_child(wide, child);
@@ -1336,8 +1056,6 @@ pub(crate) mod tests {
         }
         assert_children(&document, wide, &model);
 
-        // Removals from the front, the back, and positions on either side of
-        // the middle.
         for step in 0..48 {
             let at = match step % 4 {
                 0 => 0,
@@ -1349,7 +1067,6 @@ pub(crate) mod tests {
         }
         assert_children(&document, wide, &model);
 
-        // Moves within the parent, forward and backward, and to the end.
         for step in 0..48 {
             let from = (step * 29 + 5) % model.len();
             let child = model.remove(from);
@@ -1364,7 +1081,6 @@ pub(crate) mod tests {
         }
         assert_children(&document, wide, &model);
 
-        // Moves to another parent and back.
         for step in 0..24 {
             let child = model.remove((step * 17) % model.len());
             document.append_child(other, child);
@@ -1379,7 +1095,6 @@ pub(crate) mod tests {
         assert_children(&document, wide, &model);
         assert_children(&document, other, &other_model);
 
-        // Swaps, adjacent and apart, within and across parents.
         let pairs = [(0, 1), (5, 90), (model.len() - 1, 3)];
         for (x, y) in pairs {
             document.swap_element(model[x], model[y]);
@@ -1390,8 +1105,6 @@ pub(crate) mod tests {
         assert_children(&document, wide, &model);
         assert_children(&document, other, &other_model);
 
-        // Dropping a parent leaves its element children detached roots, and
-        // they insert anywhere afresh.
         document.drop_element(other);
         for (step, &child) in other_model.iter().enumerate() {
             assert_eq!(document.live(child).parent_id(), None);
@@ -1429,9 +1142,6 @@ pub(crate) mod tests {
         assert_eq!(document.get(c).unwrap().child_ids(), [b]);
     }
 
-    /// A removal only unlinks. What frees a node is a drop, and a drop frees
-    /// one node: its element children survive it as detached roots, each
-    /// waiting for the owner that names it.
     #[test]
     fn drop_element_frees_one_node_and_unlinks_its_element_children() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1470,9 +1180,6 @@ pub(crate) mod tests {
         assert!(document.is_connected(grandchild), "and re-attaches whole");
     }
 
-    /// A node *inside* a shadow tree is not reachable from outside either, so
-    /// its element children go with it rather than surviving as detached
-    /// roots nothing could ever name or free.
     #[test]
     fn dropping_inside_a_shadow_tree_takes_the_elements_under_it() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1493,8 +1200,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The other half of the rule: what no owner outside the tree could name
-    /// goes with its owner, or nothing would ever free it.
     #[test]
     fn drop_element_frees_the_text_nodes_and_shadow_tree_it_owns() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1529,18 +1234,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// Freeing what is already detached changes no frame, so it must cost no
-    /// frame: no layout is scheduled, least of all a whole-document one, and
-    /// the retained frame stays valid. The unlink that detached the subtree
-    /// is what recorded all of that, once, for the subtree as a whole.
     #[test]
     fn dropping_a_detached_node_schedules_no_layout_and_invalidates_nothing() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let page = document.document_element().id();
         let root = document.create_element("view", ());
         document.append_child(page, root);
-        // Element children, because they are what the free walk has to unlink
-        // — and the general unlink path notes a visual mutation per child.
         for _ in 0..4 {
             let child = document.create_element("view", ());
             document.append_child(root, child);
@@ -1573,8 +1272,6 @@ pub(crate) mod tests {
         document.swap_element(attached, detached);
     }
 
-    /// A node's payload rises and falls with it, the freed *storage* comes
-    /// back, and the freed *id* never does.
     #[test]
     fn arena_storage_is_reused_while_the_id_that_named_it_retires() {
         let mut document: Document<u32> = Document::new(device(), "page", 1);
@@ -1618,10 +1315,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// A handle names one node for that node's whole life and is refused
-    /// afterwards, however many nodes reuse its storage. That is the guarantee
-    /// the deleted id table used to buy with a monotonic counter, and the
-    /// generation buys it without one.
     #[test]
     fn a_handle_never_names_a_later_occupant_of_its_storage() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1650,10 +1343,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// The payload rides in its node rather than in a second slab kept in
-    /// lockstep with the first, and the unit payload every production
-    /// embedder files costs the stride nothing: it sits in the padding, so a
-    /// node is as wide as one whose payload type has no values at all.
     #[test]
     fn a_unit_payload_does_not_change_primary_node_stride() {
         assert_eq!(

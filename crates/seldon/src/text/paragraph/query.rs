@@ -18,19 +18,12 @@ use super::{Additions, LineGeometry, Paragraph};
 use crate::geometry::{Point, Rect, Size};
 use crate::style::TextBrush;
 
-/// One reported line as the source-range queries read it: the consumer's own
-/// per-line record, read where it is kept rather than copied per query.
 pub(in crate::text) trait ReportedLine {
-    /// The line's first source unit, and the end of its visible content —
-    /// the collapsible whitespace hanging at its end belongs to no line.
     fn source_range(&self) -> Range<u32>;
 
-    /// The line box of reported line `index`, whose glyphs `layout` holds.
     fn line_box(&self, layout: &Layout<TextBrush>, index: usize) -> LineGeometry;
 }
 
-/// An inline formatting context reports every laid-out line it keeps, so a
-/// line's box is the layout's own line at the same index.
 impl ReportedLine for NaturalLine {
     fn source_range(&self) -> Range<u32> {
         self.start_unit..self.end_unit
@@ -45,9 +38,6 @@ impl ReportedLine for NaturalLine {
     }
 }
 
-/// Where a consumer's displayed layout keeps its content: the layout, its
-/// reported lines in the layout's line order, and the byte and box slot the
-/// content ends at in the layout's text.
 pub(in crate::text) struct Displayed<'a, L> {
     pub(in crate::text) layout: &'a Layout<TextBrush>,
     pub(in crate::text) lines: &'a [L],
@@ -56,12 +46,6 @@ pub(in crate::text) struct Displayed<'a, L> {
 }
 
 impl<S, A: Additions> Paragraph<S, A> {
-    /// The boxes the source range `[start, end)` occupies in `displayed`: one
-    /// per line it shows content on, from the leftmost selected cluster or
-    /// atomic box to the rightmost, as tall as the line box. `start == end`
-    /// answers one zero-width box at the origin as tall as the line holding
-    /// `start`; `None` when the range is inverted or runs past the source,
-    /// or, for an empty range, when there is no line.
     pub(in crate::text) fn range_boxes_in<L: ReportedLine>(
         &self,
         displayed: &Displayed<'_, L>,
@@ -86,8 +70,6 @@ impl<S, A: Additions> Paragraph<S, A> {
         let objects = Objects::of(displayed.layout);
         let mut boxes = Vec::new();
         for (index, (line, reported)) in displayed.layout.lines().zip(lines).enumerate() {
-            // Clipping to the line's own range is what drops its trailing
-            // collapsible whitespace, which the range excludes.
             let span = reported.source_range();
             let low = start.max(span.start);
             let high = end.min(span.end);
@@ -120,11 +102,6 @@ impl<S, A: Additions> Paragraph<S, A> {
         Some(boxes)
     }
 
-    /// The source unit of the cluster or atomic box under `point` in
-    /// `displayed`: the inverse of [`Self::range_boxes_in`] over one unit. A
-    /// line owns its whole line box, half-open at the bottom; a cluster owns
-    /// `[left, left + advance)` and answers its first unit; `None` off
-    /// content.
     pub(in crate::text) fn index_at_point_in<L: ReportedLine>(
         &self,
         displayed: &Displayed<'_, L>,

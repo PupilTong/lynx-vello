@@ -9,7 +9,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// Sanitized script failure details that are safe to expose outside a realm.
 #[derive(Clone, Debug)]
 pub struct ScriptError {
     pub kind: ScriptErrorKind,
@@ -58,18 +57,12 @@ pub enum ScriptErrorPhase {
     RegisterModule,
     Execute,
     ExecuteModule,
-    /// Calling an ESM export the realm published back to the host.
     CallModuleExport,
     CollectGarbage,
-    /// Installing the `ShadowRealm` constructor on a realm.
     InstallShadowRealm,
-    /// Reporting what a realm left unhandled outside a checkpoint of its own
-    /// entry: a `ShadowRealm` child's rejections, and the parent's beside
-    /// them.
     ShadowRealmCheckpoint,
 }
 
-/// Sanitized source location for a [`ScriptError`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptSourceLocation {
     pub source: Option<Arc<str>>,

@@ -37,15 +37,12 @@
 
 use super::{lynx_svg, text_field};
 
-/// Each Lynx tag that is mapped, with its document tag.
 const TAGS: [(&str, &str); 3] = [
     ("svg", lynx_svg::SVG_TAG),
     ("input", text_field::INPUT_TAGS[0]),
     ("textarea", text_field::TEXTAREA_TAGS[0]),
 ];
 
-/// The document tag a page's tag creates, and a `StyleInfo` type selector
-/// names.
 #[must_use]
 pub fn document_tag(lynx_tag: &str) -> &str {
     TAGS.iter()
@@ -53,7 +50,6 @@ pub fn document_tag(lynx_tag: &str) -> &str {
         .map_or(lynx_tag, |&(_, document)| document)
 }
 
-/// The tag a page reads for a document element's tag.
 pub(crate) fn lynx_tag(document_tag: &str) -> &str {
     TAGS.iter()
         .find(|(_, document)| *document == document_tag)

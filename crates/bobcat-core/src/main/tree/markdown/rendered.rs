@@ -21,18 +21,12 @@ use super::build::{AFTER_CLOSE, AFTER_OPEN, BEFORE_OPEN, IMAGE_TAG, MARKER_TAG, 
 use super::parse::utf16_len;
 use crate::main::tree::LynxDocument;
 
-/// One step of the walk over the rendered text, in tree order.
 pub(super) enum Step<'a> {
-    /// An element starts: everything until its [`Step::Leave`] is inside it.
     Enter(NodeId),
-    /// Text: a text node's, or one of markdown-it's line breaks between
-    /// block tags.
     Text(&'a str),
-    /// The element the last unmatched [`Step::Enter`] named ends.
     Leave,
 }
 
-/// Walks the rendered text under `root` (not `root` itself).
 pub(super) fn walk<'d>(
     document: &'d LynxDocument,
     root: NodeId,
@@ -80,7 +74,6 @@ fn walk_node<'d>(
     }
 }
 
-/// The rendered text under `root`, as UTF-16 code units.
 pub(super) fn text_units(
     document: &LynxDocument,
     root: NodeId,
@@ -95,19 +88,13 @@ pub(super) fn text_units(
     units
 }
 
-/// One paragraph of the rendered tree: the element establishing it, where
-/// its text starts in the rendered text, and how its source units line up
-/// with that text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Paragraph {
     pub(super) element: NodeId,
-    /// The rendered offset of its first text.
     pub(super) start: usize,
     segments: Vec<Segment>,
 }
 
-/// A stretch of a paragraph's content: text, whose units are its rendered
-/// text, or an atom, units that render no text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Segment {
     units: usize,
@@ -115,7 +102,6 @@ struct Segment {
 }
 
 impl Paragraph {
-    /// How much rendered text the paragraph holds.
     pub(super) fn len(&self) -> usize {
         self.segments
             .iter()
@@ -124,17 +110,10 @@ impl Paragraph {
             .sum()
     }
 
-    /// How many source units the paragraph holds.
     pub(super) fn units(&self) -> usize {
         self.segments.iter().map(|segment| segment.units).sum()
     }
 
-    /// The source unit a rendered offset `offset` (local to the paragraph)
-    /// falls at: inside the first text segment that reaches it, as web-core's
-    /// `createRangeByChar` places a range boundary in the first text node
-    /// whose end reaches the offset (`XMarkdown.ts:282-298`). An atom between
-    /// two text segments is therefore after a boundary at the end of the
-    /// first, and before one past its start in the second.
     pub(super) fn unit_at(&self, offset: usize) -> usize {
         let mut unit = 0;
         let mut position = 0;
@@ -150,8 +129,6 @@ impl Paragraph {
         unit
     }
 
-    /// The rendered offset (local to the paragraph) of source unit `unit`:
-    /// a text unit's own, an atom's the offset it sits at.
     pub(super) fn offset_of(&self, unit: usize) -> usize {
         let mut first = 0;
         let mut position = 0;
@@ -172,16 +149,12 @@ impl Paragraph {
     }
 }
 
-/// The paragraphs under `root`, in tree order, from the last committed
-/// layout: an element is one when it establishes a committed paragraph
-/// ([`terminus::link::Document::paragraph_of`] answers itself).
 pub(super) fn paragraphs(
     document: &LynxDocument,
     root: NodeId,
     newlines: &FxHashMap<NodeId, Newlines>,
 ) -> Vec<Paragraph> {
     let mut paragraphs: Vec<Paragraph> = Vec::new();
-    // The open paragraph and how deep inside it the walk is.
     let mut open: Option<(Paragraph, usize)> = None;
     let mut position = 0;
     walk(document, root, newlines, &mut |step| match step {
@@ -227,10 +200,6 @@ pub(super) fn paragraphs(
     paragraphs
 }
 
-/// The source units an element inside a paragraph contributes that are not
-/// its text nodes': an image's one, a `br`'s generated line break, and what
-/// a slot's assigned elements contribute (an inline view's one). Zero for
-/// every other element, whose text nodes the walk counts itself.
 fn atom_units(document: &LynxDocument, element: NodeId) -> usize {
     let range_len = |node: NodeId| {
         document
@@ -252,9 +221,6 @@ fn atom_units(document: &LynxDocument, element: NodeId) -> usize {
     }
 }
 
-/// web-core's `getRenderedPrefixLengthForSourceOffset` (`XMarkdown.ts:85-101`):
-/// how much of `rendered` a greedy walk matches within the first
-/// `source_offset` units of `source`, one unit at a time.
 pub(super) fn rendered_prefix(source: &[u16], rendered: &[u16], source_offset: usize) -> usize {
     let mut rendered_index = 0;
     for &unit in &source[..source_offset.min(source.len())] {
@@ -268,9 +234,6 @@ pub(super) fn rendered_prefix(source: &[u16], rendered: &[u16], source_offset: u
     rendered_index
 }
 
-/// The inverse of [`rendered_prefix`] for one rendered unit: the source
-/// offset the greedy walk matched rendered unit `offset` at, or `None` when
-/// the walk never matches it.
 pub(super) fn source_offset(source: &[u16], rendered: &[u16], offset: usize) -> Option<usize> {
     let mut rendered_index = 0;
     for (index, &unit) in source.iter().enumerate() {

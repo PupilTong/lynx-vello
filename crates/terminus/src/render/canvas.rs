@@ -71,45 +71,29 @@ use crate::paint::display_list::{DisplayList, Texture, next_texture_id};
 use crate::render::image::ImageDescriptor;
 use crate::render::picture::PictureId;
 
-/// The longest side a canvas texture has: the device's
-/// `max_texture_dimension_2d` under the limits every device is created
-/// with ([`SharedGpu::LIMITS`]).
 pub(crate) const MAX_SURFACE_SIDE: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
-/// The canvas textures of one device, by the id a draw names each by:
-/// every surface's and every canvas image's ([`SharedGpu::canvases`]).
 #[derive(Default)]
 pub(crate) struct Textures(Mutex<FxHashMap<u64, CanvasTexture>>);
 
 impl Textures {
-    /// Locks the table. A poisoned lock is taken anyway: every change to
-    /// the table is one insert or remove, which leaves it whole.
     fn lock(&self) -> MutexGuard<'_, FxHashMap<u64, CanvasTexture>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// A canvas's texture, and the one a draw that reads the canvas's own
-/// pixels renders into before the two change places.
 struct CanvasTexture {
     texture: wgpu::Texture,
     spare: Option<wgpu::Texture>,
 }
 
-/// How a draw treats what the surface holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Init {
-    /// Drawn over the content.
     Load,
-    /// The content is cleared to transparent black first.
     Clear,
-    /// Drawn into the surface's second texture over a clear, with the
-    /// content bound under the surface's own id, which the list samples:
-    /// the list draws the old content itself.
     Backdrop,
 }
 
-/// Why a canvas operation produced nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SurfaceError(pub(crate) String);
 
@@ -121,7 +105,6 @@ impl std::fmt::Display for SurfaceError {
 
 impl std::error::Error for SurfaceError {}
 
-/// One GPU step on the canvas textures.
 enum Op {
     Draw(Box<Draw>),
     Write {
@@ -138,8 +121,6 @@ enum Op {
         extent: (u32, u32),
         reply: flume::Sender<Result<Vec<u8>, String>>,
     },
-    /// `source`'s pixels at `from` copied to `to` in a new texture `copy`;
-    /// with no texture under `source`, `copy` stays transparent black.
     Copy {
         source: u64,
         from: (u32, u32),
@@ -148,7 +129,6 @@ enum Op {
         copy: u64,
         copy_size: (u32, u32),
     },
-    /// `from`'s texture becomes `to`'s; `from` has none until its next op.
     Move {
         from: u64,
         to: u64,
@@ -166,30 +146,21 @@ enum Op {
     EndLease(u64),
 }
 
-/// A draw encoded on the thread that issued it ([`Surface::draw`]): what
-/// its GPU half needs.
 struct Draw {
     target: u64,
     size: (u32, u32),
     init: Init,
     encoded: Encoded,
-    /// Images the scene draws, kept until it has been rendered.
     _keep: Vec<SurfaceImage>,
-    /// Where the scene goes once rendered: back to the surface, whose next
-    /// draw reuses its buffers.
     back: flume::Sender<Scene>,
 }
 
-// The scene crosses to the Render Worker inside the op on wasm32.
 const _: () = {
     const fn send<T: Send>() {}
     send::<Scene>();
     send::<Op>();
 };
 
-/// The calling thread's canvas replay state: how many [`ReplayUser`]s are
-/// alive on it, and the [`Replay`] every surface encodes with here, kept
-/// only while one is.
 struct ThreadReplay {
     users: usize,
     replay: Option<Replay>,
@@ -204,13 +175,6 @@ thread_local! {
     };
 }
 
-/// One user of the calling thread's canvas replay state (see the [module
-/// documentation](self)): while one is alive on a thread, the glyph
-/// outlines its canvases encoded stay cached there; the last one dropped
-/// drops them. An owner of canvases holds one on its thread while it holds
-/// a canvas.
-///
-/// Not `Send`: it is dropped on the thread it counts on.
 #[derive(Debug)]
 pub struct ReplayUser(PhantomData<*const ()>);
 
@@ -230,7 +194,6 @@ impl Default for ReplayUser {
 
 impl Drop for ReplayUser {
     fn drop(&mut self) {
-        // After the thread's own destruction there is nothing left to drop.
         let _ = REPLAY.try_with(|thread| {
             let mut thread = thread.borrow_mut();
             thread.users -= 1;
@@ -241,10 +204,7 @@ impl Drop for ReplayUser {
     }
 }
 
-/// What a surface encodes its draws with, on the thread that issues them,
-/// beside the thread's [`Replay`].
 struct Encoder {
-    /// The scenes back from their renders ([`Draw::back`]).
     back: flume::Sender<Scene>,
     returned: flume::Receiver<Scene>,
 }
@@ -255,8 +215,6 @@ impl Encoder {
         Self { back, returned }
     }
 
-    /// A scene back from its render, or a new one while every scene is
-    /// away; a second scene back is dropped, so one is kept.
     fn scene(&self) -> Scene {
         let mut back = self.returned.try_iter();
         let scene = back.next().unwrap_or_else(|| Scene::new(1, 1));
@@ -265,18 +223,11 @@ impl Encoder {
     }
 }
 
-/// A canvas bitmap on the GPU: a texture of `width` × `height` premultiplied
-/// RGBA8, transparent black until drawn. See the [module documentation](self).
-///
-/// `Send`: the owner may move it between threads, and it is used from one
-/// at a time.
 pub(crate) struct Surface {
     id: u64,
     width: u32,
     height: u32,
-    /// Made at the first draw.
     encoder: Option<Encoder>,
-    /// The device side natively, made at the first op that needs one.
     #[cfg(not(target_arch = "wasm32"))]
     port: Option<Submitter>,
 }
@@ -291,9 +242,6 @@ impl std::fmt::Debug for Surface {
     }
 }
 
-/// An image a canvas holds on the GPU: what `transferToImageBitmap` hands
-/// out and a copy of a canvas is. Cloning shares the texture, which is
-/// released with the last clone.
 #[derive(Clone, Debug)]
 pub(crate) struct SurfaceImage(Arc<ImageTexture>);
 
@@ -302,7 +250,6 @@ struct ImageTexture {
     id: u64,
     width: u32,
     height: u32,
-    /// The stack the texture is on, kept alive with it natively.
     #[cfg(not(target_arch = "wasm32"))]
     gpu: Option<Arc<SharedGpu>>,
 }
@@ -330,8 +277,6 @@ impl Drop for ImageTexture {
     }
 }
 
-/// The stack an op is applied on natively; always `None` on wasm32, where
-/// ops are queued for the Render Worker's.
 type Gpu<'a> = Option<&'a Arc<SharedGpu>>;
 
 impl SurfaceImage {
@@ -345,15 +290,11 @@ impl SurfaceImage {
         self.0.height
     }
 
-    /// What a draw of this image names it by.
     #[must_use]
     pub(crate) fn texture(&self) -> Texture {
         Texture::with_id(self.0.id, self.0.width, self.0.height)
     }
 
-    /// A new image `width` × `height`, transparent black but for the
-    /// pixels of this one from `(x, y)`, placed at the origin: the part of
-    /// that rectangle inside this image.
     #[must_use]
     pub(crate) fn crop(&self, x: i64, y: i64, width: u32, height: u32) -> Self {
         copy(
@@ -366,10 +307,6 @@ impl SurfaceImage {
         )
     }
 
-    /// A new image `width` × `height`, transparent black but for the
-    /// pixels `source` names from `(x, y)`, the part of that rectangle inside
-    /// it, as of every op issued so far: what a canvas's current pixels
-    /// ([`Surface::texture`]) are kept as.
     #[must_use]
     pub(crate) fn copy(source: Texture, x: i64, y: i64, width: u32, height: u32) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
@@ -386,31 +323,16 @@ impl SurfaceImage {
         )
     }
 
-    /// Reads the image's pixels, premultiplied RGBA8, row-major, tightly
-    /// packed, waiting for them.
-    ///
-    /// # Errors
-    ///
-    /// [`SurfaceError`] when the readback failed or no device answered.
     pub(crate) fn read(&self) -> Result<Vec<u8>, SurfaceError> {
         let size = (self.0.width, self.0.height);
         read(self.0.gpu(), None, self.0.id, size, (0, 0), size).wait()
     }
 }
 
-/// A pending readback: the pixels a read asked for, once the device has
-/// answered. On wasm32 the Render Worker answers it in a later turn of its
-/// own.
 #[derive(Debug)]
 pub(crate) struct PendingRead(flume::Receiver<Result<Vec<u8>, String>>);
 
 impl PendingRead {
-    /// Waits for the pixels: premultiplied RGBA8, row-major, tightly packed.
-    ///
-    /// # Errors
-    ///
-    /// [`SurfaceError`] when the readback failed, or the op was dropped
-    /// unapplied (no device, or the device's queue was closed).
     pub(crate) fn wait(self) -> Result<Vec<u8>, SurfaceError> {
         self.0
             .recv()
@@ -418,11 +340,6 @@ impl PendingRead {
             .map_err(SurfaceError)
     }
 
-    /// [`Self::wait`] for a caller that waits asynchronously.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::wait`].
     pub(crate) async fn wait_async(self) -> Result<Vec<u8>, SurfaceError> {
         self.0
             .recv_async()
@@ -433,8 +350,6 @@ impl PendingRead {
 }
 
 impl Surface {
-    /// A `width` × `height` surface; `None` for a zero side or one longer
-    /// than [`MAX_SURFACE_SIDE`]. Nothing is allocated until the first op.
     #[must_use]
     pub(crate) fn new(width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 || width > MAX_SURFACE_SIDE || height > MAX_SURFACE_SIDE {
@@ -450,7 +365,6 @@ impl Surface {
         })
     }
 
-    /// A surface whose ops are applied on `gpu`, a stack of a test's own.
     #[cfg(test)]
     fn on(gpu: &Arc<SharedGpu>, width: u32, height: u32) -> Self {
         let mut surface = Self::new(width, height).expect("a side the device takes");
@@ -458,9 +372,6 @@ impl Surface {
         surface
     }
 
-    /// What a draw of this surface's current pixels names it by: as they are
-    /// when a list drawing it is replayed, so a caller that wants them as of
-    /// now replays that list before it draws into this surface again.
     #[must_use]
     pub(crate) fn texture(&self) -> Texture {
         Texture::with_id(self.id, self.width, self.height)
@@ -470,9 +381,6 @@ impl Surface {
         (self.width, self.height)
     }
 
-    /// The stack and device side ops are applied with natively, made at
-    /// the first call; `(None, None)` on wasm32, and natively with no
-    /// usable adapter.
     #[cfg(not(target_arch = "wasm32"))]
     fn port(&mut self) -> (Option<Arc<SharedGpu>>, Option<&mut Submitter>) {
         if self.port.is_none()
@@ -490,19 +398,11 @@ impl Surface {
         (None, None)
     }
 
-    /// Applies or queues `op`.
     fn issue(&mut self, op: Op) {
         let (gpu, port) = self.port();
         issue(gpu.as_ref(), port, op);
     }
 
-    /// Replays `list`, which leaves no clip or layer open, onto the surface
-    /// as `init` says, and empties it, keeping its capacity; `keep` holds
-    /// the images it draws, released once it has been rendered, and is
-    /// emptied too.
-    ///
-    /// The list is replayed into a scene here, on the calling thread
-    /// ([`Self::encode`]), and the scene is rendered by the op this issues.
     pub(crate) fn draw(
         &mut self,
         list: &mut DisplayList,
@@ -513,17 +413,10 @@ impl Surface {
         self.issue(Op::Draw(Box::new(draw)));
     }
 
-    /// The CPU half of [`Self::draw`]: `list` replayed into a scene with the
-    /// thread's [`Replay`], which draws a texture under its own id and a
-    /// bitmap under an id reserved for it, with no device ([`encode`]). A
-    /// draw of the surface's own texture draws nothing unless `init` is
-    /// [`Init::Backdrop`], which binds it.
     fn encode(&mut self, list: &mut DisplayList, init: Init, keep: &mut Vec<SurfaceImage>) -> Draw {
         let (target, size) = (self.id, self.size());
         let state = self.encoder.get_or_insert_with(Encoder::new);
         let clear = init != Init::Load;
-        // Nothing called inside `encode` reaches this thread-local: it runs
-        // no caller code but the `drawable` test below.
         let encoded = REPLAY.with_borrow_mut(|thread| {
             let replay = thread.replay.get_or_insert_with(Replay::default);
             let encoded = encode(state.scene(), replay, list, size, clear, &|id| {
@@ -545,8 +438,6 @@ impl Surface {
         }
     }
 
-    /// Writes `texels`, `extent` premultiplied RGBA8 pixels, tightly packed,
-    /// at `origin`; the rectangle lies inside the surface.
     pub(crate) fn write(&mut self, origin: (u32, u32), extent: (u32, u32), texels: Vec<u8>) {
         self.issue(Op::Write {
             target: self.id,
@@ -557,8 +448,6 @@ impl Surface {
         });
     }
 
-    /// Reads the `extent` pixels at `origin`, a rectangle inside the
-    /// surface, as of every op issued before this one.
     #[must_use]
     pub(crate) fn read(&mut self, origin: (u32, u32), extent: (u32, u32)) -> PendingRead {
         let (target, size) = (self.id, self.size());
@@ -566,7 +455,6 @@ impl Surface {
         read(gpu.as_ref(), port, target, size, origin, extent)
     }
 
-    /// A copy of the surface's pixels as an image, for this module's tests.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn snapshot(&mut self) -> SurfaceImage {
@@ -575,8 +463,6 @@ impl Surface {
         copy(gpu.as_ref(), port, source, size, (0, 0), size)
     }
 
-    /// Hands the surface's texture to a new image and leaves the surface
-    /// transparent black: `transferToImageBitmap`.
     #[must_use]
     pub(crate) fn take(&mut self) -> SurfaceImage {
         let (from, size) = (self.id, self.size());
@@ -597,13 +483,6 @@ impl Surface {
         image
     }
 
-    /// Makes the surface's pixels, as of every op issued before this one,
-    /// what the placeholder `<canvas>` of `frames` shows: HTML's update of an
-    /// `OffscreenCanvas`'s placeholder. They are copied into the texture the
-    /// placeholder's picture draws from, which the link owns for the
-    /// element's life, and only then is the new generation published, so a
-    /// painter never draws a frame half copied. Answers what the commit owes;
-    /// nothing once the element is freed.
     #[must_use = "a wake or a resize the commit owes is lost"]
     pub(crate) fn commit(&mut self, frames: &CanvasFrames) -> Committed {
         let Some(link) = frames.link() else {
@@ -625,8 +504,6 @@ impl Surface {
 }
 
 impl Drop for Surface {
-    /// Releases the texture, which exists only if an op made it: a surface
-    /// that never drew asks for no device here.
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(port) = &self.port {
@@ -637,8 +514,6 @@ impl Drop for Surface {
     }
 }
 
-/// Ends `owner`'s leases on the textures it holds: a placeholder's link
-/// lets go of its picture's texture.
 pub(crate) fn end_lease(owner: u64) {
     #[cfg(not(target_arch = "wasm32"))]
     let gpu = super::gpu::live();
@@ -670,8 +545,6 @@ fn read(
     PendingRead(answer)
 }
 
-/// A new image `extent`, transparent black but for `source`'s pixels from
-/// `at`, the part of that rectangle inside `source`.
 fn copy(
     gpu: Gpu<'_>,
     port: Option<&mut Submitter>,
@@ -693,7 +566,6 @@ fn copy(
             .saturating_add(i64::from(extent))
             .clamp(0, i64::from(size));
         let from = u32::try_from(start).unwrap_or(0);
-        // Past the extent when nothing overlaps, and then unused.
         let to = u32::try_from(start.saturating_sub(at)).unwrap_or(0);
         (from, to, u32::try_from(end - start).unwrap_or(0))
     };
@@ -714,9 +586,6 @@ fn copy(
     image
 }
 
-/// Applies `op` on `gpu` now, natively, or queues it for the Render Worker
-/// on wasm32. Natively, an op with no stack to apply it on has nothing to
-/// change: no texture of its was ever made.
 fn issue(gpu: Gpu<'_>, port: Option<&mut Submitter>, op: Op) {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(gpu) = gpu {
@@ -729,7 +598,6 @@ fn issue(gpu: Gpu<'_>, port: Option<&mut Submitter>, op: Op) {
     }
 }
 
-/// The texture under `id`, made `size` and zero-filled if there is none.
 fn texture(gpu: &SharedGpu, id: u64, size: (u32, u32)) -> wgpu::Texture {
     gpu.canvases
         .lock()
@@ -742,8 +610,6 @@ fn texture(gpu: &SharedGpu, id: u64, size: (u32, u32)) -> wgpu::Texture {
         .clone()
 }
 
-/// What a canvas texture is used as: rendered into, sampled, copied from
-/// and into.
 const SURFACE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::COPY_SRC)
@@ -770,10 +636,6 @@ fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// The views `encoded` draws by id, from the canvas table, except
-/// `target`'s: transparent black for an id with no texture there, a surface
-/// that never issued an op of its own, which draws as nothing does
-/// ([`transparent_view`]).
 fn sources(gpu: &SharedGpu, encoded: &Encoded, target: u64) -> FxHashMap<u64, wgpu::TextureView> {
     let mut sources = FxHashMap::default();
     let mut transparent = None;
@@ -795,8 +657,6 @@ fn sources(gpu: &SharedGpu, encoded: &Encoded, target: u64) -> FxHashMap<u64, wg
     sources
 }
 
-/// The GPU half of [`Surface::draw`]: the scene `draw` holds rendered onto
-/// its surface's texture.
 fn render(gpu: &SharedGpu, port: &mut Submitter, draw: &Draw) {
     let Draw {
         target,
@@ -817,8 +677,6 @@ fn render(gpu: &SharedGpu, port: &mut Submitter, draw: &Draw) {
             .unwrap_or_else(|| canvas_texture(gpu, size));
         sources.insert(target, view(&current));
         let result = port.submit(encoded, &view(&spare), &sources);
-        // The rendered texture becomes the content; after a failed render
-        // the content stays and the spare is kept for the next batch.
         if let Some(entry) = gpu.canvases.lock().get_mut(&target) {
             if result.is_ok() {
                 entry.texture = spare;
@@ -831,12 +689,9 @@ fn render(gpu: &SharedGpu, port: &mut Submitter, draw: &Draw) {
     } else {
         port.submit(encoded, &view(&current), &sources)
     };
-    // A failed render (an intermediate past the device's limits) leaves the
-    // batch undrawn; a canvas has nobody to report it to.
     let _ = result;
 }
 
-/// Applies `op` to `gpu`'s canvas textures, rendering with `port`.
 fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
     match op {
         Op::Draw(draw) => {
@@ -844,7 +699,6 @@ fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
                 render(gpu, port, &draw);
             }
             let Draw { encoded, back, .. } = *draw;
-            // The surface may be gone, and its scene with it.
             let _ = back.send(encoded.into_scene());
         }
         Op::Write {
@@ -884,10 +738,6 @@ fn apply(gpu: &SharedGpu, port: Option<&mut Submitter>, op: Op) {
             copy,
             copy_size,
         } => {
-            // Looked up, not made: a surface that never issued an op of its
-            // own has no texture and removes none when dropped, and its
-            // pixels are transparent black, which the new texture already
-            // is.
             let source = gpu
                 .canvases
                 .lock()
@@ -958,9 +808,6 @@ fn at(texture: &wgpu::Texture, (x, y): (u32, u32)) -> wgpu::TexelCopyTextureInfo
     }
 }
 
-/// Copies the `extent` pixels of `texture` at `origin` into a staging
-/// buffer and sends them, tightly packed, on `reply` once mapped: natively
-/// before this returns, on wasm32 from the map's completion on this Worker.
 #[cfg_attr(
     not(target_arch = "wasm32"),
     expect(
@@ -1042,16 +889,11 @@ fn read_region(
     });
 }
 
-/// Sets what wakes the Render Worker when an op is queued for it: the
-/// thread whose turns call [`drain`].
 #[cfg(target_arch = "wasm32")]
 pub fn set_waker(waker: Arc<dyn Fn() + Send + Sync>) {
     queue::set_waker(waker);
 }
 
-/// Applies every op queued so far, in order, on this thread's device; the
-/// Render Worker calls it at the start of every turn. With no live device
-/// here the ops are dropped unapplied, which fails the reads among them.
 #[cfg(target_arch = "wasm32")]
 pub fn drain() {
     queue::drain();
@@ -1069,16 +911,12 @@ mod queue {
         waker: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
-    /// Shared by every Worker: wasm32 statics live in the one shared
-    /// memory.
     static QUEUE: Mutex<Queue> = Mutex::new(Queue {
         ops: Vec::new(),
         waker: None,
     });
 
     thread_local! {
-        /// The Render Worker's device side for every canvas: one target in
-        /// the bitmaps' pins.
         static PORT: RefCell<Option<Submitter>> = const { RefCell::new(None) };
     }
 
@@ -1090,7 +928,6 @@ mod queue {
         lock().waker = Some(waker);
     }
 
-    /// Queues `op`, waking the Render Worker when the queue was empty.
     pub(super) fn push(op: Op) {
         let waker = {
             let mut queue = lock();
@@ -1110,7 +947,6 @@ mod queue {
                 return;
             }
             let Some(gpu) = super::super::gpu::live() else {
-                // Dropping the ops drops the reads' reply senders.
                 continue;
             };
             PORT.with(|port| {
@@ -1161,13 +997,10 @@ mod tests {
         list.fill_paint(Fill::NonZero, Affine::IDENTITY, paint.clone(), None, &rect);
     }
 
-    /// `image` sampled through `sampler`.
     fn image_paint(image: ImageRef, sampler: ImageSampler) -> Paint {
         Paint::Image(Arc::new(ImagePaint { image, sampler }))
     }
 
-    /// A draw lands on what the surface holds; a backdrop draw samples the
-    /// surface itself; writes, copies and a take keep their order.
     #[test]
     fn a_surface_replays_writes_reads_and_hands_over_its_texture() {
         let mut surface = Surface::new(8, 4).expect("a side the device takes");
@@ -1180,7 +1013,6 @@ mod tests {
         assert_eq!(pixel(&mut surface, 1, 1), RED);
         assert_eq!(pixel(&mut surface, 5, 1), CLEAR);
 
-        // The left half drawn again into the right half, from the surface.
         let own = Paint::texture(
             surface.texture(),
             ImageSampler::new()
@@ -1216,9 +1048,6 @@ mod tests {
         assert_eq!(pixel(&mut surface, 0, 0), RED);
     }
 
-    /// A copy of a surface that never issued an op of its own is
-    /// transparent black, and leaves no texture under the surface's id once
-    /// both are dropped.
     #[test]
     fn a_copy_of_a_surface_that_never_drew_leaves_no_texture() {
         let gpu = SharedGpu::offscreen().expect("a GPU adapter");
@@ -1234,10 +1063,6 @@ mod tests {
         assert!(!canvases.contains_key(&copy_id), "the copy's texture");
     }
 
-    /// A backdrop batch whose render fails (here a drop shadow whose
-    /// filter layer is past the device's texture limit) leaves the surface
-    /// as it was: the textures change places only after a render that
-    /// succeeds.
     #[test]
     fn a_failed_backdrop_render_keeps_the_content() {
         let mut surface = Surface::new(8, 4).expect("a side the device takes");
@@ -1263,14 +1088,11 @@ mod tests {
     const W: u32 = 16;
     const H: u32 = 8;
 
-    /// Every pixel of `surface`.
     fn pixels(surface: &mut Surface) -> Vec<u8> {
         let size = surface.size();
         surface.read((0, 0), size).wait().expect("the read")
     }
 
-    /// A straight-alpha RGBA8 bitmap of `texels`, `width` wide, with pixels
-    /// of its own.
     fn bitmap(width: u32, texels: &[[u8; 4]]) -> ImageData {
         let bytes: Vec<u8> = texels.iter().flatten().copied().collect();
         ImageData {
@@ -1288,7 +1110,6 @@ mod tests {
             .with_quality(ImageQuality::Low)
     }
 
-    /// `rect` filled with `image` stretched over it, sampled nearest.
     fn fill_image(list: &mut DisplayList, rect: Rect, image: ImageRef, size: (u32, u32)) {
         let scale = Affine::scale_non_uniform(
             rect.width() / f64::from(size.0),
@@ -1303,7 +1124,6 @@ mod tests {
         );
     }
 
-    /// Content with many alpha levels: two gradients crossing.
     fn backdrop(list: &mut DisplayList) {
         let canvas = Rect::new(0.0, 0.0, f64::from(W), f64::from(H));
         let across = Gradient::new_linear((0.0, 0.0), (f64::from(W), 0.0)).with_stops([
@@ -1318,10 +1138,6 @@ mod tests {
         fill(list, canvas, &Paint::from(&Brush::Gradient(down)));
     }
 
-    /// A list encoded on one thread and rendered from another gives the
-    /// pixels the same list encoded on the rendering thread does: the
-    /// encoded draw, a bitmap and a canvas texture included, crosses
-    /// threads.
     #[test]
     fn a_draw_encoded_on_one_thread_renders_from_another() {
         let mut source = Surface::new(4, 4).expect("a side the device takes");
@@ -1367,13 +1183,10 @@ mod tests {
         assert_eq!(pixels(&mut surface), expected);
     }
 
-    /// How many glyph outlines the calling thread's canvas replay state
-    /// holds; `None` when it holds no state.
     fn thread_outlines() -> Option<usize> {
         super::REPLAY.with_borrow(|thread| thread.replay.as_ref().map(Replay::cached_outlines))
     }
 
-    /// An `OffscreenCanvas` that has drawn `text` in Ahem and replayed it.
     fn draw_text(fonts: &mut TextContext, text: &str) -> OffscreenCanvas {
         let mut canvas = OffscreenCanvas::new(W, H);
         let mut context = canvas.context_2d();
@@ -1396,9 +1209,6 @@ mod tests {
         fonts
     }
 
-    /// Two canvases on one thread encode with the thread's one glyph
-    /// outline cache: the second canvas's draw of the same text adds no
-    /// outline, and its draw of a new glyph adds one to the same cache.
     #[test]
     fn two_canvases_on_one_thread_share_the_glyph_outlines() {
         let mut fonts = ahem();
@@ -1415,9 +1225,6 @@ mod tests {
         );
     }
 
-    /// The thread's replay state lives while a user is alive on it and
-    /// goes with the last one; an encode while none is alive keeps
-    /// nothing.
     #[test]
     fn the_last_replay_user_drops_the_thread_replay_state() {
         let mut fonts = ahem();
@@ -1437,9 +1244,6 @@ mod tests {
         assert_eq!(thread_outlines(), None, "the last user is gone");
     }
 
-    /// A pixel image is drawn under the id its scene reserved for it, from
-    /// an upload made at its first draw and found again at the next: the
-    /// second batch, which draws it twice, uploads nothing.
     #[test]
     fn a_bitmap_is_bound_under_its_reserved_id_on_a_miss_and_on_a_hit() {
         let gpu = SharedGpu::private(SharedRaster::new);
@@ -1481,10 +1285,6 @@ mod tests {
         assert_eq!(pixel(&mut surface, 0, 0), RED, "the first batch stays");
     }
 
-    /// Paints whose pixels a render cannot find (a canvas that never drew
-    /// has no texture; lent pixels that are gone and never uploaded; too
-    /// few bytes for the image's size) leave every composite operation's
-    /// result as a list without the draw gives, shadowed or not.
     #[test]
     fn a_paint_with_no_pixels_composites_as_no_draw() {
         let never_drew = Surface::new(4, 4).expect("a side the device takes");
@@ -1543,7 +1343,6 @@ mod tests {
         for name in ops {
             let blend = CompositeOp::from_name(name).expect("an operation").blend();
             for shadow in [false, true] {
-                // `draw` is `None` for the list without the draw.
                 let mut render = |draw: Option<&Paint>| {
                     let mut surface = Surface::new(W, H).expect("a side the device takes");
                     backdrop(&mut list);

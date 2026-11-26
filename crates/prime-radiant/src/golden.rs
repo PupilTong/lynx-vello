@@ -13,7 +13,6 @@ use crate::image::{Image, ImageError};
 
 pub const UPDATE_ENV: &str = "PRIME_RADIANT_UPDATE_SNAPSHOTS";
 
-/// A directory of golden PNGs plus the tolerances they are compared with.
 #[derive(Debug)]
 pub struct Screenshots {
     goldens: PathBuf,
@@ -23,7 +22,6 @@ pub struct Screenshots {
 }
 
 impl Screenshots {
-    /// Opens a golden directory with a sibling failure-artifact directory.
     #[must_use]
     pub fn new(goldens: impl Into<PathBuf>) -> Self {
         let goldens = goldens.into();
@@ -39,14 +37,12 @@ impl Screenshots {
         }
     }
 
-    /// Overrides where failure artifacts are written.
     #[must_use]
     pub fn with_artifacts_dir(mut self, artifacts: impl Into<PathBuf>) -> Self {
         self.artifacts = artifacts.into();
         self
     }
 
-    /// Overrides the comparison tolerances for every golden in this store.
     #[must_use]
     pub const fn with_options(mut self, options: CompareOptions) -> Self {
         self.options = options;
@@ -58,14 +54,11 @@ impl Screenshots {
         self.options
     }
 
-    /// Whether this run overwrites goldens instead of checking them.
     #[must_use]
     pub const fn is_updating(&self) -> bool {
         self.update
     }
 
-    /// Resolves path segments to a PNG inside the golden directory.
-    /// Panics when the name is empty or a segment can escape the store.
     #[must_use]
     pub fn path(&self, name: &[&str]) -> PathBuf {
         assert!(
@@ -90,7 +83,6 @@ impl Screenshots {
         path
     }
 
-    /// Compares an image with its golden or accepts it in update mode.
     pub fn check(&self, name: &[&str], actual: &Image) -> Result<GoldenOutcome, GoldenError> {
         let path = self.path(name);
         if self.update {
@@ -127,8 +119,6 @@ impl Screenshots {
         })
     }
 
-    /// Checks a golden and panics with a failure report.
-    /// Panics unless the golden matches or update mode accepts the image.
     pub fn assert_matches(&self, name: &[&str], actual: &Image) {
         match self.check(name, actual) {
             Ok(GoldenOutcome::Matched { .. }) => {}
@@ -162,12 +152,10 @@ impl Screenshots {
     }
 }
 
-/// Where the three failure PNGs were written.
 #[derive(Debug)]
 pub struct Artifacts {
     pub expected: PathBuf,
     pub actual: PathBuf,
-    /// Absent when the images were different sizes and could not be diffed.
     pub diff: Option<PathBuf>,
 }
 
@@ -292,8 +280,6 @@ impl std::error::Error for GoldenError {
     }
 }
 
-/// A convenience for tests that keep their goldens under
-/// `<crate>/tests/screenshots`.
 #[must_use]
 pub fn screenshots_in(manifest_dir: &str) -> Screenshots {
     Screenshots::new(Path::new(manifest_dir).join("tests").join("screenshots"))
@@ -317,7 +303,6 @@ mod tests {
         Image::from_rgba8(width, height, pixels).unwrap()
     }
 
-    /// Gives each test call an isolated golden directory.
     fn store(label: &str) -> Screenshots {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -326,7 +311,6 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        // The unique root isolates both goldens and their sibling artifacts.
         Screenshots::new(root.join("screenshots"))
     }
 
@@ -345,7 +329,6 @@ mod tests {
             "{}",
             store.path(&["1.5x-scale"]).display()
         );
-        // Dotted names that `set_extension` would collapse remain distinct.
         assert_ne!(store.path(&["a.b"]), store.path(&["a.c"]));
     }
 

@@ -27,16 +27,8 @@ use super::offsets::{unit_of_byte, utf16_len};
 use crate::layout::TextBrush;
 use crate::tree::document::{Document, NodeId};
 
-/// The caret's width, in CSS px.
 pub(crate) const CARET_WIDTH: f32 = 1.0;
 
-/// What kind of field the focused host is, which picks the platform
-/// keyboard and its behaviors (Chromium's `TextInputType`, HTML's `<input
-/// type>`). Read from the host's `type` attribute with HTML's `<input type>`
-/// keywords (ASCII case-insensitive), [`Self::Text`] for anything else and
-/// when it is absent: a plain `contenteditable` host carries none, and the
-/// element layer over this kernel (`x-input`'s `type`) writes it on the
-/// editing host in its shadow tree.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputType {
@@ -51,8 +43,6 @@ pub enum InputType {
 }
 
 impl InputType {
-    /// HTML's `<input type>` keywords this enumeration names, ASCII
-    /// case-insensitive; every other value, and none, is [`Self::Text`].
     fn parse(value: Option<&str>) -> Self {
         let Some(value) = value else {
             return Self::Text;
@@ -71,9 +61,6 @@ impl InputType {
     }
 }
 
-/// HTML's `inputmode` attribute: the virtual keyboard a host asks for.
-/// [`Self::Default`] when the attribute is absent or invalid, which leaves
-/// the choice to the input type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
     #[default]
@@ -89,7 +76,6 @@ pub enum InputMode {
 }
 
 impl InputMode {
-    /// HTML's enumerated-attribute parse, ASCII case-insensitive.
     fn parse(value: Option<&str>) -> Self {
         let Some(value) = value else {
             return Self::Default;
@@ -110,8 +96,6 @@ impl InputMode {
     }
 }
 
-/// HTML's `enterkeyhint` attribute: the label of the virtual keyboard's
-/// enter key. [`Self::Default`] when the attribute is absent or invalid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EnterKeyHint {
     #[default]
@@ -145,40 +129,20 @@ impl EnterKeyHint {
     }
 }
 
-/// The focused host's editing state, as a platform input method sees it.
-/// The default value is "nothing editable is focused".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextInputState {
-    /// The focused editing host; `None` when nothing editable is focused,
-    /// and then every other field is its default.
     pub host: Option<NodeId>,
     pub input_type: InputType,
-    /// From the host's `inputmode` attribute.
     pub input_mode: InputMode,
-    /// From the host's `enterkeyhint` attribute.
     pub enter_key_hint: EnterKeyHint,
-    /// The whole value: the host's direct text-node children, concatenated.
     pub value: String,
-    /// The selection, start ≤ end, in UTF-16 units into `value`.
     pub selection: Range<u32>,
-    /// The composition, in UTF-16 units into `value`.
     pub composition: Option<Range<u32>>,
-    /// The caret at the selection's focus, `CARET_WIDTH` wide and as tall
-    /// as its line, in viewport CSS px.
     pub caret: Rect<f32>,
-    /// The host's border box, in viewport CSS px.
     pub editable_bounds: Rect<f32>,
-    /// One box per UTF-16 unit of the composition, in viewport CSS px: the
-    /// box of the grapheme cluster the unit belongs to, so both units of a
-    /// surrogate pair and every code point of one cluster share a box.
     pub composition_bounds: Vec<Rect<f32>>,
 }
 
-/// The used line height of `style` for a host with no paragraph to measure
-/// a line in — a flex `view` with no text, or with only white space it does
-/// not render: its caret is still one line tall. A host that establishes a
-/// paragraph of its own has a line even when empty (one empty line of its
-/// strut), and its caret is that line's.
 pub(crate) fn empty_line_height(style: &ComputedValues) -> f32 {
     use stylo::values::computed::font::LineHeight;
     let font_size = style.get_font().font_size.computed_size().px();
@@ -189,10 +153,6 @@ pub(crate) fn empty_line_height(style: &ComputedValues) -> f32 {
     }
 }
 
-/// The caret box at `cursor` in `layout`'s coordinates, `width` wide, as
-/// tall as its line. An empty host's own paragraph has one empty line, which
-/// answers here like any other; a layout with no line at all puts the caret
-/// at the origin, `fallback` tall.
 pub(crate) fn caret_box(
     layout: &Layout<TextBrush>,
     cursor: Cursor,
@@ -215,8 +175,6 @@ pub(crate) fn caret_box(
     }
 }
 
-/// The box of the grapheme cluster holding `byte`, in `layout`'s
-/// coordinates: its advance by its line's height.
 pub(crate) fn cluster_box(layout: &Layout<TextBrush>, byte: usize) -> Option<Rect<f32>> {
     let cluster = Cluster::from_byte_index(layout, byte)?;
     let x = cluster.visual_offset()?;
@@ -231,13 +189,8 @@ pub(crate) fn cluster_box(layout: &Layout<TextBrush>, byte: usize) -> Option<Rec
 }
 
 impl<T> Document<T> {
-    /// The focused host's [`TextInputState`], from the last committed
-    /// layout. Runs no pass: geometry of a change not laid out yet is the
-    /// previous layout's, while the value and the offsets are current.
     #[must_use]
     pub fn text_input_state(&self) -> TextInputState {
-        // A selectable element selected without focus is nothing a platform
-        // input method edits.
         let Some(session) = self.focused_session() else {
             return TextInputState::default();
         };
@@ -247,9 +200,6 @@ impl<T> Document<T> {
         };
         let value = self.host_value(host);
         let paragraph = self.editable_paragraph(host);
-        // A parley selection the paragraph cannot read back as value offsets
-        // is reported collapsed at the value's end rather than as offsets
-        // into some other text.
         let range = session
             .bytes(paragraph.as_ref(), &value)
             .map_or(value.len()..value.len(), super::ByteSelection::range);
@@ -283,10 +233,6 @@ impl<T> Document<T> {
                     }
                 }
             } else {
-                // No paragraph — a flex host with no text, or with white
-                // space it does not render: the caret at the content box's
-                // origin, one line tall. A host with a paragraph of its own
-                // has a line even when empty, and is answered above.
                 let origin = editable_bounds.origin + self.content_inset(host);
                 caret = Rect::new(origin, Size2D::new(CARET_WIDTH, fallback));
                 if let Some(range) = &session.composition {

@@ -67,11 +67,8 @@ enum UserEvent {
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
 
-/// The pointer id of the `tap` command's finger.
 const TAP_POINTER_ID: u32 = 1;
 
-/// The native reference embedder's policy for winit's abstract line wheel
-/// unit. Core accepts wheel deltas in CSS pixels only.
 const WHEEL_LINE_CSS_PX: f32 = 40.0;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
@@ -96,9 +93,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
-/// This window's wakeup: a user event on winit's loop proxy, which is the
-/// only thing that reaches the run loop from another thread. The Lynx main
-/// thread holds it, and posting one is all it ever does with it.
 #[derive(Debug)]
 struct ProxyWakeup(EventLoopProxy<UserEvent>);
 
@@ -113,36 +107,18 @@ struct MacApplication {
     input: String,
     initial_width: f32,
     initial_height: f32,
-    /// The language of the page's text, handed to the view's sources.
     locale: String,
-    /// The scripts the group preloads before the view is built.
     preload_scripts: Vec<String>,
-    /// This window's display clock, running only while a frame is owed.
-    /// Declared before both of the two below so it is stopped — and its
-    /// callback proven finished — before what it wakes goes away.
     vsync: Option<DisplayLink>,
-    /// The painter, declared before the window it draws into: it owns the
-    /// surface built from that window, so dropping it first releases the
-    /// surface before the last handle to the window goes — and the window
-    /// itself is destroyed on this thread, which is the only one allowed to
-    /// destroy it.
     painter: Option<Painter>,
-    /// The view, declared after the painter that observes it: the painter
-    /// holds nothing of it but weak handles, so either order is safe, and
-    /// this one keeps the surface's release first.
     view: Option<LynxView<ViewResources>>,
     event_requester: Arc<ProxyWakeup>,
     window: Option<Arc<Window>>,
     console: Console,
     pointer: Option<PhysicalPosition<f64>>,
     pressed: bool,
-    /// The modifier keys as winit last reported them, which every key event
-    /// carries.
     modifiers: ModifiersState,
-    /// The input method's composition as this side has sent it.
     ime: ImeBridge,
-    /// The last text input state the view published: whether an editing
-    /// host is focused, and where its caret is.
     text_input: Option<TextInputState>,
     error: Option<CliError>,
 }
@@ -218,31 +194,16 @@ impl MacApplication {
             .take()
             .expect("the program is consumed by the first window only");
 
-        // Two constructions: the view, which is the page and its resources,
-        // and the painter, which is this window's surface. The surface is
-        // built on this thread because `AppKit` allows it nowhere else — and
-        // this is also the thread that will draw into it, for the same
-        // reason.
-        // The resource system completes image loads on its own runtime — a
-        // driver thread plus tokio's blocking pool; each completion wakes the
-        // event loop the same way a commit does.
         let resources = program.resources({
             let requester = Arc::clone(&self.event_requester);
             move || requester.request_event()
         });
-        // One window, so one group: its Lynx main thread and its Stylo workers
-        // exist for this view alone, and the view is what keeps them alive.
         let group = super::start_group(
             Arc::clone(&self.event_requester),
             &self.locale,
             &self.preload_scripts,
             &program.input,
         )?;
-        // The screen `SystemInfo` reports is the monitor this window is on,
-        // in physical pixels: `MonitorHandle::size()` is already physical, so
-        // the scale factor multiplies nothing here. A window winit cannot
-        // name a monitor for has no screen to report, so it reports its own
-        // create-time viewport in physical pixels, as a headless capture does.
         let screen = window
             .current_monitor()
             .or_else(|| event_loop.primary_monitor())
@@ -276,10 +237,6 @@ impl MacApplication {
 
         self.painter = Some(painter);
         self.view = Some(view);
-        // The display this window is on is the clock its frames run at. A
-        // monitor winit cannot name, or a link CoreVideo will not open,
-        // leaves the window on the engine's own wakeups: it still paints
-        // every commit, it just cannot pace an animation itself.
         self.vsync = window.current_monitor().and_then(|monitor| {
             let requester = Arc::clone(&self.event_requester);
             DisplayLink::new(monitor.native_id(), move || {
@@ -414,19 +371,6 @@ impl MacApplication {
         self.dispatch(InputEvent::wheel(point, wheel_delta_css(delta, scale)));
     }
 
-    /// One key going down or up, as W3C UI Events' `keydown`/`keyup`: winit's
-    /// logical key is the `key`, its physical key the `code`
-    /// ([`super::keys`]), and `KeyEvent.text` the text it typed.
-    ///
-    /// The text is winit's whether or not the input method is on: a key the
-    /// input method consumed queues no `KeyboardInput` at all and its text
-    /// comes as `Ime` events, and one it did not consume delivers its text
-    /// here only ([`super::ime`]), so no key's text is inserted twice.
-    /// winit's text for Enter, Tab, Backspace and Escape is a control
-    /// character, which the engine does not insert.
-    ///
-    /// Modifiers are macOS's: Option is `alt`, Command `meta`, Control
-    /// `ctrl`.
     fn key_event(&mut self, event: &KeyEvent) {
         let phase = match event.state {
             ElementState::Pressed => KeyPhase::Down,
@@ -450,7 +394,6 @@ impl MacApplication {
         );
     }
 
-    /// Sends one editing command to the view, reporting a refusal.
     fn edit(&self, command: EditCommand) {
         if let Some(view) = &self.view
             && let Err(error) = view.edit(command)
@@ -459,23 +402,12 @@ impl MacApplication {
         }
     }
 
-    /// Sends the cancellation the input-method bridge held back, now that
-    /// an event other than a commit has followed it.
     fn flush_ime(&mut self) {
         if let Some(command) = self.ime.flush() {
             self.edit(command);
         }
     }
 
-    /// Follows the view's text input state: the input method is on exactly
-    /// while an editing host is focused, and its candidate window sits at
-    /// the caret — or at the composition's first character while one is
-    /// active. The rectangles are viewport CSS px, which are this window's
-    /// logical points (the view's CSS px are the physical size divided by
-    /// the scale factor), so winit takes them as they are. A focus that
-    /// moved leaves the old host's composition behind.
-    ///
-    /// winit's `set_ime_purpose` is not called: its macOS backend ignores it.
     fn text_input_changed(&mut self, state: TextInputState) {
         let Some(window) = self.window.clone() else {
             return;
@@ -534,17 +466,8 @@ impl MacApplication {
         event_loop.exit();
     }
 
-    /// Runs both turns: the painter draws the frame it owes — which is where
-    /// this thread waits for the display — and then the view services its
-    /// host's resources and hands back the lifecycle events it produced.
-    ///
-    /// The painter first, deliberately. The frame a view committed before a
-    /// fatal event reaches the screen on the turn that reports it, with
-    /// nobody left to ask for another frame.
     fn serve(&mut self, event_loop: &ActiveEventLoop) {
         let mut fatal = None;
-        // A draw target that failed cannot be reached again, so the window
-        // has nothing left to show.
         if let Some(painter) = self.painter.as_mut()
             && let Err(error) = painter.pump()
         {
@@ -559,13 +482,9 @@ impl MacApplication {
         let mut text_input = None;
         for event in view.pump() {
             match event {
-                // The view has ended. The first failure is the one reported.
                 event if event.is_fatal() && fatal.is_none() => {
                     fatal = Some(CliError::from_fatal_event(&self.input, event));
                 }
-                // Not fatal — the view and its realms go on and later events
-                // are still delivered — so each is reported and the window
-                // stays up.
                 EngineEvent::ScriptRunError(error) => {
                     eprintln!("script failed: {error}");
                 }
@@ -593,7 +512,6 @@ impl MacApplication {
                 } => {
                     eprintln!("[{source}] [{level}] {message}");
                 }
-                // Only the newest state matters to the window.
                 EngineEvent::TextInputStateChanged(state) => text_input = Some(*state),
                 _ => {}
             }
@@ -623,8 +541,6 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         if self.window().map(|window| window.id()) != Some(window_id) {
             return;
         }
-        // An empty preedit held back is a cancellation unless a commit is
-        // the very next event ([`super::ime`]).
         if !matches!(event, WindowEvent::Ime(_)) {
             self.flush_ime();
         }
@@ -701,8 +617,6 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
-            // The wakeup itself. Answering it is `about_to_wait`'s job; this
-            // arm exists only because a wakeup had to be shaped as an event.
             UserEvent::Pump => {}
             UserEvent::Vsync => {
                 if let Some(painter) = self.painter.as_mut() {
@@ -712,42 +626,16 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         }
     }
 
-    /// The turn ends here: run the view's turn, then decide how long to
-    /// sleep.
-    ///
-    /// Drawing belongs here and not in the event relays, for two reasons. A
-    /// turn's whole event burst has been handed over by now, so a wheel
-    /// flurry draws one frame carrying its sum. And a frame that asks
-    /// `bobcat-main` for the next commit is answered through this loop's own
-    /// proxy, which winit drains by iterating until the channel is empty —
-    /// from inside that drain the run loop would never return to `AppKit`,
-    /// while a wakeup posted from here simply opens the next turn.
-    ///
-    /// The loop then waits, and always plainly: while the view owes a frame,
-    /// the display link posts a wakeup per refresh, and the turn that finds
-    /// nothing owed stops the link. A realm timer is not this loop's to time
-    /// out for — the engine waits its own deadlines out and wakes this thread
-    /// through the `EventRequester` when one fires.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // A turn that quit opened draws nothing: this thread is the one
-        // taking the window down, and a frame presented into a surface being
-        // torn down buys nothing. An event the engine queued in that same
-        // turn goes with it, exactly as it does when the window's close
-        // button is what ends the run.
         if event_loop.exiting() {
             return;
         }
-        // The turn's events are all in: an empty preedit still held was not
-        // the start of a commit.
         self.flush_ime();
         self.serve(event_loop);
         let owed = self.painter.as_ref().is_some_and(Painter::owes_frame);
         if let Some(vsync) = self.vsync.as_mut() {
             vsync.set_running(owed);
         }
-        // Always a plain wait. Nothing the engine owes itself is this loop's
-        // to time out for: a realm timer comes due on `bobcat-main`, commits
-        // there, and wakes this thread through the `EventRequester`.
         event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
@@ -770,12 +658,6 @@ fn wheel_delta_css(delta: MouseScrollDelta, scale_factor: f64) -> (f32, f32) {
     }
 }
 
-/// The screen `SystemInfo` reports: the monitor this window is on, in the
-/// physical pixels `MonitorHandle::size` already gives, and its scale factor.
-///
-/// A monitor's, not a window's. It is read once, when the window is created,
-/// and a window moved to another display afterwards does not change it — the
-/// standing web-core gives the values it reads at module load.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \

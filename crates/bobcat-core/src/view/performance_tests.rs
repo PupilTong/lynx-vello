@@ -8,9 +8,6 @@ use super::*;
 use crate::performance::{PipelineOrigin, PipelineTiming, Timestamp};
 use crate::test_support::{TestEngine, TestViewSpec};
 
-/// A card whose first screen carries the flag `first`, whose `updatePage`
-/// and `rLynxChange` re-render it, the second as `ReactLynx`'s BTS update does:
-/// with the BTS's `pipelineOptions` handed to the flush.
 const CARD: &str = r"
     function paint(width) {
       __SetInlineStyles(view, `width:${width}px;height:10px;background-color:red`);
@@ -34,10 +31,6 @@ const CARD: &str = r"
     };
 ";
 
-/// A BTS that logs every pipeline entry it observes, and once the load is
-/// reported starts one `ReactLynx`-shaped update: a pipeline that carries
-/// timestamps, a framework mark, a flag bound to it, and the call that hands
-/// its options to the main thread's flush.
 const OBSERVING_BTS: &str = r"
     import { lynx, console } from 'bobcat:bts-runtime';
     let updated = false;
@@ -65,8 +58,6 @@ fn engine(background: Option<&str>) -> TestEngine {
     spec.create(Arc::new(NoWakeup))
 }
 
-/// One host turn: an offscreen frame drawn, then the view's own turn, whose
-/// events are kept. Any failure fails the test with what it said.
 fn turn(engine: &mut TestEngine, events: &mut Vec<EngineEvent>) {
     let _ = engine.tick(true);
     for event in engine.pump() {
@@ -82,7 +73,6 @@ fn turn(engine: &mut TestEngine, events: &mut Vec<EngineEvent>) {
     }
 }
 
-/// Turns until `done` holds of what the turns reported.
 fn drive_until(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
@@ -121,7 +111,6 @@ fn pipeline_named<'a>(events: &'a [EngineEvent], flag: &str) -> Option<&'a Pipel
     })
 }
 
-/// Every stage of a pipeline in order, from its start to its present.
 fn assert_ordered(pipeline: &PipelineTiming) {
     let stages: [Timestamp; 10] = [
         pipeline.pipeline_start,
@@ -189,7 +178,6 @@ fn a_flagged_first_screen_reports_its_load_to_rust_and_to_the_bts() {
     assert_eq!(first.origin, PipelineOrigin::LoadBundle);
     assert_ordered(first);
 
-    // The BTS's observer received the same pipeline, as Lynx's JSON.
     let message = events
         .iter()
         .find_map(|event| match event {
@@ -272,7 +260,6 @@ fn extra_timing_after_the_load_reports_the_load_again_once() {
     drive_until(&mut engine, &mut events, |events| {
         !load_entries(events).is_empty()
     });
-    // 50 ms before the view's own origin: before its load began.
     let origin = engine.view.time_origin();
     let opened = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(origin.unix_millis() / 1000.0)
         - Duration::from_millis(50);
@@ -293,7 +280,6 @@ fn extra_timing_after_the_load_reports_the_load_again_once() {
     let total = again.total_fcp.expect("openTime was set");
     assert!(fcp.duration() >= again.lynx_fcp.duration());
     assert!(total.duration() >= Duration::from_millis(50));
-    // A key set twice is set once.
     engine.view.set_extra_timing(extra).expect("a live view");
     for _ in 0..5 {
         turn(&mut engine, &mut events);
@@ -306,8 +292,6 @@ fn a_view_nobody_observes_reports_nothing_and_keeps_no_record() {
     let mut engine = engine(None);
     let registry = Arc::clone(&engine.view.seat().registry);
     let mut events = Vec::new();
-    // The load completes — and is freed — once its first frame is presented
-    // and its BTS has loaded its (empty) entry.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         turn(&mut engine, &mut events);
@@ -331,12 +315,8 @@ fn a_view_nobody_observes_reports_nothing_and_keeps_no_record() {
     assert!(registry.records_for_test().is_empty());
 }
 
-/// Solid em squares, so a text run is ink whatever the machine's fonts.
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// A card whose first screen is one coloured box — a first paint, and no
-/// contentful one — and whose `updatePage` adds a text: the first
-/// contentful paint.
 const TEXT_CARD: &str = r"
     globalThis.renderPage = function () {
       globalThis.page = __CreatePage('card', 0);
@@ -352,8 +332,6 @@ const TEXT_CARD: &str = r"
     };
 ";
 
-/// A BTS that logs every `paint` entry it observes, having said it
-/// observes.
 const PAINT_BTS: &str = r"
     import { lynx, console } from 'bobcat:bts-runtime';
     lynx.performance.createObserver(entry => {
@@ -393,7 +371,6 @@ fn observing_paint_reports_first_paint_then_first_contentful_paint_once_each() {
     drive_until(&mut engine, &mut events, |events| {
         !paint_entries(events).is_empty()
     });
-    // The first screen is a coloured box: a first paint, nothing contentful.
     for _ in 0..3 {
         turn(&mut engine, &mut events);
     }
@@ -474,8 +451,6 @@ fn a_bts_paint_observer_receives_both_paint_entries() {
             })
             .collect()
     };
-    // The view's own turns alone until the BTS observes, so the first frame
-    // is presented — and its first paint recorded — only once it does.
     let deadline = Instant::now() + Duration::from_secs(30);
     while logged(&events, "observing paint").is_empty() {
         assert!(
@@ -528,7 +503,6 @@ fn a_bts_paint_observer_receives_both_paint_entries() {
         .as_secs_f64()
         * 1000.0;
     assert!((now - first_at).abs() < 60_000.0, "{first_at} vs {now}");
-    // The Rust embedder asked for nothing.
     assert!(performance(&events).next().is_none(), "{events:?}");
 }
 
@@ -561,8 +535,6 @@ fn an_unobserved_view_stops_timing_its_presents_once_its_load_completed() {
     }
 }
 
-/// A BTS entry whose evaluation holds the worker thread for 20 ms: one job
-/// of `bobcat-workers` that runs long.
 const SPINNING_BTS: &str = r"
     const until = Date.now() + 20;
     while (Date.now() < until) {}
@@ -582,7 +554,6 @@ fn a_bts_job_that_runs_long_is_a_long_task_on_the_workers_thread() {
     use crate::performance::{JobKind, JsThreadName, LongTaskConfig};
 
     let mut engine = engine(Some(SPINNING_BTS));
-    // Before the first turn, which is what serves the BTS entry's request.
     engine.view.set_long_task_monitor(Some(LongTaskConfig {
         threshold: Duration::from_millis(15),
     }));
@@ -590,9 +561,6 @@ fn a_bts_job_that_runs_long_is_a_long_task_on_the_workers_thread() {
         .view
         .observe_performance(EntryTypes::LONG_TASK | EntryTypes::LOAD_BUNDLE);
     let mut events = Vec::new();
-    // The BTS entry is evaluated in the job that completes the module its
-    // import asked for. Another job may run long too in a debug build, the
-    // boot jobs most of all, so the spinning one is picked by its kind.
     let spinning = |task: &crate::performance::LongTaskEntry| {
         task.thread == JsThreadName::Workers && task.kind == JobKind::Module
     };
@@ -603,14 +571,9 @@ fn a_bts_job_that_runs_long_is_a_long_task_on_the_workers_thread() {
         .into_iter()
         .find(spinning)
         .expect("the spinning job");
-    // At least the threshold: `Date.now()` reads whole milliseconds, so
-    // the 20 ms spin itself can come out a little short.
     assert!(task.duration() >= Duration::from_millis(15), "{task:?}");
 }
 
-/// A BTS whose entry waits for a native module's answer before it finishes
-/// loading — an answer the view sends it as one message, after the
-/// embedder's first turn — and then keeps one answer in flight every 5 ms.
 const WAITING_BTS: &str = r"
     import { NativeModules } from 'bobcat:bts-runtime';
     await new Promise(resolve => NativeModules.Echo.echo('first', resolve));
@@ -636,8 +599,6 @@ fn the_js_blocking_monitor_reports_at_the_load_and_then_on_its_timer() {
         .with_background_entry(WAITING_BTS)
         .with_echo_module("Echo")
         .create(Arc::new(NoWakeup));
-    // Before the first turn, which is what invokes the module and sends
-    // its answer to the BTS.
     engine
         .view
         .set_js_blocking_monitor(Some(JsBlockingConfig {
@@ -670,7 +631,6 @@ fn the_js_blocking_monitor_reports_at_the_load_and_then_on_its_timer() {
     assert!(timer.total_blocking_count >= 1, "{timer:?}");
     let after = timer.time_after_load_bundle.expect("a timer report's");
     assert!(after >= interval, "{timer:?}");
-    // Off: the task ends, and nothing more is stamped.
     engine
         .view
         .set_js_blocking_monitor(None)
@@ -729,13 +689,10 @@ fn the_memory_monitor_reports_every_category_read_by_its_own_thread() {
     };
     assert!(shared(MemoryCategory::MainThreadScriptingEngine));
     assert!(shared(MemoryCategory::BackgroundThreadScriptingEngine));
-    // Off: the task ends, and a reading still on its way reports nothing.
     engine.view.set_memory_monitor(None).expect("a live view");
     assert!(!engine.view.seat().registry.note_memory(elements.clone()));
 }
 
-/// A BTS that fetches a bundle the host serves and one it does not, logging
-/// each outcome, after `observe` (a statement, run first).
 fn fetching_bts(observe: &str) -> String {
     format!(
         r"
@@ -748,8 +705,6 @@ fn fetching_bts(observe: &str) -> String {
     )
 }
 
-/// A view whose host serves `app:///lazy.bundle` as a fetch, with one module
-/// under it standing in for what a container installer registers.
 fn fetching_engine(background: &str) -> TestEngine {
     TestViewSpec::new(CARD)
         .offscreen(32.0, 24.0)
@@ -768,7 +723,6 @@ fn lazy_bundles(events: &[EngineEvent]) -> Vec<&crate::performance::LazyBundleEn
         .collect()
 }
 
-/// Every console message that starts with `prefix`, the prefix removed.
 fn logged_after<'a>(events: &'a [EngineEvent], prefix: &str) -> Vec<&'a str> {
     events
         .iter()
@@ -779,8 +733,6 @@ fn logged_after<'a>(events: &'a [EngineEvent], prefix: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Every `SourceRequest::Fetch` the view's host was asked: its URL and
-/// whether it was timed.
 fn fetch_requests(engine: &TestEngine) -> Vec<(String, bool)> {
     engine
         .view
@@ -791,10 +743,6 @@ fn fetch_requests(engine: &TestEngine) -> Vec<(String, bool)> {
         .clone()
 }
 
-/// A BTS `lynx.fetchBundle` is one `resource.lazyBundle` entry, to Rust and
-/// to the BTS's own `resource` observer, for a served bundle and for one
-/// the host does not have; with nobody observing `resource`, the same
-/// fetches ask the fetcher for no readings and report nothing.
 #[test]
 fn a_bts_fetch_bundle_is_one_lazy_bundle_entry_to_rust_and_the_bts_while_observed() {
     let observer = "lynx.performance.createObserver(entry => \
@@ -825,7 +773,6 @@ fn a_bts_fetch_bundle_is_one_lazy_bundle_entry_to_rust_and_the_bts_while_observe
     assert!(!missing.load_success);
     assert!(missing.require.start <= missing.require.end);
     assert_eq!((missing.size_bytes, missing.decode.clone()), (None, None));
-    // The BTS's observer received both, as Lynx's JSON in Lynx's key order.
     let seen = logged_after(&events, "resource ");
     for start in [
         r#"{"entryType":"resource","name":"lazyBundle","componentUrl":"app:///lazy.bundle","size":22,"loadSuccess":true,"mode":"normal","decodeStart""#,
@@ -841,7 +788,6 @@ fn a_bts_fetch_bundle_is_one_lazy_bundle_entry_to_rust_and_the_bts_while_observe
         ]
     );
 
-    // Every type but `resource`, and no BTS observer: not timed.
     let mut engine = fetching_engine(&fetching_bts(""));
     engine
         .view
@@ -860,10 +806,6 @@ fn a_bts_fetch_bundle_is_one_lazy_bundle_entry_to_rust_and_the_bts_while_observe
     assert!(lazy_bundles(&events).is_empty(), "{events:?}");
 }
 
-/// A card whose first screen is a `containertiming="hero"` view holding one
-/// text, and whose every `updatePage` adds another text under it, below the
-/// last, with a timing flag `update-<n>` — the pipeline entry that says the
-/// update's frame was presented.
 const CONTAINER_CARD: &str = r"
     let updates = 0;
     function line(content) {
@@ -917,7 +859,6 @@ fn a_container_root_reports_its_paints_until_the_first_pointer_down() {
     assert_eq!(first.first_render, first.start);
     let first = first.clone();
 
-    // A text below the first grows the region.
     engine
         .view
         .update_data("{}".to_owned(), String::new())
@@ -937,8 +878,6 @@ fn a_container_root_reports_its_paints_until_the_first_pointer_down() {
     assert!(grown.start > first.start);
     assert!(grown.intersection_rect.size.height > first.intersection_rect.size.height);
 
-    // The first pointer down stops recording: a later text under the root
-    // paints, and reports nothing.
     engine.dispatch_input(terminus::link::input::InputEvent::pointer(
         terminus::link::Point2D::new(60.0, 44.0),
         1,

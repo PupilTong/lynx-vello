@@ -72,9 +72,6 @@ fn standard_cascade_is_embedder_neutral() {
     );
 }
 
-/// css-display-3 §2.7: a root `display: contents` computes to a block-level
-/// box. Under the fork's `lynx` grammar that box is `flex`, where a browser
-/// gives `block`.
 #[test]
 fn root_display_contents_computes_to_flex() {
     let mut doc = document();
@@ -142,7 +139,6 @@ fn presentational_hints_use_their_own_cascade_origin() {
     assert_restyle_color(&mut doc, target, BLUE);
     doc.add_class(target, "author");
     assert_restyle_color(&mut doc, target, RED);
-    // Later hint updates cannot defeat even a layered author declaration.
     doc.set_presentational_hint(target, "color", "green");
     assert_restyle_color(&mut doc, target, RED);
     doc.remove_class(target, "author");
@@ -454,11 +450,6 @@ fn documents_own_independent_stylesheets() {
     );
 }
 
-/// `:nth-last-child` and the `-of-type` family count from the end, so adding or
-/// removing any child can change which siblings match — Stylo asks for every
-/// child to be restyled by setting `HAS_SLOW_SELECTOR` on the parent. The
-/// invalidation reaches descendants of those children too, not just the
-/// children themselves.
 #[test]
 fn counting_from_the_end_restyles_every_child_and_their_descendants() {
     let mut doc = document();
@@ -496,7 +487,6 @@ fn counting_from_the_end_restyles_every_child_and_their_descendants() {
         "the last row's label matches through its parent"
     );
 
-    // Appending shifts every position counted from the end by one.
     let appended = doc.create_element("view", ());
     doc.add_class(appended, "row");
     let appended_label = doc.create_element("view", ());
@@ -520,8 +510,6 @@ fn counting_from_the_end_restyles_every_child_and_their_descendants() {
         "the new last row's label must gain it"
     );
 
-    // Removing from the front shifts nothing counted from the end, but the
-    // parent is still asked to restyle every child.
     doc.remove_element(rows[0]);
     doc.layout();
 
@@ -530,8 +518,6 @@ fn counting_from_the_end_restyles_every_child_and_their_descendants() {
     assert_color!(doc, labels[1], BLUE);
 }
 
-/// `:only-of-type` matches only while a child is the sole element of its tag,
-/// so it flips on both the second insertion and the return to one.
 #[test]
 fn only_of_type_flips_on_the_second_child_and_back() {
     let mut doc = document();
@@ -559,13 +545,6 @@ fn only_of_type_flips_on_the_second_child_and_back() {
     assert_color!(doc, first, RED, "removing it restores the match");
 }
 
-/// An attribute no rule mentions still lands on the element, and a stylesheet
-/// mounted afterwards matches against it.
-///
-/// Writing such an attribute skips the style snapshot entirely — nothing could
-/// read it — which is only sound because a later stylesheet re-styles from the
-/// root, covering every element whose snapshot was skipped. This is that
-/// argument, executed.
 #[test]
 fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
     let mut doc = document();
@@ -576,7 +555,6 @@ fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
     doc.layout();
     assert_color!(doc, el, BLUE);
 
-    // No rule mentions `data-state`, so this write schedules no restyle.
     doc.set_attribute(el, "data-state", "ready");
     doc.layout();
     assert_color!(doc, el, BLUE);
@@ -590,7 +568,6 @@ fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
         "the attribute is on the element either way"
     );
 
-    // The sheet arrives after the write and must still see it.
     doc.add_stylesheet(
         "view[data-state=\"ready\"] { color: rgb(255, 0, 0) }",
         StylesheetOrigin::Author,
@@ -604,8 +581,6 @@ fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
     );
 }
 
-/// The gate is per attribute name, not per element: an attribute some rule does
-/// mention keeps invalidating immediately, including onto other elements.
 #[test]
 fn an_attribute_a_rule_mentions_still_invalidates_immediately() {
     let mut doc = document();
@@ -635,8 +610,6 @@ fn an_attribute_a_rule_mentions_still_invalidates_immediately() {
     assert_color!(doc, second, BLUE, "and unfires on removal");
 }
 
-/// Element state is gated the same way and by the same bits: `:hover` keeps
-/// working while a state no rule selects on costs no restyle.
 #[test]
 fn element_state_invalidates_only_for_states_a_rule_selects_on() {
     let mut doc = document();
@@ -649,7 +622,6 @@ fn element_state_invalidates_only_for_states_a_rule_selects_on() {
     doc.append_child(root, el);
     doc.layout();
 
-    // No rule mentions `:focus`.
     doc.add_element_state(el, terminus::link::ElementState::FOCUS);
     doc.layout();
     assert_color!(doc, el, BLUE);
@@ -670,9 +642,6 @@ fn element_state_invalidates_only_for_states_a_rule_selects_on() {
     );
 }
 
-/// The "a later stylesheet covers it" argument has to hold inside a
-/// `display: none` subtree too, which a root restyle does not descend into —
-/// `recalc_style_at` cuts `traverse_children` on `styles.is_display_none()`.
 #[test]
 fn an_ungated_attribute_written_inside_display_none_is_matched_when_shown() {
     let mut doc = document();
@@ -688,12 +657,9 @@ fn an_ungated_attribute_written_inside_display_none_is_matched_when_shown() {
     doc.append_child(container, buried);
     doc.layout();
 
-    // No rule mentions `data-state`, so this write inside the hidden subtree
-    // schedules nothing.
     doc.set_attribute(buried, "data-state", "ready");
     doc.layout();
 
-    // The sheet arrives afterwards, and only then is the subtree shown.
     doc.add_stylesheet(
         "view[data-state=\"ready\"] { color: rgb(255, 0, 0) }",
         StylesheetOrigin::Author,

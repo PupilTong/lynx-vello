@@ -91,11 +91,6 @@ use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
 use crate::view::EngineError;
 
-/// Names one `Worker` for the life of its group.
-///
-/// Issued by the realm that constructs one and never reused, so a message
-/// still in flight for a worker that has ended cannot find a later one
-/// wearing its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct WorkerKey(u64);
 
@@ -109,99 +104,47 @@ impl WorkerKey {
     }
 }
 
-/// One worker to start: everything it will ever be given, in one message.
-///
-/// No state, and nothing the creating realm decided about the worker: its
-/// key, its name, its URL, and the channels and token below. The BTS is the
-/// dedicated worker whose URL is `bobcat:bts`, and that URL is all that sets
-/// its `Start` apart: the view's data reaches it in the `initialize` message
-/// the MTS realm posts to it, as any other message does. Everything else a
-/// worker has — what is posted to it, what it says back, what it asks the
-/// host for — is a channel that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
-    /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
-    /// The worker's script URL: the `new Worker` specifier joined to the
-    /// creating realm's `__Card__` — its view's card URL, or else its entry's
-    /// response URL — by URL rules, which leaves an absolute
-    /// URL such as `bobcat:bts` as it is. The realm's root module is the
-    /// module at this URL, loaded by it, and with the key it is what the
-    /// worker's diagnostics are named by: the creating realm and the worker
-    /// thread each write the worker's
-    /// [`ScriptSource::Worker`](crate::ScriptSource::Worker) from the two.
     pub(crate) url: String,
-    /// What the MTS Worker object posts. Its finalizer or explicit terminate
-    /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
-    /// Where this worker reports, which is the creating view's own channel.
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
-    /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
-    /// Sources, frame demand and diagnostics reach the host directly, under
-    /// this worker's lifetime. The worker's own script is among the sources
-    /// asked for through it.
     pub(crate) sources: crate::link::HostOutbox,
 }
 
-/// Everything the worker thread is ever told.
 pub(crate) enum WorkerCommand {
-    /// A realm constructed a `Worker`.
     Start(WorkerStart),
-    /// Panics the thread's `main` task, for the test of what a trapped
-    /// thread reports.
     #[cfg(test)]
     Panic,
 }
 
-/// Everything one worker in particular is ever told.
-///
-/// A message that queues a job carries `enqueued`, its send instant, while
-/// the view's JS blocking monitor is on: the job measures how long it waited
-/// for the worker thread, as Lynx's `MarkJSTaskEnqueue` does.
 pub(crate) enum WorkerMessage {
-    /// A display opportunity from the painter, handled even while entry awaits.
     Vsync {
         milliseconds: f64,
         enqueued: Option<ClockInstant>,
     },
-    /// One value, primitive or structured clone, for the worker's realm.
     Post {
         data: HostValue,
         enqueued: Option<ClockInstant>,
     },
-    /// An embedder's native module answering one function argument of one
-    /// call: the call the realm numbered, which argument it was, and the JSON
-    /// array text to spread — or `None`, which releases the function
-    /// uninvoked. Delivered as soon as it arrives, boot or no boot: a call
-    /// made during the entry's own top-level await is waiting for it.
     ModuleCallback {
         call: u64,
         index: u32,
         arguments: Option<String>,
         enqueued: Option<ClockInstant>,
     },
-    /// Performance entries this worker's `lynx.performance` observers
-    /// receive are ready to be taken: sent by the painter, or the view's
-    /// pump, once a pipeline the worker's realm opened, or the realm it
-    /// belongs to opened, has completed. Held until the root module has
-    /// finished, as a post is, and delivered as one job that calls the BTS
-    /// runtime's `__BobcatPerformanceReady`; a realm with no observer drops
-    /// it.
-    PerformanceReady { enqueued: Option<ClockInstant> },
-    /// The view's memory monitor asks this worker — the view's BTS — for
-    /// the reading of its thread's script runtime. Sent by the main
-    /// thread's sampling job, and delivered as one job that runs no
-    /// JavaScript, whether or not the realm has finished loading.
-    MemorySample { enqueued: Option<ClockInstant> },
-    /// Explicit termination or GC of the MTS Worker object: end it between
-    /// tasks and discard what was queued behind this.
+    PerformanceReady {
+        enqueued: Option<ClockInstant>,
+    },
+    MemorySample {
+        enqueued: Option<ClockInstant>,
+    },
     Terminate,
 }
 
 impl WorkerMessage {
-    /// A post carrying no enqueue instant, for the tests that play the
-    /// creating realm by hand.
     #[cfg(test)]
     pub(crate) const fn post(data: HostValue) -> Self {
         Self::Post {
@@ -211,47 +154,18 @@ impl WorkerMessage {
     }
 }
 
-/// One worker realm → the view whose realm created it.
 pub(crate) struct WorkerEvent {
     pub(crate) key: WorkerKey,
     pub(crate) payload: WorkerPayload,
 }
 
 pub(crate) enum WorkerPayload {
-    /// One value, primitive or structured clone, from the worker's
-    /// `postMessage`.
     Message(HostValue),
-    /// Something in the worker's realm threw and the worker is still
-    /// running, whichever entry into the realm it was: its script, a message
-    /// delivered to it, a timer, animation or native module callback, a
-    /// module it imported, a `Future` it awaited. HTML reports an uncaught
-    /// exception at the worker and then at its parent without ending either.
-    /// A script or an imported module that could not be loaded, or was
-    /// answered with something other than a script, is reported here too:
-    /// the load rejects in the realm, and the worker stays, where HTML never
-    /// runs a worker whose script fetch failed
-    /// (`docs/tracking/deviations.md`). The creating realm reports it as
-    /// `EngineEvent::WorkerThrew`.
     Errored(ScriptError),
-    /// The worker's realm could not be built, or the thread it runs on has
-    /// trapped — while it ran, or before it was started, in which case the
-    /// creating realm queued this itself and nothing was sent to that
-    /// thread. The realm is gone with it; nothing more will ever arrive
-    /// under this key. The creating realm reports it as
-    /// `EngineEvent::WorkerEnded`.
     Failed(ScriptError),
-    /// The worker ended itself with `close()`.
     Closed,
 }
 
-/// One wire value, built from the JavaScript expression that produces it.
-///
-/// A test that plays one side of the transport by hand used to write the
-/// message as JSON text. It cannot any more: a structured clone is opaque to
-/// the host, produced only by a realm, so the expression is evaluated in a
-/// throwaway realm and what crosses the boundary is kept. The stream is
-/// self-contained, so a clone written here reads in whichever realm the test
-/// hands it to.
 #[cfg(test)]
 pub(crate) fn wire_value(expression: &str) -> HostValue {
     use std::cell::RefCell;
@@ -281,12 +195,6 @@ pub(crate) fn wire_value(expression: &str) -> HostValue {
         .expect("the wire value crossed the boundary")
 }
 
-/// One wire value as JSON text, for an assertion to compare against.
-///
-/// A description, not the transport: the clone is read back into a throwaway
-/// realm and stringified there, because a structured clone carries more than
-/// JSON can spell and nothing in Rust can look inside it. A test that cares
-/// about what JSON cannot spell uses [`wire_matches`] instead.
 #[cfg(test)]
 pub(crate) fn wire_json(value: &HostValue) -> String {
     use quickjs_rust_bridge::{EvalOptions, EvalSource, Runtime};
@@ -307,11 +215,6 @@ pub(crate) fn wire_json(value: &HostValue) -> String {
         .expect("well-formed UTF-16")
 }
 
-/// Whether a wire value is the object this JavaScript predicate accepts.
-///
-/// The mirror of [`wire_value`], for a test that has to recognize a message
-/// rather than build one: the clone is read back into a throwaway realm and
-/// the predicate is applied there, because nothing in Rust can look inside it.
 #[cfg(test)]
 pub(crate) fn wire_matches(value: &HostValue, predicate: &str) -> bool {
     use quickjs_rust_bridge::{EvalOptions, EvalSource, Runtime};
@@ -330,45 +233,14 @@ pub(crate) fn wire_matches(value: &HostValue, predicate: &str) -> bool {
         .is_ok_and(|answer| answer.as_boolean() == Some(true))
 }
 
-/// The group's right to talk to `bobcat-workers`, and to end it.
-///
-/// One per [`LynxGroup`](crate::LynxGroup), started by `LynxGroup::new` and
-/// joined by the group handle's drop, after `bobcat-main`. Everything that
-/// names a worker holds a sender cloned from here — one of them is
-/// `bobcat-main`'s, which with the trap flag is the whole of what that thread
-/// has of this one. The flag is the one piece of shared state, written once
-/// by this thread as it traps and read by `bobcat-main` before each `Start`,
-/// so it is one atomic and there is no lock.
-///
-/// **The field order is the teardown, and it must stay in this order.** Fields
-/// drop in declaration order, so the goodbye — this side's last sender closing
-/// the thread's inbox — is said before the join below waits for the thread to
-/// answer it. A wait reached with a sender still alive would never return.
 pub(crate) struct WorkerHome {
     commands: mpsc::UnboundedSender<WorkerCommand>,
-    /// Set by the thread once it has trapped, before it reports `Failed` for
-    /// the workers still on it.
     trapped: Arc<AtomicBool>,
     #[expect(dead_code, reason = "held to wait for the worker thread on drop")]
     thread: ThreadJoin,
 }
 
 impl WorkerHome {
-    /// Starts the group's worker thread.
-    ///
-    /// Eager, and beside `bobcat-main` rather than under it: a group pays one
-    /// parked thread and one `QuickJS` runtime whether or not a card ever
-    /// constructs a `Worker`, and in exchange every path below is one send.
-    /// Starting it on the first worker instead would buy that back with a
-    /// lock, a state machine and a second way for a worker to fail.
-    ///
-    /// The thread's first statement aligns its clock through `clock`
-    /// ([`crate::clock`]), whose other end the spawner answers.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::Thread`] if the thread will not start, which is a
-    /// failure to build the group.
     pub(crate) fn start(clock: SpawnedClock) -> Result<Self, EngineError> {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let trapped = Arc::new(AtomicBool::new(false));
@@ -392,13 +264,10 @@ impl WorkerHome {
         })
     }
 
-    /// The sending end, for anything that names a worker.
     pub(crate) fn commands(&self) -> mpsc::UnboundedSender<WorkerCommand> {
         self.commands.clone()
     }
 
-    /// The flag the thread sets once it has trapped, for whatever sends it a
-    /// `Start`.
     pub(crate) fn trapped(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.trapped)
     }

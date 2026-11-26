@@ -40,8 +40,6 @@ fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
         "inline",
         "inline-block",
         "inline-flex",
-        // css-grid-3 defines `inline-grid-lanes`, but the lynx grammar has no
-        // inline-level container value at all.
         "inline-grid-lanes",
         "flow-root",
         "table",
@@ -282,12 +280,6 @@ fn grid_template_tracks() {
     );
 }
 
-/// css-grid-3 §4.2 `fit-tolerance: normal | <length-percentage [0,∞]> |
-/// infinite`. Both keywords survive to computed-value time: layout resolves
-/// `normal` to `1em` and `infinite` to an unbounded tie window. The draft
-/// renamed the property from `flow-tolerance`, which is not kept as an alias
-/// (WPT `css/css-grid/grid-lanes/tentative/parsing/fit-tolerance-computed.html`
-/// and the reftests that set `fit-tolerance` read the current name).
 #[test]
 fn fit_tolerance_grammar() {
     assert!(

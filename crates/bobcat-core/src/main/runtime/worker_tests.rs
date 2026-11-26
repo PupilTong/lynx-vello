@@ -14,28 +14,12 @@ use crate::main::workers::WorkerFactory;
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::NoWakeup;
 
-/// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// What a test's BTS entry posts as its own last statement, for a test that
-/// must not proceed until that entry has evaluated.
-///
-/// Nothing announces the BTS entry any more — the view is ready on MTS boot
-/// alone — so a test that needs the entry's hook installed or its animation
-/// frame requested says so in the entry itself.
 const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 
-/// The URL the worker of a `new Worker('./worker.js')` asks the host for its
-/// script by: the specifier joined by URL rules to the entry's URL,
-/// `app:///nested/main.js`.
 const WORKER_URL: &str = "app:///nested/worker.js";
 
-/// What a worker's failures and diagnostics are named by: the id of its key
-/// and its script URL, which is `bobcat:bts` for the BTS.
-///
-/// A pair is a group of its own, so its keys count from 1 in the order its
-/// realm constructs workers: the entry's, then the BTS boot creates once the
-/// entry has run.
 fn worker_label(key: u64, url: &str) -> crate::ScriptSource {
     crate::ScriptSource::Worker {
         id: crate::WorkerId::from(WorkerKey::new(key)),
@@ -43,11 +27,6 @@ fn worker_label(key: u64, url: &str) -> crate::ScriptSource {
     }
 }
 
-/// Whether the worker posted exactly this string.
-///
-/// A string crosses the transport as itself rather than inside an encoding,
-/// so this is the whole comparison; anything that is not a primitive is a
-/// structured clone, read back through `wire_json`.
 fn posted(value: &HostValue, text: &str) -> bool {
     matches!(value, HostValue::String(value) if value == text)
 }
@@ -55,27 +34,12 @@ fn posted(value: &HostValue, text: &str) -> bool {
 struct Pair {
     runtime: Option<MainThreadRuntime>,
     js: ScriptRuntime,
-    /// What this view's workers said, which is where every worker event
-    /// arrives now — one channel per view rather than one per group.
     events: mpsc::UnboundedReceiver<WorkerEvent>,
-    /// The host's end of the view's link: the test plays the embedder, so it
-    /// is what answers every source request.
     view: DetachedView,
     frame_demand: crate::link::FrameDemand,
     deferred_notices: VecDeque<ViewNotice>,
-    /// The host's view cancellation signal. Worker handles and their sources
-    /// have independent lifetimes, which these tests exercise explicitly.
     cancel: tokio_util::sync::CancellationToken,
-    /// The engine thread the MTS realm was opened with, held for its life:
-    /// `__AdoptStyleSheet` would park on it.
     _thread: Rc<JsThread>,
-    /// The group's worker thread. `Option` only so a test can drop it in the
-    /// middle of its body: that is what waits for the thread, and two pins here
-    /// ask what the realm's channels hold once it has returned.
-    ///
-    /// **Last field, and it must stay last.** Fields drop in declaration order,
-    /// so the realm — whose `WorkerOwner` holds a sender on that thread — goes
-    /// before the home whose drop closes the last one and waits.
     home: Option<WorkerHome>,
 }
 
@@ -94,10 +58,6 @@ impl Pair {
         Self::unbooted_with_data(background_source, RealmStartup::default())
     }
 
-    /// A booted pair whose view was built with these native modules, as
-    /// `create_lynx_view` would have encoded them. The test is the embedder,
-    /// so what it plays is the other half: it takes the calls off the notice
-    /// queue and answers their callbacks by hand.
     fn with_native_modules(
         script: &str,
         background_source: &str,
@@ -123,11 +83,6 @@ impl Pair {
         pair
     }
 
-    /// Waits for the next native-module call the BTS realm made, and
-    /// assembles it out of the reply handle this test registered from
-    /// `WorkerCreated` — which is exactly what `LynxView::pump` does. The
-    /// command sender stands in for the view's own, which only a call the
-    /// MTS realm made is answered through.
     fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -166,10 +121,6 @@ impl Pair {
         }
     }
 
-    /// `startup` carries the page data and module table a test wants; this
-    /// fills in the BTS entry, and the main script — which is what answers
-    /// this realm's entry request and so names the base URL a worker
-    /// specifier resolves against — is evaluated afterwards by [`Self::boot`].
     fn unbooted_with_data(background_source: Option<&str>, startup: RealmStartup) -> Self {
         Self::unbooted_with_config(
             background_source,
@@ -178,9 +129,6 @@ impl Pair {
         )
     }
 
-    /// The same, over a page configuration of the test's own: the boot module
-    /// is written with it, so it has to be in place before the realm is
-    /// opened.
     fn unbooted_with_config(
         background_source: Option<&str>,
         startup: RealmStartup,
@@ -194,9 +142,6 @@ impl Pair {
         )
     }
 
-    /// The same, over a viewport of the test's own: what a frame's
-    /// `content-visibility: auto` relevance and encode window are relative
-    /// to.
     fn unbooted_over(
         background_source: Option<&str>,
         mut startup: RealmStartup,
@@ -246,9 +191,6 @@ impl Pair {
         )
     }
 
-    /// The next request one of this view's realms makes for the module at
-    /// `url`, waited for by spinning the way an embedder's own turn does.
-    /// Every other notice stays queued, in order.
     fn request(&mut self, url: &str) -> SourceCompletion {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -269,9 +211,6 @@ impl Pair {
         }
     }
 
-    /// Answers the next module one of this view's realms asks for at `url`.
-    /// A compiled BTS bundle reaches its manifest paths through the host,
-    /// and the load parks the worker's job until this answers it.
     fn serve_module(&mut self, url: &str, source: &str) {
         self.request(url).complete(Ok(LoadedSource::Module {
             source: source.to_owned(),
@@ -279,10 +218,6 @@ impl Pair {
         }));
     }
 
-    /// The request a `./worker.js` worker made for its own script, which
-    /// Rust joined to the entry's URL `app:///nested/main.js`. The worker's
-    /// realm makes it from `bobcat-workers`, in its boot job, so it is
-    /// waited for.
     fn source(&mut self) -> SourceCompletion {
         self.request(WORKER_URL)
     }
@@ -291,8 +226,6 @@ impl Pair {
         self.serve_module(WORKER_URL, source);
     }
 
-    /// Waits for one worker event and hands it to the realm, as the view's
-    /// own task does.
     fn deliver(&mut self) {
         let event = self.next_event().expect("a worker event arrives");
         self.runtime
@@ -307,8 +240,6 @@ impl Pair {
         block_on_deadline(self.events.recv(), deadline).flatten()
     }
 
-    /// Waits for the marker a test's BTS entry posts last, dispatching
-    /// whatever it said before it and consuming the marker itself.
     fn await_background_entry(&mut self) {
         loop {
             let event = self.next_event().expect("the BTS entry's own marker");
@@ -325,12 +256,10 @@ impl Pair {
         }
     }
 
-    /// How many workers this realm still holds the right to stop.
     fn live_workers(&self) -> usize {
         self.runtime.as_ref().unwrap().live_workers()
     }
 
-    /// Everything the realm has said to its host so far.
     fn pump_host(&mut self) {
         collect_host_notices(
             &mut self.frame_demand,
@@ -356,7 +285,6 @@ impl Pair {
             )
             .unwrap();
     }
-    /// Drive the same MTS module and Worker event stream as the page owner.
     fn dispose(&mut self) -> Vec<String> {
         self.runtime
             .as_mut()
@@ -378,8 +306,6 @@ impl Pair {
         messages
     }
 
-    /// Release the creating realm and wait for every worker owner to return.
-    /// Keep the receiver to detect anything posted after JS disposal.
     fn finish(&mut self) -> Vec<WorkerEvent> {
         drop(self.runtime.take());
         drop(self.home.take());
@@ -405,8 +331,6 @@ fn collect_host_notices(
     }
 }
 
-/// Whether any notice reports a worker failure with this message: a throw
-/// or an end, from any worker.
 fn worker_failed(notices: &[ViewNotice], message: &str) -> bool {
     notices.iter().any(|notice| {
         matches!(notice, ViewNotice::Engine(
@@ -416,7 +340,6 @@ fn worker_failed(notices: &[ViewNotice], message: &str) -> bool {
     })
 }
 
-/// Every worker failure a batch of notices carries, throws and ends alike.
 fn worker_failures(notices: Vec<ViewNotice>) -> Vec<crate::script::ScriptError> {
     notices
         .into_iter()
@@ -430,8 +353,6 @@ fn worker_failures(notices: Vec<ViewNotice>) -> Vec<crate::script::ScriptError> 
         .collect()
 }
 
-/// Every worker event a batch of notices carries, in order, for a test that
-/// asks which of the two each one is and which worker it names.
 fn worker_events(notices: Vec<ViewNotice>) -> Vec<crate::EngineEvent> {
     notices
         .into_iter()
@@ -445,9 +366,6 @@ fn worker_events(notices: Vec<ViewNotice>) -> Vec<crate::EngineEvent> {
         .collect()
 }
 
-/// Whether any notice asks the host for the script of a `./worker.js`
-/// worker. Worker scripts are `Module` requests like imports, so the URL is
-/// what tells them apart.
 fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
     notices.iter().any(|notice| {
         matches!(
@@ -460,9 +378,6 @@ fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
     })
 }
 
-/// Whether any notice asks the host for a source, whatever it is. The BTS
-/// asks for none in these tests: the engine supplies its boot script, and the
-/// test's worker thread serves the BTS entry itself.
 fn asked_the_host(notices: &[ViewNotice]) -> bool {
     notices
         .iter()
@@ -740,7 +655,6 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
 #[test]
 fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
     let processor = "selected'\"\\\n中文";
-    // This is a JS assertion literal, while RealmStartup receives the original Rust string.
     let expected_processor = r#""selected'\"\\\n中文""#;
     for enable_js_data_processor in [false, true] {
         let expected_name = if enable_js_data_processor {
@@ -956,10 +870,6 @@ fn string_handlers_reach_background_with_event_snapshots() {
     );
 }
 
-/// What a Context event carries is a structured clone in both directions, so
-/// the values a JSON transport could not spell survive the two threads: an
-/// `undefined`-valued key, `NaN`, a `Date`, a typed array, a `BigInt`, and a
-/// cycle.
 #[test]
 fn context_events_carry_structured_values_in_both_directions() {
     let mut pair = Pair::with_background(
@@ -1010,8 +920,6 @@ fn context_events_carry_structured_values_in_both_directions() {
     );
 }
 
-/// A value the serializer refuses is refused where it was written, so the
-/// poster hears about it rather than the other thread.
 #[test]
 fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
     let mut pair = Pair::new(
@@ -1038,10 +946,6 @@ fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
     );
 }
 
-/// The published snapshot of a DOM event is the same shape it was under the
-/// JSON transport: the two stop methods are gone rather than present as
-/// `undefined`, the element handles are replaced by values, and nothing else
-/// was added or lost.
 #[test]
 fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
     let mut pair = Pair::with_background(
@@ -1206,7 +1110,6 @@ fn lepus_calls_return_async_results_to_the_matching_background_callback() {
         ",
         ),
     );
-    // Three requests followed by their three replies through the same FIFO.
     for _ in 0..6 {
         pair.deliver();
     }
@@ -1312,7 +1215,6 @@ fn terminate_discards_events_already_queued_on_main() {
     ",
     );
     pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('already queued');");
-    // Waiting for the worker's response proves it has run before terminate.
     let event = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate(); worker.terminate(); worker.postMessage('ignored');");
     pair.runtime
@@ -1365,12 +1267,6 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
     "#);
 }
 
-/// A script the host could not load is one `error` event at the `Worker`
-/// object and one `WorkerThrew` at the embedder, named as a module load, and
-/// the worker is not over: the realm still holds it, as it holds one whose
-/// script threw, until `terminate()` ends it. The worker sends nothing more:
-/// what is posted to it before the `terminate()` is dropped, and it reports
-/// nothing as it ends.
 #[test]
 fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_terminable() {
     let mut pair = Pair::new(
@@ -1387,7 +1283,6 @@ fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_te
     let [crate::EngineEvent::WorkerThrew { source, error }] = events.as_slice() else {
         panic!("one WorkerThrew from the worker: {events:?}");
     };
-    // The entry's worker is the pair's first.
     assert_eq!(*source, worker_label(1, WORKER_URL));
     assert!(
         error.message.contains("loading a worker module")
@@ -1404,20 +1299,12 @@ fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_te
         "if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error(JSON.stringify(errors)); worker.postMessage('ignored'); worker.terminate();",
     );
     assert_eq!(pair.live_workers(), 1, "`terminate()` ended that worker");
-    // The thread has returned, so whatever the worker sent after its one
-    // error is here: an answer to the post, or a report of its own end.
     assert!(
         pair.finish().is_empty(),
         "the worker sent nothing for the post and nothing as it ended"
     );
 }
 
-/// A `Worker` constructed once `bobcat-workers` has trapped fails at once:
-/// the view hears no `WorkerCreated` for it, and its end reaches the
-/// embedder as one `WorkerEnded` and the `Worker` object as one `error`
-/// event. That no `Start` is sent for it is asserted where the test holds
-/// the thread's inbox, in `main/runtime/tests.rs`
-/// (`a_worker_constructed_after_its_thread_trapped_is_sent_no_start`).
 #[test]
 fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     let mut pair = Pair::new("globalThis.errors = [];");
@@ -1434,8 +1321,6 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     ",
     );
     let event = pair.next_event().expect("the worker's failure");
-    // A `WorkerCreated` is sent by the constructing job itself, so reading
-    // what the realm has told its host registers one that was sent.
     pair.pump_host();
     let (commands, _) = mpsc::unbounded_channel();
     assert!(
@@ -1465,9 +1350,6 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     assert_eq!(pair.live_workers(), 1, "only the built-in BTS remains");
 }
 
-/// A view whose workers are all created after `bobcat-workers` trapped hears
-/// one `WorkerEnded` for each, named by its source: the `Worker` its entry
-/// constructs, then the BTS boot creates once that entry has settled.
 #[test]
 fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     let mut pair = Pair::unbooted(None);
@@ -1495,14 +1377,11 @@ fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     else {
         panic!("one WorkerEnded for the Worker, then one for the BTS: {events:?}");
     };
-    // In construction order: the entry's worker, then boot's BTS.
     assert_eq!(*worker, worker_label(1, WORKER_URL));
     assert_eq!(*background, worker_label(2, "bobcat:bts"));
     assert_eq!(pair.live_workers(), 0);
 }
 
-/// Whatever entry of the BTS's threw, the realm is still running: the
-/// embedder hears a throw rather than an end, from the background thread.
 #[test]
 fn a_bts_that_throws_reports_worker_threw_from_the_background() {
     let mut pair = Pair::with_background("__CreatePage();", Some("throw Error('BTS threw');"));
@@ -1525,10 +1404,6 @@ fn a_bts_that_throws_reports_worker_threw_from_the_background() {
     assert_eq!(pair.live_workers(), 1, "the BTS that threw still runs");
 }
 
-/// A `Worker` is named by the key its `Worker` object holds and by its URL:
-/// the printed `WorkerId` is the key number the realm routed the event by,
-/// the URL is the one its specifier joined to, and the `error` event
-/// reaching that object is what shows the realm holds it.
 #[test]
 fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     let mut pair = Pair::new(
@@ -1565,12 +1440,6 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     );
 }
 
-/// A worker's label is the id of its key and its script URL, and both
-/// threads write that one value from the worker's `Start`: the creating realm
-/// records it under the key and reports the worker's throw with it, and the
-/// worker's own realm names its console output with it. The BTS is labelled
-/// by the same rule, with the URL `bobcat:bts`, and two workers constructed
-/// over one URL carry that URL and differ in their ids.
 #[test]
 fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
     const SCRIPT: &str = "import 'bobcat:worker'; \
@@ -1591,19 +1460,13 @@ fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
         ",
         ),
     );
-    // Each of the two asks for the script at its URL.
     pair.answer(SCRIPT);
     pair.answer(SCRIPT);
-    // In construction order: the entry's two, then the BTS boot created once
-    // the entry had run.
     let labels = [
         ("first", worker_label(1, WORKER_URL)),
         ("second", worker_label(2, WORKER_URL)),
         ("lynx-bg", worker_label(3, "bobcat:bts")),
     ];
-    // One throw each, in no order between the three workers. Each was logged
-    // before it was thrown, so the three console messages are with the host
-    // once the three throws are here.
     for _ in &labels {
         let event = pair.next_event().expect("each worker reports its throw");
         assert!(
@@ -1663,13 +1526,6 @@ fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
     }
 }
 
-/// The URL in a worker's label is the one its `Start` names, which is the URL
-/// its realm asks the host for the script by, and not the URL that request is
-/// answered from. A fetcher that answers from another URL, as a redirect
-/// does, changes what the script runs as, its `import.meta.url`, and leaves
-/// the label as it is on both threads: the creating realm's table, the
-/// `WorkerThrew` it reports and the console output the worker's own realm
-/// sends all carry the script URL.
 #[test]
 fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url() {
     const RESPONSE_URL: &str = "https://cdn.test/redirected/worker.js";
@@ -1684,8 +1540,6 @@ fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url
             .into(),
         url: RESPONSE_URL.into(),
     }));
-    // Logged before it was thrown, so the console message is with the host
-    // once the throw is here.
     let event = pair.next_event().expect("the worker reports its throw");
     assert!(
         matches!(event.payload, WorkerPayload::Errored(_)),
@@ -1712,7 +1566,6 @@ fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url
             _ => {}
         }
     }
-    // The entry's worker is the pair's first.
     let label = worker_label(1, WORKER_URL);
     assert_eq!(
         pair.runtime
@@ -1723,7 +1576,6 @@ fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url
         Some(label.clone()),
         "what the creating realm recorded"
     );
-    // The message is the URL the script ran as, and its source is the label.
     assert_eq!(
         logged,
         [(label.clone(), RESPONSE_URL.to_owned())],
@@ -1736,9 +1588,6 @@ fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url
     assert!(message.contains("threw"), "{message}");
 }
 
-/// A worker its script has stopped is reported to no one: an error or an end
-/// that arrives after `terminate()` reaches neither the `Worker` object nor
-/// the embedder.
 #[test]
 fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
     let mut pair = Pair::new(
@@ -1781,8 +1630,6 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         !completion.is_cancelled(),
         "the live MTS handle still owns this load"
     );
-    // Dropping the realm releases its senders even while the host retains the
-    // source completion. No view-token propagation is needed to end the worker.
     drop(pair.runtime.take());
     drop(pair.home.take());
     assert!(
@@ -1798,8 +1645,6 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
     assert!(pair.events.try_recv().is_err());
 }
 
-/// Dropping the MTS realm closes its last Worker sender. Even an interval
-/// cannot keep that Worker or its thread alive after the channel is gone.
 #[test]
 fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
     let mut pair = Pair::new(
@@ -1809,44 +1654,24 @@ fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
         "import 'bobcat:worker'; import 'bobcat:timers'; \
          setInterval(() => postMessage('tick'), 1);",
     );
-    // The first tick proves the realm booted and its interval is running, so
-    // what the drop below has to stop is a live worker.
     pair.next_event().expect("the worker's interval fires");
     drop(pair.runtime.take());
-    // One deadline for the whole loop rather than one per iteration: this
-    // worker posts a tick every millisecond, so a per-iteration deadline is
-    // one a live worker keeps resetting and the failure this test names would
-    // never arrive.
     let deadline = ClockInstant::now() + PATIENCE;
     loop {
         match block_on_deadline(pair.events.recv(), deadline) {
-            // Every sender is gone: the realm's own, and the clone the
-            // worker's task held for as long as it ran.
             Some(None) => break,
-            // A tick the worker had already sent, or sent before it read the
-            // message that ends it. The clock is checked here too because
-            // `block_on_deadline` polls before it consults it, so a ready tick
-            // is handed back even past the deadline.
             Some(Some(_)) if ClockInstant::now() < deadline => {}
             _ => panic!("the worker outlived the realm that created it"),
         }
     }
 }
 
-/// A worker that ended on its own is forgotten by the realm that created it.
-///
-/// `close()` ends the worker's task, and the `Closed` event is where this side
-/// learns of it — so that is where the right to tell that worker to stop stops
-/// being worth keeping. What the realm holds afterwards is the workers still
-/// running; releasing the realm closes only those remaining senders.
 #[test]
 fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
     pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; close();");
-    // Boot creates the BTS worker beside the entry's own, so the realm has
-    // two of them and this close accounts for exactly one.
     assert_eq!(pair.live_workers(), 2, "the entry's worker and lynx-bg");
     let event = pair
         .next_event()
@@ -1864,19 +1689,6 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     );
 }
 
-/// A `Worker` terminated in the job that constructed it never runs its
-/// script. Its `Start` and its `Terminate` reach `bobcat-workers` on two
-/// channels, so the worker ends either before its boot job, having asked the
-/// host for nothing, or after it, with the request for its script
-/// outstanding. So the host sees at most one request for that script, and a
-/// request it does see reads as cancelled once the worker has ended: an
-/// answer completed after that reaches nothing.
-///
-/// The surviving worker is what the test waits on. Its boot job is queued
-/// behind the terminated worker's, and each worker sends its request from
-/// its boot job on the one notice channel, so a request the terminated
-/// worker made has been read by the time the surviving worker has answered.
-/// The requests are counted again once the worker thread has returned.
 #[test]
 fn a_worker_terminated_at_construction_never_runs() {
     const CANCELLED_URL: &str = "app:///nested/cancelled.js";
@@ -1922,7 +1734,6 @@ fn a_worker_terminated_at_construction_never_runs() {
             url: CANCELLED_URL.into(),
         }));
     }
-    // The thread has returned, so whatever a worker said is here.
     assert!(
         pair.finish().is_empty(),
         "the terminated worker never ran its script"
@@ -1986,12 +1797,6 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
     );
 }
 
-/// A worker's script URL is joined to the entry's URL by URL rules, not by
-/// import-specifier rules: a bare `worker.js` is a relative URL, and a
-/// query-only URL keeps the entry's path. Each worker asks the host for its
-/// script by that URL, from its own boot job, so the two requests are waited
-/// for, and compared without regard to which arrived first: that order is
-/// the worker thread's.
 #[test]
 fn a_worker_url_joins_the_entry_url_by_url_rules() {
     let mut pair = Pair::new(
@@ -2030,10 +1835,6 @@ fn a_worker_url_joins_the_entry_url_by_url_rules() {
     );
 }
 
-/// A plain `Worker`'s script is asked for once, by the worker's own realm:
-/// the load of its root module raises the request, and constructing the
-/// worker asks the host for nothing. The answer to that request is what
-/// completes the load, and nothing asks again afterwards.
 #[test]
 fn a_workers_script_is_requested_once() {
     let mut pair = Pair::new(
@@ -2049,9 +1850,6 @@ fn a_workers_script_is_requested_once() {
          onmessage = event => postMessage(event.data);",
     );
     pair.deliver();
-    // A second request would leave in the epilogue of the job that completed
-    // the script, after the script's own message. The echo is posted by a
-    // later job of the same worker, so that epilogue has run once it is here.
     pair.check("worker.postMessage('echo');");
     pair.deliver();
     pair.check(
@@ -2063,17 +1861,9 @@ fn a_workers_script_is_requested_once() {
     );
 }
 
-/// A script URL that does not resolve is HTML's synchronous `SyntaxError`,
-/// and nothing is started: no worker is announced to the view, the realm
-/// holds no new worker, and no failure is queued for one.
-/// `WorkerOwner::start` does the first or the last for every worker it is
-/// handed, so it was handed none: no `Start` was sent, and only a started
-/// worker asks the host for a script. The script catches the exception, so
-/// nothing here depends on how an uncaught one is reported.
 #[test]
 fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     let mut pair = Pair::new("");
-    // The built-in BTS the boot started, announced and held from here on.
     pair.notices();
     let live = pair.live_workers();
     pair.check(
@@ -2095,10 +1885,6 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
-/// A plain `Worker` may import the BTS runtime, and is posted no
-/// `initialize`: the view here was built with a screen and a native module,
-/// and the worker reports neither — `SystemInfo` is the runtime constants
-/// alone, and `NativeModules` is empty.
 #[test]
 fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     let mut pair = Pair::unbooted_with_data(
@@ -2143,11 +1929,6 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     );
 }
 
-/// The BTS reports the MTS realm's own `SystemInfo`, which boot posts to it
-/// in `initialize`, so the two serialize alike, a ratio an `f32` cannot hold
-/// included. `NativeModules` is built out of the module table the same
-/// message carries before the BTS entry is imported, so the entry's top level
-/// already finds the view's module on it.
 #[test]
 fn the_bts_reports_the_mts_system_info_and_has_its_native_modules_before_its_entry() {
     let mut pair = Pair::unbooted_with_data(
@@ -2346,10 +2127,6 @@ fn an_omitted_background_entry_boots_without_host_io() {
         worker.postMessage('barrier');
     ",
     );
-    // The built-in BTS worker is started before this one and asks the host
-    // for nothing: its root module imports the registered `bobcat:bts`, and
-    // the view named no entry. So an ordinary worker that replies proves the
-    // thread served both.
     pair.answer(
         "import 'bobcat:worker'; import 'bobcat:timers'; \
          onmessage = event => postMessage(event.data);",
@@ -2361,10 +2138,6 @@ fn an_omitted_background_entry_boots_without_host_io() {
     assert!(worker_failures(notices).is_empty());
 }
 
-/// A main entry that rejects is app code that failed, and boot goes on past
-/// it: boot finishes, the BTS is connected, and the event the entry sent
-/// before it rejected reaches the BTS once the BTS entry has run. The seam
-/// still returns the entry's rejection, which a view reports without ending.
 #[test]
 fn a_rejected_main_entry_still_connects_its_background_context() {
     let mut pair = Pair::unbooted(Some(
@@ -2441,8 +2214,6 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     ",
         ),
     );
-    // Seven requests and then the application result, delivered through the
-    // same FIFO as React's hydration and patch calls.
     for _ in 0..8 {
         pair.deliver();
     }
@@ -2467,10 +2238,6 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     )));
 }
 
-/// A background-thread `SelectorQuery` finds an element by a dataset entry:
-/// the entry is the node's `data-<key>` attribute, which the document's
-/// selector engine matches, and the `dataset` field still answers the typed
-/// values.
 #[test]
 fn bts_selector_queries_match_dataset_entries_as_data_attributes() {
     let mut pair = Pair::with_background(
@@ -2502,7 +2269,6 @@ fn bts_selector_queries_match_dataset_entries_as_data_attributes() {
     "#,
         ),
     );
-    // Four requests and then the application result.
     for _ in 0..5 {
         pair.deliver();
     }
@@ -2568,14 +2334,6 @@ fn bts_native_props_mutate_the_document_before_the_next_query() {
     )));
 }
 
-/// The background thread's `invoke` reaches the same `__InvokeUIMethod` the
-/// main thread's does, and the geometry it answers is current without the
-/// query flushing for it: the entry that built the tree had already run a
-/// pass over it — boot's own deferred flush here, the dirty-commit epilogue
-/// for every entry after it — by the time the Worker's request crosses back.
-/// Node resolution keeps its own codes either side of that: 2 for a selector
-/// that matched nothing, and 5 for the `selectAll` an `invoke` cannot take,
-/// which `selector-query.ts` refuses locally without a crossing at all.
 #[test]
 fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() {
     let mut pair = Pair::with_background(
@@ -2606,8 +2364,6 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
         ",
         ),
     );
-    // The selectAll failure is local. Two invokes and one field request cross
-    // the Worker, followed by the application result.
     for _ in 0..4 {
         pair.deliver();
     }
@@ -2622,12 +2378,6 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// A `canvas`'s `transferControlToOffscreen` answers through both invoke
-/// paths: the background thread's `invoke` gets `{token, width, height}`,
-/// plain numbers in the reply; the canvas, now a placeholder, answers the
-/// main thread's `__InvokeUIMethod` of it with 7, `INVALID_STATE_ERROR`; a
-/// `view` takes the generic path and answers 3. The token attaches in the
-/// main thread's realm too, at the placeholder's size.
 #[test]
 fn invokes_of_transfer_control_to_offscreen_answer_a_token_then_7() {
     let mut pair = Pair::with_background(
@@ -2654,7 +2404,6 @@ fn invokes_of_transfer_control_to_offscreen_answer_a_token_then_7() {
         ",
         ),
     );
-    // The invoke crosses the Worker, then the application result.
     for _ in 0..2 {
         pair.deliver();
     }
@@ -2680,10 +2429,6 @@ fn invokes_of_transfer_control_to_offscreen_answer_a_token_then_7() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// Every realm sends its own console output and `lynx.reportError`s to the
-/// view's host, named by its source: the BTS's reach the embedder without a
-/// message to the main-thread realm, and a level is spelled as the console
-/// method. The BTS's global `console` is the object its module exports.
 #[test]
 fn each_realm_reports_its_own_diagnostics_with_its_source() {
     let mut pair = Pair::with_background(
@@ -2705,8 +2450,6 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
         ",
         ),
     );
-    // The Context event is the one worker event: the BTS's diagnostics were
-    // sent to the host before it, and not through this realm.
     pair.deliver();
     pair.check("if (!alive) throw Error('a diagnostic stopped delivery');");
     let diagnostics: Vec<_> = pair
@@ -2731,7 +2474,6 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
         })
         .collect();
     assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
-    // In each realm's own order; the two realms' are in none between them.
     let from = |wanted: crate::ScriptSource| {
         diagnostics
             .iter()
@@ -2745,7 +2487,6 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
     assert!(main[0].2.contains("MTS warning"));
     assert!(main[0].2.contains("app:///nested/main.js"));
     assert_eq!(main[1], (false, "info", "MTS {\"value\":1}"));
-    // The entry constructed no worker, so the BTS is the pair's first.
     let background = from(worker_label(1, "bobcat:bts"));
     assert_eq!(background.len(), 2, "{background:?}");
     assert_eq!((background[0].0, background[0].1), (true, "fatal"));
@@ -2753,9 +2494,6 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
     assert_eq!(background[1], (false, "warn", "BTS [1,2]"));
 }
 
-/// A plain `Worker` has a global `console`, not enumerable, whose output
-/// reaches the embedder from the worker itself, named by the key its
-/// `Worker` object holds and by its URL. It has no `requestAnimationFrame`.
 #[test]
 fn a_workers_global_console_reports_from_the_worker() {
     let mut pair = Pair::new(
@@ -2800,10 +2538,6 @@ fn a_workers_global_console_reports_from_the_worker() {
     assert_eq!(message, "from the worker {\"value\":1}");
 }
 
-/// A BTS animation-frame callback or `queueMicrotask` callback that throws is
-/// an uncaught exception of the worker realm, as it is in a browser worker:
-/// each is one `WorkerThrew` from the background thread, and neither is a
-/// `ScriptReported`.
 #[test]
 fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
     let mut pair = Pair::with_background(
@@ -2817,8 +2551,6 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
         "
         )),
     );
-    // The marker is posted before the microtask runs, so the microtask's
-    // throw is the event behind it.
     pair.await_background_entry();
     pair.deliver();
     pair.frame(1000.0);
@@ -2845,7 +2577,6 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
     else {
         panic!("two WorkerThrew from the BTS: {events:?}");
     };
-    // The entry constructed no worker, so the BTS is the pair's first.
     let background = worker_label(1, "bobcat:bts");
     assert_eq!(*microtask_source, background);
     assert_eq!(*frame_source, background);
@@ -2858,8 +2589,6 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
     assert_eq!(pair.live_workers(), 1, "the BTS still runs");
 }
 
-/// A misused BTS `SelectorQuery` still reports through `lynx.reportError`: a
-/// `ScriptReported` from the background thread, and no worker throw.
 #[test]
 fn a_misused_bts_selector_query_is_reported_from_the_background() {
     let mut pair = Pair::with_background(
@@ -2893,7 +2622,6 @@ fn a_misused_bts_selector_query_is_reported_from_the_background() {
     let [(source, level, message)] = reports.as_slice() else {
         panic!("one report from the BTS: {reports:?}");
     };
-    // The entry constructed no worker, so the BTS is the pair's first.
     assert_eq!(*source, worker_label(1, "bobcat:bts"));
     assert_eq!(level, "error");
     assert!(
@@ -2945,10 +2673,6 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
     pair.check(r#"if (JSON.stringify(results) !== '[[1,{"nested":1}],[2,{"nested":2}]]') throw Error(JSON.stringify(results));"#);
 }
 
-/// The BTS entry of the exposure pins below: one `GlobalEventEmitter`
-/// listener per global record list, which hands the MTS realm what it was
-/// called with, and a `stop` Context event that runs `lynx.stopExposure()`
-/// as a card would — from the BTS.
 const EXPOSURE_BTS_ENTRY: &str = r"
 import { lynx } from 'bobcat:bts-runtime';
 const emitter = lynx.getJSModule('GlobalEventEmitter');
@@ -2960,9 +2684,6 @@ for (const name of ['exposure', 'disexposure']) {
 lynx.getCoreContext().addEventListener('stop', () => lynx.stopExposure());
 ";
 
-/// Two rows the 32×24 viewport shows whole, each with an `exposure-id`, one
-/// with an `exposure-scene` too, an id and a typed dataset; and the MTS end
-/// of [`EXPOSURE_BTS_ENTRY`]'s replies.
 const EXPOSURE_MTS_ENTRY: &str = r"
 globalThis.results = [];
 lynx.getJSContext().addEventListener('heard', (event) => results.push(event.data));
@@ -2981,10 +2702,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// What the rows' global records must read as, `kind` being the list's
-/// name: web-core's `GlobalExposureEvent` per row, in registration order, the
-/// timestamp aside. Evaluated in the MTS realm, where `results` collects what
-/// the BTS listener heard.
 fn exposure_records_check(index: usize, kind: &str) -> String {
     format!(
         r"
@@ -3026,9 +2743,6 @@ fn exposure_records_check(index: usize, kind: &str) -> String {
     )
 }
 
-/// Runs the page's intersection delivery as the page's own entry does — the
-/// update, then the notification — and answers whether the update had
-/// anything to deliver.
 fn deliver_exposure(pair: &mut Pair) -> bool {
     let runtime = pair.runtime.as_mut().unwrap();
     let queued = runtime.update_intersection_observations() || runtime.has_pending_exposure();
@@ -3044,11 +2758,6 @@ fn deliver_exposure(pair: &mut Pair) -> bool {
     queued
 }
 
-/// The exposure record list the MTS realm's Lynx layer builds from one
-/// intersection delivery's `bobcat:exposure` record events reaches a BTS
-/// `GlobalEventEmitter` listener as the global event's one argument: an
-/// array of web-core's records, one per element, built in the MTS realm out
-/// of each event's extras and the elements' own id and dataset.
 #[test]
 fn exposure_records_reach_the_bts_emitter_as_one_list() {
     let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));
@@ -3057,10 +2766,6 @@ fn exposure_records_reach_the_bts_emitter_as_one_list() {
     pair.check(&exposure_records_check(0, "exposure"));
 }
 
-/// `lynx.stopExposure()` from the BTS is a post to the MTS realm, which runs
-/// it as `switchExposure(0, 1, <the ids of the rows it registered>)`: every
-/// exposed row owes a `disexposure`, and the next delivery sends them, as one
-/// list, to the same listener.
 #[test]
 fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
     let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));
@@ -3072,7 +2777,6 @@ fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
         "import { lynx } from 'bobcat:runtime';
         lynx.getJSContext().dispatchEvent({ type: 'stop', data: null });",
     );
-    // The BTS's `switchExposure` post, run by the MTS realm's Worker listener.
     pair.deliver();
     assert!(
         pair.runtime.as_ref().unwrap().has_pending_exposure(),
@@ -3087,12 +2791,6 @@ fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
     );
 }
 
-/// A background-thread string handler filed through
-/// `__AddEvent(el, 'bindEvent', 'layoutchange', name)` — what `ReactLynx`'s
-/// `bindLayoutChange` compiles to — is reached through the existing publish
-/// path with the `layoutchange` detail: the `api-bindlauoutchange` card's
-/// 100×100 view at its 50px margin offset, with its id and typed dataset.
-/// The detail crosses as values, `dataset` a copy.
 #[test]
 fn a_bts_layoutchange_handler_hears_the_detail() {
     let mut pair = Pair::with_background(
@@ -3157,9 +2855,6 @@ fn a_bts_layoutchange_handler_hears_the_detail() {
 
 #[test]
 fn mts_boot_finishes_without_waiting_for_bts() {
-    // Boot is the MTS entry's own fact. A BTS entry whose top-level await
-    // never settles does not hold it back, and there is nothing further to
-    // wait for once the entry module has evaluated.
     for background in [None, Some("await new Promise(() => {});")] {
         let mut pair = Pair::with_background("__CreatePage();", background);
         assert!(
@@ -3214,7 +2909,6 @@ throw Error('BTS entry failed');",
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("BTS entry failed"));
     assert_eq!(pair.live_workers(), 1);
-    // The realm that threw still has its listeners and still takes messages.
     pair.runtime
         .as_mut()
         .unwrap()
@@ -3311,11 +3005,7 @@ fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker(
             "
             )),
         );
-        // The hook must be installed before disposal asks for it, and the
-        // marker is consumed here so it is not one of the messages disposal
-        // is compared against.
         pair.await_background_entry();
-        // Host cancellation leaves the live MTS Worker alone until JS disposal.
         pair.cancel.cancel();
         assert_eq!(pair.live_workers(), 1);
         let messages = pair.dispose();
@@ -3432,8 +3122,6 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
         .unwrap()
         .collect_garbage(&mut pair.js)
         .unwrap();
-    // QuickJS discovers cycles in one collection and processes their weak
-    // registrations in the next. Neither pass may retain the Worker.
     pair.runtime
         .as_mut()
         .unwrap()
@@ -3445,20 +3133,6 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
     assert!(pair.finish().is_empty());
 }
 
-/// The shape a page writes by habit — construct, install a handler, post —
-/// keeps its `Worker` alive only through that handler's own closure, which is
-/// a cycle rather than a root. A collection between the worker's answer and
-/// its delivery clears the routing weak reference, and the answer is then
-/// dropped with no diagnostic anywhere: the page simply never hears back.
-///
-/// Pinned here because the collection is not the page's to schedule. Every
-/// view of a group shares one `QuickJS` runtime, so a sibling view's boot can
-/// run the collection that takes this page's workers away. A page that waits
-/// for an answer therefore has to name its worker for as long as it wants
-/// one, which is what `docs/destruction-runtime.md` means by this engine's
-/// handle collection policy. Browsers keep a running worker's object alive
-/// instead and deliver the message; that divergence is the policy rather than
-/// an oversight here.
 #[test]
 fn a_message_for_a_collected_worker_handle_is_dropped() {
     let mut pair = Pair::new(
@@ -3476,8 +3150,6 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
         "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
     );
     let event = pair.next_event().expect("the worker answers");
-    // QuickJS discovers the cycle in one collection and processes its weak
-    // registrations in the next, so the handle is released by the second.
     for _ in 0..2 {
         pair.runtime
             .as_mut()
@@ -3498,8 +3170,6 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
     assert!(pair.finish().is_empty());
 }
 
-/// The same page with the one reference that makes the worker the page's: its
-/// answer arrives however many collections run in between.
 #[test]
 fn a_named_worker_survives_a_collection_and_still_delivers() {
     let mut pair = Pair::new(
@@ -3610,7 +3280,6 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
         ",
         ),
     );
-    // The boot module starts BTS only after the MTS entry finishes.
     pair.frame(250.0);
     pair.check("if (globalThis.firstFrame !== 250) throw Error('MTS frame timestamp');");
     let event = pair.next_event().unwrap();
@@ -3622,9 +3291,6 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// A plain `Worker` that imports `bobcat:animation-frame` and nothing of the
-/// BTS gets its frame: a vsync is delivered to the realm's own animation-frame
-/// module, not to a runtime module only the BTS imports.
 #[test]
 fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
     let mut pair = Pair::new(
@@ -3640,8 +3306,6 @@ fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
         postMessage('requested');
     ",
     );
-    // The demand is sent before the message behind it, so the frame below
-    // finds it registered.
     assert!(matches!(pair.next_event().unwrap().payload,
         WorkerPayload::Message(ref value) if posted(value, "requested")));
     pair.frame(1250.0);
@@ -3652,10 +3316,6 @@ fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
     assert!(pair.finish().is_empty());
 }
 
-/// The native module transport is `bobcat:native-modules`, and the global
-/// scope module exports none of it: a plain `Worker` whose script imports
-/// `callNativeModule` from `bobcat:worker` fails at link, as an ordinary
-/// worker error, and runs nothing.
 #[test]
 fn a_plain_worker_cannot_import_the_transport_from_the_global_scope_module() {
     let mut pair = Pair::new(
@@ -3706,13 +3366,10 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
         ",
         ),
     );
-    // Every BTS frame request must be armed before the frame is dispatched.
     pair.await_background_entry();
     pair.frame(1250.0);
     pair.deliver();
     pair.deliver();
-    // Wait until the callback's nested request is armed, independently of
-    // delivery of the console/Context messages it posted earlier.
     let deadline = ClockInstant::now() + PATIENCE;
     loop {
         pair.pump_host();
@@ -3762,7 +3419,6 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap();
     pair.boot("import {block} from 'test:gate'; lynx.requestAnimationFrame(() => block());")
         .unwrap();
-    // The BTS frame request must be armed before the first dispatch below.
     pair.await_background_entry();
     let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
     pair.pump_host();
@@ -3868,16 +3524,6 @@ fn releasing_a_development_view_unmounts_the_current_react_tree() {
     verify_react_teardown(true, true);
 }
 
-/// A compiled `ReactLynx` `<list>`, end to end over both realms.
-///
-/// A card never builds a list's children: the framework records them as index
-/// operations, writes them with `__SetAttribute(list, 'update-list-info', …)`
-/// and files the `componentAtIndex`/`enqueueComponent` pair that builds and
-/// retires them. What this pins is that the cells arrive as real element
-/// children of the list element, in `item-key` order, each carrying its own
-/// `<text>` — and that a tap whose handler lives on the *background* thread
-/// produces a second batch whose removals and insertion land in the same
-/// tree, through the same pair.
 #[test]
 fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
     const BUNDLE_URL: &str = "app:///nested/card.lynx.bundle";
@@ -3890,9 +3536,6 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
     );
-    // A phone's viewport, so the list's first cells are on screen: under a
-    // smaller one the card's header would hide them all, and nothing would
-    // be revealed.
     let mut pair = Pair::unbooted_over(
         Some(&background),
         RealmStartup::default(),
@@ -3902,17 +3545,10 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
     pair.boot(&template.lepus_code["react-list__main-thread"])
         .unwrap();
 
-    // The first screen is the main thread's own render, and it ends in the
-    // checkpoint that drains the protocol's microtask: the forty cells'
-    // placeholders are there before the background thread has been asked
-    // for anything, and the commit's state changes build the ones it
-    // reveals.
     reveal_list_cells(&mut pair);
     let first_screen = pair.runtime.as_mut().unwrap().with_document(list_cells);
     assert_listed(&first_screen, &(0..40).collect::<Vec<_>>());
 
-    // In the order the card asks for them, each a worker job parked on this
-    // answer.
     serve_bundle_path(&mut pair, &template, "/app-service.js");
     for path in template.manifest.keys() {
         if path != "/app-service.js" {
@@ -3920,10 +3556,6 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
         }
     }
 
-    // The tap's handler is a background-thread one, so the edit is a round
-    // trip: publish, re-render there, hydrate here. The three dropped rows
-    // become a `removeAction` of ascending *old* indices and the appended
-    // row an `insertAction`; both are one batch.
     let header = pair.runtime.as_mut().unwrap().with_document(|document| {
         document
             .query_selector(document.document_element().id(), "#header")
@@ -3976,9 +3608,6 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
     }
 }
 
-/// Commits the card and delivers each commit's
-/// `contentvisibilityautostatechange`s until a commit decides none — which
-/// is how the list's placeholders inside the encode window become cells.
 fn reveal_list_cells(pair: &mut Pair) {
     let runtime = pair.runtime.as_mut().unwrap();
     for _ in 0..8 {
@@ -3988,13 +3617,10 @@ fn reveal_list_cells(pair: &mut Pair) {
     }
 }
 
-/// What [`list_cells`] lists for a row whose cell is still a placeholder.
 fn placeholder_of(row: &str) -> String {
     format!("{}=", row.split('=').next().unwrap_or_default())
 }
 
-/// `cells` lists `rows` in order, each built (`cell-N=row N`) or still a
-/// placeholder (`cell-N=`), with the built ones first and at least one.
 fn assert_listed(cells: &[String], rows: &[usize]) {
     let expected: Vec<String> = rows
         .iter()
@@ -4012,11 +3638,6 @@ fn assert_listed(cells: &[String], rows: &[usize]) {
     }
 }
 
-/// Every element child of the card's list, as `<item-key>=<its text>`, or
-/// `<item-key>=` for a cell whose placeholder has not been revealed.
-///
-/// Asserting the shape here rather than in the test body keeps the two
-/// call sites reading as the orders they are about.
 fn list_cells(document: &mut LynxDocument) -> Vec<String> {
     let list = document
         .query_selector(document.document_element().id(), "#cells")
@@ -4032,11 +3653,6 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
                 return format!("{key}=");
             };
             assert_eq!(text.tag_name(), Some("text"));
-            // A `<text>`'s own `text` attribute replaces its children's
-            // content (`tree/raw_text.rs`); the `ReactLynx` 0.127 compiler
-            // writes a dynamic `<text>{value}</text>` that way, with
-            // `__SetAttribute(text, 'text', value)` on the `<text>` itself,
-            // where 0.126's output put the content in a child.
             let content = text
                 .attribute("text")
                 .map_or_else(|| generated_text(text), std::borrow::Cow::into_owned);
@@ -4045,9 +3661,6 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
         .collect()
 }
 
-/// The text a `<text>` renders, wherever the framework put it: a `raw-text`
-/// element's `text` attribute for generated content, a host text node's data
-/// otherwise.
 fn generated_text(node: &terminus::link::Node<()>) -> String {
     let mut text = String::new();
     for child in node.children() {
@@ -4062,14 +3675,6 @@ fn generated_text(node: &terminus::link::Node<()>) -> String {
     text
 }
 
-/// Answers one manifest path of a native bundle, at the URL `PageSource`
-/// registers it under — the path as it is, under the bundle's own URL — with
-/// the body served through the same adaptation `PageSource` applies at
-/// registration.
-///
-/// The card asks for each of them itself: `lynx.requireModule` builds this
-/// URL and loads it synchronously, so a load is a worker job parked on this
-/// answer, in the order the card asks, not a boot-time import of every path.
 fn serve_bundle_path(pair: &mut Pair, template: &bobcat_source::web::WebTemplate, path: &str) {
     pair.serve_module(
         &format!("app:///nested/card.lynx.bundle{path}"),
@@ -4080,13 +3685,6 @@ fn serve_bundle_path(pair: &mut Pair, template: &bobcat_source::web::WebTemplate
     );
 }
 
-/// Dispatches what the view's workers say until the host's notices hold the
-/// React fixture's mount line for `seed`, and answers with every notice read
-/// on the way, the line's own batch included.
-///
-/// The host is read before each dispatch, because the BTS logs to the host
-/// itself: the line can arrive with no worker event behind it. A turn with
-/// nothing to read and nothing to dispatch waits a moment.
 fn await_react_mount(pair: &mut Pair, seed: u8) -> Vec<ViewNotice> {
     let mounted = format!("reload-mount {seed} retained 1");
     let deadline = ClockInstant::now() + PATIENCE;
@@ -4124,10 +3722,6 @@ fn verify_react_teardown(reload: bool, development: bool) {
         fixtures::fixture("react-reload").page
     };
     let template = bobcat_source::native::decode(bytes).unwrap();
-    // What `PageSource` writes for a source-based native bundle: the bundle's
-    // own URL as the base every path of it resolves against, then the
-    // `requireModule` that loads and starts the card. Nothing of the
-    // container's bodies is in it.
     let background = format!(
         "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
          __BobcatRegisterBundle({url});\n\
@@ -4144,9 +3738,6 @@ fn verify_react_teardown(reload: bool, development: bool) {
 
     pair.boot(&template.lepus_code["react-reload__main-thread"])
         .unwrap();
-    // In the order the card asks for them, which is its own: the entry, then
-    // the chunk its `init` reaches for. Each is a job of the worker parked on
-    // this answer — nothing imported either ahead of time.
     serve_bundle_path(&mut pair, &template, "/app-service.js");
     for path in template.manifest.keys() {
         if path != "/app-service.js" {
@@ -4168,8 +3759,6 @@ fn verify_react_teardown(reload: bool, development: bool) {
                 )
                 .unwrap();
         }
-        // Complete actual hydration and its patch acknowledgement, so the
-        // fixture's useEffect and GlobalEventEmitter listener have mounted.
         let notices = await_react_mount(&mut pair, *seed);
         assert!(!worker_failed(&notices, ""));
         for notice in &notices {
@@ -4187,11 +3776,7 @@ fn verify_react_teardown(reload: bool, development: bool) {
     assert_eq!(missing_websocket_warnings, usize::from(development));
     pair.cancel.cancel();
     pair.dispose();
-    // The cleanup logs from the BTS itself, before the `disposed` reply the
-    // disposal above waited for, so the host already has it.
     let notices = pair.notices();
-    // The card's main-thread script constructs no worker, so the BTS is the
-    // pair's first.
     let background = worker_label(1, "bobcat:bts");
     assert!(
         !notices.iter().any(|notice| matches!(
@@ -4280,8 +3865,6 @@ fn a_callback_released_uninvoked_never_runs_and_fails_nothing() {
         &[("Echo", &["ping"])],
     );
 
-    // Dropped rather than invoked: the realm hears that its function is over,
-    // and the function itself never runs.
     let (_, released) = pair.module_call();
     drop(released);
     let (_, answered) = pair.module_call();
@@ -4325,8 +3908,6 @@ fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing()
     let (_, call) = pair.module_call();
     let [callback] = <[_; 1]>::try_from(call.callbacks).expect("one function argument");
 
-    // The realm that made the call is gone with the runtime that owned its
-    // Worker handle, so there is nothing left to answer.
     let events = pair.finish();
     assert!(
         callback.is_cancelled(),
@@ -4342,8 +3923,6 @@ fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing()
     );
 }
 
-/// A worker realm's children get the core alone: no document members, so
-/// `bobcat:element` does not link in one, and no `framePage`.
 #[test]
 fn a_worker_realms_children_have_no_document_members() {
     let mut pair = Pair::new(
@@ -4374,9 +3953,6 @@ fn a_worker_realms_children_have_no_document_members() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// A Worker realm has `ShadowRealm` too, and its children are serviced by
-/// the worker's own epilogue: a child evaluates, and its timer fires on the
-/// worker thread and calls the worker's own function it was handed.
 #[test]
 fn a_worker_realm_has_shadow_realms_its_epilogue_services() {
     let mut pair = Pair::new(
@@ -4409,13 +3985,6 @@ fn a_worker_realm_has_shadow_realms_its_epilogue_services() {
     );
 }
 
-/// Makes a `ShadowRealm` child of the page realm, the page's `realm`, whose
-/// card is `app:///nested/main.js` — its `__Card__`, set the way
-/// `bobcat:frame-boot` sets it — and in it a `./worker.js` worker, the
-/// child's `worker`. What reaches that `Worker` object — a message, an
-/// error, its end — the child hands the page realm's `heard` through a
-/// wrapped callback, so the page can tell what reached the child; and the
-/// child's `bobcat-internal:host` is its `H`.
 const CHILD_WORKER: &str = r"
 globalThis.heard = [];
 globalThis.realm = new ShadowRealm();
@@ -4436,12 +4005,6 @@ await new Promise((resolve, reject) => realm.evaluate(`(record, resolve, reject)
 }`)(text => { heard.push(text); }, resolve, reject));
 ";
 
-/// A worker a `ShadowRealm` child creates is the child's: its URL resolves
-/// against the child's `__Card__`, what it posts reaches the child's
-/// `Worker` object and not the page realm's `bobcat-internal`, and its
-/// failure is reported to the embedder by the source the child's side
-/// recorded, before the child's `error` event. The page realm's own side
-/// holds only its BTS.
 #[test]
 fn a_childs_worker_talks_to_the_child() {
     let mut pair = Pair::new(&format!(
@@ -4473,15 +4036,8 @@ fn a_childs_worker_talks_to_the_child() {
     );
 }
 
-/// A child with a worker of its own running is still needed, whoever refers
-/// to it: the release step keeps it while the worker runs — a frame's card
-/// waiting for its BTS's disposal acknowledgement — and frees it once the
-/// worker has ended and the child heard so.
 #[test]
 fn a_child_is_kept_while_its_worker_runs() {
-    // The child posts before the worker's script has loaded, so the worker
-    // takes it once the test answers that script; then nothing refers to
-    // the child.
     let mut pair = Pair::new(&format!(
         "{CHILD_WORKER} realm.evaluate(`worker.postMessage('close')`); globalThis.realm = null;"
     ));
@@ -4499,9 +4055,6 @@ fn a_child_is_kept_while_its_worker_runs() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
-/// A retired child is freed though its worker still runs, and freeing it
-/// ends that worker: the child's side goes with it, closing the worker's
-/// channel, so the worker stops, and what it said last reaches no realm.
 #[test]
 fn freeing_a_child_ends_its_workers() {
     let mut pair = Pair::new(CHILD_WORKER);
@@ -4517,8 +4070,6 @@ fn freeing_a_child_ends_its_workers() {
     let runtime = pair.runtime.as_mut().unwrap();
     assert_eq!(runtime.core().children.release_unneeded(), 1);
     assert_eq!(runtime.child_realms(), 0);
-    // What the worker posted before its channel closed is still delivered,
-    // to no realm: the page realm's `bobcat-internal` never held its key.
     let deadline = ClockInstant::now() + PATIENCE;
     let mut quiet = 0;
     while quiet < 20 {

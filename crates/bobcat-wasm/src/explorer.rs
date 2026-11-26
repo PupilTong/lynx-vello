@@ -19,10 +19,8 @@
 use bobcat_core::{ModuleCall, NativeModule};
 use serde_json::Value;
 
-/// The `NativeModules` key this module answers to.
 pub(crate) const EXPLORER_MODULE_NAME: &str = "ExplorerModule";
 
-/// The methods the module declares, in the order the realm lists them.
 const METHODS: [&str; 8] = [
     "openSchema",
     "openScan",
@@ -34,20 +32,13 @@ const METHODS: [&str; 8] = [
     "getSettingInfo",
 ];
 
-/// A status the page shows for a call it has nothing else to do for. The
-/// names are the `notice` values of `js/protocol.d.ts`'s
-/// `ExplorerNoticeMessage`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExplorerNotice {
-    /// `openSchema` was called without a URL: its first argument was not a
-    /// string, or only white space.
     EmptySchema,
-    /// `openScan` was called; the browser demo has no camera scanner.
     NoScanner,
 }
 
 impl ExplorerNotice {
-    /// The `notice` value the protocol carries.
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::EmptySchema => "emptySchema",
@@ -56,28 +47,19 @@ impl ExplorerNotice {
     }
 }
 
-/// How serious a line on the Render Worker's console is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LogLevel {
     Info,
     Warn,
 }
 
-/// What [`ExplorerModule`] asks of the page and of the console. The browser
-/// build posts the first three as `js/protocol.d.ts`'s Explorer messages.
 pub(crate) trait ExplorerPage {
-    /// Open the template `schema` names: the first argument of
-    /// `openSchema`, as the card passed it.
     fn open_schema(&self, schema: String);
-    /// Store `value` under `key` in the page's preference storage.
     fn store_preference(&self, key: String, value: String);
-    /// Show the status `notice` stands for.
     fn notice(&self, notice: ExplorerNotice);
-    /// Write `message` to the Render Worker's console.
     fn log(&self, level: LogLevel, message: &str);
 }
 
-/// `NativeModules.ExplorerModule` over the page `P`.
 #[derive(Debug)]
 pub(crate) struct ExplorerModule<P> {
     page: P,
@@ -99,8 +81,6 @@ impl<P: ExplorerPage> NativeModule for ExplorerModule<P> {
     }
 
     fn invoke(&self, call: ModuleCall) {
-        // Each function argument is `null` in the array text, and none of
-        // these methods takes one: dropping the call releases them.
         let arguments = match serde_json::from_str::<Vec<Value>>(&call.arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
@@ -139,27 +119,17 @@ impl<P: ExplorerPage> NativeModule for ExplorerModule<P> {
             "saveThemePreferences" | "saveToLocalStorage" => self
                 .page
                 .store_preference(js_string(arguments.first()), js_string(arguments.get(1))),
-            // `readFromLocalStorage`, `getSettingInfo`: no answer to give.
             _ => {}
         }
     }
 }
 
-/// Whether `text` is empty once ECMAScript's `String.prototype.trim` has
-/// removed its white space and line terminators.
 fn is_blank(text: &str) -> bool {
-    // Unicode's White_Space less U+0085, which ECMAScript does not count,
-    // plus U+FEFF, which it does.
     text.chars().all(|character| {
         (character.is_whitespace() && character != '\u{85}') || character == '\u{feff}'
     })
 }
 
-/// ECMAScript's `String(value)` of one JSON argument, with a missing argument
-/// as `undefined`: a string is itself, an array its elements' strings joined
-/// by commas (`null` as the empty string), an object `[object Object]`. A
-/// number is its JSON text, which is ECMAScript's own spelling for every
-/// number but those written with an exponent.
 fn js_string(value: Option<&Value>) -> String {
     match value {
         None => "undefined".to_owned(),

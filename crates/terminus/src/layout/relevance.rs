@@ -19,23 +19,15 @@
 //! that is what [`Relevance::Undetermined`] means, and it is why it reads as
 //! skipped everywhere.
 
-/// One element's relevance, as of the last rendering update that determined
-/// it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Relevance {
-    /// No rendering update has determined this element yet. Skips its
-    /// contents — css-contain-2 §4.1 determines relevance in the next
-    /// rendering update, and until then the box is not relevant.
     #[default]
     Undetermined,
-    /// The element intersects the region the frame's encode window admits.
     Relevant,
-    /// Determined, and not relevant: contents are skipped.
     Skipped,
 }
 
 impl Relevance {
-    /// Whether an `auto` box in this state skips its contents.
     #[inline]
     pub(crate) const fn skips(self) -> bool {
         !matches!(self, Self::Relevant)
@@ -51,25 +43,11 @@ impl Relevance {
     }
 }
 
-/// How far the render in flight has determined one element.
-///
-/// A commit runs the determination once per build pass, and each pass may
-/// move what the next one sees: a revealed box takes its real size in place
-/// of its `contain-intrinsic-size`, which moves every box after it. A box an
-/// earlier pass decided is therefore asked again only when the answer can
-/// still go one way — from skipped to relevant — so every element's bit moves
-/// at most once per commit, whatever the later layouts moved.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Freshness {
-    /// Not determined by the render in flight.
     #[default]
     Stale,
-    /// Determined skipped by the render in flight, as it already was before
-    /// it: a later pass may still reveal it, once the reveals before it have
-    /// moved it into the region.
     Revealable,
-    /// Determined by the render in flight, and final for it: relevant, or
-    /// skipped by a flip this render made.
     Final,
 }
 
@@ -79,20 +57,10 @@ struct Entry {
     freshness: Freshness,
 }
 
-/// The slot-keyed relevance table.
-///
-/// Lazily sized like `DocumentLayoutState`: an absent entry reads as
-/// [`Relevance::Undetermined`], so a document that never uses
-/// `content-visibility: auto` allocates nothing here.
 #[derive(Debug, Default)]
 pub(crate) struct RelevanceTable {
     entries: Vec<Entry>,
-    /// The keys this render determined, so clearing them at the end of a
-    /// render costs one walk of what this render determined rather than one
-    /// walk of the document.
     fresh: Vec<usize>,
-    /// Whether the last render stopped at its pass cap with a reveal still
-    /// owed; the next frame tick takes it.
     owed: bool,
 }
 
@@ -104,25 +72,21 @@ impl RelevanceTable {
             .map_or(Relevance::default(), |entry| entry.state)
     }
 
-    /// Whether the last render left a reveal owed.
     #[inline]
     pub(crate) const fn owed(&self) -> bool {
         self.owed
     }
 
-    /// Records whether the render in flight leaves a reveal owed.
     #[inline]
     pub(crate) fn set_owed(&mut self, owed: bool) {
         self.owed = owed;
     }
 
-    /// Takes the owed reveal, answering whether there was one.
     #[inline]
     pub(crate) fn take_owed(&mut self) -> bool {
         std::mem::take(&mut self.owed)
     }
 
-    /// How far the render in flight has determined this element.
     #[inline]
     pub(crate) fn freshness(&self, key: usize) -> Freshness {
         self.entries
@@ -130,14 +94,6 @@ impl RelevanceTable {
             .map_or(Freshness::Stale, |entry| entry.freshness)
     }
 
-    /// Records `state` for `key` and marks it determined for this render:
-    /// [`Freshness::Revealable`] when it confirms a skip, otherwise
-    /// [`Freshness::Final`].
-    ///
-    /// Returns whether *skipping* changed — the caller's signal that layout
-    /// under this node has to be redone. Undetermined and skipped both skip,
-    /// so the first rendering update of an off-screen `auto` box confirms
-    /// what layout already assumed and costs no second build pass.
     pub(crate) fn determine(&mut self, key: usize, state: Relevance) -> bool {
         if self.entries.len() <= key {
             self.entries.resize(key + 1, Entry::default());
@@ -156,8 +112,6 @@ impl RelevanceTable {
         flipped
     }
 
-    /// Ends the render: every determination made during it stops being this
-    /// render's, so the next one asks again.
     pub(crate) fn settle(&mut self) {
         for key in self.fresh.drain(..) {
             if let Some(entry) = self.entries.get_mut(key) {
@@ -166,11 +120,6 @@ impl RelevanceTable {
         }
     }
 
-    /// Resets a freed slot, so the key's next occupant starts undetermined.
-    ///
-    /// The key may still be listed in `fresh`; clearing an already-clear bit
-    /// is a no-op, and no node is freed in the middle of a render, so the
-    /// stale listing can never un-freshen a live determination.
     pub(crate) fn reset(&mut self, key: usize) {
         if let Some(entry) = self.entries.get_mut(key) {
             *entry = Entry::default();

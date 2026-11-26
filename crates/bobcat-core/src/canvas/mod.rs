@@ -49,42 +49,27 @@ use crate::jobs::JsThreadHandle;
 use crate::paint::canvas_pictures::{CanvasPresenter, Transferred};
 use crate::view::WorkerFonts;
 
-/// One object a realm's JavaScript names by id.
 pub(crate) enum Entry {
     Canvas(CanvasEntry),
     Path(Path),
     Gradient(Gradient),
     Pattern(Pattern),
-    /// An image bitmap's pixels.
     Bitmap(Image),
 }
 
-/// A canvas: its size, its bitmap with the context state, made at the first
-/// call that needs it, and the placeholder `<canvas>` it commits to, if it
-/// came from one.
 pub(crate) struct CanvasEntry {
     width: u32,
     height: u32,
-    /// Boxed, so an entry of any kind is small to move.
     canvas: Option<Box<OffscreenCanvas>>,
-    /// Listed in [`CanvasTable::drawn`] since the last
-    /// [`CanvasTable::settle_drawn`].
     drawn: bool,
-    /// What the bitmap is committed through, for a canvas made by
-    /// `transferControlToOffscreen()`.
     presenter: Option<CanvasPresenter>,
 }
 
-// The table's entries move between realms, and so between threads.
 const _: () = {
     const fn send<T: Send>() {}
     send::<Entry>();
 };
 
-/// An entry in a [`CanvasHandOver`], behind a trait object whose `Send` is
-/// stated in its type: a type holding the store is then proven `Send`
-/// without the compiler walking an entry's GPU types, which nest deeper than
-/// its default recursion limit lets it go.
 trait Moved: Send {
     fn into_entry(self: Box<Self>) -> Entry;
 }
@@ -95,19 +80,8 @@ impl Moved for Entry {
     }
 }
 
-/// The canvas and image bitmap entries one view's realms hand to each
-/// other, by token: `canvasDetach` stores an entry taken out of the calling
-/// realm's table, and `canvasAttach` takes it out again into the calling
-/// realm's table.
-///
-/// One per view: the view's `ViewOutbox` makes it, and every `HostOutbox`
-/// the view hands out — the MTS realm's, its `ShadowRealm` children's, the
-/// BTS's and each `Worker`'s — carries the same `Arc`. Tokens start at 1
-/// and are never reused. What is never attached is dropped when the last of
-/// those outboxes goes, which is when the view and its workers have ended.
 #[derive(Default)]
 pub(crate) struct CanvasHandOver {
-    /// The last token handed out.
     last: AtomicU64,
     entries: Mutex<FxHashMap<u64, Box<dyn Moved>>>,
 }
@@ -117,19 +91,16 @@ impl CanvasHandOver {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stores `entry` under a new token, and answers the token.
     fn store(&self, entry: Box<dyn Moved>) -> u64 {
         let token = self.last.fetch_add(1, Ordering::Relaxed) + 1;
         self.lock().insert(token, entry);
         token
     }
 
-    /// Takes the entry under `token` out of the store.
     fn take(&self, token: u64) -> Option<Entry> {
         self.lock().remove(&token).map(Moved::into_entry)
     }
 
-    /// How many entries wait in the store, for a test.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.lock().len()
@@ -147,8 +118,6 @@ impl CanvasEntry {
         }
     }
 
-    /// The canvas a placeholder's transfer files. Its bitmap is
-    /// made now, so a size set before any draw reaches it and is committed.
     fn transferred(transferred: Transferred) -> Self {
         let Transferred {
             width,
@@ -168,7 +137,6 @@ impl CanvasEntry {
             .get_or_insert_with(|| Box::new(OffscreenCanvas::new(width, height)))
     }
 
-    /// Setting `width` or `height`: the bitmap and the context state reset.
     fn set_size(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -178,44 +146,21 @@ impl CanvasEntry {
     }
 }
 
-/// What a realm's canvases have of a document.
 #[derive(Clone)]
 pub(crate) enum CanvasHost {
-    /// None: a worker realm's. Text shapes with the view's host fonts and
-    /// the platform's, in a context the realm makes at its first text call,
-    /// as a worker on the web does not see the document's fonts.
     Worker(Arc<WorkerFonts>),
-    /// The view's document: the MTS realm's and its `ShadowRealm`
-    /// children's. Text shapes with the document's text context,
-    /// `@font-face` faces included, and a `<canvas>` element's control is
-    /// transferred from it (`canvasTransferControl`).
     Document(Weak<dyn CanvasDocument>),
 }
 
-/// The document a realm's canvases shape text with and transfer
-/// placeholders from.
 pub(crate) trait CanvasDocument {
-    /// Runs `shape` with the document's text context; `false`, without
-    /// running it, while there is no document or it is borrowed.
     fn with_text_context(&self, shape: &mut dyn FnMut(&mut TextContext)) -> bool;
 
-    /// HTML's `transferControlToOffscreen()` on the element `node`
-    /// (`crate::paint::canvas_pictures::transfer_control_to_offscreen`).
-    ///
-    /// # Errors
-    ///
-    /// The outer error, a message the member throws, for a node that is not
-    /// a live element or a document that is not there; the inner one for an
-    /// element that is not a canvas in context mode none.
     fn transfer_control_to_offscreen(
         &self,
         node: NodeId,
     ) -> Result<Result<Transferred, InvalidState>, String>;
 }
 
-/// What a read of a canvas's pixels waits with: natively nothing, the read
-/// being done when it is issued; on wasm32 the realm's engine thread, parked
-/// until the Render Worker answers or the realm's token is cancelled.
 #[derive(Clone)]
 pub(crate) struct ReadWait {
     #[cfg(target_arch = "wasm32")]
@@ -225,7 +170,6 @@ pub(crate) struct ReadWait {
 }
 
 impl ReadWait {
-    /// Waits on `thread`, ending when `token` is cancelled.
     pub(crate) fn new(token: &CancellationToken, thread: &JsThreadHandle) -> Self {
         #[cfg(target_arch = "wasm32")]
         {
@@ -241,8 +185,6 @@ impl ReadWait {
         }
     }
 
-    /// The pixels of `read`: `InvalidState` when the GPU did not answer, or
-    /// on wasm32 the realm ended first.
     #[cfg_attr(
         not(target_arch = "wasm32"),
         expect(clippy::unused_self, reason = "on wasm32 the wait is the realm's")
@@ -252,8 +194,6 @@ impl ReadWait {
         {
             read.wait()
         }
-        // The job parks as a synchronous `require` does: the thread's tasks
-        // go on running, and the realm's end is the biased first arm.
         #[cfg(target_arch = "wasm32")]
         {
             let token = self.token.clone();
@@ -273,21 +213,14 @@ enum Fonts {
     Document(Weak<dyn CanvasDocument>),
 }
 
-/// Every canvas object one realm's JavaScript holds, by id.
 pub(crate) struct CanvasTable {
     entries: RefCell<FxHashMap<u64, Entry>>,
     next: Cell<u64>,
-    /// The canvases drawn since the last [`Self::settle_drawn`].
     drawn: RefCell<Vec<u64>>,
     fonts: Fonts,
     reads: ReadWait,
-    /// The view's store that `canvasDetach` and `canvasAttach` go through.
     hand_over: Arc<CanvasHandOver>,
-    /// Held while `entries` holds a canvas: the thread's canvas replay
-    /// state is kept for it.
     replay: RefCell<Option<ReplayUser>>,
-    /// How many canvases [`Self::settle_drawn`] has flushed or committed,
-    /// for a test.
     #[cfg(test)]
     pub(crate) settled: Cell<usize>,
 }
@@ -310,17 +243,11 @@ impl CanvasTable {
         }
     }
 
-    /// What runs after every entry into the realm, at the end of the
-    /// entry: each canvas drawn during it replays what it recorded, and one
-    /// bound to a placeholder whose bitmap changed is committed to it
-    /// (HTML's update of the placeholder, in "update the rendering"). One
-    /// test of an empty list for an entry that drew nothing.
     pub(crate) fn settle_drawn(&self) {
         let mut drawn = self.drawn.borrow_mut();
         if drawn.is_empty() {
             return;
         }
-        // No JavaScript runs below, so neither borrow can be met again.
         let mut entries = self.entries.borrow_mut();
         for id in drawn.drain(..) {
             if let Some(Entry::Canvas(entry)) = entries.get_mut(&id) {
@@ -337,11 +264,8 @@ impl CanvasTable {
         }
     }
 
-    /// Files `entry` under a new id.
     fn insert(&self, entry: Entry) -> u64 {
         let id = self.next.get();
-        // 2^53 ids are not handed out in a realm's life, so every id is an
-        // exact JavaScript number and none is reused.
         self.next.set(id + 1);
         if matches!(entry, Entry::Canvas(_)) {
             self.replay.borrow_mut().get_or_insert_with(ReplayUser::new);
@@ -350,7 +274,6 @@ impl CanvasTable {
         id
     }
 
-    /// Takes the entry under `id` out of the table.
     pub(crate) fn remove(&self, id: u64) -> Option<Entry> {
         let mut entries = self.entries.borrow_mut();
         let entry = entries.remove(&id);
@@ -360,11 +283,6 @@ impl CanvasTable {
         entry
     }
 
-    /// `canvasDetach(id)`: takes the canvas or image bitmap under `id` out
-    /// of this table into the view's store, and answers its token. A canvas
-    /// goes as it is — bitmap, context state, draws not yet replayed, its
-    /// placeholder's presenter — and leaves the drawn list; the replay state
-    /// is let go once the last canvas has left.
     fn detach(&self, id: u64) -> Result<u64, String> {
         let mut entries = self.entries();
         if !matches!(entries.get(&id), Some(Entry::Canvas(_) | Entry::Bitmap(_))) {
@@ -382,12 +300,6 @@ impl CanvasTable {
         Ok(self.hand_over.store(Box::new(entry)))
     }
 
-    /// `canvasAttach(token)`: files the entry the view's store holds under
-    /// `token` in this table, and answers its new id, width and height;
-    /// `None` when the store holds nothing under `token`. A canvas that
-    /// arrives with draws not yet replayed, or with a bitmap changed since
-    /// its last commit, is listed as drawn, so this realm's epilogue
-    /// replays or commits it.
     fn attach(&self, token: u64) -> Option<[f64; 3]> {
         let entry = self.hand_over.take(token)?;
         let (size, owed) = match &entry {
@@ -409,9 +321,6 @@ impl CanvasTable {
         Some([id as f64, f64::from(size[0]), f64::from(size[1])])
     }
 
-    /// Lets go of the thread's canvas replay state once `entries`, which a
-    /// canvas has just left, holds none; a bitmap or a pattern encodes no
-    /// draw of its own.
     fn canvas_removed(&self, entries: &FxHashMap<u64, Entry>) {
         if !entries
             .values()
@@ -421,8 +330,6 @@ impl CanvasTable {
         }
     }
 
-    /// Whether the table keeps the thread's canvas replay state, for a
-    /// test.
     #[cfg(test)]
     pub(crate) fn keeps_replay_state(&self) -> bool {
         self.replay.borrow().is_some()
@@ -432,8 +339,6 @@ impl CanvasTable {
         self.entries.borrow_mut()
     }
 
-    /// The 2D context of the canvas under `id`, for a call that reads or
-    /// sets context state.
     fn context<R>(&self, id: u64, call: impl FnOnce(&mut Context2d<'_>) -> R) -> Result<R, String> {
         match self.entries().get_mut(&id) {
             Some(Entry::Canvas(entry)) => Ok(call(&mut entry.canvas().context_2d())),
@@ -441,8 +346,6 @@ impl CanvasTable {
         }
     }
 
-    /// The canvas under `id`, for a call that may change the bitmap, which
-    /// lists the canvas as drawn during this entry.
     fn draw_canvas<R>(
         &self,
         id: u64,
@@ -456,13 +359,10 @@ impl CanvasTable {
         Ok(call(entry.canvas()))
     }
 
-    /// [`Self::context`] for a call that may change the bitmap, which lists
-    /// the canvas as drawn during this entry.
     fn draw<R>(&self, id: u64, call: impl FnOnce(&mut Context2d<'_>) -> R) -> Result<R, String> {
         self.draw_canvas(id, |canvas| call(&mut canvas.context_2d()))
     }
 
-    /// Lists the canvas `entry`, under `id`, as drawn during this entry.
     fn note_drawn(&self, id: u64, entry: &mut CanvasEntry) {
         if !entry.drawn {
             entry.drawn = true;
@@ -470,8 +370,6 @@ impl CanvasTable {
         }
     }
 
-    /// The pixels of the canvas or bitmap under `id`, for `canvasDrawImage`,
-    /// `canvasCreatePattern` and `canvasBitmapFrom`.
     fn image(&self, id: u64) -> Result<Image, String> {
         match self.entries().get_mut(&id) {
             Some(Entry::Canvas(entry)) => Ok(entry.canvas().image()),
@@ -480,9 +378,6 @@ impl CanvasTable {
         }
     }
 
-    /// Runs `shape` with the text context this realm's canvas text is
-    /// shaped in; `None` when the realm's document is not there to lend its
-    /// own.
     fn with_fonts<R>(&self, shape: impl FnOnce(&mut TextContext) -> R) -> Option<R> {
         match &self.fonts {
             Fonts::Worker(fonts, context) => {
@@ -504,8 +399,6 @@ impl CanvasTable {
         }
     }
 
-    /// How many entries of each kind the table holds — canvases, paths,
-    /// gradients, patterns, bitmaps — for a test.
     #[cfg(test)]
     pub(crate) fn census(&self) -> [usize; 5] {
         let mut census = [0; 5];
@@ -521,8 +414,6 @@ impl CanvasTable {
         census
     }
 
-    /// Whether any canvas still holds draws it has not replayed, for a
-    /// test.
     #[cfg(test)]
     pub(crate) fn has_pending_draws(&self) -> bool {
         self.entries.borrow().values().any(|entry| {
@@ -532,15 +423,10 @@ impl CanvasTable {
     }
 }
 
-/// The message of a lookup that found nothing of `kind` under `id`; the
-/// member that looked prefixes its own name.
 fn no_such(kind: &str, id: u64) -> String {
     format!("no {kind} has id {id}")
 }
 
-/// The names of the members [`install`] registers, for a test listing what
-/// a realm's `bobcat-internal:host` exports and one holding
-/// `packages/bobcat-element/src/canvas-host.d.ts` to the same names.
 #[cfg(test)]
 pub(crate) const MEMBERS: [&str; 65] = [
     "canvasCreate",
@@ -610,13 +496,9 @@ pub(crate) const MEMBERS: [&str; 65] = [
     "canvasBitmapHeight",
 ];
 
-/// The member [`install`] registers beside [`MEMBERS`] in a realm with a
-/// document, for a test.
 #[cfg(test)]
 pub(crate) const DOCUMENT_MEMBER: &str = "canvasTransferControl";
 
-/// `members` and the canvas members, sorted as a module namespace lists its
-/// exports and joined with commas, for a test.
 #[cfg(test)]
 pub(crate) fn host_members_with_canvas(members: &[&str]) -> String {
     let mut all: Vec<&str> = members.iter().chain(&MEMBERS).copied().collect();

@@ -24,7 +24,6 @@ use super::recording::{Item, LayerClip, Recording};
 use crate::kurbo::{Affine, Point, Rect, Stroke};
 use crate::peniko::Color;
 
-/// `text-anchor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum TextAnchor {
     #[default]
@@ -33,32 +32,20 @@ pub(crate) enum TextAnchor {
     End,
 }
 
-/// One `text` element: its chunks, placed by the element's absolute
-/// transform.
 #[derive(Clone, Debug)]
 pub(crate) struct TextItem {
-    /// The `text` element.
     pub(crate) node: crate::tree::document::NodeId,
     pub(crate) chunks: Vec<TextChunk>,
     pub(crate) transform: Affine,
-    /// Each chunk shaped, index-parallel with `chunks`; empty until
-    /// [`shape`] runs, and a text item with no shaped chunks
-    /// draws nothing.
     pub(crate) shaped: Vec<ShapedChunk>,
 }
 
-/// One chunk shaped and placed in the item's user space.
 #[derive(Clone, Debug)]
 pub(crate) struct ShapedChunk {
-    /// The chunk's bounding box in the item's user space: its advance
-    /// between the fonts' ascent and descent.
     pub(crate) bbox: Rect,
-    /// Each span's pen position and shaped line.
     pub(crate) spans: Vec<(Point, ShapedLine)>,
 }
 
-/// A run of spans positioned together: the pen starts at `(x, y)` (the
-/// alphabetic baseline) and the whole run is shifted by its anchor.
 #[derive(Clone, Debug)]
 pub(crate) struct TextChunk {
     pub(crate) x: f32,
@@ -67,7 +54,6 @@ pub(crate) struct TextChunk {
     pub(crate) spans: Vec<TextSpan>,
 }
 
-/// Characters under one style. `dx`/`dy` move the pen before the span.
 #[derive(Clone, Debug)]
 pub(crate) struct TextSpan {
     pub(crate) text: String,
@@ -77,41 +63,22 @@ pub(crate) struct TextSpan {
     pub(crate) letter_spacing: f32,
     pub(crate) fill: Option<TextPaint>,
     pub(crate) stroke: Option<(Stroke, TextPaint)>,
-    /// `paint-order`: the fill before the stroke.
     pub(crate) fill_first: bool,
 }
 
-/// A text paint, kept unresolved where it depends on the chunk's bounding
-/// box, which only shaping knows.
 #[derive(Clone, Debug)]
 pub(crate) enum TextPaint {
-    /// A colour with the paint's opacity folded in.
     Solid(Color),
-    /// A gradient and the paint opacity to fold into its stops.
     Gradient(Arc<GradientSpec>, f32),
 }
 
-/// What a chunk's pen does: the whitespace rules of `xml:space`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Space {
-    /// Newlines go, tabs become spaces, runs collapse to one, the
-    /// element's ends are trimmed.
     Default,
-    /// Newlines and tabs become spaces; nothing else changes.
     Preserve,
 }
 
-/// Normalises the text of every span of `chunks` in document order under
-/// `space`, across span boundaries, and drops the spans and chunks left
-/// empty.
-///
-/// A run of collapsed whitespace becomes one space, written once the next
-/// character shows it is not trailing: before that character when it is in
-/// the same chunk, else at the end of the span the run began in, because a
-/// space belongs to the chunk that produced it (SVG 1.1 §10.15) and counts
-/// in that chunk's advance, which `text-anchor` reads.
 pub(super) fn normalize_whitespace(chunks: &mut Vec<TextChunk>, space: Space) {
-    // Where the pending collapsed space began: its chunk and its span.
     let mut pending: Option<(usize, usize)> = None;
     let mut at_start = true;
     for chunk_index in 0..chunks.len() {
@@ -152,19 +119,12 @@ pub(super) fn normalize_whitespace(chunks: &mut Vec<TextChunk>, space: Space) {
             chunks[chunk_index].spans[span_index].text = out;
         }
     }
-    // A pending space at the end is the trailing whitespace the default
-    // mode trims, so it is simply never written.
     for chunk in chunks.iter_mut() {
         chunk.spans.retain(|span| !span.text.is_empty());
     }
     chunks.retain(|chunk| !chunk.spans.is_empty());
 }
 
-/// Shapes every text item of `recording` that is not shaped yet through
-/// the document's `context`, created here on the first recording with
-/// text so one without pays for no font context, and grows every
-/// bounds-clipped compositing layer by the text drawn inside it. Shaping a
-/// recording twice changes nothing.
 pub(crate) fn shape(recording: &mut Recording, context: &mut Option<Box<TextContext>>) {
     if !recording.has_text {
         return;
@@ -189,7 +149,6 @@ pub(crate) fn shape(recording: &mut Recording, context: &mut Option<Box<TextCont
     }
 }
 
-/// `text`'s chunks shaped and placed in the item's user space.
 fn shape_text(text: &TextItem, context: &mut TextContext) -> Vec<ShapedChunk> {
     text.chunks
         .iter()
@@ -205,9 +164,6 @@ fn shape_text(text: &TextItem, context: &mut TextContext) -> Vec<ShapedChunk> {
                     shape_line(context, &span.text, &span.font, options)
                 })
                 .collect();
-            // The pen runs from the chunk's start through every span's `dx`
-            // and advance; the anchor shifts the whole run by the distance
-            // it covered.
             let width: f32 = chunk
                 .spans
                 .iter()
@@ -247,13 +203,8 @@ fn shape_text(text: &TextItem, context: &mut TextContext) -> Vec<ShapedChunk> {
         .collect()
 }
 
-/// For every bounds-clipped compositing layer, the rectangle in its own
-/// coordinates that the shaped text drawn inside it reaches, which the
-/// recording could not know. Indexed by item.
 fn layer_extensions(recording: &Recording) -> Vec<Option<Rect>> {
     let mut extensions = vec![None; recording.items.len()];
-    // The open layers: item index and the inverse of the layer transform,
-    // or `None` for a layer whose bounds text does not touch.
     let mut open: Vec<Option<(usize, Affine)>> = Vec::new();
     for (index, item) in recording.items.iter().enumerate() {
         match item {
@@ -285,8 +236,6 @@ fn layer_extensions(recording: &Recording) -> Vec<Option<Rect>> {
     extensions
 }
 
-/// `bounds` grown by `extension`; a layer with no path content takes the
-/// text's extent alone rather than a box that also holds the origin.
 fn extend(bounds: Rect, extension: Option<Rect>) -> Rect {
     match extension {
         None => bounds,

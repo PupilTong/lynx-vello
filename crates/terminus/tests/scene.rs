@@ -17,7 +17,6 @@ struct Harness {
 }
 
 impl Harness {
-    /// A page styled by `css`, where a `text` element is a Lynx text element.
     fn new(css: &str) -> Self {
         let mut doc = Doc::with_css(&format!("{PAGE} {css}"));
         doc.define_lynx_text("text");

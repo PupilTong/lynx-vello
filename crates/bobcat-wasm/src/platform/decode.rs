@@ -42,14 +42,12 @@ use crate::image_frames::{self, Track};
 
 #[wasm_bindgen]
 extern "C" {
-    /// The global `createImageBitmap`, of any source it takes.
     #[wasm_bindgen(js_name = createImageBitmap, catch)]
     fn create_image_bitmap(
         source: &JsValue,
         options: &web_sys::ImageBitmapOptions,
     ) -> Result<Promise, JsValue>;
 
-    /// `WebCodecs`' `ImageDecoder`.
     #[derive(Clone, Debug)]
     #[wasm_bindgen(js_name = ImageDecoder)]
     type WebImageDecoder;
@@ -88,7 +86,6 @@ extern "C" {
     #[wasm_bindgen(method, getter, js_name = repetitionCount)]
     fn repetition_count(this: &ImageTrack) -> f64;
 
-    /// A `WebCodecs` `VideoFrame`, as `ImageDecoder` answers each frame.
     #[wasm_bindgen(js_name = VideoFrame)]
     type DecodedFrame;
 
@@ -98,7 +95,6 @@ extern "C" {
     #[wasm_bindgen(method, getter, js_name = displayHeight)]
     fn display_height(this: &DecodedFrame) -> u32;
 
-    /// Microseconds, or `null` when the file states none.
     #[wasm_bindgen(method, getter)]
     fn duration(this: &DecodedFrame) -> Option<f64>;
 
@@ -106,32 +102,23 @@ extern "C" {
     fn close_frame(this: &DecodedFrame);
 }
 
-/// One animation's `ImageDecoder`, kept open between its frames.
 #[derive(Debug)]
 struct Open {
-    /// The bytes it was opened over: a clone, so the allocation it is keyed
-    /// on cannot be reused while it is open.
     bytes: Bytes,
     decoder: WebImageDecoder,
 }
 
-/// The browser's decoders in the Render Worker, as a [`vant::ImageDecoder`]
-/// whose platform frame is a [`BrowserFrame`].
 #[derive(Debug, Default)]
 pub struct BrowserDecoder {
     open: RefCell<Vec<Open>>,
 }
 
 impl BrowserDecoder {
-    /// The decoder over this Worker's `createImageBitmap` and, where it has
-    /// one, `ImageDecoder`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// The `ImageDecoder` open over `bytes`, opening one when none is: `None`
-    /// when this browser has none, or it does not decode `format`.
     async fn decoder_for(
         &self,
         bytes: &Bytes,
@@ -143,8 +130,6 @@ impl BrowserDecoder {
         let Some(decoder) = open_decoder(bytes, format).await? else {
             return Ok(None);
         };
-        // Another frame of the same animation may have opened one while
-        // this one waited; the first stays.
         if let Some(open) = self.find(bytes) {
             decoder.close();
             return Ok(Some(open));
@@ -168,9 +153,6 @@ impl BrowserDecoder {
 impl vant::ImageDecoder for BrowserDecoder {
     type Frame = BrowserFrame;
 
-    /// The browser decodes asynchronously, on this Worker's event loop,
-    /// which a blocking call cannot wait on: every decode, a restore
-    /// included, goes through [`Self::decode`].
     fn decode_blocking(
         &self,
         _bytes: &[u8],
@@ -183,9 +165,6 @@ impl vant::ImageDecoder for BrowserDecoder {
         ))
     }
 
-    /// `createImageBitmap` of the bytes, at most `max` large. The header is
-    /// not read: the size is the decoded bitmap's, after its EXIF
-    /// orientation, which a header cannot see.
     async fn decode(
         &self,
         bytes: Bytes,
@@ -202,8 +181,6 @@ impl vant::ImageDecoder for BrowserDecoder {
             ));
         }
         let size = target_size(source.0, source.1, max);
-        // The full-size bitmap closes as it goes out of scope, once the
-        // resized one is made of it.
         let frame = if size == source {
             full
         } else {
@@ -223,11 +200,6 @@ impl vant::ImageDecoder for BrowserDecoder {
         }
     }
 
-    /// What `ImageDecoder` says of the frames, read through a decoder of
-    /// its own that is closed again: one frame where it is missing or does
-    /// not decode the type ([`image_frames::frames`]). Each frame's
-    /// duration is only known once it is decoded, so every frame is
-    /// decoded once here and its `VideoFrame` closed at once.
     async fn frames(
         &self,
         bytes: Bytes,
@@ -242,9 +214,6 @@ impl vant::ImageDecoder for BrowserDecoder {
         Ok(image_frames::frames(track?.as_ref()))
     }
 
-    /// Frame `index` through the animation's open `ImageDecoder`, turned
-    /// into an `ImageBitmap` at most `max` large; frame 0 is
-    /// [`Self::decode`]'s, as a still image's is.
     async fn decode_frame(
         &self,
         bytes: Bytes,
@@ -269,7 +238,6 @@ impl vant::ImageDecoder for BrowserDecoder {
         Ok(platform(bitmap?, source))
     }
 
-    /// Closes the `ImageDecoder` kept open for `bytes`.
     fn forget_frames(&self, bytes: &Bytes) {
         let mut open = self.open.borrow_mut();
         if let Some(index) = open
@@ -281,8 +249,6 @@ impl vant::ImageDecoder for BrowserDecoder {
     }
 }
 
-/// `frame`, decoded from an image of `source` size, as the decoder's
-/// answer.
 fn platform(frame: BrowserFrame, source: (u32, u32)) -> DecodedImage<BrowserFrame> {
     let (width, height) = frame.size();
     DecodedImage::Platform(PlatformBitmap {
@@ -294,8 +260,6 @@ fn platform(frame: BrowserFrame, source: (u32, u32)) -> DecodedImage<BrowserFram
     })
 }
 
-/// Whether `a` and `b` are the same allocation, which one animation's
-/// frames are all asked of.
 fn same_allocation(a: &Bytes, b: &Bytes) -> bool {
     a.as_ptr() == b.as_ptr() && a.len() == b.len()
 }
@@ -304,8 +268,6 @@ fn has_global(name: &str) -> bool {
     Reflect::has(&js_sys::global(), &JsValue::from_str(name)).unwrap_or(false)
 }
 
-/// A copy of `bytes` in a buffer of its own, which a `Blob` or an
-/// `ImageDecoder` may be built over.
 fn own_copy(bytes: &[u8]) -> Uint8Array {
     Uint8Array::from(bytes)
 }
@@ -318,7 +280,6 @@ fn blob(bytes: &[u8], media_type: &str) -> Result<web_sys::Blob, DecodeError> {
         .map_err(|error| DecodeError::Unavailable(describe(&error)))
 }
 
-/// The options every bitmap is decoded with, and the size to resize to.
 fn bitmap_options(size: Option<(u32, u32)>) -> web_sys::ImageBitmapOptions {
     let options = web_sys::ImageBitmapOptions::new();
     options.set_image_orientation(web_sys::ImageOrientation::FromImage);
@@ -332,7 +293,6 @@ fn bitmap_options(size: Option<(u32, u32)>) -> web_sys::ImageBitmapOptions {
     options
 }
 
-/// `createImageBitmap(source, options)`.
 async fn bitmap_of(
     source: &JsValue,
     options: &web_sys::ImageBitmapOptions,
@@ -342,8 +302,6 @@ async fn bitmap_of(
     Ok(BrowserFrame::new(bitmap.unchecked_into()))
 }
 
-/// An `ImageDecoder` over a copy of `bytes`, or `None` when this browser
-/// has none or does not decode `format`.
 async fn open_decoder(
     bytes: &[u8],
     format: ImageFormat,
@@ -364,12 +322,9 @@ async fn open_decoder(
     WebImageDecoder::new(&init).map(Some).map_err(malformed)
 }
 
-/// What `decoder`'s selected track says of its frames: every frame decoded
-/// once for its duration. `None` when it has no track.
 async fn read_track(decoder: &WebImageDecoder) -> Result<Option<Track>, DecodeError> {
     let tracks = decoder.tracks();
     JsFuture::from(tracks.ready()).await.map_err(malformed)?;
-    // Every byte was handed over at once, so this settles the frame count.
     JsFuture::from(decoder.completed())
         .await
         .map_err(malformed)?;
@@ -391,7 +346,6 @@ async fn read_track(decoder: &WebImageDecoder) -> Result<Option<Track>, DecodeEr
     }))
 }
 
-/// `decoder.decode({ frameIndex: index })`'s frame.
 async fn decode_index(
     decoder: &WebImageDecoder,
     index: usize,

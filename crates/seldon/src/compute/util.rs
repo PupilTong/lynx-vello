@@ -79,9 +79,6 @@ impl Axis {
     }
 }
 
-/// `LAST_BASELINE` keeps `last baseline` for an algorithm that implements
-/// last-baseline self-alignment; without it the value is replaced by `end`,
-/// its fallback alignment's direction, before the algorithm reads it.
 #[inline]
 fn normalize_alignment<const CONTENT: bool, const LAST_BASELINE: bool>(
     flags: AlignFlags,
@@ -99,8 +96,6 @@ fn normalize_alignment<const CONTENT: bool, const LAST_BASELINE: bool>(
             AlignFlags::END
         });
     }
-    // css-anchor-position-1 §4.2: "If the box is not absolutely positioned,
-    // … this value behaves as center" — every in-flow item is not.
     if !CONTENT && value == AlignFlags::ANCHOR_CENTER {
         return Some(AlignFlags::CENTER);
     }
@@ -132,8 +127,6 @@ fn normalize_alignment<const CONTENT: bool, const LAST_BASELINE: bool>(
     }
 }
 
-/// A self-alignment value for an algorithm with no last-baseline alignment:
-/// `last baseline` becomes `end`.
 #[inline]
 pub(super) fn normalize_item_alignment(
     flags: AlignFlags,
@@ -143,10 +136,6 @@ pub(super) fn normalize_item_alignment(
     normalize_alignment::<false, false>(flags, inline_axis, rtl)
 }
 
-/// A self-alignment value for flexbox and grid, which implement
-/// last-baseline alignment (css-align-3 §9.3): `last baseline` stays
-/// `LAST_BASELINE`, and everything else normalizes as
-/// [`normalize_item_alignment`] does.
 #[inline]
 pub(super) fn normalize_item_alignment_with_last_baseline(
     flags: AlignFlags,
@@ -165,8 +154,6 @@ pub(super) fn normalize_content_alignment(
     normalize_alignment::<true, false>(flags, inline_axis, rtl)
 }
 
-/// A box's first or last baseline set (css-align-3 §9.1): which one an item
-/// aligns by in its baseline-sharing group, or a container exports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum BaselineSet {
     First,
@@ -184,8 +171,6 @@ impl BaselineSet {
         }
     }
 
-    /// The baseline-sharing group a self-alignment value joins, if it is
-    /// `baseline` or `last baseline`.
     #[inline]
     pub(super) fn of_alignment(alignment: AlignFlags) -> Option<Self> {
         if alignment == AlignFlags::BASELINE {
@@ -197,7 +182,6 @@ impl BaselineSet {
         }
     }
 
-    /// The index of this set in a `[first, last]` pair.
     #[inline]
     pub(super) const fn index(self) -> usize {
         match self {
@@ -207,15 +191,12 @@ impl BaselineSet {
     }
 }
 
-/// Node handle and order-modified paint index retained by resolved item
-/// scratch.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ItemKey<N> {
     pub(super) node: N,
     pub(super) layout_order: u32,
 }
 
-/// Source-order and paint-order metadata for a generated child.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OrderedItem<N> {
     pub(super) node: N,
@@ -234,7 +215,6 @@ impl<N: Copy> OrderedItem<N> {
     }
 }
 
-/// Access to ordering metadata embedded in algorithm-specific item scratch.
 pub(super) trait PendingLayoutItem<N> {
     fn ordered(&self) -> &OrderedItem<N>;
     fn ordered_mut(&mut self) -> &mut OrderedItem<N>;
@@ -319,14 +299,6 @@ pub(super) fn sort_and_assign_layout_order<N, InFlow, OutOfFlow>(
     }
 }
 
-/// Checks, in debug builds, that a container lays its out-of-flow children
-/// out in tree order.
-///
-/// Every algorithm lays them out after its in-flow commit and in tree order,
-/// and [`crate::tree::LayoutTree::anchor_rect`] depends on both: when an
-/// absolutely positioned child resolves an anchor function, `position-area`
-/// or `anchor-center`, each in-flow sibling and each earlier out-of-flow
-/// sibling — every acceptable target — already holds its box from this pass.
 #[inline]
 pub(super) fn debug_assert_tree_order(document_indices: impl Iterator<Item = usize>) {
     if cfg!(debug_assertions) {
@@ -341,7 +313,6 @@ pub(super) fn debug_assert_tree_order(document_indices: impl Iterator<Item = usi
     }
 }
 
-/// Compact auto-edge mask retained with resolved item geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub(super) struct EdgeMask(u8);
@@ -417,8 +388,6 @@ macro_rules! intrinsic_tag_from {
                 $type::MinContent => Self::MinContent,
                 $type::MaxContent => Self::MaxContent,
                 $type::FitContentFunction(_) => Self::FitContent,
-                // Resolved, a fallback, or `auto`/`none` when invalid at
-                // computed-value time: never an intrinsic keyword.
                 _ => Self::None,
             }
         }
@@ -435,7 +404,6 @@ impl IntrinsicTag {
     }
 }
 
-/// Six intrinsic keyword classifications packed into twelve bits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub(super) struct IntrinsicTags(u16);
@@ -514,7 +482,6 @@ impl IntrinsicTags {
     }
 }
 
-/// Resolved geometry embedded in an algorithm's item record.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ItemGeometry {
     pub(super) preferred_size: Size<Option<f32>>,
@@ -530,11 +497,6 @@ pub(super) struct ItemGeometry {
     pub(super) overflow: Point<Overflow>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) margin_auto: EdgeMask,
-    /// Grid's: every value above came out the same against any percentage
-    /// basis, and nothing fills a value in later (no intrinsic keyword), so
-    /// re-resolving the item against another basis is a no-op. Only
-    /// `grid::resolve_grid_item` sets it; every other resolver leaves it
-    /// false. It sits in the struct's padding.
     pub(super) basis_free: bool,
 }
 
@@ -566,7 +528,6 @@ macro_rules! impl_item_geometry {
 }
 pub(super) use impl_item_geometry;
 
-/// Algorithm-neutral resolved container box and sizing constraints.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedContainerBox {
     pub(super) preferred_definite: Size<bool>,
@@ -580,11 +541,6 @@ pub(super) struct ResolvedContainerBox {
     pub(super) outer: Size<Option<f32>>,
     pub(super) inner: Size<Option<f32>>,
     pub(super) available_inner: Size<AvailableSpace>,
-    /// Per axis where `outer` is the size the preferred aspect ratio transfers
-    /// and the box's automatic minimum size is its content (css-sizing-4
-    /// §5.1), the outer size that content may grow the box to: its own
-    /// maximum size, untransferred, or infinity. `resolve_container_box`
-    /// leaves both `None`; an algorithm that honours the rule sets them.
     pub(super) ratio_content_cap: Size<Option<f32>>,
 }
 
@@ -621,16 +577,6 @@ pub(super) fn resolve_margin(value: &Margin, basis: Option<f32>) -> Option<f32> 
         }
     }
 }
-
-// The anchor arms of the resolvers below are cold and out of line on purpose:
-// every box resolves its geometry through these on the in-flow hot path, and
-// a resolver that called itself on the substituted value would be recursive,
-// which keeps it from being inlined into any of its callers. Each cold
-// sibling substitutes the §5.1.1 unresolvable form (which never carries an
-// anchor function again) and matches it without calling back. The
-// `*_depends_on_basis` predicates need no sibling at all: they answer an
-// anchor function with a conservative `true`, which only withholds a
-// stability claim or asks for a re-resolution.
 
 #[cold]
 #[inline(never)]
@@ -837,9 +783,6 @@ pub(super) fn apply_aspect_ratio(
     value
 }
 
-/// The size `known` projects onto the other axis through `ratio` (width over
-/// height), dividing for a known width and multiplying for a known height,
-/// with the ratio applied to the box `box_sizing` names (css-sizing-4 §5.1).
 #[inline]
 pub(super) fn ratio_project(
     known: f32,
@@ -871,8 +814,6 @@ pub(super) fn ratio_project(
     }
 }
 
-/// Settles the one unsettled axis of a border-box `size` from the other
-/// through a preferred aspect ratio (css-sizing-4 §5.1).
 #[inline]
 pub(super) fn apply_border_box_ratio(
     mut size: Size<Option<f32>>,
@@ -917,10 +858,6 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     }
 }
 
-/// Stores one committed child's durable layout and folds its box into the
-/// container's scrollable overflow — the common tail of every algorithm's
-/// in-flow commit loop. A `scroll_container` folds in the child's margin
-/// area too ([`item_end_margin`]).
 #[inline]
 #[expect(
     clippy::too_many_arguments,
@@ -959,8 +896,6 @@ pub(super) use crate::style::{
     edges_depend_on_inline_basis, max_size_depends_on_basis, style_size_depends_on_basis,
 };
 
-/// Whether any of the item's own sizing values on this axis is an intrinsic
-/// keyword, which resolves by measuring the item's content.
 #[inline]
 pub(super) fn axis_has_intrinsic_style(geometry: &ItemGeometry, axis: Axis) -> bool {
     geometry.intrinsic.preferred(axis).is_intrinsic()
@@ -968,12 +903,6 @@ pub(super) fn axis_has_intrinsic_style(geometry: &ItemGeometry, axis: Axis) -> b
         || geometry.intrinsic.maximum(axis).is_intrinsic()
 }
 
-/// Per axis: whether the container's own used size on that axis cannot move
-/// when only its subtree content changes — its input is stable there, and
-/// either the parent imposed the size or the container's style resolves one
-/// against that stable input. This is what every percentage its children
-/// resolve, and every stretch target it imposes, chains off. A measurement
-/// carries no independence and licenses none, so it answers `None`.
 #[inline]
 pub(super) fn container_content_independence(
     input: LayoutInput,
@@ -988,9 +917,6 @@ pub(super) fn container_content_independence(
     ))
 }
 
-/// The per-item facts a container needs before it can call any part of an
-/// item's committed input imposed: per axis, whether the item's own sizing
-/// values stand on their own, and whether its margins and paddings do.
 #[inline]
 pub(super) fn item_value_stability(
     style: &impl CoreStyle,
@@ -1002,8 +928,6 @@ pub(super) fn item_value_stability(
         axis_sizing_is_stable(style, Axis::Vertical, container_independent),
     );
     if aspect_ratio.is_some() {
-        // The ratio transfers a size across the axes, so either axis is only
-        // as stable as both.
         let both = values.width && values.height;
         values = Size::new(both, both);
     }
@@ -1012,9 +936,6 @@ pub(super) fn item_value_stability(
     (values, edges)
 }
 
-/// Whether every sizing value the item resolves on this axis stands on its
-/// own: a pure length, or a percentage of a container axis that is itself
-/// content-independent.
 #[inline]
 pub(super) fn axis_sizing_is_stable(
     style: &impl CoreStyle,
@@ -1379,9 +1300,6 @@ pub(super) fn resolve_container_box(
             .height
             .map(|value| (value - box_inset.height).max(0.0)),
     );
-    // The margins are read only for an axis whose inner size is unsettled,
-    // so a box whose two sizes are settled (a committed child with both
-    // known dimensions) resolves none.
     let available_inner = if let (Some(width), Some(height)) = (inner.width, inner.height) {
         Size::new(
             AvailableSpace::Definite(width),
@@ -1427,12 +1345,6 @@ pub(super) fn resolve_container_box(
     }
 }
 
-/// Per axis, whether the absolute pass may read the static position of the
-/// absolutely positioned `node` (whose style is `style`), so its container
-/// has one ready: both insets on the axis are `auto`. An anchor-function
-/// inset may still resolve to `auto`, so it counts as one; a position option
-/// can make `auto` an inset the box's own style gives a length, so a box
-/// with options needs both axes.
 #[inline]
 pub(super) fn needs_static_position<T: LayoutTree>(
     tree: &T,
@@ -1453,11 +1365,6 @@ pub(super) fn is_scroll_container(overflow: Point<Overflow>) -> bool {
     overflow.x.is_scrollable() || overflow.y.is_scrollable()
 }
 
-/// Grows `content_size` by one child placed at `location`: its border box,
-/// its own scrollable overflow when `overflow` is `visible` on the axis, and
-/// its margin area past the border box's right and bottom edges,
-/// `end_margin` (see [`item_end_margin`]; zero for a box whose margin area
-/// does not count). The three are a union, so each axis takes the farthest.
 #[inline]
 pub(super) fn accumulate_scrollable_overflow(
     content_size: &mut Size<f32>,
@@ -1493,16 +1400,6 @@ pub(super) fn accumulate_scrollable_overflow(
     content_size.height = content_size.height.max(location.y + reach.height);
 }
 
-/// The part of an in-flow child's margin area that css-overflow-3 §3.3 adds
-/// to its container's scrollable overflow past the child's border box: "the
-/// margin areas of grid item and flex item boxes for which the box
-/// establishes a containing block" — Flexbox, Grid and grid-lanes items,
-/// and Linear and Relative items, which web-core lays out as flex items.
-/// Only a `scroll_container` counts them, as every browser does
-/// ([csswg-drafts#9194](https://github.com/w3c/csswg-drafts/issues/9194)):
-/// a non-scrolling container's item margins never reach an ancestor's
-/// scrollable overflow. The area is a union with the border box, so a
-/// negative margin adds nothing.
 #[inline]
 pub(super) fn item_end_margin(scroll_container: bool, margin: Edges<f32>) -> Size<f32> {
     if scroll_container {
@@ -1512,12 +1409,6 @@ pub(super) fn item_end_margin(scroll_container: bool, margin: Edges<f32>) -> Siz
     }
 }
 
-/// Where a box's scrollable overflow rectangle ends at the least, in
-/// border-box coordinates: the far edge of its padding box, which
-/// [css-overflow-3 §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)
-/// puts in the area as "the scroll container's own padding box". The far
-/// border lies outside it, so a scroll container with no contents has a
-/// scrolling area the size of its scrollport.
 #[inline]
 pub(super) fn padding_box_end(outer: Size<f32>, border: Edges<f32>) -> Size<f32> {
     Size::new(
@@ -1526,12 +1417,6 @@ pub(super) fn padding_box_end(outer: Size<f32>, border: Edges<f32>) -> Size<f32>
     )
 }
 
-/// A box's own `content_size` from the reach of its contents, `interior`
-/// (border-box coordinates, accumulated from zero): the union with its
-/// padding box ([`padding_box_end`]), or, for a layout-contained box
-/// (`layout_contained`) that is not a scroll container (`scroll_container`),
-/// the padding box alone — its descendants' overflow is ink overflow
-/// (css-contain-2 §3.3).
 #[inline]
 pub(super) fn own_scrollable_overflow(
     layout_contained: bool,

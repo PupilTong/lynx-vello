@@ -14,10 +14,6 @@
 
 use std::future::Future;
 use std::time::Duration;
-/// The wall clock: read once per view, beside a [`ClockInstant`], and the
-/// type the embedder's [`crate::performance::ExtraTiming`] marks arrive in.
-/// `std::time::SystemTime` panics on `wasm32-unknown-unknown` like `Instant`
-/// does, so that target reads `web_time`'s.
 #[cfg(not(target_arch = "wasm32"))]
 pub use std::time::SystemTime;
 
@@ -25,18 +21,8 @@ pub(crate) use terminus::link::clock::ClockInstant;
 #[cfg(target_arch = "wasm32")]
 pub use web_time::SystemTime;
 
-/// How long a spawner waits for a thread it spawned to align its clock
-/// before letting it run on its own. Only reached by a thread that does not
-/// start: the exchange itself is one round trip between two threads.
 pub(crate) const ALIGNMENT_PATIENCE: Duration = Duration::from_secs(2);
 
-/// Resolves once `deadline` has passed.
-///
-/// Natively this is tokio's own time driver, running on the engine thread
-/// that armed the timer. On wasm32 there is no time driver to enable —
-/// tokio's reads `std::time::Instant`, which panics on that target — so the
-/// same call is served by [`crate::alarm`], a thread that owns nothing but a
-/// heap of deadlines and the wakers waiting on them.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sleep_until(deadline: ClockInstant) -> impl Future<Output = ()> {
     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.into_std()))

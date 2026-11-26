@@ -21,14 +21,6 @@ static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-m
 static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-tail-color-convert"));
 static INLINE_TRUNCATION: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-inline-truncation"));
 
-/// Read the UA-registered, non-inherited integer after CSS computation.
-///
-/// The registered `<integer>` computes to one integer component, `calc()`
-/// and animations resolved, which is read as it is. Anything else in the
-/// map is read through its serialization, as an integer or not at all: the
-/// initial value's text a `var()` substitution that yields a CSS-wide
-/// keyword leaves there uncomputed, or what an author re-registration of the
-/// name computes to.
 fn paragraph_limit(style: &ComputedValues, name: &Name) -> Option<u32> {
     let value = style.custom_properties().non_inherited.get(name)?;
     let integer = match value.as_component() {
@@ -45,9 +37,6 @@ style_protocol! {
                 *style.inherited_values().get_inherited_text().get_text_align(),
             text_wrap_mode -> text_wrap_mode::T =
                 *style.inherited_values().get_inherited_text().get_text_wrap_mode(),
-            // The container's own value. A run reads its own for its text;
-            // a Lynx text block reads this one only to tell `white-space: pre`
-            // from `nowrap` (`BlockStyle::from_container_style`).
             white_space_collapse -> white_space_collapse::T =
                 *style.inherited_values().get_inherited_text().get_white_space_collapse(),
             word_break -> WordBreak =
@@ -60,9 +49,6 @@ style_protocol! {
     }
 }
 
-// The Lynx `<text>` inputs that are attributes rather than CSS. The UA sheet
-// carries each as a registered, non-inherited integer custom property, so a
-// host view reads them from the same computed values as the CSS above.
 style_protocol! {
     pub trait LynxTextStyle: TextContainerStyle {
         defaults(style) {
@@ -70,16 +56,9 @@ style_protocol! {
                 paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
             text_maxlength -> Option<u32> =
                 paragraph_limit(style.computed_values(), &TEXT_MAXLENGTH),
-            // Lynx `tail-color-convert`: whether the truncation marker wears
-            // the establishing element's colour instead of the colour of the
-            // run the cut landed in. Off by default, as it is natively.
             tail_color_convert -> bool =
                 paragraph_limit(style.computed_values(), &TAIL_COLOR_CONVERT)
                     .is_some_and(|value| value != 0),
-            // Whether this text scope is the paragraph's custom truncation
-            // content — a Lynx `inline-truncation` the UA sheet flagged. The
-            // host reads a computed value rather than a tag name, which is
-            // what keeps element vocabulary out of the layout host.
             is_inline_truncation -> bool =
                 paragraph_limit(style.computed_values(), &INLINE_TRUNCATION)
                     .is_some_and(|value| value != 0),
@@ -174,7 +153,6 @@ mod tests {
         assert_eq!(style.text_maxlength(), None);
         assert!(!style.tail_color_convert());
         assert!(!style.is_inline_truncation());
-        // A paragraph needs no LinearStyle implementation.
         let block = crate::text::block::BlockStyle::from_container_style(&style, &style);
         assert_eq!(block.max_lines, None);
         assert_eq!(block.max_chars, None);

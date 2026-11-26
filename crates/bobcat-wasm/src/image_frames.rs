@@ -14,18 +14,12 @@ use std::time::Duration;
 
 use vant::image::animation::{ImageFrames, Loops};
 
-/// What one `ImageTrack` of an image said: each frame's stated duration in
-/// microseconds, and its repetition count.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Track {
     pub(crate) durations: Vec<Option<f64>>,
     pub(crate) repetition_count: f64,
 }
 
-/// The frames to play for `track`; `None` is a browser with no
-/// `ImageDecoder`, or one that does not decode this type or found no track,
-/// and is one frame: the image is drawn as `createImageBitmap`'s decode of
-/// it, its first frame.
 pub(crate) fn frames(track: Option<&Track>) -> ImageFrames {
     let Some(track) = track else {
         return ImageFrames::still();
@@ -47,8 +41,6 @@ pub(crate) fn frames(track: Option<&Track>) -> ImageFrames {
     ImageFrames::new(delays, loops(track.repetition_count))
 }
 
-/// How many times frames repeated `repetition_count` times after their
-/// first play are played in all.
 fn loops(repetition_count: f64) -> Loops {
     if !repetition_count.is_finite() {
         return Loops::Infinite;
@@ -74,15 +66,12 @@ mod tests {
 
     use super::{Track, frames};
 
-    /// Without an `ImageDecoder` — a browser that lacks one, or does not
-    /// decode the type — an image is one frame, whatever the file holds.
     #[test]
     fn a_browser_without_an_image_decoder_answers_one_frame() {
         assert_eq!(frames(None), ImageFrames::still());
         assert!(!frames(None).is_animated());
     }
 
-    /// One frame is a still image, however the track counts repetitions.
     #[test]
     fn one_frame_is_still() {
         let track = Track {
@@ -92,8 +81,6 @@ mod tests {
         assert_eq!(frames(Some(&track)), ImageFrames::still());
     }
 
-    /// Durations are microseconds, a missing one is zero, and a count of
-    /// repetitions is one fewer than the plays.
     #[test]
     fn durations_and_repetitions_become_delays_and_plays() {
         let track = Track {

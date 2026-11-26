@@ -7,24 +7,10 @@ use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
-/// Constraint-shape buckets the last-resort eviction hashes into.
 pub const MEASURE_CACHE_SLOTS: usize = 8;
 
-/// The hard ceiling on live measurements for one node.
-///
-/// Flex, Linear and Relative containers ask a child for at most a handful of
-/// distinct constraints, so they never leave the inline slots. Grid's two-axis
-/// track sizing asks for far more — a single-child `display: grid` chain needs
-/// thirteen live entries per node — and evicting one of those turns every later
-/// re-request into a full subtree recomputation, which is quadratic in the
-/// number of grid levels. Growing on the heap up to this ceiling keeps that
-/// cost linear and is paid only by the nodes that need it.
 const MEASURE_CACHE_LIMIT: usize = 32;
 
-/// Inline measurement capacity. Most nodes (fixed-size leaves, committed flex
-/// items) record at most a couple of measurement shapes, so the cache keeps
-/// two entries inline and spills to the heap only for the nodes whose
-/// containers actually probe many constraint shapes.
 const MEASURE_CACHE_INLINE: usize = 2;
 
 const KNOWN_WIDTH_PRESENT: u32 = 1 << 0;
@@ -50,62 +36,26 @@ const DEFINITE_WIDTH: u32 = 1 << 11;
 const DEFINITE_HEIGHT: u32 = 1 << 12;
 const EXACT_INPUT_FLAGS: u32 =
     OPTIONAL_SIZE_PRESENCE | IGNORE_SIZE_STYLES | DEFINITE_WIDTH | DEFINITE_HEIGHT;
-/// The presence of the first baseline, which only an output reports: an
-/// output fact, outside every key mask.
 const BASELINE_Y_PRESENT: u32 = 1 << 14;
-/// The independence a `LayoutGoal::Commit` carries, per axis. Like the
-/// baseline-presence bits these ride in `flags` but stay out of `INPUT_FLAGS`
-/// and `EXACT_INPUT_FLAGS`: independence never changes computed geometry, so
-/// two commits that differ only in it answer each other from the cache.
 const INDEPENDENT_WIDTH: u32 = 1 << 15;
 const INDEPENDENT_HEIGHT: u32 = 1 << 16;
-/// The presence of the last baseline, beside the first one's above.
 const LAST_BASELINE_Y_PRESENT: u32 = 1 << 18;
-/// The input's [`LayoutInput::reads_last_baseline`] request. An input fact
-/// that is not part of the key either: an entry computed with the request
-/// answers a lookup without it, but an entry computed without it answers no
-/// lookup that carries it, unless it is a commit, whose last baseline is
-/// exact whatever the request (see [`packed_inputs_match`]).
 const READS_LAST_BASELINE: u32 = 1 << 20;
-/// The input's [`LayoutInput::reads_first_baseline`] request, kept and
-/// matched exactly as [`READS_LAST_BASELINE`] is.
 const READS_FIRST_BASELINE: u32 = 1 << 21;
-/// The entry was stored for a box whose layout reads no percentage basis
-/// ([`crate::style::CoreStyle::reads_percentage_basis`]) and was computed
-/// against none, so it answers a request whatever `parent_size` that carries:
-/// `compute_cached_layout` would lay the request out against none too. A
-/// fact about the node rather than the input, so it stays outside every key
-/// mask, and it holds for as long as the entry does: the styles it was
-/// answered from are layout inputs, and changing one clears the cache.
 const BASIS_FREE: u32 = 1 << 22;
-/// The entry was stored for a box whose layout reads its percentage basis,
-/// the other answer [`BASIS_FREE`] records. An entry stored with neither
-/// ([`Cache::store`]) records no answer.
 const BASIS_READ: u32 = 1 << 23;
-/// The entry was stored for a box whose layout reads no
-/// [`LayoutInput::definite_dimensions`] and was computed with none, so it
-/// answers a request whatever definiteness that carries. Recorded beside the
-/// basis answer, under the same terms.
 const DEFINITENESS_FREE: u32 = 1 << 24;
 const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
     | (GOAL_MASK << GOAL_SHIFT);
 
-/// What a node's layout reads of a [`LayoutInput`] beyond the fields every
-/// cache key compares exactly, recorded with the entries
-/// `compute_cached_layout` stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputReads {
-    /// [`LayoutInput::parent_size`], its percentage basis.
     pub basis: bool,
-    /// [`LayoutInput::definite_dimensions`].
     pub definiteness: bool,
 }
 
-/// A lossless compact representation of [`LayoutInput`]. Every field round
-/// trips, including the `LayoutGoal::Commit` independence payload, which rides
-/// in `flags` outside the key bits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutInput {
     values: [f32; 6],
@@ -231,8 +181,6 @@ impl PackedLayoutInput {
         }
     }
 
-    /// The same input with no `parent_size`, packed as
-    /// [`Self::new`] packs `Size::NONE`.
     #[inline]
     fn without_basis(mut self) -> Self {
         self.values[2] = 0.0;
@@ -241,7 +189,6 @@ impl PackedLayoutInput {
         self
     }
 
-    /// The same input with no definite dimensions.
     #[inline]
     fn without_definiteness(mut self) -> Self {
         self.flags &= !(DEFINITE_WIDTH | DEFINITE_HEIGHT);
@@ -290,17 +237,12 @@ fn unpack_available_space(value: f32, flags: u32, shift: u32) -> AvailableSpace 
     }
 }
 
-/// A dense representation of the layout output: the size, the content size,
-/// and two **baseline slots**, the first and the last baseline, their
-/// presence riding in the paired input's `flags`. Packing either way is a
-/// fixed set of moves.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutOutput {
     values: [f32; 6],
 }
 
 impl PackedLayoutOutput {
-    /// The packed output and the presence flags of its baselines.
     #[inline]
     fn new(output: LayoutOutput) -> (Self, u32) {
         let mut flags = 0;
@@ -321,7 +263,6 @@ impl PackedLayoutOutput {
         (Self { values }, flags)
     }
 
-    /// The output an entry holds.
     #[inline]
     fn unpack(self, input_flags: u32) -> LayoutOutput {
         LayoutOutput {
@@ -333,7 +274,6 @@ impl PackedLayoutOutput {
     }
 }
 
-/// One compact cached measurement input→output pair.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct MeasurementSlot {
     input: PackedLayoutInput,
@@ -358,8 +298,6 @@ impl MeasurementSlot {
     }
 }
 
-/// A bounded per-node layout cache holding two measurements inline and
-/// spilling to the heap up to a ceiling of 32.
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
@@ -380,25 +318,16 @@ impl Cache {
         self.committed.is_none() && self.measurements.is_empty()
     }
 
-    /// The complete committed input, independence payload included.
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
         self.committed.map(|slot| slot.input.unpack())
     }
 
-    /// The committed output.
     #[must_use]
     pub fn committed_output(&self) -> Option<LayoutOutput> {
         self.committed.map(MeasurementSlot::unpack_output)
     }
 
-    /// Returns a cached output.
-    ///
-    /// In a cache whose entries record that the node reads no basis
-    /// ([`BASIS_FREE`]), `input` is looked up as if it carried no
-    /// `parent_size`, as `compute_cached_layout` computed every entry. The
-    /// first entry speaks for all of them: that function stores only the
-    /// answer it read back from the entries already there.
     #[must_use]
     pub fn get(&self, input: LayoutInput) -> Option<LayoutOutput> {
         let mut requested = PackedLayoutInput::new(input);
@@ -425,7 +354,6 @@ impl Cache {
             .map(|slot| slot.unpack_output())
     }
 
-    /// The flags of the entry that speaks for all of them, or none.
     #[inline]
     fn recorded_flags(&self) -> u32 {
         self.committed
@@ -433,16 +361,11 @@ impl Cache {
             .map_or(0, |slot| slot.input.flags)
     }
 
-    /// Whether the node reads its percentage basis, as the entries stored
-    /// through [`Self::store_recording_reads`] recorded it; `None` when no
-    /// entry recorded an answer.
     #[must_use]
     pub fn recorded_reads_basis(&self) -> Option<bool> {
         self.recorded_reads().map(|reads| reads.basis)
     }
 
-    /// What the node's layout reads beyond the key, as the entries recorded
-    /// it; `None` when no entry recorded an answer.
     #[must_use]
     pub fn recorded_reads(&self) -> Option<InputReads> {
         let flags = self.recorded_flags();
@@ -456,11 +379,6 @@ impl Cache {
         self.store_slot(MeasurementSlot::new(input, output), input.goal);
     }
 
-    /// [`Self::store`], recording whether the node reads its percentage
-    /// basis. An entry for a box that reads none is computed against none
-    /// (`input` carries no `parent_size`) and then answers every basis
-    /// ([`BASIS_FREE`]); either answer is kept for
-    /// [`Self::recorded_reads_basis`].
     pub fn store_recording_basis(
         &mut self,
         input: LayoutInput,
@@ -477,10 +395,6 @@ impl Cache {
         );
     }
 
-    /// [`Self::store_recording_basis`], also recording whether the node
-    /// reads its definite dimensions: an entry for a box that reads none is
-    /// computed with none and answers every definiteness
-    /// ([`DEFINITENESS_FREE`]).
     pub fn store_recording_reads(
         &mut self,
         input: LayoutInput,
@@ -507,10 +421,6 @@ impl Cache {
         match goal {
             LayoutGoal::Commit { .. } => self.committed = Some(slot),
             LayoutGoal::Measure(_) => {
-                // Retiring a live same-shape measurement while the cache still
-                // has room costs a whole subtree recomputation the next time
-                // its constraint comes back, so a replacement target is only
-                // worth looking for once there is nowhere left to grow.
                 let full = self.measurements.len() >= MEASURE_CACHE_LIMIT;
                 let mut exact = None;
                 let mut same_shape = None;
@@ -558,9 +468,6 @@ fn packed_inputs_match(stored: PackedLayoutInput, requested: PackedLayoutInput) 
     } else {
         stored_goal == requested_goal
     };
-    // A request for an exact last (or first) baseline is answered by a
-    // commit or by a measurement that was itself asked for one; a precise
-    // answer may serve an imprecise request, never the reverse.
     let baselines_exact = stored_goal == GOAL_COMMIT
         || requested.flags & !stored.flags & (READS_LAST_BASELINE | READS_FIRST_BASELINE) == 0;
     if !goal_matches
@@ -868,8 +775,6 @@ mod tests {
         }
     }
 
-    /// The two baseline slots hold the first and the last baseline, whose
-    /// presence bits are output facts outside the key.
     #[test]
     fn the_baselines_take_the_slots_outside_the_key() {
         let measured = measurement(Size::NONE, Size::MAX_CONTENT);
@@ -898,11 +803,6 @@ mod tests {
         }
     }
 
-    /// A last-baseline request is answered by an entry computed with it or
-    /// by a commit, never by a measurement computed without it; an entry
-    /// computed with it answers a request without it. The request is not
-    /// part of the key: a requested measurement replaces an unrequested one
-    /// of the same input.
     #[test]
     fn a_last_baseline_request_is_answered_only_by_an_exact_entry() {
         let plain = measurement(Size::NONE, Size::MAX_CONTENT);
@@ -947,10 +847,6 @@ mod tests {
         assert_eq!(cache.get(both.reading_last_baseline(true)), Some(exact));
     }
 
-    /// An entry recorded as basis-free answers a request whatever basis it
-    /// carries, as `compute_cached_layout` would have laid it out against
-    /// none; one recorded as reading the basis, or recording nothing, answers
-    /// only its own.
     #[test]
     fn a_basis_free_entry_answers_every_basis() {
         let unbased = LayoutInput::measure(
@@ -1012,8 +908,6 @@ mod tests {
         assert_eq!(cache.get(based), None);
     }
 
-    /// The first-baseline request follows the last-baseline one's rule, and
-    /// the two are independent: neither answers for the other.
     #[test]
     fn a_first_baseline_request_is_answered_only_by_an_exact_entry() {
         let plain = measurement(Size::NONE, Size::MAX_CONTENT);
@@ -1066,8 +960,6 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn last_baseline_costs_the_cache_no_bytes() {
-        // Pinned as the budget test pins it; restated here because the
-        // baseline slots are what keep it.
         assert_eq!(core::mem::size_of::<PackedLayoutOutput>(), 24);
         assert_eq!(core::mem::size_of::<MeasurementSlot>(), 52);
     }
@@ -1240,9 +1132,6 @@ mod tests {
         measure_width.goal = LayoutGoal::Measure(RequestedAxis::Horizontal);
         assert_eq!(cache.get(measure_width), None);
 
-        // Independence is outside the key: a commit request that claims
-        // something else still answers from the stored entry, and the stored
-        // entry keeps its own payload.
         let mut other_independence = input;
         other_independence.goal = commit_goal(false, true);
         assert_eq!(cache.get(other_independence), Some(stored));
@@ -1416,8 +1305,6 @@ mod tests {
             cache
         };
 
-        // Distinct constraints of one shape accumulate instead of replacing
-        // each other, first through the inline slots and then on the heap.
         let inline = filled(MEASURE_CACHE_INLINE);
         assert_eq!(inline.measurements.len(), MEASURE_CACHE_INLINE);
         assert!(!inline.measurements.spilled());
@@ -1425,15 +1312,12 @@ mod tests {
         assert_eq!(spilled.measurements.len(), MEASURE_CACHE_INLINE + 1);
         assert!(spilled.measurements.spilled());
 
-        // At the limit the cache stops growing and retires the first entry of
-        // the incoming constraint's shape.
         let mut cache = filled(MEASURE_CACHE_LIMIT);
         assert_eq!(cache.measurements.len(), MEASURE_CACHE_LIMIT);
         cache.store(same_shape, LayoutOutput::new(Size::ZERO, Size::ZERO));
         assert_eq!(cache.measurements.len(), MEASURE_CACHE_LIMIT);
         assert_input_bits_eq(cache.measurements[0].input.unpack(), same_shape);
 
-        // A shape nothing in the cache shares falls back to the hashed slot.
         let mut cache = filled(MEASURE_CACHE_LIMIT);
         let target = constraint_shape_hash(different_shape);
         cache.store(different_shape, LayoutOutput::new(Size::ZERO, Size::ZERO));

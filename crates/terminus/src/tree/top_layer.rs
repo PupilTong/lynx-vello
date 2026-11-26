@@ -95,38 +95,28 @@ use crate::style::damage::StyleDamage;
 use crate::tree::document::{Document, DocumentLayoutState, NodeId, TreeArenas};
 use crate::tree::node::{Node, NodeFlags};
 
-/// One element of the top layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TopLayerEntry {
     element: NodeId,
-    /// The detached node that carries this entry's `::backdrop` style and
-    /// box. Never handed out.
     pub(crate) backdrop: NodeId,
     blocks_document: bool,
 }
 
 impl TopLayerEntry {
-    /// The element in the top layer.
     #[must_use]
     pub const fn element(&self) -> NodeId {
         self.element
     }
 
-    /// Whether this entry blocks the document (HTML's modal dialog): while
-    /// it is the topmost such entry, nothing painted before its
-    /// `::backdrop` is hit-testable.
     #[must_use]
     pub const fn blocks_document(&self) -> bool {
         self.blocks_document
     }
 }
 
-/// The ordered set, bottom first.
 #[derive(Debug, Default)]
 pub(crate) struct TopLayer {
     entries: Vec<TopLayerEntry>,
-    /// An entry was added since the backdrops were last cascaded, so the
-    /// next flush cascades them even if no element needs restyling.
     restyle_pending: bool,
 }
 
@@ -144,7 +134,6 @@ impl TopLayer {
         self.entries.iter().any(|entry| entry.element == element)
     }
 
-    /// The originating element of `backdrop`, when it is a backdrop node.
     pub(crate) fn origin_of(&self, backdrop: NodeId) -> Option<NodeId> {
         self.entries
             .iter()
@@ -152,8 +141,6 @@ impl TopLayer {
             .map(|entry| entry.element)
     }
 
-    /// Whether `node` generates a box whose containing block is the initial
-    /// containing block by membership: a top-layer element, or a backdrop.
     #[inline]
     pub(crate) fn places_against_viewport(&self, node: NodeId) -> bool {
         !self.is_empty()
@@ -164,10 +151,6 @@ impl TopLayer {
     }
 }
 
-/// Whether a top-layer element generates a box this frame: it has a style,
-/// its own `display` is neither `none` nor `contents`, and its last layout
-/// did not hide it — the mark `display: none` and skipping ancestors leave
-/// on every box under them, so no ancestor style is read here.
 pub(crate) fn is_rendered<T>(
     tree: &TreeArenas<T>,
     state: &DocumentLayoutState,
@@ -190,9 +173,6 @@ pub(crate) fn is_rendered<T>(
         .is_some_and(|slot| !slot.slot.is_hidden())
 }
 
-/// Whether an entry's `::backdrop` generates a box, given that its element
-/// does: it has been cascaded, and neither its `display` nor its `content`
-/// computes to `none`.
 pub(crate) fn backdrop_generates_box<T>(tree: &TreeArenas<T>, backdrop: NodeId) -> bool {
     tree.get(backdrop).is_some_and(|node| {
         node.layout_computed_style().is_some_and(|style| {
@@ -203,13 +183,6 @@ pub(crate) fn backdrop_generates_box<T>(tree: &TreeArenas<T>, backdrop: NodeId) 
 }
 
 impl<T> Document<T> {
-    /// css-position-4 §3.3 "add an element to the top layer": `element`
-    /// becomes the topmost entry — moved there if it was already in the
-    /// layer — with a fresh `::backdrop`. `blocks_document` is HTML's modal
-    /// flag.
-    ///
-    /// The caller checks that `element` is a connected element (HTML's
-    /// `showModal()` throws otherwise); this asserts it.
     pub fn add_to_top_layer(&mut self, element: NodeId, blocks_document: bool) {
         assert!(
             self.get(element).is_some_and(Node::is_element),
@@ -240,8 +213,6 @@ impl<T> Document<T> {
         self.note_top_layer_change(element);
     }
 
-    /// Removes `element` from the top layer immediately and frees its
-    /// `::backdrop`. A no-op when it is not in the layer.
     pub fn remove_from_top_layer(&mut self, element: NodeId) {
         let layer = self.arenas_mut().top_layer_mut();
         let Some(index) = layer
@@ -256,13 +227,11 @@ impl<T> Document<T> {
         self.note_top_layer_change(element);
     }
 
-    /// Whether `node` is in the top layer.
     #[must_use]
     pub fn in_top_layer(&self, node: NodeId) -> bool {
         self.arenas().top_layer().contains(node)
     }
 
-    /// Whether `node` is in the top layer with the blocks-the-document flag.
     #[must_use]
     pub fn blocks_document(&self, node: NodeId) -> bool {
         self.arenas()
@@ -272,22 +241,15 @@ impl<T> Document<T> {
             .any(|entry| entry.element == node && entry.blocks_document)
     }
 
-    /// The top layer, bottom first.
     pub fn top_layer(&self) -> impl Iterator<Item = &TopLayerEntry> {
         self.arenas().top_layer().entries.iter()
     }
 
-    /// The originating element of a `::backdrop` node, or `None` when `node`
-    /// is not one.
     #[must_use]
     pub fn backdrop_origin(&self, node: NodeId) -> Option<NodeId> {
         self.arenas().top_layer().origin_of(node)
     }
 
-    /// HTML's removing steps for the top layer: drops every entry whose
-    /// element is no longer connected, and hides it if it was a showing
-    /// popover (`tree::popover`). The unlink path calls it after every
-    /// removal, so the walk is over the entries, not over what was removed.
     pub(crate) fn drop_disconnected_top_layer_entries(&mut self) {
         if self.arenas().top_layer().is_empty() {
             return;
@@ -306,11 +268,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// What a membership flip invalidates. Membership is not in the
-    /// element's style, so the harvest cannot notice it: the element's
-    /// position lowers differently (its parent records a static position
-    /// now, or lays it out again), and its `fixed` descendants' containing
-    /// block may have moved with the walk that stops at it.
     fn note_top_layer_change(&mut self, element: NodeId) {
         self.invalidate_layout(element);
         self.invalidate_containing_block(element);
@@ -318,7 +275,6 @@ impl<T> Document<T> {
     }
 }
 
-/// What one backdrop restyle changed.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BackdropRestyle {
     pub(crate) restyled: usize,
@@ -326,17 +282,10 @@ pub(crate) struct BackdropRestyle {
 }
 
 impl<T: Sync> Document<T> {
-    /// Whether the next flush owes the backdrops a cascade even if no
-    /// element needs restyling.
     pub(crate) fn backdrops_need_restyle(&self) -> bool {
         self.arenas().top_layer().restyle_pending
     }
 
-    /// Cascades every entry's `::backdrop` against its element's current
-    /// style and stores the ones that changed, invalidating what their
-    /// damage says. An element with no style (under `display: none`, out of
-    /// the flat tree) keeps its backdrop's last style; it renders nothing,
-    /// so nothing reads it.
     pub(crate) fn restyle_backdrops(&mut self) -> BackdropRestyle {
         let mut outcome = BackdropRestyle::default();
         if self.arenas().top_layer().is_empty() {
@@ -348,7 +297,6 @@ impl<T: Sync> Document<T> {
             let Some(style) = self.cascade_backdrop(entry) else {
                 continue;
             };
-            // A first style lays the box out for the first time.
             let relayout = {
                 let backdrop = self.arenas().live(entry.backdrop);
                 match backdrop.layout_computed_style() {
@@ -371,9 +319,6 @@ impl<T: Sync> Document<T> {
                 .expect("an entry's backdrop lives as long as the entry")
                 .replace_pseudo_style(style);
             if relayout {
-                // The tail lays the backdrop out on every run; a cleared
-                // cache is what makes it compute again rather than answer
-                // from the old style. Nothing above it exists to clear.
                 self.layout_state_mut().clear_box_cache(entry.backdrop);
                 self.mark_layout_dirty(false);
             }
@@ -382,8 +327,6 @@ impl<T: Sync> Document<T> {
         outcome
     }
 
-    /// The lazy `::backdrop` cascade for one entry, with its element's
-    /// primary style as parent.
     fn cascade_backdrop(
         &self,
         entry: TopLayerEntry,
@@ -412,7 +355,6 @@ mod tests {
     use crate::test_common::Doc;
     use crate::tree::document::NodeId;
 
-    /// The parts of an embedder's UA sheet these tests read.
     const UA: &str = "
         dialog { display: flex; position: absolute; }
         dialog.modal { position: fixed; }
@@ -537,7 +479,6 @@ mod tests {
         );
         let wrapper = doc.el(doc.root, "view.gone");
         doc.dom.append_child(wrapper, dialog);
-        // A move leaves the top layer (HTML's removing steps run).
         assert!(!doc.dom.in_top_layer(dialog));
         doc.dom.add_to_top_layer(dialog, true);
         let paint = doc.dom.build_paint_order();

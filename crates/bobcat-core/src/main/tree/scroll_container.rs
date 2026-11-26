@@ -153,29 +153,8 @@ use terminus::link::{
 use super::{ComponentEvents, InvalidParams, LynxDocument, element_child, is_truthy};
 use crate::main::record::write_record_field;
 
-/// The tag native registers and web-core defines (`@Component('scroll-view',
-/// …)`).
 pub(super) const SCROLL_VIEW_TAG: &str = "scroll-view";
 
-/// Where a scroller scrolls, from `web-elements`' `scroll-view.css`.
-///
-/// A Lynx scroller scrolls one axis and clips the other, and stacks its
-/// children along the axis it scrolls — which takes two declarations, because
-/// the axis lives in a different property per display mode: `flex-direction`
-/// for `display: flex`, `linear-direction` for `display: linear`. That is the
-/// pair web-elements drives through one `--lynx-linear-orientation` custom
-/// property. Vertical is the default in both worlds, and
-/// `enable-scroll="false"` leaves the box a scroll container that only script
-/// can move (`overflow: hidden`) rather than one the user can drag.
-///
-/// The authored `clip` never survives computation here: css-overflow-3 turns a
-/// `clip` axis into `hidden` when the other axis scrolls, so a scroller's cross
-/// axis is a scroll container that only script can move rather than a plain
-/// clip. That is what a browser makes of the same declaration in
-/// `scroll-view.css`, so it is parity rather than a shortcut.
-///
-/// The last three rules are `initial-scroll-to-index`; the module
-/// documentation's "The initial child" says what they do.
 pub(super) const UA_RULES: &str = r#"
 scroll-view, scroll-view[scroll-y], scroll-view[scroll-orientation="vertical"] {
   overflow-x: clip; overflow-y: scroll;
@@ -199,34 +178,18 @@ scroll-view[initial-scroll-to-index] > * {
 }
 "#;
 
-/// The kernel's CSSOM-View event the threshold events are decided on, which
-/// the runtime fires at a scroll container its painter post moved.
 pub(super) const SCROLL_EVENT: &str = "scroll";
 
-/// The kernel's CSSOM-View event the runtime fires at a scroll container
-/// once a painter post leaves it at rest: what the `x-swiper` and the
-/// `viewpager` decide their end-of-scroll events on.
 pub(super) const SCROLL_END_EVENT: &str = "scrollend";
 
-/// The event a scroller fires when a `scroll` brings it within its upper
-/// threshold of its start edge.
 pub(super) const SCROLL_TO_UPPER_EVENT: &str = "scrolltoupper";
 
-/// The event a scroller fires when a `scroll` brings it within its lower
-/// threshold of its end edge.
 pub(super) const SCROLL_TO_LOWER_EVENT: &str = "scrolltolower";
 
-/// How close to its start edge, in px, a scroller counts as at its upper
-/// edge.
 pub(super) const UPPER_THRESHOLD: &str = "upper-threshold";
 
-/// How close to its end edge, in px, a scroller counts as at its lower
-/// edge.
 pub(super) const LOWER_THRESHOLD: &str = "lower-threshold";
 
-/// Installs the `scroll-view` component, which queues its threshold events
-/// on `events`. Must run before any element could carry the tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         SCROLL_VIEW_TAG,
@@ -237,8 +200,6 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     );
 }
 
-/// The `scroll-view` component: `scrollTo`, `scrollBy`, `autoScroll` and
-/// `getScrollInfo`, and the `scrolltoupper` and `scrolltolower` events.
 struct ScrollView {
     events: ComponentEvents,
     edges: ScrollEdges,
@@ -301,9 +262,6 @@ impl CustomElement<()> for ScrollView {
     }
 }
 
-/// Whether `view` scrolls x rather than y: the attributes [`UA_RULES`] select
-/// the horizontal rule by. `scroll-x` wins over `scroll-y` when both are
-/// present, as the later rule of equal specificity does.
 fn is_horizontal(document: &LynxDocument, view: NodeId) -> bool {
     document.get(view).is_some_and(|node| {
         node.attribute("scroll-x").is_some()
@@ -311,12 +269,10 @@ fn is_horizontal(document: &LynxDocument, view: NodeId) -> bool {
     })
 }
 
-/// The scrolling axis's component of `vector`.
 pub(super) fn along(vector: Vector2D<f32>, horizontal: bool) -> f32 {
     if horizontal { vector.x } else { vector.y }
 }
 
-/// `vector` with its scrolling-axis component replaced by `value`.
 pub(super) fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> Vector2D<f32> {
     if horizontal {
         Vector2D::new(value, vector.y)
@@ -325,19 +281,10 @@ pub(super) fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> 
     }
 }
 
-/// Whether `event` is the `scroll` of `element` itself, the one delivery a
-/// scroller's threshold events are decided on. A `scroll` does not bubble,
-/// but its capture pass still crosses every ancestor of the container that
-/// fired it, so a scroller hears a nested scroller's `scroll` too, aimed at
-/// the nested one; the walk calls the target itself once.
 pub(super) fn is_own_scroll(element: NodeId, event: &ElementEvent<'_>) -> bool {
     event.type_name() == SCROLL_EVENT && event.target() == element
 }
 
-/// `scroller`'s scroll geometry from the last completed layout, or `None`
-/// when it has no box ([`terminus::link::Document::generates_rendered_box`] is
-/// false: `display: none` itself or on an ancestor, or detached) or is no
-/// scroll container. Shared with `list` ([`super::list`]).
 pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> Option<ScrollBox> {
     document
         .generates_rendered_box(scroller)
@@ -345,21 +292,6 @@ pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> 
         .flatten()
 }
 
-/// The snap position on `axis` nearest `offset`, as its index in
-/// `axis.points`: the one whose position — a range, for an area larger than
-/// the snapport — lies the least distance from `offset`, the first in
-/// `points`' order (sorted by position) on a tie; `None` when the axis has
-/// no position. Shared by the `x-swiper`'s autoplay turn and its events
-/// ([`super::swiper`]) and the `viewpager`'s `change`
-/// ([`super::viewpager`]): which item or page a container standing at
-/// `offset` shows.
-///
-/// On a circular axis (`axis.period`) the positions repeat every period:
-/// every point's position lies in `[0, period)`, the offset is read in the
-/// same period (a non-finite one as `0`), and each point is measured at its
-/// copy nearest the offset — itself, or one period either side — so an
-/// offset standing across the seam, past the last item, is nearest the
-/// first item's next copy when that is the closer one.
 pub(super) fn nearest_snap_position(axis: &SnapAxis<'_>, offset: f32) -> Option<usize> {
     let offset = if offset.is_finite() { offset } else { 0.0 };
     let period = axis
@@ -367,8 +299,6 @@ pub(super) fn nearest_snap_position(axis: &SnapAxis<'_>, offset: f32) -> Option<
         .filter(|period| period.is_finite() && *period > 0.0);
     let at = period.map_or(offset, |period| {
         let at = offset.rem_euclid(period);
-        // `rem_euclid` rounds up to `period` itself for an offset just below
-        // a multiple of it, which is the start of the next period.
         if at < period { at } else { 0.0 }
     });
     let distance = |point: &SnapPoint| {
@@ -386,14 +316,6 @@ pub(super) fn nearest_snap_position(axis: &SnapAxis<'_>, offset: f32) -> Option<
         .min_by(|&a, &b| distance(&axis.points[a]).total_cmp(&distance(&axis.points[b])))
 }
 
-/// The px value of `scroller`'s threshold attribute `name`
-/// ([`UPPER_THRESHOLD`], [`LOWER_THRESHOLD`]): JavaScript's `parseInt` of
-/// the value, as web-core writes it into its sentinel's `flex-basis`
-/// (`ScrollViewEvents.ts:95-107`), so `"50"` and `"50px"` are 50 and
-/// `"12.9"` is 12, with any unit ignored. A missing or unreadable value is
-/// 0, as web-core's `NaNpx` is no length and leaves the sentinel at its
-/// initial size; so is a negative one, which is no `flex-basis` either.
-/// Shared with `list` ([`super::list`]).
 pub(super) fn threshold_px(document: &LynxDocument, scroller: NodeId, name: &str) -> f32 {
     #[expect(
         clippy::cast_possible_truncation,
@@ -406,10 +328,6 @@ pub(super) fn threshold_px(document: &LynxDocument, scroller: NodeId, name: &str
         .map_or(0.0, |value| value.max(0.0) as f32)
 }
 
-/// JavaScript's `parseInt(text)` with no radix: leading whitespace, an
-/// optional sign, then the longest run of decimal digits — or hexadecimal
-/// ones after `0x`/`0X` — with anything after it ignored. `None` where
-/// `parseInt` answers `NaN`, which is no digit at all.
 pub(super) fn parse_int(text: &str) -> Option<f64> {
     let text = text.trim_start();
     let (negative, text) = match text.as_bytes().first() {
@@ -428,43 +346,22 @@ pub(super) fn parse_int(text: &str) -> Option<f64> {
     value.map(|value| if negative { -value } else { value })
 }
 
-/// Whether the offset a `scroll` left a scroller at lies in each edge's
-/// zone: within the upper threshold of its start edge, within the lower
-/// threshold of its end edge. Each tag decides its own zones; the edge
-/// rule after that is [`ScrollEdges::record`]'s.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Zones {
     pub(super) upper: bool,
     pub(super) lower: bool,
 }
 
-/// What a scroller's last `scroll` left: which zones held its offset, and
-/// the offset, which the next event's delta is measured from.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct EdgeState {
     zones: Zones,
     offset: Vector2D<f32>,
 }
 
-/// The threshold events' memory, per element of one scroller tag
-/// (`scroll-view`'s, or `list`'s): an entry per element that has scrolled,
-/// dropped when the element is freed ([`Self::forget`]). Before an
-/// element's first `scroll` both zones read as not held and its offset as
-/// the origin, native's initial `mAtUpper = false`, `mAtLower = false`.
 #[derive(Debug, Default)]
 pub(super) struct ScrollEdges(RefCell<FxHashMap<NodeId, EdgeState>>);
 
 impl ScrollEdges {
-    /// Records the zones `scroller`'s `scroll` left it in, at `offset`, and
-    /// queues on `events` an event for each zone it entered by it — one its
-    /// previous `scroll` did not leave it in — that a listener on the
-    /// element hears: `scrolltoupper` first, then `scrolltolower`, as
-    /// native sends them. Each is queued as a kernel `scroll` is
-    /// ([`ComponentEvents::queue_scroll`]), with the change in offset since
-    /// the element's previous `scroll` as its delta.
-    ///
-    /// The zones are recorded whatever is listened to: whether a listener
-    /// hears the next edge must not depend on when it was added.
     pub(super) fn record(
         &self,
         document: &LynxDocument,
@@ -494,14 +391,11 @@ impl ScrollEdges {
         }
     }
 
-    /// Drops what `scroller`'s last `scroll` left: it was freed.
     pub(super) fn forget(&self, scroller: NodeId) {
         self.0.borrow_mut().remove(&scroller);
     }
 }
 
-/// `value` clamped to `0..=max`, in f64 first: a number as large as JSON
-/// allows would be infinite in f32, and the range is all the document keeps.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "clamped to the scroll range, which is an f32"
@@ -510,43 +404,6 @@ pub(super) fn clamp_to_range(value: f64, max: f32) -> f32 {
     value.clamp(0.0, f64::from(max)) as f32
 }
 
-/// `scrollTo({index?, offset = 0, smooth = false})` on `view`, with `params`
-/// as the JSON text the realm serialized.
-///
-/// - `params` must be a JSON object, else code 4 (Harmony `:68-71`).
-/// - `offset` is a JSON number in CSS px, or a string in `px`, `rpx` or `ppx`, or with no unit
-///   ([`offset_px`]); missing is 0, anything else is code 4. iOS reads a string through
-///   `toPtFromIDUnitValue` (`:1263-1264`), which also knows `rem`, `em`, `vw` and `vh` and reads
-///   anything it cannot parse as 0; Android and Harmony read a number only (`:1001`, `:92-93`);
-///   web-core `parseFloat`s a string and ignores its unit (`ScrollView.ts:48-53`).
-/// - Without `index`, the target is `offset` as an absolute position, in all four references.
-/// - `index`, when present, must be a JSON number, truncated toward zero as `integerValue`,
-///   `getInt` and `static_cast<int>` truncate it; anything else is code 4, where Harmony ignores a
-///   non-numeric index (`:89-91`). An index below 0, or not below the number of element children,
-///   is code 4 and moves nothing, as all three natives answer (iOS `:1265-1272`, Android
-///   `:1005-1011`, Harmony `:81-88`); web-core ignores it (`:55-73`). In range, the target is that
-///   child's position on the axis in the scroller's scroll coordinates plus `offset`, the child's
-///   layout location less the scroller's border, and 0 for a child with no box, which is web-core's
-///   `offsetTop` of a `display: none` child. web-core's index 0 scrolls to `offset` alone
-///   (`:57-59`) rather than to the first child's position plus it.
-/// - With no element children the natives answer code 4 whatever the params (iOS `:1258-1261`,
-///   Android `:995-999`, Harmony `:752-756`); here that is so only when an `index` is given, where
-///   it is out of range anyway, and an offset-only call scrolls, as web-core's does.
-/// - The target clamps to the scroll range and the call succeeds, which is iOS (`:1096-1103`) and
-///   web-core. Android scrolls to the clamped target and answers code 4 (`:1019-1023`,
-///   `:1048-1050`); Harmony answers code 4 and does not scroll, its upper bound being the content
-///   size rather than the range (`:759`, `:773-777`).
-/// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'auto'` reads
-///   it, and a missing one is `false` (Android `getBoolean("smooth", false)`, Harmony's
-///   `smooth{false}`, which both read a boolean only). A smooth scroll is animated by the painter
-///   and leaves the document's offset where it is until the painter posts it back; an instant one
-///   moves the document at once ([`terminus::link::Document::scroll_to_with`]). Either way the call
-///   answers at once, as web-core's does; native answers a smooth scroll when its animation ends.
-///
-/// A `display: none` `scroll-view` has a zero scrollport, so it scrolls to
-/// offset 0 in a request no frame carries, and one restyled into no scroll
-/// container records nothing; either way the call succeeds, as `selectTab`
-/// does.
 pub(super) fn scroll_to(
     document: &mut LynxDocument,
     view: NodeId,
@@ -584,9 +441,6 @@ pub(super) fn scroll_to(
     Ok(())
 }
 
-/// `params` as a JSON object, or code 4. Shared with the base set's
-/// `scrollIntoView` ([`super::base_methods`]) and `list`'s methods
-/// ([`super::list`]).
 pub(super) fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> {
     match serde_json::from_str(params) {
         Ok(Value::Object(params)) => Ok(params),
@@ -594,9 +448,6 @@ pub(super) fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> 
     }
 }
 
-/// The position on the scrolling axis, in `view`'s scroll coordinates, of
-/// its element child number `index` ([`element_child`]), or code 4 when
-/// there is none.
 fn child_position(
     document: &LynxDocument,
     view: NodeId,
@@ -608,14 +459,6 @@ fn child_position(
         .map_or(0.0, |rect| along(rect.origin.to_vector(), horizontal)))
 }
 
-/// `child`'s border box in its parent `scroller`'s scroll coordinates: its
-/// layout location less the scroller's border, which puts it relative to
-/// the scroller's padding-box origin with no scroll offset applied, the
-/// coordinates a scroll offset is written in. `None` when either has no
-/// layout. `child` must be a box child of `scroller`, as an element child
-/// of a `scroll-view` or a cell of a `list` is: its layout location is
-/// relative to its parent's border box. Shared with `list`'s methods
-/// ([`super::list`]).
 pub(super) fn rect_in_scroller(
     document: &LynxDocument,
     scroller: NodeId,
@@ -632,24 +475,6 @@ pub(super) fn rect_in_scroller(
     ))
 }
 
-/// How far the `content-visibility: auto` relevance region of `scroller`
-/// reaches past `child`, in CSS px: `[ahead_x, behind_x, ahead_y,
-/// behind_y]`. With the region's offset range `(low, high)` per axis
-/// ([`terminus::link::Document::scroll_relevance_window`]: the encode window
-/// stretched toward where the container is going) and `child`'s border box
-/// in the scroller's unscrolled coordinates ([`rect_in_scroller`]), `ahead`
-/// is the distance from the child's start edge to the far edge of the region
-/// (`high` plus the scrollport) and `behind` the distance from the region's
-/// near edge (`low`) to the child's end edge. A child the region covers
-/// reads positive on both sides of the axis, one wholly past it a negative
-/// `ahead` or `behind`.
-///
-/// The list protocol in `element-papi.ts` reads it (`scrollRelevanceSpan`)
-/// to size how many placeholders after and before a revealed one it builds
-/// in the same task; the geometry is the engine's, the count is the
-/// protocol's. `None` when `scroller` is no rendered scroll container or
-/// `child` has no rendered box. It reads the last completed layout and runs
-/// no pipeline step, as every readback does.
 pub(crate) fn relevance_span(
     document: &LynxDocument,
     scroller: NodeId,
@@ -669,12 +494,6 @@ pub(crate) fn relevance_span(
     ])
 }
 
-/// A `scrollTo` offset in CSS px: a JSON number as given, or a string that
-/// is a number followed by `px`, `rpx` (the viewport width over 750, the
-/// unit [`super::blur_view`] also resolves), `ppx` (device pixels, divided
-/// by the device pixel ratio) or nothing. Anything else, a non-finite number
-/// included, is `None`. Shared with `list`'s `scrollToPosition`
-/// ([`super::list`]).
 pub(super) fn offset_px(document: &LynxDocument, offset: &Value) -> Option<f64> {
     let text = match offset {
         Value::Number(number) => return number.as_f64(),
@@ -693,9 +512,6 @@ pub(super) fn offset_px(document: &LynxDocument, offset: &Value) -> Option<f64> 
     }
 }
 
-/// What `scrollBy` moved, in CSS px per axis: the
-/// `{consumedX, consumedY, unconsumedX, unconsumedY}` all three natives
-/// answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ScrolledBy {
     pub(super) consumed: Vector2D<f32>,
@@ -703,8 +519,6 @@ pub(super) struct ScrolledBy {
 }
 
 impl ScrolledBy {
-    /// The data fields, in the order `element-papi.ts` reads them:
-    /// `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY`.
     pub(super) fn record(self) -> String {
         let mut record = String::new();
         for value in [
@@ -719,29 +533,6 @@ impl ScrolledBy {
     }
 }
 
-/// `scrollBy({offset})` on `view`: scrolls the axis by `offset` CSS px at
-/// once, clamped to the scroll range, and answers what moved. `horizontal`
-/// is the scrolling axis, which the caller reads from its own tag's
-/// attributes: [`is_horizontal`] for a `scroll-view`, `list`'s own
-/// `scroll-orientation` reading for a `list` ([`super::list`]), which shares
-/// this method whole.
-///
-/// `params` must be a JSON object with a numeric `offset`, else code 4 and
-/// nothing moves, as Android (`:965-968`) and iOS (`:1224-1228`) refuse a
-/// missing one; Harmony reads a missing or non-numeric one as 0
-/// (`:139-142`), and web-core's `HTMLElement.scrollBy` reads no `offset` at
-/// all and scrolls nowhere. The scroll is instant, as every native's is,
-/// through [`terminus::link::Document::scroll_to_with`], so the painter is told.
-///
-/// The natives hand the one `offset` to both axes and scroll the scrolling
-/// one (Android `UIScrollView.java:1394-1423`). The answer is theirs: the
-/// scrolling axis consumes what it moved and leaves the rest unconsumed;
-/// the cross axis consumes nothing and leaves the whole `offset`
-/// unconsumed. The values are CSS px as `f32`; Android and iOS truncate them
-/// to integers (`(int)` at `:976-979`, `int` at `:1236-1239`).
-///
-/// A `display: none` `scroll-view`, or one that is no scroll container,
-/// moves nothing and consumes nothing.
 pub(super) fn scroll_by(
     document: &mut LynxDocument,
     view: NodeId,
@@ -786,46 +577,6 @@ pub(super) fn scroll_by(
     })
 }
 
-/// `autoScroll({rate, start = false, autoStop = true})` on `view`: starts
-/// moving the axis at `rate` CSS px per second, or stops it. `horizontal` is
-/// the scrolling axis, read by the caller as for [`scroll_by`]; `list`
-/// shares this method whole ([`super::list`]).
-///
-/// The motion is the painter's ([`terminus::link::Document::auto_scroll`]): the offset
-/// changes on the painter's clock and comes back through its posts, so the
-/// `scroll` events and the `scrollend` at its end are a user scroll's. It
-/// yields to a finger and to every other motion and goes on afterwards, and
-/// a `scrollTo` or `scrollBy` moves the container without ending it (user
-/// ruling 2026-10-13; iOS's list offers that as `touchBehavior: "pause"`,
-/// and every reference's timer outlives a `scrollTo`). Every reference but
-/// iOS's list writes the offset under a finger each frame instead.
-///
-/// - `params` must be a JSON object, else code 4 (Harmony `ui_scroll.cc:104-107`).
-/// - `start` is read with JavaScript truthiness, as web-core's `if (options.start)` reads it, and a
-///   missing one is `false`: web-core, iOS (`boolValue` of nothing), Harmony (`start{false}`) and
-///   Android's list since 4.1 (`UIListContainer.java:1100-1101`). Android's `scroll-view` reads a
-///   missing one as `true` (`AndroidScrollView.java:144`).
-/// - Without `start` the auto-scroll ends where it stands and nothing else is read. A container
-///   with none answers the same.
-/// - `rate` is CSS px per second, a JSON number or a string in `px`, `rpx` or `ppx` or with no unit
-///   ([`offset_px`]): positive toward the end edge, negative toward the start edge. The natives
-///   read a number on `scroll-view` and a unit string on `list`; web-core `parseFloat`s a string
-///   and ignores its unit. Zero, missing or unreadable is code 4 and changes nothing, an
-///   auto-scroll in progress included: Harmony's answer (`auto_scroller.cc:84-88`), where iOS
-///   (`LynxUIScroller.m:1346-1349`) and Android (`:147-150`) return without one.
-/// - `autoStop` is `true` unless it is the JSON `false`, as web-core's `XList` reads it
-///   (`XList.ts:191`) and iOS's and Harmony's lists default it. With it the auto-scroll ends for
-///   good at the edge it moves toward, which is all iOS's and Android's `scroll-view` do; without,
-///   it stays at the edge and goes on when the content grows. Read on both tags (user ruling
-///   2026-10-13), as Harmony reads it; web-core's `ScrollView` reads none and never ends
-///   (`ScrollView.ts:96-108`).
-///
-/// The rate is per second of the painter's clock, as Harmony's and
-/// web-core's `XList`'s is; iOS and Android move `rate / 60` per frame of a
-/// timer or of the display.
-///
-/// A `display: none` `scroll-view`, or one that is no scroll container at
-/// the next commit, starts nothing, and the call still succeeds.
 pub(super) fn auto_scroll(
     document: &mut LynxDocument,
     view: NodeId,
@@ -853,18 +604,13 @@ pub(super) fn auto_scroll(
     Ok(())
 }
 
-/// What `getScrollInfo` reports, in CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ScrollInfo {
     pub(super) offset: Vector2D<f32>,
-    /// The scrolling axis's maximum offset, written as both `scrollRange`
-    /// and `maxScrollOffset`.
     pub(super) max_offset: f32,
 }
 
 impl ScrollInfo {
-    /// The data fields, in the order `element-papi.ts` reads them:
-    /// `scrollX`, `scrollY`, `scrollRange`, `maxScrollOffset`.
     fn record(self) -> String {
         let mut record = String::new();
         for value in [
@@ -879,18 +625,6 @@ impl ScrollInfo {
     }
 }
 
-/// `getScrollInfo()` on `view`: its offset, and the scrolling axis's maximum
-/// offset as both `scrollRange` and `maxScrollOffset`. Android's
-/// `scrollRange` is that maximum (`getScrollRange()`, `:929`, `:1294-1297`),
-/// as is Harmony's (`scroll_range - GetViewPortSize()`, `:798`) and iOS's
-/// `maxScrollOffset` (`:1323`). iOS's own `scrollRange` is the content
-/// size, marked there as a legacy field kept to avoid a breaking change
-/// (`:1324-1325`); that
-/// is the one reading not followed. Android answers integers (`putInt`);
-/// these are `f32`. web-core has no `getScrollInfo`.
-///
-/// A `display: none` `scroll-view`, or one that is no scroll container,
-/// answers zeros.
 pub(super) fn scroll_info(document: &LynxDocument, view: NodeId) -> ScrollInfo {
     let horizontal = is_horizontal(document, view);
     document.scroll_box(view).map_or(
@@ -907,7 +641,7 @@ pub(super) fn scroll_info(document: &LynxDocument, view: NodeId) -> ScrollInfo {
 
 #[cfg(test)]
 pub(super) mod tests {
-    #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::event::{EventDetail, ListenerKey, ListenerKinds};
     use terminus::link::scroll::ScrollBehavior;
@@ -983,9 +717,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The layout half of the UA gap: before these rules existed the tag fell
-    /// to the bare Lynx initial values, so the subtree stacked on the wrong axis
-    /// inside a content box.
     #[test]
     fn a_scroller_lays_its_subtree_out_along_the_axis_it_scrolls() {
         for (tag, attribute, horizontal) in [
@@ -1046,13 +777,6 @@ pub(super) mod tests {
         }
     }
 
-    // --- the component ------------------------------------------------------
-
-    /// A laid-out scroller of `count` element children under the page:
-    /// 100px square with a 10px border, so an 80px scrollport, each child
-    /// 40px along the scrolling axis, so the children sit at 0, 40, 80, … in
-    /// the scroller's scroll coordinates, and five of them give a range of
-    /// 120. `attribute` is written before the layout.
     fn scroller(attribute: Option<(&str, &str)>, count: usize) -> (LynxDocument, NodeId) {
         let mut document = document();
         let view = child(
@@ -1065,8 +789,6 @@ pub(super) mod tests {
         }
         let horizontal = attribute.is_some();
         for _ in 0..count {
-            // Across the axis each child overflows by 70px, so the cross axis
-            // has a range of its own that no method may move.
             let style = if horizontal {
                 "width: 40px; height: 150px; flex-shrink: 0"
             } else {
@@ -1082,7 +804,6 @@ pub(super) mod tests {
         scroller(None, count)
     }
 
-    /// The request the committed frame carries to the painter for `view`.
     fn carried(
         document: &mut LynxDocument,
         view: NodeId,
@@ -1131,7 +852,6 @@ pub(super) mod tests {
             (r#"{"index":1,"offset":30}"#, 70.0),
             (r#"{"index":1,"offset":"30px"}"#, 70.0),
             (r#"{"index":2,"offset":-30}"#, 50.0),
-            // An index is truncated toward zero, as every native truncates it.
             (r#"{"index":2.9}"#, 80.0),
             (r#"{"index":-0.5,"offset":5}"#, 5.0),
         ] {
@@ -1165,8 +885,6 @@ pub(super) mod tests {
         }
     }
 
-    /// `1rpx` is the viewport width over 750 (393px here), `1ppx` one device
-    /// pixel.
     #[test]
     fn scroll_to_converts_rpx_and_ppx_offsets() {
         let (mut document, view) = vertical(5);
@@ -1185,8 +903,6 @@ pub(super) mod tests {
         assert_eq!(document.scroll_offset(view), Vector2D::new(0.0, 50.0));
     }
 
-    /// [`vertical`]'s five children on a device with `ratio` device pixels
-    /// per CSS pixel.
     fn document_with_ratio(ratio: f32) -> LynxDocument {
         let mut document = document();
         document.set_device_pixel_ratio(ratio);
@@ -1202,9 +918,6 @@ pub(super) mod tests {
         document
     }
 
-    /// Instant by default and for a falsy `smooth`: the document moves at
-    /// once. A truthy `smooth` is the painter's to animate, so only the
-    /// request records the target.
     #[test]
     fn scroll_to_is_instant_unless_smooth_is_truthy() {
         for (smooth, behavior) in [
@@ -1241,8 +954,6 @@ pub(super) mod tests {
         }
     }
 
-    /// A target past either end clamps to the range and the call succeeds
-    /// (iOS and web-core).
     #[test]
     fn a_clamped_scroll_to_target_still_succeeds() {
         for (params, expected) in [
@@ -1306,10 +1017,6 @@ pub(super) mod tests {
         }
     }
 
-    /// Native refuses `scrollTo` on a scroller with no children whatever the
-    /// params; here an index is out of range there anyway, and an offset
-    /// alone is a scroll, as web-core's is: to the clamped target, which with
-    /// no content is 0.
     #[test]
     fn an_empty_scroller_refuses_an_index_and_takes_an_offset() {
         let mut document = document();
@@ -1331,7 +1038,6 @@ pub(super) mod tests {
         );
     }
 
-    /// Only element children count, and a child with no box sits at 0.
     #[test]
     fn scroll_to_counts_element_children_and_places_a_boxless_one_at_zero() {
         let mut document = document();
@@ -1340,8 +1046,6 @@ pub(super) mod tests {
             SCROLL_VIEW_TAG,
             "width: 100px; height: 100px",
         );
-        // White space, so it generates no box of its own (css-flexbox-1
-        // §4) and the offsets stay the elements' alone.
         let text = document.create_text_node(" \n ", ());
         document.append_child(view, text);
         for style in [
@@ -1367,7 +1071,6 @@ pub(super) mod tests {
         );
     }
 
-    /// The axis is the attributes': x moves and y keeps the offset it had.
     #[test]
     fn a_horizontal_scroller_moves_x_alone() {
         for attribute in [("scroll-x", ""), ("scroll-orientation", "horizontal")] {
@@ -1396,7 +1099,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The cross axis's offset survives a vertical move too.
     #[test]
     fn a_vertical_scroller_keeps_its_x_offset() {
         let (mut document, view) = vertical(5);
@@ -1405,8 +1107,6 @@ pub(super) mod tests {
         assert_eq!(document.scroll_offset(view), Vector2D::new(25.0, 120.0));
     }
 
-    /// A `scroll-view` with no box, or one that is no scroll container,
-    /// succeeds, moves nothing, and no frame carries a request for it.
     #[test]
     fn a_scroller_that_cannot_scroll_moves_nothing() {
         for style in ["display: none", "overflow: visible"] {
@@ -1442,9 +1142,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The scrolling axis consumes what it moved; the cross axis consumes
-    /// nothing and leaves the whole offset unconsumed, as the natives
-    /// answer.
     #[test]
     fn scroll_by_answers_what_it_consumed() {
         let (mut document, view) = vertical(5);
@@ -1543,17 +1240,12 @@ pub(super) mod tests {
         );
     }
 
-    /// The change `autoScroll` recorded for `view`, as the painter will read
-    /// it: the rate, the axis and whether it ends at the edge.
     fn auto(document: &LynxDocument, view: NodeId) -> Option<(f32, bool, bool)> {
         document
             .pending_auto_scroll(view)
             .map(|request| (request.rate, request.horizontal, request.stop_at_edge))
     }
 
-    /// A start records the rate on the scrolling axis and moves nothing: the
-    /// painter does. `start` is read with JavaScript truthiness and is
-    /// `false` when missing, where the call ends the auto-scroll instead.
     #[test]
     fn auto_scroll_starts_on_the_scrolling_axis_and_stops_without_start() {
         let (mut document, view) = vertical(5);
@@ -1591,9 +1283,6 @@ pub(super) mod tests {
         assert_eq!(auto(&document, view), Some((-45.5, true, true)));
     }
 
-    /// The rate is CSS px per second in `scrollTo`'s offset grammar; `1rpx`
-    /// is the viewport width over 750 (393px here) and `1ppx` one device
-    /// pixel. Only the JSON `false` turns `autoStop` off.
     #[test]
     fn auto_scroll_reads_unit_rates_and_auto_stop() {
         let (mut document, view) = vertical(5);
@@ -1625,8 +1314,6 @@ pub(super) mod tests {
         }
     }
 
-    /// A start with no usable rate is code 4 and changes nothing, an
-    /// auto-scroll already asked for included.
     #[test]
     fn auto_scroll_refuses_a_start_without_a_rate() {
         let (mut document, view) = vertical(5);
@@ -1652,9 +1339,6 @@ pub(super) mod tests {
         }
     }
 
-    /// A `display: none` `scroll-view` has no slot in the frame, so the
-    /// change it recorded has nowhere to go and the commit drops it; the
-    /// call succeeds all the same.
     #[test]
     fn auto_scroll_on_a_scroll_view_with_no_box_starts_nothing() {
         let (mut document, view) = vertical(5);
@@ -1675,8 +1359,6 @@ pub(super) mod tests {
         assert_eq!(document.pending_auto_scroll(view), None);
     }
 
-    /// `takeContentScreenshot` is not built, and every other name is left to
-    /// the host.
     #[test]
     fn methods_not_built_are_not_found() {
         let (mut document, view) = vertical(5);
@@ -1696,10 +1378,6 @@ pub(super) mod tests {
         assert_eq!(document.pending_scroll_request(view), None);
     }
 
-    // --- the threshold events ----------------------------------------------
-
-    /// What a scroller's threshold events left on the queue, as
-    /// `(name, delta)`.
     pub(in crate::main::tree) fn heard(
         events: &ComponentEvents,
         scroller: NodeId,
@@ -1717,9 +1395,6 @@ pub(super) mod tests {
             .collect()
     }
 
-    /// Moves `scroller` to `offset` and delivers its `scroll`, as the
-    /// runtime's dispatch of the queued kernel event does: at the scroller,
-    /// not bubbling, not composed.
     pub(in crate::main::tree) fn scrolled(
         document: &mut LynxDocument,
         scroller: NodeId,
@@ -1729,15 +1404,10 @@ pub(super) mod tests {
         document.dispatch_element_event(scroller, "scroll", &EventDetail::None, false, false, 0.0);
     }
 
-    /// Registers a bubble-pass listener for `name` on `node`, as a realm's
-    /// `bindscrolltoupper` files one.
     pub(in crate::main::tree) fn listen(document: &mut LynxDocument, node: NodeId, name: &str) {
         document.add_listener(node, name, ListenerKinds::PATH_BUBBLE, ListenerKey(0));
     }
 
-    /// [`scroller`], with the document's component events and `attributes`
-    /// written before the layout: an 80px scrollport over five 40px
-    /// children, a range of 120 on the scrolling axis, 70 across it.
     fn edge_scroller(attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
         let (mut document, events) = with_component_events(PageConfig::default());
         let view = child(
@@ -1774,8 +1444,6 @@ pub(super) mod tests {
         }
         assert_eq!(heard(&events, view), [], "nobody listens on the element");
 
-        // What one scroll leaves behind: the two zones and the offset, and
-        // nothing about who listens.
         let edges = ScrollEdges::default();
         edges.record(
             &document,
@@ -1809,8 +1477,6 @@ pub(super) mod tests {
     fn entering_the_upper_zone_fires_once_and_again_after_leaving_it() {
         let (mut document, events, view) = edge_scroller(&[(UPPER_THRESHOLD, "10")]);
         listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
-        // The first scroll inside the zone fires, native's initial state
-        // being "not at the upper edge".
         scrolled(&mut document, view, y(5.0));
         assert_eq!(heard(&events, view), [(SCROLL_TO_UPPER_EVENT, y(5.0))]);
         scrolled(&mut document, view, y(3.0));
@@ -1937,8 +1603,6 @@ pub(super) mod tests {
         scrolled(&mut document, view, y(0.0));
         assert_eq!(heard(&events, view), []);
 
-        // Shown again, nothing was recorded while hidden: its first scroll
-        // is its first entry.
         document.set_inline_style(view, "width: 100px; height: 100px; border: 10px solid");
         document.layout();
         scrolled(&mut document, view, y(0.0));
@@ -1977,11 +1641,6 @@ pub(super) mod tests {
         );
     }
 
-    // --- the nearest snap position -----------------------------------------
-
-    /// The nearest position to an offset, the first in `points`' order on a
-    /// tie, measured to a range's nearer end; on a circular axis at each
-    /// point's copy nearest the offset, read in one period.
     #[test]
     fn the_nearest_snap_position_wraps_on_a_circular_axis() {
         use terminus::link::scroll::{SnapAxis, SnapPoint, SnapStrictness};
@@ -2023,7 +1682,6 @@ pub(super) mod tests {
         for (offset, expected) in [
             (540.0, Some(2)),
             (560.0, Some(0)),
-            // A tie across the seam, 50 from each: the first in `points`.
             (550.0, Some(0)),
             (1140.0, Some(2)),
             (-30.0, Some(0)),
@@ -2043,7 +1701,6 @@ pub(super) mod tests {
         assert_eq!(nearest_snap_position(&empty, 10.0), None);
     }
 
-    /// One computed longhand or custom property, as CSSOM serializes it.
     fn computed(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -2061,8 +1718,6 @@ pub(super) mod tests {
             .collect()
     }
 
-    /// `count` children of `child_style` under a `scroll-view` of
-    /// `view_style`, with `attributes` written before the first commit.
     fn indexed(
         view_style: &str,
         child_style: &str,
@@ -2080,8 +1735,6 @@ pub(super) mod tests {
         (document, view, children)
     }
 
-    /// web-core's `basic-element-scroll-view-scroll-to-index` card's shape:
-    /// a 300x600 `scroll-view` with `scroll-y`, its children 300px tall.
     fn vertical_indexed(
         attributes: &[(&str, &str)],
         count: usize,
@@ -2096,11 +1749,6 @@ pub(super) mod tests {
         )
     }
 
-    /// The first commit starts the view with the indexed child at the
-    /// scrollport's start, web-core's `scrollTop = child.offsetTop`
-    /// (`ScrollAttributes.ts:64-81`), and carries the position to the
-    /// painter as an instant request. With the card's three children and
-    /// index 1 the first screen is the second child over the third.
     #[test]
     fn initial_scroll_to_index_starts_a_vertical_view_on_the_child() {
         for (index, offset) in [("0", 0.0), ("1", 300.0), ("2", 600.0)] {
@@ -2134,8 +1782,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The card itself: three children and index 1 start at 300, the
-    /// second and third child filling the 600px scrollport.
     #[test]
     fn the_scroll_to_index_card_starts_on_its_second_child() {
         let (mut document, view, _) = vertical_indexed(&[("initial-scroll-to-index", "1")], 3);
@@ -2145,11 +1791,6 @@ pub(super) mod tests {
         assert_eq!(scroll_box.max_offset().y, 300.0);
     }
 
-    /// A child as wide as the scrollport lands at its start on x too.
-    /// `scroll-initial-target` aligns the inline axis `nearest`: a child
-    /// that fits and lies past the scrollport's end is aligned by its end
-    /// edge, which for a child as wide as the scrollport is the offset its
-    /// start gives.
     #[test]
     fn initial_scroll_to_index_starts_a_horizontal_view_on_the_child() {
         for axis in [("scroll-x", ""), ("scroll-orientation", "horizontal")] {
@@ -2173,11 +1814,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The recorded gap on x: a child narrower than the scrollport is
-    /// aligned `nearest`, not at the start web-core puts it at
-    /// (`scrollLeft = child.offsetLeft`). One already inside the scrollport
-    /// moves nothing; one past its end lands with its end edge at the
-    /// scrollport's end.
     #[test]
     fn a_narrow_child_on_x_is_aligned_nearest_not_at_the_start() {
         for (index, offset) in [("1", 0.0), ("4", 200.0)] {
@@ -2192,8 +1828,6 @@ pub(super) mod tests {
         }
     }
 
-    /// No attribute, or one that names no child — negative, past the last
-    /// child, or no integer — scrolls nothing and records no request.
     #[test]
     fn an_index_naming_no_child_scrolls_nothing() {
         for value in [None, Some("-1"), Some("-5"), Some("4"), Some("10")]
@@ -2211,13 +1845,6 @@ pub(super) mod tests {
         }
     }
 
-    /// web-core runs its handler on every change of the attribute
-    /// (`ScrollAttributes.ts:64-81`, an `attributeChangedCallback` handler),
-    /// and here each new target is honoured once: a change after the first
-    /// layout scrolls to the new child, instantly. A commit that leaves the
-    /// target where it was, or rewrites the same value, leaves a view the
-    /// user scrolled alone, and removing the attribute names no target and
-    /// moves nothing.
     #[test]
     fn a_later_change_scrolls_to_the_new_child_and_nothing_else_does() {
         let (mut document, view, children) =
@@ -2232,7 +1859,6 @@ pub(super) mod tests {
         );
         assert_eq!(document.scroll_offset(view).y, 600.0);
 
-        // Where main writes the offset the painter posted for a drag.
         document.scroll_to(view, Vector2D::new(0.0, 50.0));
         let serial = document
             .pending_scroll_request(view)
@@ -2252,10 +1878,6 @@ pub(super) mod tests {
         assert_eq!(targets(&document, &children), ["none"; 4]);
     }
 
-    /// The rules apply under a view that carries the attribute only, so a
-    /// nested view without one keeps the outer view's index for its own
-    /// target and gives its own children none, and a nested view with one
-    /// starts on its own child.
     #[test]
     fn a_nested_view_is_its_parents_target_and_keeps_its_own_index() {
         let full = "width: 300px; height: 300px; flex-shrink: 0";

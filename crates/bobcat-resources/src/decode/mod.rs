@@ -31,19 +31,14 @@ mod gdk_pixbuf;
 #[cfg(target_os = "macos")]
 mod imageio;
 
-/// The native platform decoder as a [`vant::ImageDecoder`]: [`decode`] and
-/// [`available`].
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeDecoder;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl vant::ImageDecoder for NativeDecoder {
-    /// Every native decode is CPU pixels.
     type Frame = std::convert::Infallible;
 
-    /// The native decoders take the header the format sniff found; the
-    /// format itself they read from the bytes.
     fn decode_blocking(
         &self,
         bytes: &[u8],
@@ -83,14 +78,6 @@ impl vant::ImageDecoder for NativeDecoder {
     }
 }
 
-/// Decodes `bytes` with the platform decoder, downsampling to fit inside
-/// `max` (per axis, in pixels). `header` is what the container's header said
-/// about the image, if it could be read — the size a decoder that scales
-/// during load needs before it has seen the pixels.
-///
-/// Blocking; runs on a thread of the fetcher's blocking pool, holding that
-/// job's decode permit, or — for a restore inside a read — on the painter's
-/// thread with no permit at all.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode(
     bytes: &[u8],
@@ -114,9 +101,6 @@ pub fn decode(
     }
 }
 
-/// What an animated image's frames are, read without decoding a pixel:
-/// every frame on macOS, one on Linux, where gdk-pixbuf has no decode by
-/// frame index.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn frames(bytes: &[u8]) -> Result<ImageFrames, DecodeError> {
     #[cfg(target_os = "macos")]
@@ -130,10 +114,6 @@ pub fn frames(bytes: &[u8]) -> Result<ImageFrames, DecodeError> {
     }
 }
 
-/// Decodes frame `index` of `bytes` at most `max` large: the whole canvas as
-/// shown at that frame. Frame 0 is what [`decode`] decodes; any other is
-/// refused where [`frames`] answers one frame. On macOS the source stays open
-/// for `bytes` between frames until [`forget_frames`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode_frame(
     bytes: &bytes::Bytes,
@@ -156,8 +136,6 @@ pub fn decode_frame(
     }
 }
 
-/// No more frames of `bytes` are asked for: on macOS the source kept open
-/// for them is closed; elsewhere nothing was kept.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn forget_frames(bytes: &bytes::Bytes) {
     #[cfg(target_os = "macos")]
@@ -166,8 +144,6 @@ pub fn forget_frames(bytes: &bytes::Bytes) {
     let _ = bytes;
 }
 
-/// Whether a platform decoder can be reached at all, so a host can report
-/// the gap once at startup rather than once per image.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn available() -> Result<(), DecodeError> {
     #[cfg(target_os = "macos")]
@@ -186,11 +162,6 @@ pub fn available() -> Result<(), DecodeError> {
     }
 }
 
-/// Reconciles a header's size with what the decoder produced: an EXIF
-/// orientation the header probe cannot see may have transposed the image,
-/// and the intrinsic size layout is told must be the oriented one.
-///
-/// gdk-pixbuf's helper: `ImageIO` reports the oriented size itself.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn oriented_source_size(header: (u32, u32), decoded: (u32, u32)) -> (u32, u32) {
     let (header_landscape, decoded_landscape) = (header.0 > header.1, decoded.0 > decoded.1);
@@ -201,10 +172,6 @@ fn oriented_source_size(header: (u32, u32), decoded: (u32, u32)) -> (u32, u32) {
     }
 }
 
-/// Packs a decoder's rows — `channels` bytes per pixel, `stride` bytes per
-/// row — into tightly packed RGBA8, filling alpha where the source has none.
-///
-/// gdk-pixbuf's helper: `ImageIO` draws straight into an RGBA8 context.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn pack_rgba(
     pixels: &[u8],
@@ -228,7 +195,6 @@ fn pack_rgba(
     Some(rgba)
 }
 
-/// The gdk-pixbuf helpers, which only Linux builds.
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
@@ -264,17 +230,10 @@ mod tests {
     }
 }
 
-/// The platform decoder itself, driven with a PNG the `png` crate encodes.
-///
-/// These require the platform decoder — `ImageIO` on macOS, gdk-pixbuf on
-/// Linux — and fail rather than skip when it is missing, so a green run
-/// always means pixels were decoded and compared.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod platform_tests {
     use super::*;
 
-    /// A width x height image whose quadrants are red, green, blue, and
-    /// half-transparent white.
     fn quadrant_png(width: u32, height: u32) -> Vec<u8> {
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
@@ -306,7 +265,6 @@ mod platform_tests {
             .expect("four bytes")
     }
 
-    /// Straight-alpha colour of a pixel, whichever way the platform stores it.
     fn straight(bitmap: &Bitmap, x: u32, y: u32) -> [u8; 4] {
         let [red, green, blue, alpha] = pixel(bitmap, x, y);
         if bitmap.premultiplied && alpha != 0 && alpha != 255 {
@@ -363,8 +321,6 @@ mod platform_tests {
         }
     }
 
-    /// The animated fixtures (`tests/fixtures/animated/`, written by
-    /// `tests/animated_fixtures.rs`).
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -374,7 +330,6 @@ mod platform_tests {
         .expect("an animated fixture")
     }
 
-    /// A still image is one frame on every platform.
     #[test]
     fn a_still_png_is_one_frame() {
         assert_eq!(
@@ -383,10 +338,6 @@ mod platform_tests {
         );
     }
 
-    /// Every animated fixture decodes its first frame, whatever the
-    /// platform answers about the rest. The WebP only where `ImageIO`
-    /// decodes it: gdk-pixbuf reads WebP only with a loader module a Linux
-    /// host need not have.
     #[test]
     fn every_animated_fixture_decodes_its_first_frame() {
         let names: &[&str] = if cfg!(target_os = "macos") {
@@ -403,8 +354,6 @@ mod platform_tests {
         }
     }
 
-    /// gdk-pixbuf answers one frame for an animated file, and decodes no
-    /// frame past the first: an explicit answer, not one inherited.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn linux_answers_one_frame_for_an_animated_file() {
@@ -445,9 +394,6 @@ mod platform_tests {
     }
 }
 
-/// `ImageIO` against the animated fixtures: frame counts, the delays and
-/// loop counts the files state, and each frame decoded by index as the whole
-/// canvas at that frame.
 #[cfg(all(test, target_os = "macos"))]
 mod imageio_animation_tests {
     use std::time::Duration;
@@ -503,7 +449,6 @@ mod imageio_animation_tests {
                 .frames_blocking(&fixture(name), ImageFormat::Other, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(frames.loops(), loops, "{name}");
-            // `ImageIO` reads a delay as a double of seconds.
             let stated: Vec<Duration> = frames
                 .stated_delays()
                 .iter()
@@ -534,13 +479,7 @@ mod imageio_animation_tests {
                     (at(&bitmap, 1, 4), at(&bitmap, 6, 4))
                 })
                 .collect();
-            let last = if gif {
-                // The GIF's last frame covers the left half only: the right
-                // half is the green frame before it, composited under it.
-                (BLUE, GREEN)
-            } else {
-                (BLUE, BLUE)
-            };
+            let last = if gif { (BLUE, GREEN) } else { (BLUE, BLUE) };
             assert_eq!(colours, [(RED, RED), (GREEN, GREEN), last], "{name}");
             assert!(
                 NativeDecoder
@@ -552,7 +491,6 @@ mod imageio_animation_tests {
         }
     }
 
-    /// A bound downsamples every frame, as it does the first.
     #[test]
     fn imageio_downsamples_a_frame_to_the_bound() {
         let bytes = bytes::Bytes::from(fixture("rgb-thrice.webp"));

@@ -28,15 +28,12 @@ const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height=
   <rect width="12" height="6" fill="red"/>
 </svg>"#;
 
-/// A page styled by `css` after [`PAGE`], where a `text` element is a Lynx
-/// text element and Ahem is the one face, with content detection on.
 fn page(css: &str) -> Doc {
     let mut doc = undetected_page(css);
     doc.dom.set_content_detection(true);
     doc
 }
 
-/// [`page`] with content detection as a document starts: off.
 fn undetected_page(css: &str) -> Doc {
     let mut doc = Doc::with_css(&format!("{PAGE} {css}"));
     doc.define_lynx_text("text");
@@ -44,7 +41,6 @@ fn undetected_page(css: &str) -> Doc {
     doc
 }
 
-/// A `text` element under the root holding `content`.
 fn text(doc: &mut Doc, class: &str, content: &str) -> NodeId {
     let root = doc.root;
     let holder = doc.el_tag(root, "text", &format!("box text {class}"));
@@ -56,7 +52,6 @@ fn paints_content(doc: &mut Doc) -> bool {
     doc.dom.commit().paints_content()
 }
 
-/// One 2×2 opaque bitmap at `source`.
 fn bitmap(images: &TestImages, source: &str) {
     images.insert_rgba8(source, 2, 2, vec![255; 16]);
 }
@@ -137,8 +132,6 @@ fn content_detection_is_off_by_default() {
         "a frame built with detection off is never contentful"
     );
 
-    // Turned on, the next frame built is decided; turned off again, the
-    // next is not.
     doc.dom.set_content_detection(true);
     text(&mut doc, "", "World");
     assert!(paints_content(&mut doc));
@@ -173,7 +166,6 @@ fn white_space_only_text_is_not_content() {
     text(&mut doc, "", "   ");
     assert!(!paints_content(&mut doc));
 
-    // Spaces that survive collapsing are shaped, and are still no ink.
     let mut doc = page(".pre { white-space: pre; }");
     text(&mut doc, "pre", "  \n  ");
     assert!(!paints_content(&mut doc));
@@ -313,8 +305,6 @@ fn offscreen_painter() -> Painter {
     .expect("a GPU adapter is mandatory for the render tests")
 }
 
-/// Adopts the document's newest frame and draws it offscreen, answering the
-/// frame's commit id.
 fn present(painter: &mut Painter, doc: &mut Doc) -> u64 {
     let frame = doc.dom.commit();
     let commit = frame.commit_id();
@@ -371,7 +361,6 @@ fn first_contentful_paint_waits_for_content_and_first_paint_holds() {
         contentful
     );
 
-    // A third frame moves neither first mark.
     text(&mut doc, "", "World");
     let later = present(&mut painter, &mut doc);
     assert_eq!(painter.first_paint().expect("held").commit_id, blank);
@@ -426,7 +415,6 @@ fn presentation_timing_off_records_nothing_and_on_again_records() {
     assert!(painter.first_paint().is_none());
     assert!(painter.first_contentful_paint().is_none());
 
-    // The switch outlives the view it was set for.
     painter.forget_view();
     assert!(!painter.presentation_timing());
 

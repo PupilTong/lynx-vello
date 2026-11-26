@@ -144,7 +144,6 @@ fn rejects_unknown_section_label() {
     assert!(matches!(err, DecodeError::UnknownSection(99)), "{err}");
 }
 
-/// The selectors and declarations of a named section's one sheet, css id 0.
 fn section_rules(style_info: &bobcat_source::web::StyleInfo) -> Vec<(String, Vec<String>)> {
     assert_eq!(
         style_info
@@ -176,10 +175,6 @@ fn section_rules(style_info: &bobcat_source::web::StyleInfo) -> Vec<(String, Vec
         .collect()
 }
 
-/// `css-custom-sections` is a web card the canary encoder (lynx-stack#4138)
-/// wrote with two `encoding: 'CSS'` custom sections: they arrive as the
-/// `CustomSectionsStyleInfo` section (label 7), keyed by section name, and no
-/// longer in the JSON `CustomSections` section.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_css_custom_sections_into_the_style_info_map() {
@@ -223,7 +218,6 @@ fn decodes_css_custom_sections_into_the_style_info_map() {
             .all(|section| section.get("encoding").and_then(|e| e.as_str()) != Some("CSS")),
         "a CSS section is no longer JSON: {sections:?}"
     );
-    // The card's own CSS stays where it was.
     let style_info = template.style_info.as_ref().unwrap();
     let selectors: Vec<String> = style_info.css_id_to_style_sheet[&0].rules[0]
         .prelude
@@ -234,9 +228,6 @@ fn decodes_css_custom_sections_into_the_style_info_map() {
     assert_eq!(selectors, [".page"]);
 }
 
-/// The same container's named stylesheets as `ContainerSources` registers
-/// them: each one under `custom_section/`, its name encoded, the `?#` suffix
-/// kept.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn css_custom_sections_register_under_custom_section() {
@@ -246,7 +237,6 @@ fn css_custom_sections_register_under_custom_section() {
         fixtures::fixture("css-custom-sections").page,
     )
     .unwrap();
-    // The card's own `StyleInfo` and its root hang under the container too.
     assert_eq!(
         sources.style_info().map(url::Url::as_str),
         Some("https://cdn.test/sections.bundle/style-info.css?rev=1")
@@ -287,14 +277,10 @@ fn css_custom_sections_register_under_custom_section() {
     );
 }
 
-/// A label-7 payload that fails validation fails the whole decode, as a bad
-/// `StyleInfo` does: no named sheet is half-loaded.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_a_corrupt_custom_sections_style_info_section() {
     let mut bytes = fixtures::fixture("css-custom-sections").page.to_vec();
-    // Walk to the label-7 section and overwrite the tail of its payload,
-    // where an rkyv root-at-end archive keeps its root.
     let mut offset = 12;
     let (start, len) = loop {
         let label = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());

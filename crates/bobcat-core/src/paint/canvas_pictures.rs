@@ -37,15 +37,12 @@ use crate::link::{ToMain, ViewOutbox};
 use crate::main::tree::LynxDocument;
 use crate::view::EventRequester;
 
-/// One placeholder canvas's link and where a commit's owed wakes go.
 struct CanvasPicture {
     frames: CanvasFrames,
     requester: Arc<dyn EventRequester>,
-    /// The view's command channel, held weakly: what a resize is sent on.
     main: Option<mpsc::WeakUnboundedSender<ToMain>>,
 }
 
-/// One view's placeholder canvases, by picture.
 #[derive(Default)]
 pub(crate) struct CanvasPictures(Mutex<FxHashMap<PictureId, Arc<CanvasPicture>>>);
 
@@ -59,19 +56,10 @@ impl CanvasPictures {
     }
 }
 
-/// What a canvas's owner, on any thread, commits its bitmap through.
-///
-/// Holds its entry weakly, and the entry holds the element's link weakly:
-/// once the element is freed a commit does nothing and wakes nobody, and
-/// once the view is gone the handle keeps none of its state alive.
 #[derive(Clone)]
 pub(crate) struct CanvasPresenter(Weak<CanvasPicture>);
 
 impl CanvasPresenter {
-    /// Registers `frames` in `pictures` and answers the handle on it. A
-    /// commit wakes `requester` when a wake is owed and sends
-    /// [`ToMain::CanvasResized`] on `main` when a resize is. Entries of
-    /// freed canvases are dropped here.
     pub(crate) fn register(
         pictures: &CanvasPictures,
         frames: CanvasFrames,
@@ -91,11 +79,6 @@ impl CanvasPresenter {
         presenter
     }
 
-    /// HTML's update of the placeholder: `canvas`, with every draw recorded
-    /// on it, becomes what the placeholder shows
-    /// (`OffscreenCanvas::commit`). Nothing is queued: a wake is asked for
-    /// only when the painter has described every earlier commit, and a
-    /// resize sent only when none is pending.
     pub(crate) fn commit(&self, canvas: &mut OffscreenCanvas) {
         let Some(entry) = self.0.upgrade() else {
             return;
@@ -124,9 +107,6 @@ impl std::fmt::Debug for CanvasPresenter {
     }
 }
 
-/// What [`transfer_control_to_offscreen`] answers: the size the
-/// `OffscreenCanvas` is created at and the handle its bitmap is committed
-/// through.
 #[derive(Debug)]
 pub(crate) struct Transferred {
     pub(crate) width: u32,
@@ -134,15 +114,6 @@ pub(crate) struct Transferred {
     pub(crate) presenter: CanvasPresenter,
 }
 
-/// HTML's `transferControlToOffscreen()` on `canvas` in the view `outbox`
-/// publishes for, on `bobcat-main`: the element becomes a placeholder
-/// ([`terminus::link::html::canvas::transfer_control_to_offscreen`]) and its
-/// link is registered for the view's painter.
-///
-/// # Errors
-///
-/// [`InvalidState`] when `canvas` is not a canvas element in context mode
-/// none.
 pub(crate) fn transfer_control_to_offscreen(
     outbox: &ViewOutbox,
     document: &mut LynxDocument,
@@ -162,9 +133,6 @@ pub(crate) fn transfer_control_to_offscreen(
     })
 }
 
-/// What a painter asks about a view's pictures: the view's placeholder
-/// canvases from their links, and every other picture from the embedder's
-/// store, unchanged.
 pub(crate) struct ViewImages<'a, P> {
     pub(crate) canvases: &'a CanvasPictures,
     pub(crate) store: &'a dyn FrameImages<PlatformFrame = P>,
@@ -186,7 +154,6 @@ impl<P: FrameWriter> FrameImages for ViewImages<'_, P> {
         }
     }
 
-    /// A canvas's commits are copied into its texture: none is taken.
     fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<P>> {
         match self.canvases.get(picture) {
             Some(_) => None,
@@ -194,7 +161,6 @@ impl<P: FrameWriter> FrameImages for ViewImages<'_, P> {
         }
     }
 
-    /// A canvas is never wanted from the store: its texture is the link's.
     fn want(&self, picture: &PictureKey, hint: ImageSizeHint) {
         if self.canvas(picture).is_none() {
             self.store.want(picture, hint);

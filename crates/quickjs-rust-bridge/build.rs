@@ -80,9 +80,6 @@ fn main() {
     }
     quickjs_build.compile("quickjs_bridge_core");
 
-    // Keep the formatter in its own translation unit. In particular, do not
-    // force-include `rust-platform.h`: that header maps `vsnprintf` to this
-    // wrapper and would make the implementation recurse into itself.
     let mut printf_build = cc::Build::new();
     configure_target(&mut printf_build, &target, &clang_target_feature_flags);
     printf_build
@@ -117,22 +114,12 @@ fn main() {
     export_engine_sources_digest(&manifest_dir, &quickjs_dir, &sources, &headers);
 }
 
-/// Exports `QJS_ENGINE_SOURCES_DIGEST`, the build half of the bridge's
-/// `bytecode_engine_id`.
 fn export_engine_sources_digest(
     manifest_dir: &Path,
     quickjs_dir: &Path,
     sources: &[&str],
     headers: &[&str],
 ) {
-    // Everything that decides whether bytecode one build writes can be read
-    // by another: the engine's C sources and headers, the version file they
-    // are built under, the shim, and this script, whose defines change what
-    // the engine compiles (its atom table among them). Each file is hashed
-    // under a path relative to the crate, in sorted order, so the digest is
-    // the same wherever the checkout lives. Every file named here already
-    // has its `rerun-if-changed` in `main`, and Cargo reruns a changed build
-    // script on its own.
     let mut engine_files: Vec<(String, PathBuf)> = sources
         .iter()
         .chain(headers.iter())
@@ -159,8 +146,6 @@ fn export_engine_sources_digest(
     );
 }
 
-/// 64-bit FNV-1a: stable across Rust releases and platforms, which
-/// `std::hash` does not promise.
 struct Fnv1a(u64);
 
 impl Fnv1a {
@@ -190,8 +175,6 @@ fn assert_supported_target(target_os: &str, target_env: &str) {
 fn configure_target(build: &mut cc::Build, target: &str, clang_target_feature_flags: &[String]) {
     build.flag_if_supported("-fwrapv");
     if target == "wasm32-unknown-unknown" {
-        // These describe C object code only; the QuickJS build still omits
-        // its JavaScript Atomics and SharedArrayBuffer intrinsics.
         for flag in clang_target_feature_flags {
             build.flag(flag);
         }

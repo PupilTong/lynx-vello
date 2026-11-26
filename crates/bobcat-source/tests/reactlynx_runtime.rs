@@ -14,8 +14,6 @@ use bobcat_resources::{Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use url::Url;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(393.0, 727.0, 1.0);
 
@@ -39,8 +37,6 @@ async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources
     let mut view = group
         .create_lynx_view(393.0, 727.0, 1.0, resources.builder(), Vec::new(), sources)
         .unwrap();
-    // Boot's first flush waits for a painter to bind the view, and this waits
-    // for `ScriptFinished` past it.
     let mut painter =
         bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 393.0, 727.0, 1.0)
             .await
@@ -48,8 +44,6 @@ async fn boot_registered(sources: bobcat_core::ViewSources, resources: Resources
     painter.attach(&view).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut finished = false;
-    // Continue after boot: hydration and the patch acknowledgement are queued
-    // by the framework, so entry evaluation alone is not an error-free run.
     let mut finished_at = None;
     loop {
         for event in view.pump() {
@@ -120,8 +114,6 @@ async fn real_native_background_runs_from_its_preserved_custom_section() {
     let mut sources = page.view_sources(SCREEN, "en-US");
     let entry = serde_json::to_string(sources.background_entry.as_ref().unwrap()).unwrap();
     let key = serde_json::to_string(key).unwrap();
-    // Keep PageSource's actual section registration and the compiled factory.
-    // Select its custom-section loader in place of the app-service launcher.
     let bootstrap = format!(
         r"
         import {{lynx}} from 'bobcat:bts-runtime';
@@ -161,8 +153,6 @@ async fn compiled_bindtap_set_state_changes_the_painted_pixels_twice() {
 
 #[tokio::test]
 async fn compiled_worklets_and_main_thread_refs_cross_both_directions() {
-    // The effect runs on BTS, calls a compiled worklet on MTS, and uses its
-    // hydrated main-thread ref to enlarge the pink 100px box to green 200px.
     paint_and_tap(
         fixtures::fixture("basic-mts-run-on-main-thread").page,
         [150, 150],
@@ -170,8 +160,6 @@ async fn compiled_worklets_and_main_thread_refs_cross_both_directions() {
         None,
     )
     .await;
-    // The native input invokes a compiled MTS worklet; runOnBackground then
-    // calls React's real state setter on BTS and the patch paints green.
     paint_and_tap(
         fixtures::fixture("basic-mts-run-on-background").page,
         [50, 50],
@@ -181,10 +169,6 @@ async fn compiled_worklets_and_main_thread_refs_cross_both_directions() {
     .await;
 }
 
-/// web-core-e2e's `api-setSharedData` and `api-shared-context`, on two views
-/// of one group: the first card's effect stores `green` under `color` and
-/// paints its own read of it, and a tap on the second card reads what the
-/// first stored and paints that.
 #[tokio::test]
 async fn compiled_cards_share_data_across_their_group() {
     use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
@@ -193,8 +177,6 @@ async fn compiled_cards_share_data_across_their_group() {
     const GREEN: [u8; 4] = [0, 128, 0, 255];
     const ORANGE: [u8; 4] = [255, 165, 0, 255];
 
-    /// Pumps both views and painters until `cards[index]` shows `colour` at
-    /// (50, 50).
     async fn until_painted<F: bobcat_core::resource::ResourceFetcher + 'static>(
         cards: &mut [(LynxView<F>, Painter, Resources)],
         index: usize,
@@ -214,8 +196,6 @@ async fn compiled_cards_share_data_across_their_group() {
                 }
                 painter.pump().unwrap();
             }
-            // A painter that has drawn nothing yet has nothing to capture:
-            // not painted so far, as the other suites here read it.
             let offset = (50 * 240 + 50) * 4;
             let pixel = match cards[index].1.capture() {
                 Ok(shot) => Some(<[u8; 4]>::try_from(&shot.pixels[offset..offset + 4]).unwrap()),
@@ -286,10 +266,6 @@ async fn compiled_bts_ref_queries_and_native_props_change_real_pixels() {
     .await;
 }
 
-/// A compiled `<viewpager>` starts on the page its `select-index={1}` names,
-/// green, and the tap's
-/// selector-query `selectTab({index: 3, smooth: false})` crosses from the
-/// background thread and turns it to the fourth, yellow, in the next frame.
 #[tokio::test]
 async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
     paint_and_tap(
@@ -301,10 +277,6 @@ async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
     .await;
 }
 
-/// A compiled `<x-swiper>` of four 240px items starts on the item its
-/// `current={1}` names, green, and the tap's selector-query
-/// `scrollTo({index: 3, smooth: false})` crosses from the background thread
-/// and turns it to the fourth, yellow, in the next frame.
 #[tokio::test]
 async fn compiled_swiper_scroll_to_turns_to_the_fourth_item() {
     paint_and_tap(
@@ -316,20 +288,6 @@ async fn compiled_swiper_scroll_to_turns_to_the_fourth_item() {
     .await;
 }
 
-/// A compiled `<dialog>` over a red page that fills the 240px view. A tap on
-/// the page calls `showModal()` through the background thread's selector
-/// query: the dialog enters the top layer, centred by the UA sheet's
-/// shrink-to-fit sizing, with its green 120px `#close` view over the page's
-/// centre and its yellow author `::backdrop` over the rest.
-///
-/// - At the centre, the second tap hits `#close` above the inert page and calls `close()`;
-///   `catchtap` keeps it from the dialog, so only `close` fires and the page turns blue. Had it hit
-///   the page, `showModal()` on a modal dialog would change nothing; had it hit the dialog, the
-///   page would turn magenta.
-/// - At the bottom-right corner, clear of `#status`'s text, the second tap hits the backdrop, which
-///   targets the dialog, whose `catchtap` calls `requestClose()`: `cancel` then `close` fire and
-///   the page turns magenta. Had it hit the page, the dialog would stay open over the yellow
-///   backdrop.
 #[tokio::test]
 async fn compiled_dialog_opens_modal_and_reports_close() {
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -342,22 +300,6 @@ async fn compiled_dialog_opens_modal_and_reports_close() {
     paint_and_tap(page, [236, 236], &[RED, YELLOW, MAGENTA], None).await;
 }
 
-/// A compiled `<overlay>` over a red page that fills the 240px view. A tap
-/// on the page sets `visible`: the overlay's shadow dialog enters the top
-/// layer and the overlay's one child, a 200px panel, paints at the viewport's
-/// top-left above the page, with a green 120px `#close` at the panel's own
-/// top-left. The overlay element carries an author `display: flex` and a
-/// translucent green background, which must show nothing: every first round
-/// is the bare red page, and every later colour is exact.
-///
-/// - At (60, 60) the second tap hits `#close`, whose `catchtap` clears `visible`; the overlay
-///   leaves the top layer and `binddismissoverlay` turns the page blue. Had the panel stayed, the
-///   point would still be green; had `dismissoverlay` not arrived, the page would still be red.
-/// - At (180, 180), on the panel outside `#close`, the panel turns from yellow to magenta once
-///   `bindshowoverlay` has run.
-/// - At (220, 220), on the page outside the panel, `bindshowoverlay` turns the page orange, seen
-///   through the overlay's transparent dialog and `::backdrop`: a host background painted over the
-///   viewport, or `dialog::backdrop`'s tint, would shift the colour.
 #[tokio::test]
 async fn compiled_overlay_shows_its_panel_and_reports_show_and_dismiss() {
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -371,14 +313,6 @@ async fn compiled_overlay_shows_its_panel_and_reports_show_and_dismiss() {
     paint_and_tap(page, [220, 220], &[RED, ORANGE], None).await;
 }
 
-/// A compiled `events-pass-through` `<overlay>` over a red page with a blue
-/// 60px `#below` square at its bottom-right. Every tap is at (210, 210), on
-/// `#below`: the first reaches it and bubbles to the page, which shows the
-/// overlay, and `#below` turns cyan once `bindshowoverlay` has run. With the
-/// overlay shown — its shadow dialog filling the viewport as a popover —
-/// the second tap still reaches `#below`, which turns magenta. A blocking
-/// overlay would take that tap and leave it cyan; an overlay that never
-/// showed would turn it green, then yellow.
 #[tokio::test]
 async fn compiled_pass_through_overlay_lets_a_tap_outside_its_content_through() {
     const BLUE: [u8; 4] = [0, 0, 255, 255];
@@ -388,19 +322,6 @@ async fn compiled_pass_through_overlay_lets_a_tap_outside_its_content_through() 
     paint_and_tap(page, [210, 210], &[BLUE, CYAN, MAGENTA], None).await;
 }
 
-/// The compiled `react-svg` card: the Lynx `<svg>` component drawing from
-/// `content` and from `src`, beside `<image src="x.svg">` and a tiled
-/// `background-image`, each sampled inside a solid area of its picture
-/// (the fixture's `index.jsx` has the layout).
-///
-/// - `<svg content>` sized by CSS: the green band of its 40 by 20 `viewBox` at the bottom quarter
-///   of its 120 by 60 box, and the yellow triangle's centre; the `<text>` card's blue rectangle
-///   clear of the text.
-/// - `<svg src>` unsized: it lays out at the document's natural 80 by 40, so its yellow circle is
-///   at (40, 80) and the point right of it is the white page.
-/// - `<image mode="aspectFit">`: magenta above the letterboxed picture, its yellow circle at the
-///   centre.
-/// - The tiles: a green square at each tile's top-left, yellow beside it.
 #[tokio::test]
 async fn compiled_svg_component_draws_content_and_src() {
     const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -426,20 +347,6 @@ async fn compiled_svg_component_draws_content_and_src() {
     .await;
 }
 
-/// The compiled `react-animated-image` card: two `<image>`s of one animated
-/// GIF whose file plays twice (the fixture's `index.jsx` has the layout),
-/// played by the platform decoder's frames on a playhead of each element's
-/// own, with the painter drawing them.
-///
-/// - `#playing`, `loop-count={3}`: `startplay` before `load`, three `currentloopcomplete`s and one
-///   `finalloopcomplete`, then nothing, and `#status` turns green.
-/// - `#paused`, `autoplay={false}`: a `load` and nothing more.
-/// - A tap: `startAnimate` on `#playing` answers code 0 and "Animation restarted.", and it plays
-///   its three loops again, with no second `startplay`; `stopAnimation` on `#paused`, which was not
-///   playing, answers code 0 and "Animation stopped."; `#status` turns blue.
-///
-/// Only macOS's decoder (`ImageIO`) reads a GIF's frames; gdk-pixbuf answers
-/// one frame, which plays nothing.
 #[tokio::test]
 #[cfg_attr(
     not(target_os = "macos"),
@@ -483,7 +390,6 @@ async fn compiled_animated_image_plays_its_own_loops_and_answers_its_methods() {
     };
 
     card.until_status(GREEN).await;
-    // A little longer: a fourth loop, or a late event, would show here.
     card.idle(Duration::from_millis(800)).await;
     assert_eq!(
         card.of("playing"),
@@ -525,7 +431,6 @@ async fn compiled_animated_image_plays_its_own_loops_and_answers_its_methods() {
     assert_eq!(card.of("paused"), ["stopAnimation 0 Animation stopped."]);
 }
 
-/// The `react-animated-image` card in a 240px view, and the lines it logged.
 struct AnimatedCard {
     view: bobcat_core::LynxView<bobcat_resources::ViewResources>,
     painter: bobcat_core::Painter,
@@ -534,10 +439,8 @@ struct AnimatedCard {
 }
 
 impl AnimatedCard {
-    /// A point of the card's `#status` band.
     const STATUS: (u16, u16) = (120, 180);
 
-    /// One turn of the view and the painter, keeping the card's log lines.
     fn turn(&mut self) {
         for event in self.view.pump() {
             match event {
@@ -553,7 +456,6 @@ impl AnimatedCard {
         self.painter.pump().unwrap();
     }
 
-    /// Turns until `#status` shows `colour`.
     async fn until_status(&mut self, colour: [u8; 4]) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -574,7 +476,6 @@ impl AnimatedCard {
         }
     }
 
-    /// Turns for `duration`.
     async fn idle(&mut self, duration: Duration) {
         let until = Instant::now() + duration;
         while Instant::now() < until {
@@ -583,7 +484,6 @@ impl AnimatedCard {
         }
     }
 
-    /// What `#id` logged, without the id.
     fn of(&self, id: &str) -> Vec<String> {
         self.logged
             .iter()
@@ -593,17 +493,6 @@ impl AnimatedCard {
     }
 }
 
-/// The compiled `react-video` card: one muted `<video>` of the 1.2 s
-/// red-green-blue clip in a 240 by 180 box over a red `#status` band (the
-/// fixture's `index.jsx` has the layout), played by `AVFoundation` with the
-/// painter drawing its frames.
-///
-/// - It opens paused on its first frame: `firstframe` with the clip's duration, the box red, and
-///   nothing more while nobody plays it.
-/// - A tap: `play` answers code 0 and `{success: true}`; the clip plays through and `ended` fires
-///   once, `#status` turns green, and the box rests on the last frame, blue.
-///
-/// Only macOS has a player; Linux's fails every open.
 #[tokio::test]
 #[cfg_attr(
     not(target_os = "macos"),
@@ -613,7 +502,6 @@ async fn compiled_video_opens_paused_and_plays_on_tap() {
     use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
     use bobcat_core::{DrawTarget, Painter};
     const GREEN: [u8; 4] = [0, 128, 0, 255];
-    /// A point of the video's box, and one of `#status`.
     const CLIP: (usize, usize) = (120, 90);
     const STATUS: (usize, usize) = (120, 210);
 
@@ -649,7 +537,6 @@ async fn compiled_video_opens_paused_and_plays_on_tap() {
         logged: Vec::new(),
     };
 
-    // The first frame, paused.
     card.until("the first frame drawn red", |card| {
         card.of("clip")
             .iter()
@@ -668,7 +555,6 @@ async fn compiled_video_opens_paused_and_plays_on_tap() {
         card.pixel(CLIP)
     );
 
-    // A tap plays it through.
     card.logged.clear();
     for phase in [PointerPhase::Down, PointerPhase::Up] {
         card.painter.dispatch_input(InputEvent::pointer(
@@ -694,7 +580,6 @@ async fn compiled_video_opens_paused_and_plays_on_tap() {
     );
 }
 
-/// Whether `texel` is `expected` within H.264's rounding of a flat colour.
 fn near(texel: [u8; 4], expected: [u8; 4]) -> bool {
     texel
         .iter()
@@ -702,8 +587,6 @@ fn near(texel: [u8; 4], expected: [u8; 4]) -> bool {
         .all(|(actual, expected)| actual.abs_diff(expected) <= 24)
 }
 
-/// A compiled card in a 240px view whose background thread logs lines that
-/// start with `prefix`, and the lines it logged.
 struct LoggedCard {
     view: bobcat_core::LynxView<bobcat_resources::ViewResources>,
     painter: bobcat_core::Painter,
@@ -713,7 +596,6 @@ struct LoggedCard {
 }
 
 impl LoggedCard {
-    /// One turn of the view and the painter, keeping the card's log lines.
     fn turn(&mut self) {
         for event in self.view.pump() {
             match event {
@@ -729,14 +611,10 @@ impl LoggedCard {
         self.painter.pump().unwrap();
     }
 
-    /// The pixel at `at` of the painter's last frame; `None` before the
-    /// card booted or while no frame has been rendered to capture.
     fn pixel(&mut self, at: (usize, usize)) -> Option<[u8; 4]> {
         if !self.booted {
             return None;
         }
-        // A painter that has drawn nothing yet has nothing to capture: not
-        // painted so far, as the other suites here read it.
         let shot = match self.painter.capture() {
             Ok(shot) => shot,
             Err(bobcat_core::EngineError::Render(message))
@@ -750,7 +628,6 @@ impl LoggedCard {
         shot.pixels[index..index + 4].try_into().ok()
     }
 
-    /// Turns until `done` holds, or fails after thirty seconds.
     async fn until(&mut self, what: &str, done: impl Fn(&mut Self) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -767,7 +644,6 @@ impl LoggedCard {
         }
     }
 
-    /// Turns for `duration`.
     async fn idle(&mut self, duration: Duration) {
         let until = Instant::now() + duration;
         while Instant::now() < until {
@@ -776,7 +652,6 @@ impl LoggedCard {
         }
     }
 
-    /// What `#id` logged, without the id.
     fn of(&self, id: &str) -> Vec<String> {
         self.logged
             .iter()
@@ -786,13 +661,6 @@ impl LoggedCard {
     }
 }
 
-/// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
-/// 60 tall, a red header 200 tall, a slot of eight 100px items in a
-/// `<scroll-view>`) boots with the header under the toolbar and the first
-/// item at 200. A forward drag of 148px in the scroll-view — 140 of scroll
-/// after the 8px slop, the fold's whole range — folds the header first: the
-/// toolbar then covers the header's bottom band and the first item sits
-/// directly under it, at 60..160.
 #[tokio::test]
 async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
     use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
@@ -844,8 +712,6 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
         "the translucent toolbar shows the red header through it, got {band:?}"
     );
 
-    // One move and a release: a single step measures no release velocity, so
-    // nothing flings after it.
     for (phase, y) in [
         (PointerPhase::Down, 350.0),
         (PointerPhase::Move, 202.0),
@@ -872,16 +738,6 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
     );
 }
 
-/// A compiled card of six 120px `<x-swiper>`s in a 240px by 360px grid,
-/// laid out by the engine's UA sheet: `current={2}` starts on its blue item,
-/// a `vertical` one with `current={1}` on its green item, a `coverflow` one
-/// with `current={1}` shows its green item centred and its red one turned
-/// toward it at its left, and a plain one with `current={1}` its green item, its
-/// white current dot the middle of its three, centred at (180, 227.2): the
-/// strip is three dots long because the component counted the items its
-/// slot was assigned. The third row's dots are hidden on the left and
-/// custom-coloured on the right (`crates/bobcat-cli/src/server/capture.rs`
-/// has the geometry).
 #[tokio::test]
 async fn compiled_swipers_start_on_current() {
     use bobcat_core::{DrawTarget, Painter};
@@ -903,7 +759,6 @@ async fn compiled_swipers_start_on_current() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
         .await
         .unwrap();
-    // `settle` reads the shot at the coordinator test's width.
     let (width, height) = (f32::from(COORDINATOR_WIDTH), 360.0);
     let mut view = group
         .create_lynx_view(
@@ -942,14 +797,6 @@ async fn compiled_swipers_start_on_current() {
     );
 }
 
-/// A compiled card of two `<x-refresh-view>`s, 150 by 360 each, opens on
-/// their yellow content. A pull of 150px on the left one — 142 of scroll
-/// after the 8px slop — chains from its `scroll-view`, at its top, into the
-/// shadow `#container` (108px placeholders, a 50px header, opening at 158),
-/// and shows the whole red header at 92..142 while the finger is down;
-/// released, the view settles on the header's start, so the header fills
-/// 0..50 and the content starts under it. The same pull on the right one,
-/// `enable-refresh={false}`, moves nothing.
 #[tokio::test]
 async fn compiled_refresh_view_holds_a_pulled_header() {
     use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
@@ -1006,16 +853,12 @@ async fn compiled_refresh_view_holds_a_pulled_header() {
     pull(&mut painter, 75.0, PointerPhase::Down, 100.0);
     pull(&mut painter, 75.0, PointerPhase::Move, 250.0);
     let held = [(75, 95, RED), (75, 140, RED), (75, 150, YELLOW)];
-    // The finger stays down while the main thread adopts the pull and
-    // publishes the header's snap position.
     let until = Instant::now() + Duration::from_millis(300);
     while Instant::now() < until {
         settle(&mut view, &mut painter, &mut booted, &held, "held");
         std::thread::sleep(Duration::from_millis(10));
     }
     pull(&mut painter, 75.0, PointerPhase::Up, 250.0);
-    // An offscreen painter's glide advances one display frame per frame it
-    // is asked for: post, take the view's turns until it is serviced, draw.
     let deadline = Instant::now() + Duration::from_secs(10);
     while painter.is_animating() {
         let posted = painter.post_frame().unwrap();
@@ -1050,11 +893,8 @@ async fn compiled_refresh_view_holds_a_pulled_header() {
     );
 }
 
-/// The width of the coordinator test's view.
 const COORDINATOR_WIDTH: u16 = 300;
 
-/// Pumps `view` and `painter` until every `(x, y, colour)` of `expected` is
-/// on screen, and answers the colour at (150, 30), the toolbar band.
 fn settle<F: bobcat_core::resource::ResourceFetcher + 'static>(
     view: &mut bobcat_core::LynxView<F>,
     painter: &mut bobcat_core::Painter,
@@ -1124,8 +964,6 @@ async fn paint_and_tap(
     .await;
 }
 
-/// Boots `bytes` in a 240px view and pumps it until every `(x, y, colour)`
-/// of `expected` is on screen.
 async fn paint_and_sample(bytes: &[u8], expected: &[(u16, u16, [u8; 4])]) {
     use bobcat_core::{DrawTarget, Painter};
     let page =

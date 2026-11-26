@@ -53,11 +53,6 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
 
-    /// The flat children that can generate a box, except where loose text
-    /// sits among them: there the anonymous boxes that wrap it replace it
-    /// (`tree::anonymous`). A text node is content of the paragraph above it
-    /// and never a box, so it is left out; the paragraph reads its own text
-    /// from the flat children.
     fn children(&self, node: NodeSlot) -> Self::ChildIter<'_> {
         let node_ref = self.at(node);
         let children = if node_ref.may_override_children()
@@ -109,9 +104,6 @@ impl<T> LayoutTree for TreeArenas<T> {
                 table.swap_remove(at);
             }
             (None, Some(unrounded)) => {
-                // Entries of nodes released since drop out here, on the rare
-                // push, rather than on every release; a stale entry answers
-                // nothing wrong meanwhile, since a `NodeId` is never reissued.
                 table.retain(|entry| self.contains(entry.node));
                 table.push(StickyContainingBlock {
                     node,
@@ -146,8 +138,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         }
     }
 
-    /// Records the position and lists the box under the containing block
-    /// that lays it out ([`hoisted`]).
     fn set_static_position(&self, state: &mut Self::State, node: NodeSlot, position: Point<f32>) {
         let slot = self.layout_mut(state, node);
         if slot.static_position != position {
@@ -166,12 +156,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         hoisted::children_of(self, state, node)
     }
 
-    /// Only a container that places boxes reads its definiteness: its
-    /// algorithm hands it to its children. A paragraph or block flow builds
-    /// its atoms' inputs from none of it. An empty flex, linear or relative
-    /// box lays out as a leaf ([`lays_out_as_empty_leaf`]) but still answers
-    /// `true`: being empty is a fact about its contents, and a relayout
-    /// re-runs it under its committed input once children arrive.
     fn reads_definiteness(&self, node: NodeSlot) -> bool {
         if self.at(node).is_replaced() {
             return false;
@@ -190,8 +174,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         }
     }
 
-    /// A listed block is not proof of a box: `hoisted::children_of`
-    /// re-derives each listed box's containing block and skips stale ones.
     #[inline]
     fn has_hoisted_children(&self, state: &Self::State, node: NodeSlot) -> bool {
         state.hoisted_to.contains_key(&node)
@@ -223,9 +205,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         input: LayoutInput,
     ) -> LayoutOutput {
         let node_ref = self.at(node);
-        // Every caller reaches an element: a text node is never a box
-        // (`children` leaves it out), and the root, the parked roots, the
-        // atoms and the hoisted boxes are elements.
         debug_assert!(node_ref.is_element(), "only an element is laid out");
         let display = {
             let view = self.style(node);
@@ -235,15 +214,6 @@ impl<T> LayoutTree for TreeArenas<T> {
                 return LayoutOutput::HIDDEN;
             }
             if view.skips_contents() {
-                // A skipped box has two halves and only one of them is a
-                // function of the layout input. Hiding the contents answers
-                // to the box tree — a child inserted under this box changes
-                // what must be hidden without changing anything the box's own
-                // size reads — so it runs on every committing call, outside
-                // the cache. The size reads no child at all, so it is served
-                // from the cache like every other algorithm's output: a list
-                // of skipped rows re-resolves no box model when a sibling
-                // relayouts.
                 hide_skipped_contents(self, state, node, input);
                 return compute_cached_layout(
                     self,
@@ -256,14 +226,6 @@ impl<T> LayoutTree for TreeArenas<T> {
                         let view = tree.style(node);
                         let output = compute_skipped_contents_size(&view, input);
                         if input.goal.commits() {
-                            // Skipping turns `Contain::SIZE` on, so this call
-                            // can only ever *remove* a last remembered size —
-                            // the half of css-sizing-4 §5.2.1 that fires when
-                            // the `auto` keyword goes away while the box goes
-                            // on skipping. A skipped box still has a box,
-                            // though, so a query container that is also
-                            // skipping supplies the substituted size it was
-                            // laid out at.
                             committed_box::record(tree, node, &view, input, output.size);
                         }
                         output
@@ -278,21 +240,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         };
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
-            // The css-contain-3 §2.1 **interleave**: this run is about to read
-            // every child style under a box whose own size those styles may be
-            // resolved against, and `committed_box::container_estimate` can
-            // say what that size will be from this box's style and this input
-            // alone. When it disagrees with what is published — what the
-            // subtree was last cascaded against — laying the contents out here
-            // would lay them out at a size that is about to be restyled away.
-            // So the run records the new size and stops: `run_layout` publishes
-            // it, restyles the `cqw`/`cqh` readers under this box, and relays
-            // the subtree once, at the size it will keep.
-            //
-            // The box's own output is not deferred with it. Both of its axes
-            // are size-contained, so this *is* the size the algorithm would
-            // have produced, and its ancestors are laid out against the final
-            // number rather than against a guess.
             if input.goal.commits()
                 && state.interleaves_containers()
                 && !establishes_paragraph(display)
@@ -347,14 +294,6 @@ impl<T> LayoutTree for TreeArenas<T> {
                     output
                 }
             };
-            // The recording moment (css-sizing-4 §5.2.1 and css-contain-3
-            // §2.1, which is the same one): this run laid the box out with
-            // its real contents, so its content box is both what the element
-            // last rendered at and what a descendant's `cqw` and `cqh`
-            // resolve against until the next commit moves it. Only a
-            // *committing* run establishes one, and only a cache miss reaches
-            // here — a box served from the cache produced the same size it
-            // already recorded under the same input.
             if input.goal.commits() && tree.at(node).is_element() {
                 let view = tree.style(node);
                 committed_box::record(tree, node, &view, input, output.size);
@@ -367,19 +306,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         state.clear_layout_cache(node);
     }
 
-    /// css-anchor-position-1 §2.3's target anchor element for `node`, and
-    /// its border box in the padding-box coordinates of the element
-    /// generating `node`'s containing block, translated by `node`'s
-    /// remembered scroll offsets (§3.3). The lookup and the geometry are
-    /// [`anchors`]'s; this records the read for the settle loop.
-    ///
-    /// A box whose containing block is not its box parent (a `fixed` box, or
-    /// an `absolute` one under a static parent) is laid out by that
-    /// containing block's absolute pass in tree order with its own
-    /// out-of-flow children (`layout::hoisted`), so every acceptable anchor
-    /// is placed before the box reads it. An anchor that moves under a
-    /// relayout that never reaches the reader is caught by
-    /// [`Document::settle_anchors`] after the run.
     fn anchor_rect(
         &self,
         state: &Self::State,
@@ -436,8 +362,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         state.anchored.get(&node)?.last_successful
     }
 
-    /// Keeps `outcome` and seals the reads the box's layout made since its
-    /// last report as the ones the settle loop verifies.
     fn set_anchor_outcome(&self, state: &mut Self::State, node: NodeSlot, outcome: AnchorOutcome) {
         let mut reads = SmallVec::new();
         for (_, read) in state
@@ -472,8 +396,6 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 }
 
-/// [`LayoutTree::children`] for the document: the children that can generate
-/// a box, text nodes left out.
 pub(crate) struct BoxChildren<'tree, T> {
     tree: &'tree TreeArenas<T>,
     children: core::slice::Iter<'tree, NodeSlot>,
@@ -490,7 +412,6 @@ impl<T> Iterator for BoxChildren<'_, T> {
             .find(|&child| !self.tree.at(child).is_text_node())
     }
 
-    /// At most the children left; how many of them are text is unknown.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.children.len()))
@@ -498,8 +419,6 @@ impl<T> Iterator for BoxChildren<'_, T> {
 }
 
 impl<T> TreeArenas<T> {
-    /// Answers one anchor query — the target and its rectangle — and records
-    /// it as a read of `node`'s layout.
     fn anchor_query(
         &self,
         state: &DocumentLayoutState,
@@ -508,9 +427,6 @@ impl<T> TreeArenas<T> {
         query: anchors::AnchorQuery,
     ) -> (Option<NodeSlot>, Option<Rect<f32>>) {
         let node_ref = self.at(node);
-        // Only `AnchorMemo` asks, from the absolute pass seldon dispatches
-        // `absolute` and `fixed` boxes to (`resolve_position` maps those
-        // onto each other).
         debug_assert!(
             node_ref
                 .layout_computed_style()
@@ -526,8 +442,6 @@ impl<T> TreeArenas<T> {
         let (target, rect) = anchors::answer(self, state, &anchored, option, &query);
         #[cfg(debug_assertions)]
         if let Some(target) = target {
-            // Acceptability is what guarantees the anchor was laid out
-            // before the box reading it; a descendant never is.
             let mut current = self.at(target).flat_parent();
             while let Some(ancestor) = current {
                 assert_ne!(
@@ -553,11 +467,6 @@ impl<T> TreeArenas<T> {
     }
 }
 
-/// Whether a flex, linear or relative `node` lays out as a leaf with no
-/// contents, which is what its algorithm computes for it: it has no child
-/// that may own a box, `display: none` ones included, and no preferred
-/// aspect ratio, which those algorithms do not apply to an automatic size
-/// and the leaf would.
 #[inline]
 fn lays_out_as_empty_leaf<T>(tree: &TreeArenas<T>, node: NodeSlot) -> bool {
     tree.children(node).next().is_none()
@@ -566,15 +475,6 @@ fn lays_out_as_empty_leaf<T>(tree: &TreeArenas<T>, node: NodeSlot) -> bool {
 
 #[cfg(test)]
 std::thread_local! {
-    /// How many times a box that skips its contents has resolved its own box
-    /// model on this thread — that is, how often the skipped path *missed*
-    /// its cache.
-    ///
-    /// Test-only, because the number is the point of the cache rather than a
-    /// runtime fact anything reads: it must stay flat as skipped boxes are
-    /// added to a page, where before the cache it was one resolution per
-    /// skipped box per pass. Layout runs on the thread that calls it, so a
-    /// thread-local count belongs to the test that produced it.
     static SKIPPED_SIZE_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -583,8 +483,6 @@ fn note_skipped_size_resolution() {
     SKIPPED_SIZE_RESOLUTIONS.with(|count| count.set(count.get() + 1));
 }
 
-/// Runs `pass` and answers how many skipped boxes resolved their own size in
-/// it.
 #[cfg(test)]
 pub(super) fn skipped_size_resolutions_during(pass: impl FnOnce()) -> usize {
     SKIPPED_SIZE_RESOLUTIONS.with(|count| count.set(0));
@@ -594,16 +492,9 @@ pub(super) fn skipped_size_resolutions_during(pass: impl FnOnce()) -> usize {
 
 #[cfg(test)]
 std::thread_local! {
-    /// How many box layouts have run on this thread — one per [`run_layout`],
-    /// whatever it settled inside itself.
-    ///
-    /// Test-only, and the number the query-container interleave exists to hold
-    /// at one: a page whose containers resize used to cost a whole second run
-    /// of the document, and now costs the deferred subtrees alone.
     static LAYOUT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Runs `pass` and answers how many times the document was laid out in it.
 #[cfg(test)]
 pub(super) fn layout_runs_during(pass: impl FnOnce()) -> usize {
     LAYOUT_RUNS.with(|count| count.set(0));
@@ -611,17 +502,6 @@ pub(super) fn layout_runs_during(pass: impl FnOnce()) -> usize {
     LAYOUT_RUNS.with(std::cell::Cell::get)
 }
 
-/// One layout run: the boxes, the query-container interleave the boxes owe,
-/// and the rounding tail.
-///
-/// Three phases, and the middle one is why this takes the whole document
-/// rather than the split parts. Laying out is a shared read of the tree, but
-/// a size query container whose size moved has to be *restyled under* before
-/// its contents are worth laying out, and a restyle publishes computed styles
-/// — `&mut Document` work. So the box phase stops at such a container
-/// ([`DocumentLayoutState::defer_container`]), the restyle phase runs between
-/// the two shared borrows, and the relay phase finishes the deferred subtrees
-/// before anything is rounded.
 pub(super) fn run_layout<T: Sync>(
     document: &mut Document<T>,
     viewport: Size<f32>,
@@ -634,23 +514,13 @@ pub(super) fn run_layout<T: Sync>(
     LAYOUT_RUNS.with(|count| count.set(count.get() + 1));
     let root_id = document.document_element().id();
     let mut parked = collect_parked_boundaries(document);
-    // The interleave's gate is the recascade loop's: a page whose styles never
-    // resolved a `cqw`/`cqh` has nothing to restyle when a container's size
-    // moves, so deferring its contents would buy a page with query containers
-    // and no container units nothing at all.
     let interleave = document.arenas().uses_container_units();
     let mut deferred = Vec::new();
-    // The in-place roots that fell back to the whole-tree pass.
     let mut escalated: SmallVec<[NodeId; 2]> = SmallVec::new();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(interleave);
-        // Every parked root is relaid in place before the root pass, in a
-        // whole-tree run too: the root pass answers a box whose cache stayed
-        // warm from that cache and never descends, so a parked root under
-        // such a box is reached by nobody else, and a dirty box above it
-        // takes the relay's result from the cache the relay just filled.
         for &(_, pending) in &parked {
             let Some(slot) = tree.slot(pending.node_id) else {
                 continue;
@@ -668,21 +538,11 @@ pub(super) fn run_layout<T: Sync>(
                 }
                 RelayoutKind::InPlace { previous } => {
                     let output = tree.compute_layout(state, slot, pending.input);
-                    // A reproduced output proves nothing above this node
-                    // can observe the change, as long as every box hoisted
-                    // out of it can be placed late by the rounding tail;
-                    // anything else falls back to the whole-tree pass,
-                    // which reuses the caches just filled. The containing
-                    // blocks above the node then run their absolute passes,
-                    // so the tail places nothing late under it.
                     if output != previous || hoisted::escapes_past_late_placement(tree, state, slot)
                     {
                         escalated.push(pending.node_id);
                         let mut current = tree.at(slot).flat_parent_slot();
                         while let Some(ancestor) = current {
-                            // Geometry only: a paragraph an ancestor retains
-                            // answers for itself whether what it was shaped
-                            // from moved, as under `Document::invalidate_layout`.
                             state.clear_box_cache(ancestor);
                             current = tree.at(ancestor).flat_parent_slot();
                         }
@@ -703,10 +563,6 @@ pub(super) fn run_layout<T: Sync>(
     }
     let full = full || !escalated.is_empty();
     let settled = settle_deferred_containers(document, resized, &mut deferred);
-    // A deferred container is a relayout boundary, so its own box did not move
-    // and nothing above it has to be laid out again — but its subtree was
-    // finished after the boundaries the pass had parked, so the incremental
-    // rounding tail has to be told about it.
     if !settled.is_empty() {
         let mut ids: FxHashSet<NodeId> = parked.iter().map(|&(_, p)| p.node_id).collect();
         for &pending in &settled {
@@ -715,11 +571,6 @@ pub(super) fn run_layout<T: Sync>(
             }
         }
     }
-    // The parked subtrees this run relaid in place, before the root pass, and
-    // did not escalate: a box under one of them that escapes to a containing
-    // block above it was laid out by nobody, and the tail places it
-    // (`hoisted::places_late`). Under an escalated root every containing
-    // block above it ran its own absolute pass.
     let relayed: FxHashSet<NodeId> = parked
         .iter()
         .map(|&(_, pending)| pending.node_id)
@@ -736,14 +587,8 @@ pub(super) fn run_layout<T: Sync>(
             };
             round_with(tree, state, root, scale, Point::ZERO, rescale, position);
         }
-        // After a whole-tree walk too: that walk descends through marked
-        // nodes alone, and the boxes between a parked root and the nearest
-        // box above it the pass wrote carry no mark, so it may stop short of
-        // the root. A root it did reach answers at once.
         position_and_round_parked_boundaries(tree, state, &parked, viewport, scale, &relayed);
         state.in_rounding_tail = false;
-        // Every text node this pass measured but did not commit still holds
-        // the probe's line break; painting reads the committed one.
         state.restore_probed_text();
         if !tree.top_layer().is_empty() {
             place_backdrops(tree, state, viewport, scale, rescale);
@@ -751,17 +596,6 @@ pub(super) fn run_layout<T: Sync>(
     }
 }
 
-/// The top-layer tail: lays every rendered entry's `::backdrop` box out
-/// against the viewport and rounds it (`tree::top_layer`).
-///
-/// A backdrop node has no parent, so neither the root pass nor the rounding
-/// tail reaches it; it is placed here, after both, with the same absolute
-/// layout the tail gives any box whose containing block is the initial one
-/// and a static position of zero. Its element needs nothing here: the
-/// rounding tail already placed it against the viewport, as a box whose
-/// containing block is the initial one. Every run lays the backdrops out,
-/// which the layout cache answers unless the viewport or the backdrop's
-/// style moved.
 fn place_backdrops<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -789,20 +623,6 @@ fn place_backdrops<T: Sync>(
     }
 }
 
-/// Publishes what the deferred containers measured, restyles the container-unit
-/// readers under them, and lays their subtrees out — until nothing is left
-/// deferred.
-///
-/// The loop is the nesting depth of size query containers that all moved at
-/// once, not the number of containers: one iteration settles every container
-/// at one level, and the only thing a relay can discover is a container *under*
-/// one just settled. It is bounded the way
-/// [`Document::layout`](crate::tree::document::Document::layout)'s is, and its last iteration
-/// closes the interleave rather than capping it — a relay that may not defer
-/// lays every subtree out for real, so this never returns with a subtree
-/// nobody laid out.
-///
-/// Returns every container it settled, for the rounding tail.
 fn settle_deferred_containers<T: Sync>(
     document: &mut Document<T>,
     resized: &mut Vec<NodeId>,
@@ -813,8 +633,6 @@ fn settle_deferred_containers<T: Sync>(
         if deferred.is_empty() {
             break;
         }
-        // What the deferred runs recorded becomes readable here — by the style
-        // traversal below, which is what the whole deferral was for.
         document.arenas_mut().publish_committed_boxes(resized);
         let mut marked = false;
         for &DeferredContainer { node, input } in deferred.iter() {
@@ -827,11 +645,6 @@ fn settle_deferred_containers<T: Sync>(
                 marked |= document.mark_container_units_users(node);
             }
         }
-        // Every container this call is settling has had its readers marked, so
-        // its report is spent; one it is *not* settling — an
-        // `inline-size` container, whose block axis answers to its contents and
-        // so has no size to publish before them — stays in the list for
-        // `Document::layout`'s loop to recascade after the pass.
         let deferred_ids: FxHashSet<NodeId> = deferred.iter().map(|entry| entry.node).collect();
         resized.retain(|id| !deferred_ids.contains(id));
         if marked {
@@ -847,9 +660,6 @@ fn settle_deferred_containers<T: Sync>(
             if !tree.at(slot).is_element() || !is_relayout_boundary(&StyleView::of(tree.at(slot))) {
                 continue;
             }
-            // The deferred run cached the size it published; the relay is the
-            // run that lays the contents out under it. A deferred container
-            // establishes no paragraph, so there is no shaped text to drop.
             state.clear_box_cache(slot);
             let output = compute_boundary_relayout(tree, state, slot, input);
             tree.layout_mut(state, slot)
@@ -879,25 +689,6 @@ fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRe
     parked
 }
 
-/// The parked roots' rounding tail: every parked root's subtree is
-/// positioned and rounded from its parent's accumulated unrounded origin,
-/// which is what the whole-tree walk would reach it with, since every
-/// unrounded box is final before the tail runs. It runs after every pass,
-/// the whole-tree walk included.
-///
-/// A parked root is walked on its own because no other walk is sure to
-/// reach it. A walk descends only through nodes a layout write marked, and
-/// the boxes between a parked root and the nearest box above it that the
-/// pass wrote — a `display: contents` wrapper, or any box no relayout wrote
-/// — are marked by nobody: the root's invalidation stopped at the root, and
-/// the walk above it started from another invalidation. Left to that walk,
-/// the subtree would keep its old rounded boxes, and a box the tail alone
-/// places (`pre_position`: one whose containing block is the initial one, a
-/// top-layer element among them) would never be placed. A root another walk
-/// did reach carries no mark any more and answers at once; where a box
-/// above it did change, that walk forced its whole subtree and rounded the
-/// root's a second time, to the same values: rounding is a function of the
-/// unrounded boxes alone.
 fn position_and_round_parked_boundaries<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -954,12 +745,6 @@ fn boundary_depth<T>(document: &Document<T>, id: NodeId) -> usize {
     depth
 }
 
-/// The rounding tail's pre-node hook: zeroes a `display: contents` box, and
-/// places the out-of-flow boxes no containing block's absolute pass laid out
-/// this run — the ones whose containing block is the initial containing
-/// block, which lays its out-of-flow boxes out after everything else, and
-/// the ones a subtree relaid in place hides from their containing block
-/// (`hoisted::places_late`).
 fn pre_position<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -1000,9 +785,6 @@ fn pre_position<T: Sync>(
         && !(establishes_paragraph(display) && replaces_children(node))
 }
 
-/// Places an out-of-flow box whose containing block is the initial
-/// containing block — the viewport here — from the static position its
-/// parent recorded.
 fn position_against_viewport<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
@@ -1014,8 +796,6 @@ fn position_against_viewport<T: Sync>(
         return;
     };
     let parent_origin = accumulated_unrounded_origin(tree, state, parent_slot);
-    // css-position-4 §3.1: a top-layer element's static position is zero
-    // for `left`, `right` and `top`, not the place its parent recorded.
     let static_in_cb = if tree.top_layer().places_against_viewport(node_id) {
         Point::ZERO
     } else {

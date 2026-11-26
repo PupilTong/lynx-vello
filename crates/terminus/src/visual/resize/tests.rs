@@ -12,10 +12,6 @@ use stylo::queries::values::PrefersColorScheme;
 use super::*;
 use crate::test_common::{Doc, device_with};
 
-/// Every box is a flex container, and a `view` a non-shrinking one, so the
-/// sizes a case writes are the sizes it gets. `.cell` is a 100 × 50 border
-/// box with 10px/5px padding and a 2px border, so its content box is
-/// 76 × 36 at (10, 5).
 const BASE: &str = "page { display: flex; flex-direction: column; } \
                     view { display: flex; flex-shrink: 0; } \
                     .cell { box-sizing: border-box; width: 100px; height: 50px; \
@@ -23,8 +19,6 @@ const BASE: &str = "page { display: flex; flex-direction: column; } \
 
 type Log = Rc<RefCell<Vec<(ResizeObserverId, Vec<ResizeObserverEntry>)>>>;
 
-/// Logs what it heard, checking that its own handler is out of its observer
-/// while it runs; bound to `bound`, if any.
 struct Recorder {
     log: Log,
     bound: Option<NodeId>,
@@ -51,7 +45,6 @@ impl ResizeEventHandler<()> for Recorder {
     }
 }
 
-/// Logs, then drops its own observer.
 struct SelfDropper {
     log: Log,
 }
@@ -68,8 +61,6 @@ impl ResizeEventHandler<()> for SelfDropper {
     }
 }
 
-/// Logs, resizes `target`, lays out, updates, and runs the loop again from
-/// inside its own notification.
 struct Renotifier {
     log: Log,
     target: NodeId,
@@ -92,7 +83,6 @@ impl ResizeEventHandler<()> for Renotifier {
 
 fn page(css: &str) -> Doc {
     let mut doc = Doc::with_css(&format!("{BASE}\n{css}"));
-    // A first pass, so every case starts from a document that has laid out.
     doc.flush();
     doc
 }
@@ -104,7 +94,6 @@ fn recording(doc: &mut Doc, log: &Log, bound: Option<NodeId>) -> ResizeObserverI
     }))
 }
 
-/// Each queued entry as `(target, border-box width, border-box height)`.
 fn queued(doc: &Doc, observer: ResizeObserverId) -> Vec<(NodeId, f32, f32)> {
     doc.dom
         .resize_observer(observer)
@@ -203,9 +192,6 @@ fn a_width_change_queues_one_entry_with_every_box_size() {
     );
 }
 
-/// At a ratio of 1.5, an 11px box ends at 16.5 device px, which the rounding
-/// tail rounds up to 17: the layout holds 17 / 1.5 CSS px, and the
-/// device-pixel size is the whole 17.
 #[test]
 fn device_pixel_sizes_are_whole_device_pixels() {
     let mut doc = Doc::with_device(device_with(800.0, 600.0, 1.5, PrefersColorScheme::Light));
@@ -238,7 +224,6 @@ fn a_layout_that_moves_no_observed_size_queues_nothing() {
     assert!(doc.dom.update_resize_observations());
     let _ = doc.dom.take_resize_records(observer);
 
-    // The cell moves down 30px and keeps its size.
     doc.set_inline(above, "height: 40px");
     doc.flush();
     assert!(doc.dom.resizes.stale, "a pass that ran sets the bit");
@@ -280,10 +265,6 @@ fn a_target_that_stops_being_rendered_reports_zero_once() {
     assert_eq!(queued(&doc, observer), vec![(cell, 100.0, 50.0)]);
 }
 
-/// Chromium's locked subtree: a target whose contents an ancestor skips is
-/// neither compared nor updated, so it reports nothing while skipped and,
-/// once laid out again, only a size that differs from the one it last
-/// reported. The skipping element's own box is still observed.
 #[test]
 fn a_target_a_skipping_ancestor_hides_is_left_alone() {
     let mut doc = page(
@@ -350,8 +331,6 @@ fn a_target_a_skipping_ancestor_hides_is_left_alone() {
     assert_eq!(queued(&doc, late), vec![(inner, 150.0, 50.0)]);
     let _ = doc.dom.take_resize_records(observer);
 
-    // A `display: none` ancestor above the skipping one: the skipping one
-    // has no box, so it skips nothing, and the target is not rendered.
     doc.add_class(holder, "skip");
     doc.add_class(outer, "gone");
     doc.flush();
@@ -363,8 +342,6 @@ fn a_target_a_skipping_ancestor_hides_is_left_alone() {
     );
 }
 
-/// An unlinked node keeps the layout it last had; only the walk up its
-/// containing-block chain tells it is no longer in the document.
 #[test]
 fn an_unlinked_live_target_reports_zero() {
     let mut doc = page("");
@@ -571,8 +548,6 @@ fn a_loop_run_from_inside_a_notification_leaves_its_own_entries_queued() {
     );
 }
 
-/// `unobserve` leaves the queue, as the spec's steps leave
-/// `[[activeTargets]]`; `disconnect` clears both lists.
 #[test]
 fn unobserve_keeps_the_queue_and_disconnect_drops_it() {
     let mut doc = page("");

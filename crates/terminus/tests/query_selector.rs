@@ -10,8 +10,6 @@ mod common;
 use common::Doc;
 use terminus::link::{NodeId, ShadowRootMode};
 
-/// The document node — `document.querySelector(...)`'s receiver, as opposed to
-/// [`Doc::root`], which is the document *element*.
 fn document(doc: &Doc) -> NodeId {
     doc.dom.root_node().id()
 }
@@ -51,9 +49,6 @@ fn query_selector_all_is_in_tree_order_not_selector_order() {
     let mut doc = Doc::new();
     let ids = doc.els(doc.root, &["view.a", "view.b", "view.a"]);
 
-    // A selector list is a set: `.b, .a` reports the document's order, not the
-    // list's. `dom_apis` refuses its single-selector fast paths for lists for
-    // exactly this reason.
     assert_eq!(all(&doc, doc.root, ".b, .a"), ids);
     assert_eq!(all(&doc, doc.root, ".a, .b"), ids);
 }
@@ -64,8 +59,6 @@ fn the_query_root_is_never_its_own_match() {
     let outer = doc.el(doc.root, "view.a");
     let inner = doc.el(outer, "view.a");
 
-    // Descendants only, so `outer` is excluded from its own query even though
-    // it matches, and `:scope` alone can never match anything.
     assert_eq!(all(&doc, outer, ".a"), vec![inner]);
     assert_eq!(first(&doc, outer, ":scope"), None);
 }
@@ -79,8 +72,6 @@ fn scope_is_the_query_root() {
 
     assert_eq!(all(&doc, outer, ":scope > .x"), vec![middle]);
     assert_eq!(all(&doc, outer, ":scope .x"), vec![middle, deep]);
-    // Rooted at the document there is no scoping element, so `:scope` falls
-    // back to the document element.
     assert_eq!(all(&doc, document(&doc), ":scope > #outer"), vec![outer]);
 }
 
@@ -91,9 +82,6 @@ fn selectors_may_match_through_ancestors_outside_the_query_root() {
     let b = doc.el(a, "view#b");
     let c = doc.el(b, "view#c");
 
-    // The DOM Standard's canonical scoped-query case: candidates are limited
-    // to `b`'s descendants, but the selector is still evaluated against the
-    // real tree, so `#a` outside the root still satisfies the combinator.
     assert_eq!(first(&doc, b, "#a view"), Some(c));
     assert_eq!(first(&doc, b, "#b > view"), Some(c));
 }
@@ -156,8 +144,6 @@ fn pseudo_elements_parse_but_never_match() {
     let mut doc = Doc::new();
     doc.el(doc.root, "view");
 
-    // Per spec `querySelector` accepts a pseudo-element and then matches
-    // nothing — it is not a parse error.
     assert_eq!(first(&doc, doc.root, "view::before"), None);
     assert_eq!(all(&doc, doc.root, "view::marker"), Vec::new());
 }
@@ -188,9 +174,6 @@ fn unsupported_selector_features_are_reported_as_invalid() {
     let parent = doc.el(doc.root, "view");
     doc.el(parent, "view.deep");
 
-    // The vendored selector parser keeps `:has()` and `:nth-child(... of S)`
-    // disabled, so selectors current browsers accept are invalid here — for
-    // queries exactly as for stylesheets.
     assert!(doc.dom.query_selector(doc.root, "view:has(.deep)").is_err());
     assert!(doc.dom.matches(parent, ":has(.deep)").is_err());
     assert!(
@@ -247,12 +230,8 @@ fn a_light_tree_query_never_descends_into_a_shadow_tree() {
     let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
     let shadowed = doc.el(shadow, "view.target");
 
-    // A shadow root is not among its host's children, so the node-tree walk
-    // the DOM Standard specifies for `querySelector` cannot reach it.
     assert_eq!(all(&doc, document(&doc), ".target"), vec![light]);
     assert_eq!(all(&doc, host, ".target"), vec![light]);
-    // Rooting the query at the shadow root queries that tree instead, and it
-    // does not escape back out into the light tree.
     assert_eq!(all(&doc, shadow, ".target"), vec![shadowed]);
 }
 
@@ -266,9 +245,6 @@ fn a_slotted_light_child_stays_in_the_light_tree_for_queries() {
     doc.flush();
 
     assert_eq!(doc.dom.assigned_nodes(slot), [slotted]);
-    // Selectors run on the node tree, not the flat tree: assignment moves
-    // where `slotted` renders, never where it is found or what it descends
-    // from.
     assert_eq!(all(&doc, host, ".slotted"), vec![slotted]);
     assert_eq!(all(&doc, shadow, ".slotted"), Vec::new());
     assert!(doc.matches(slotted, "host > .slotted"));
@@ -284,7 +260,6 @@ fn closest_does_not_escape_a_shadow_tree() {
     let inner = doc.el(outer, "view");
 
     assert_eq!(closest(&doc, inner, ".match"), Some(outer));
-    // The host matches too, but the walk stops at the shadow root.
     assert_eq!(closest(&doc, outer, "host"), None);
     assert_eq!(closest(&doc, host, "host"), Some(host));
 }
@@ -297,8 +272,6 @@ fn host_selectors_resolve_against_the_shadow_host() {
     let top = doc.el(shadow, "view.top");
     let deep = doc.el(top, "view.deep");
 
-    // `:host` matches through the query's current host: the root's host for
-    // a shadow-rooted query, the containing host for `matches`.
     assert_eq!(all(&doc, shadow, ":host > .top"), vec![top]);
     assert_eq!(all(&doc, shadow, ":host(.outer) .deep"), vec![deep]);
     assert!(doc.matches(deep, ":host .deep"));

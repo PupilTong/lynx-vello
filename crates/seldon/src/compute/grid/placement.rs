@@ -26,7 +26,6 @@ const MIN_GRID_LINE: i32 = -10_000;
 const MAX_GRID_LINE: i32 = 10_000;
 const MAX_GRID_TRACKS: usize = (MAX_GRID_LINE - MIN_GRID_LINE) as usize;
 
-/// A half-open sequence of tracks bounded by two resolved grid lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct TrackSpan {
     pub(super) start: i32,
@@ -46,20 +45,17 @@ impl TrackSpan {
     }
 }
 
-/// Projects the numeric placement styles needed for one grid item.
 pub(super) trait PlacementInput {
     fn column(&self) -> Line<GridPlacement>;
     fn row(&self) -> Line<GridPlacement>;
 }
 
-/// A resolved two-dimensional grid area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct GridArea {
     pub(super) column: TrackSpan,
     pub(super) row: TrackSpan,
 }
 
-/// Result of resolving and auto-placing all in-flow items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlacementResult {
     pub(super) areas: Vec<GridArea>,
@@ -144,7 +140,6 @@ pub(super) fn place_items<I: PlacementInput>(
     let dense = flow.contains(GridAutoFlow::DENSE);
     let explicit_column_range = explicit_range(explicit_columns);
     let explicit_row_range = explicit_range(explicit_rows);
-    // The physical area of a flow-relative (primary, cross) pair.
     let physical = |primary: TrackSpan, cross: TrackSpan| {
         if row_flow {
             GridArea {
@@ -273,9 +268,6 @@ pub(super) fn place_items<I: PlacementInput>(
             end: occupancy_cross_max,
         },
     );
-    // Every item is written by exactly one step: step 1 places the items
-    // definite in both axes, step 2 those definite only in the primary axis,
-    // step 3 every item whose primary axis is indefinite.
     let mut areas = vec![GridArea::default(); items.len()];
 
     for (index, item) in items.iter().copied().enumerate() {
@@ -445,7 +437,6 @@ struct LogicalPlacement {
     cross: AxisPlacement,
 }
 
-/// A flow-normalized occupancy matrix with dense and sparse storage.
 #[derive(Debug)]
 struct Occupancy {
     storage: OccupancyStorage,
@@ -655,7 +646,6 @@ fn sparse_range_any(intervals: &[(usize, usize)], start: usize, end: usize) -> b
     sparse_last_set(intervals, start, end).is_some()
 }
 
-/// Range-`chmax`/range-maximum tree used by sparse step-2 cursors.
 #[derive(Debug)]
 struct RangeMax {
     len: usize,

@@ -38,13 +38,10 @@ use terminus::link::{Document, NodeId};
 
 use crate::paint_common::{Doc, define_lynx_text, device};
 
-/// The class that marks a fixture element holding text.
 const TEXT_BLOCK_CLASS: &str = "text-block";
 
-/// The tag a `text-block` element is created under.
 const TEXT_TAG: &str = "text";
 
-/// The tags `crates/bobcat-core` defines as Lynx text elements.
 const LYNX_TEXT_TAGS: [&str; 3] = [TEXT_TAG, "inline-text", "inline-truncation"];
 
 #[must_use]
@@ -80,8 +77,6 @@ pub(super) fn parse(fragment: &str, width: f32, height: f32) -> Doc {
         .collect();
     assert_eq!(roots.len(), 1, "fragment must contain one root element");
 
-    // A definition upgrades the document element when the root is a
-    // `text-block` too, so the root needs no case of its own.
     let mut dom = Document::new(device(width, height), tag_of(&roots[0]), ());
     for tag in LYNX_TEXT_TAGS {
         define_lynx_text(&mut dom, tag);
@@ -91,8 +86,6 @@ pub(super) fn parse(fragment: &str, width: f32, height: f32) -> Doc {
     Doc { dom, root }
 }
 
-/// The tag `source` is created under: [`TEXT_TAG`] for a `text-block`
-/// element, the fixture's own name otherwise.
 fn tag_of(source: &Handle) -> &str {
     let NodeData::Element { name, attrs, .. } = &source.data else {
         panic!("fragment importer expected an element");

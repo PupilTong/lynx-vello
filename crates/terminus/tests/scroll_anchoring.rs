@@ -10,7 +10,6 @@ use common::{Doc, device};
 use euclid::default::Vector2D;
 use terminus::link::NodeId;
 
-/// A 100px-tall scroller of thirty 20px rows: offsets 0..=500.
 struct Page {
     doc: Doc,
     scroller: NodeId,
@@ -43,8 +42,6 @@ impl Page {
         self.doc.dom.render();
     }
 
-    /// As the runtime adopts a painter's post: a scroll anchoring did not
-    /// make.
     fn scroll(&mut self, y: f32) {
         self.doc.dom.scroll_to(self.scroller, Vector2D::new(0.0, y));
         self.render();
@@ -54,7 +51,6 @@ impl Page {
         self.doc.dom.scroll_offset(self.scroller).y
     }
 
-    /// Where row `index` stands in the scrollport: its top minus the offset.
     fn on_screen(&self, index: usize) -> f32 {
         let layout = self.doc.dom.rounded_layout(self.rows[index]).unwrap();
         layout.location.y - self.offset()
@@ -93,7 +89,6 @@ fn a_row_growing_above_the_shown_ones_moves_the_offset_with_them() {
         "the frame carries the shift to the painter",
     );
 
-    // Shrinking moves it back, and the shift is a sum.
     page.grow(0, 10.0);
     assert_eq!(page.offset(), 95.0);
     assert_eq!(page.on_screen(5), -5.0);
@@ -129,7 +124,6 @@ fn overflow_anchor_none_on_a_row_passes_the_anchor_to_the_next() {
     page.render();
     page.scroll(105.0);
     page.grow(5, 50.0);
-    // With row 5 the anchor nothing would move: it grew below its own top.
     assert_eq!(
         page.offset(),
         135.0,
@@ -174,8 +168,6 @@ fn a_scroll_anchoring_did_not_make_selects_a_new_anchor() {
 
 #[test]
 fn rows_revealed_above_the_scrollport_do_not_move_what_it_shows() {
-    // `<list>`'s placeholder: each row skips at one scrollport tall and is
-    // 20px once revealed.
     let mut page = page(
         ".row { height: auto; flex-direction: column; content-visibility: auto;
                 contain-intrinsic-size: none auto 100px; }
@@ -192,7 +184,6 @@ fn rows_revealed_above_the_scrollport_do_not_move_what_it_shows() {
     };
     page.render();
     settle(&mut page);
-    // Into the placeholders, 20px into one of them.
     let y = page
         .doc
         .dom
@@ -236,16 +227,6 @@ fn rows_revealed_above_the_scrollport_do_not_move_what_it_shows() {
     );
 }
 
-/// A host that builds content where its placeholders turn relevant: each
-/// round, every placeholder a commit revealed is replaced by a new row that
-/// skips at the same one-scrollport estimate and is 20px once revealed — a
-/// `<list>` whose cells are built lazily, without the list's own rules.
-///
-/// Anchored to the first box the scrollport shows, that box is the next
-/// placeholder below the rows just built, each new row pushes it a scrollport
-/// down, and the offset follows it to the last row. A skipping box is no
-/// anchor, so the rows land where the placeholders were and the scrollport
-/// fills.
 #[test]
 fn a_skipping_box_is_no_anchor_so_building_at_revealed_placeholders_settles() {
     let mut page = page(
@@ -253,8 +234,6 @@ fn a_skipping_box_is_no_anchor_so_building_at_revealed_placeholders_settles() {
                 contain-intrinsic-size: none auto 100px; }
          .cell { height: 20px; }",
     );
-    // One commit per round, as a host's frame tick and the task that
-    // delivers the reveals alternate.
     let commit = |page: &mut Page| {
         page.doc.dom.resume_relevance();
         page.render();
@@ -287,12 +266,10 @@ fn a_skipping_box_is_no_anchor_so_building_at_revealed_placeholders_settles() {
         }
         built
     };
-    // Every row starts empty; the first screen's rows are built first.
     for _ in 0..8 {
         build(&mut page, &mut placeholders);
         commit(&mut page);
     }
-    // Into the placeholders, as a fling past the built rows leaves it.
     let y = page
         .doc
         .dom

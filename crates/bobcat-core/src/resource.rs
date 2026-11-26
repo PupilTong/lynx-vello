@@ -7,129 +7,13 @@ pub use vant::error::{ResourceError, ResourceErrorKind, ResourceErrorPhase, Retr
 
 use crate::style::PreparsedStyleSheet;
 
-/// The host's whole resource system: sources, stylesheets and images.
-///
-/// Owned by the [`LynxView`](crate::LynxView), on the thread that constructed
-/// it, and never reachable from `bobcat-main` — every resource the document
-/// needs is asked for by message. It is therefore free to be neither `Send`
-/// nor `Sync` and to hold `Rc`, `RefCell` or browser objects directly.
-///
-/// The view services it in [`LynxView::pump`](crate::LynxView::pump) and
-/// nowhere else, past the one call that builds it: that call hands it the
-/// view's startup sources as well, so their IO overlaps everything the
-/// embedder does before its first turn. A painter observing that view asks
-/// it what each picture draws as through
-/// [`FrameImages`](terminus::link::FrameImages), never blocking, and asks it for
-/// no load; a picture whose pixels it dropped is wanted, and restored off the
-/// painter's thread.
-///
-/// Source requests are non-blocking: the fetcher resolves the URL, loads and
-/// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
-/// [`SourceCompletion`] to answer whoever asked, without naming them. It owns
-/// any executor its IO needs. Images are reported through
-/// [`ImageReports`](terminus::link::ImageReports), then described during
-/// composition.
-///
-/// **A fetcher's base URL must be the view's
-/// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script
-/// request reaches it absolute: the entry, the BTS entry and every
-/// synchronous load resolved against that base, a worker script against
-/// `__Card__` — the view's card URL, or else the entry's response URL — and
-/// an import against its importer's. The
-/// stylesheets and plain fetches it is asked for carry the URL as it was
-/// named, and it resolves them against its own base by URL rules. A lazy
-/// container is fetched, and its sections registered, by the fetcher's
-/// resolution, and each section is loaded synchronously by the realm's: with
-/// two different bases, the URL a section is registered under and the URL
-/// the realm requests it by would differ.
-///
-/// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
-/// resource future and polls none, and nothing here names a host's transport, caches or
-/// codecs: whatever surface those have belongs to the host's own crate.
-///
-/// Its frames are CPU pixels or frames of the host's own type
-/// ([`FrameImages::PlatformFrame`](terminus::link::FrameImages::PlatformFrame)),
-/// which write themselves into a texture the painter created
-/// ([`FrameWriter`](terminus::link::FrameWriter)); a host with none names
-/// [`std::convert::Infallible`]. A [`Painter`](crate::Painter) attaches only
-/// to views whose fetcher names its own frame type.
 pub trait ResourceFetcher: terminus::link::FrameImages {
-    /// Begins one source load without blocking its caller.
-    ///
-    /// **A view's startup sources are requested before it runs at all**:
-    /// every author stylesheet in the order the view listed them and then the
-    /// entry, as a [`SourceRequest::Module`], are handed over together inside
-    /// [`LynxGroup::create_lynx_view`](crate::LynxGroup::create_lynx_view),
-    /// on the embedder's own thread, before it returns — this fetcher is
-    /// built earlier in that same call, out of the builder the embedder
-    /// passed, so a fetcher must be able to take them there. Order of
-    /// *completion* is this method's own business: the view's first
-    /// `__FlushElementTree` mounts the sheets in the order it listed them,
-    /// whatever order they were answered in, and the entry is completed when
-    /// its answer arrives.
-    /// Every later request — an import, an adopted stylesheet, a worker
-    /// script, a font, a plain fetch — is handed over in a
-    /// [`LynxView::pump`](crate::LynxView::pump) turn instead.
-    ///
-    /// Consume `completion` with the result, or retain it until the load finishes.
-    /// Dropping it unanswered reports a failure unless the view has ended.
-    /// Check [`SourceCompletion::is_cancelled`] before starting queued work and
-    /// after IO — it answers whether the view was cancelled by the embedder's
-    /// release or a fatal event, or ended on its own — since a cancelled load
-    /// no longer needs to decode or deliver a result.
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion);
 
-    /// Hints that a later source request may use this URL. The fetcher owns
-    /// preloading, in-flight sharing and cache lifetime; no response is required.
-    /// The default ignores the hint, so preloading is never required for correctness.
     fn preload_source(&self, _request: SourceRequest) {}
 
-    /// Names `source` and begins loading it. Non-blocking.
-    ///
-    /// Single-flight: concurrent requests for one source join one load, and
-    /// a request for an already-loaded bitmap starts nothing. A parsed
-    /// document is not retained (the engine owns the scene it encodes from
-    /// the report), so a later request for one may fetch and parse it again.
-    /// The engine asks for a source exactly once per
-    /// document, keyed by the raw string the page wrote — two specifiers a
-    /// host canonicalises to one resource are simply asked for twice.
-    ///
-    /// For every source it is asked for, a host eventually calls exactly one
-    /// of [`ImageReports::loaded`](terminus::link::ImageReports::loaded),
-    /// [`ImageReports::parsed_document`](terminus::link::ImageReports::parsed_document)
-    /// or [`ImageReports::failed`](terminus::link::ImageReports::failed), unless the view
-    /// is torn down first. A source whose bytes are an SVG document is not
-    /// decoded but parsed, with the engine's own parser
-    /// ([`ImageEvent::parse_document`](terminus::link::ImageEvent::parse_document)), on
-    /// whatever thread the host decodes bitmaps on, and reported as the
-    /// parsed document, or as a failure when it does not parse. Reporting and
-    /// asking for the turn that drains the report are both the host's, and
-    /// both happen on this thread.
-    ///
-    /// The default serves nothing, which is what a host with no image support
-    /// wants: a source is asked for once and then never drawn.
     fn request_image(&self, _source: &str) {}
 
-    /// Hands over `bytes`, a document of `kind` the page wrote itself (the
-    /// Lynx `<svg content>`), to be parsed and reported under `source`.
-    /// Non-blocking.
-    ///
-    /// `source` is a synthetic name the document chose (`svg-content:` and a
-    /// hash of the bytes), not a URL: there is nothing to fetch. The host
-    /// parses the bytes exactly as it parses a fetched document of that kind
-    /// — with [`ImageEvent::parse_document`](terminus::link::ImageEvent::parse_document),
-    /// where it decodes bitmaps — and reports exactly one of
-    /// [`ImageReports::parsed_document`](terminus::link::ImageReports::parsed_document)
-    /// or [`ImageReports::failed`](terminus::link::ImageReports::failed) for `source`.
-    /// The document asks once per distinct markup while some element
-    /// presents it, and again after it forgot the source with the last
-    /// element presenting it. Every request is parsed and reported on its
-    /// own, and the host keeps nothing of the document: the engine owns the
-    /// scene it encodes, and ignores a report for a source that has settled
-    /// or been forgotten since it asked.
-    ///
-    /// The default serves nothing: on a host without document support an
-    /// `<svg content>` stays pending and draws nothing.
     fn request_document(
         &self,
         _source: &str,
@@ -138,105 +22,23 @@ pub trait ResourceFetcher: terminus::link::FrameImages {
     ) {
     }
 
-    /// Serves one request of the owner of an `Id` picture
-    /// ([`PlaybackRequest`](terminus::link::PlaybackRequest)): play the
-    /// frames of a URL this host reported loaded and animated under a
-    /// playhead of the picture's own, open a video with the platform's media
-    /// player, one of the four controls or a media command, or the end of
-    /// the picture. Non-blocking.
-    ///
-    /// A host that serves it publishes the frame the playhead or the player
-    /// shows into the picture's slot and answers it through
-    /// [`FrameImages`](terminus::link::FrameImages) like any `Id` picture,
-    /// advances a playhead only while the picture is drawn, publishes a
-    /// player's frames only while it is drawn, and reports each loop a
-    /// playhead completes and each event a player reports through
-    /// [`ImageReports::playback`](terminus::link::ImageReports::playback) of
-    /// this view. Waking the host for the turn that describes the picture
-    /// again, after a request that changed what it shows, is the host's.
-    ///
-    /// The default serves nothing: a host that never reports a source
-    /// animated is never asked to play one, and a `video` on such a host
-    /// opens nothing and reports nothing.
     fn request_playback(&self, _request: terminus::link::PlaybackRequest) {}
 
-    /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),
-    /// on this thread, before the turn reads the reports queued so far.
-    ///
-    /// A host whose loads finish somewhere else — a decode thread, a
-    /// browser worker — forwards each completion into its
-    /// [`ImageReports`](terminus::link::ImageReports) here, so a load that completed
-    /// between turns is reported in the next one whether or not that turn
-    /// requested or resolved anything. Asking for that turn is still the
-    /// host's, through the wakeup it gave the view. A host that reports
-    /// inline has nothing to do, and the default does nothing.
     fn service_images(&self) {}
 
-    /// A thread-safe answer to whether a [`SourceRequest::Fetch`] of `url`
-    /// has already completed for this view, asked from a realm's own thread
-    /// with the URL string the realm holds — which the probe resolves the way
-    /// the fetcher resolves a request.
-    ///
-    /// A fetch it answers `true` for is **not made again**: the realm's
-    /// `fetchResource` settles at once, which is what a cached fetch looks
-    /// like from JavaScript. That is the whole reason it exists — a Promise
-    /// resolved in a later job is not what a repeat fetch is to a card, and
-    /// both native (`TemplateAssembler::FindTemplateBundle`) and web-core (a
-    /// promise cache) settle one inside the same task.
-    ///
-    /// It is called from `bobcat-main` and from `bobcat-workers`, never from
-    /// the view's own thread, which is why it is a `Send + Sync` function
-    /// rather than a method: nothing else on this trait leaves the embedder's
-    /// thread. It must not block and must not start a load.
-    ///
-    /// The default is no probe: every `fetchResource` is a request, and none
-    /// settles synchronously.
     fn fetch_probe(&self) -> Option<FetchProbe> {
         None
     }
 
-    /// Whether this fetcher already holds a stylesheet at a URL, answered
-    /// without loading anything — the question `__LoadStyleSheet` asks
-    /// before it hands out a handle, so that a container section that does
-    /// not exist answers `null`, as native's `LoadStyleSheet` answers
-    /// `undefined` (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`),
-    /// rather than a handle whose adoption fails.
-    ///
-    /// The URL is the realm's, unresolved, as a
-    /// [`SourceRequest::StyleSheet`] carries it. Called from `bobcat-main`,
-    /// never from the view's own thread, so like [`Self::fetch_probe`] it is a
-    /// `Send + Sync` function. It must not block and must not start a load.
-    ///
-    /// The default is no probe: every `__LoadStyleSheet` answers a handle and
-    /// the adoption finds out, which is right for a fetcher that may load a
-    /// stylesheet it does not hold.
     fn style_sheet_probe(&self) -> Option<StyleSheetProbe> {
         None
     }
 }
 
-/// What a fetcher answers [`ResourceFetcher::fetch_probe`] with: "has this
-/// view already fetched `url`?", callable from either engine thread.
 pub type FetchProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// What a fetcher answers [`ResourceFetcher::style_sheet_probe`] with: "is a
-/// stylesheet held at `url`?", callable from `bobcat-main`.
 pub type StyleSheetProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// A shared handle serves whatever it points at.
-///
-/// The view owns its resource system; an embedder whose registry outlives the
-/// view hands in an [`Rc`] of it instead. This is what joins the two without a
-/// per-embedder forwarding wrapper. `Rc` rather than `Arc` because nothing on
-/// this path crosses a thread — an atomic count here would be paid on every
-/// clone and never used.
-///
-/// It is the right handle for a registry that answers reads and starts loads,
-/// and the wrong one for a registry that *reports* — an
-/// [`ImageReports`](terminus::link::ImageReports) belongs to one view, and a handle shared across
-/// views has nowhere to put more than one. A host that loads images asynchronously returns a
-/// per-view value from the builder [`create_lynx_view`](crate::LynxGroup::create_lynx_view) takes,
-/// holding this handle plus that view's reports.
 impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         (**self).request_source(request, completion);
@@ -276,114 +78,35 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     }
 }
 
-/// One source requested by the document owner.
-///
-/// A [`Self::Module`] carries an absolute URL the engine already resolved,
-/// in its WHATWG serialization, and a [`Self::Font`] the absolute URL the
-/// document resolved. [`Self::StyleSheet`] and [`Self::Fetch`] carry the URL
-/// as the view or the realm named it, and the fetcher resolves it against its
-/// own base.
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
-    /// The URL of an entry, an import, a worker script or a synchronous
-    /// load. Complete with [`LoadedSource::Module`]; the result goes to the
-    /// realm or worker that asked.
     Module(String),
-    /// Fetch `url` and keep it, the way an image source is fetched,
-    /// answering only that the fetch is over.
-    ///
-    /// What the fetcher makes of the bytes is its own — the reference
-    /// fetcher, given a container installer, registers a Lynx container's
-    /// sections beside it — and nothing about them comes back. Resolution is
-    /// the fetcher's, as for `StyleSheet`.
-    ///
-    /// Complete with [`LoadedSource::Fetched`].
-    Fetch {
-        url: String,
-        /// Whether someone observes this view's `resource` entries (Lynx's
-        /// `resource.lazyBundle`), so the fetch is one: then a fetcher that
-        /// can tell fills the [`FetchOutcome`] it answers with when the
-        /// bytes arrived, how many there were and when it installed them.
-        /// `false` asks for nothing, and a fetcher reads no clock for it.
-        timed: bool,
-    },
-    /// One `src: url(...)` of an `@font-face` rule, already resolved against
-    /// the document's base URL. Complete with [`LoadedSource::Font`]; the
-    /// bytes are registered under the rule's declared family. A fetcher that
-    /// serves no fonts drops the completion, which fails this source and lets
-    /// the document try the rule's next one.
-    Font {
-        url: String,
-    },
+    Fetch { url: String, timed: bool },
+    Font { url: String },
 }
 
-/// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
 #[derive(Clone, Debug)]
 pub enum StyleSheetSource {
     Preparsed(Arc<PreparsedStyleSheet>),
     Text(String),
 }
 
-/// A loaded source. `Module` carries JavaScript for an entry, an import, a
-/// worker script or a synchronously loaded script, including its final
-/// response URL. The completion routes it to the runtime that requested it.
 #[derive(Clone, Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
-    Module {
-        source: String,
-        /// The response URL, after any redirect, which must be an absolute
-        /// URL: it is the script's `import.meta.url` and the base its own
-        /// relative imports resolve against. The entry's is also `__Card__`,
-        /// the base every `new Worker` URL is joined to, and an entry
-        /// answered from one that is not absolute fails the view's startup.
-        url: String,
-    },
-    /// One `@font-face` source's bytes, unvalidated: a font file is binary,
-    /// so nothing here decodes or transcodes it. The font backend is what
-    /// rejects bytes that are not a face.
+    Module { source: String, url: String },
     Font(terminus::link::FontBlob),
-    /// A [`SourceRequest::Fetch`] that is over. The bytes stayed with the
-    /// fetcher, and whatever it made of them is reachable only as the source
-    /// requests it now answers; what comes back is only how the fetch went,
-    /// for a timed request.
     Fetched(FetchOutcome),
 }
 
-/// How one [`SourceRequest::Fetch`] went, as the fetcher measured it: what
-/// a `resource.lazyBundle` performance entry reports beyond the realm's own
-/// call and delivery. Filled only for a request that was
-/// [`timed`](SourceRequest::Fetch::timed), and only as far as the fetcher
-/// can tell; [`FetchOutcome::default`] — every field `None` — is always a
-/// correct answer, and the one for an untimed request, which takes no
-/// instant and counts nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FetchOutcome {
-    /// The body's length in bytes, as it arrived: Lynx's `size`
-    /// (`binary_size`, the response data's size,
-    /// `lynx/core/resource/lazy_bundle/lazy_bundle_loader.cc:333-335`).
     pub size_bytes: Option<u64>,
-    /// When the bytes had arrived at the fetcher: Lynx's `requireEnd`.
     pub received: Option<crate::performance::Instant>,
-    /// The fetcher's install of what it fetched — the reference fetcher's
-    /// container decode and registration of its sections: Lynx's
-    /// `decodeStart`/`decodeEnd`. `None` for a body nothing was installed
-    /// from.
     pub installed: Option<std::ops::Range<crate::performance::Instant>>,
 }
 
-/// The concrete, transferable right to answer one source request.
-///
-/// This is neither a closure nor a trait object, and it names no destination:
-/// it holds one end of the one-shot channel that was minted with the request,
-/// and whoever awaits the other end is where the source goes. That is what
-/// lets a worker's script be asked for and answered on `bobcat-workers`,
-/// without `bobcat-main`, while a stylesheet's reaches the task that asked
-/// for it, with one type and no routing.
-///
-/// It cannot be cloned; consuming it permits at most one result. An unanswered
-/// drop reports failure, so a lost worker cannot leave startup waiting forever.
 #[must_use = "complete the source request or retain it until the load finishes"]
 pub struct SourceCompletion {
     answer: Option<tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>>,
@@ -400,7 +123,6 @@ impl std::fmt::Debug for SourceCompletion {
 }
 
 impl SourceCompletion {
-    /// One request's two ends, for a caller that will await the answer itself.
     pub(crate) fn new(
         token: tokio_util::sync::CancellationToken,
     ) -> (
@@ -411,8 +133,6 @@ impl SourceCompletion {
         (Self::over(answer, token), receiver)
     }
 
-    /// The right to answer a request whose receiving end has already been
-    /// handed to whoever is waiting for it.
     pub(crate) fn over(
         answer: tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>,
         token: tokio_util::sync::CancellationToken,
@@ -423,15 +143,6 @@ impl SourceCompletion {
         }
     }
 
-    /// Whether the requesting realm has ended, or nobody is waiting for this
-    /// source any more.
-    ///
-    /// Completions carry their requesting realm's cancellation token: the
-    /// view's for MTS, or the Worker's independent token for its entry/imports.
-    /// Reading it takes a mutex, so it is
-    /// asked once per decision rather than per byte. Cancellation is
-    /// cooperative: an IO operation already running may finish, but its result
-    /// is discarded.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
@@ -441,7 +152,6 @@ impl SourceCompletion {
                 .is_none_or(tokio::sync::oneshot::Sender::is_closed)
     }
 
-    /// Sends the result once. A result for a cancelled view is discarded.
     pub fn complete(mut self, source: Result<LoadedSource, crate::LynxViewError>) {
         self.send(source);
     }
@@ -463,9 +173,6 @@ impl Drop for SourceCompletion {
     }
 }
 
-/// What a source that nobody answered failed with — reported by a dropped
-/// completion, and by the awaiting side when the completion never reached a
-/// drop of its own.
 pub(crate) fn unanswered_source() -> ResourceError {
     ResourceError {
         kind: ResourceErrorKind::Unavailable,

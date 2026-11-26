@@ -145,8 +145,6 @@ fn text_background_clip() {
     assert_text_golden("background-clip", &actual);
 }
 
-/// The same paragraph through generated and literal runs must draw identical
-/// pixels, including the element's color/decoration and a paint-only update.
 #[test]
 fn generated_text_matches_literal_runs() {
     let mut generated = html::parse(
@@ -159,7 +157,6 @@ fn generated_text_matches_literal_runs() {
         .query_selector(generated.root, ".generated")
         .unwrap()
         .unwrap();
-    // The fragment helper imports only class/style attributes.
     generated.dom.set_attribute(carrier, "text", "Before ");
     generated
         .dom
@@ -190,18 +187,8 @@ fn generated_text_matches_literal_runs() {
     }
 }
 
-/// The flow layout an engine sheet writes, which an author sheet cannot:
-/// `.flow` a block container, `.inline` an inline box in its inline
-/// formatting context. A UA sheet stands in for the engine's own here.
 const FLOW_SHEET: &str = ".flow { display: block; } .inline { display: inline; }";
 
-/// Inline boxes in a block container's inline formatting context, with
-/// `box-decoration-break: slice`: a padded, bordered, rounded box wrapped
-/// over two lines shows its start border, padding and corners on the first
-/// line only and its end ones on the last; a gradient background runs across
-/// the wrap as one strip; a nested box paints over its parent's background;
-/// an empty box with a border and padding still takes up its line; vertical
-/// padding paints past the line box without moving it.
 #[test]
 fn text_inline_boxes() {
     const FRAGMENT: &str = r#"
@@ -223,11 +210,6 @@ fn text_inline_boxes() {
     assert_text_golden("inline-boxes", &actual);
 }
 
-/// A nested inline box sliced across a wrap, inside a box that is sliced
-/// too: each box shows its start border, padding and corners on its first
-/// fragment only and its end ones on its last, its middle fragments are
-/// open on both sides, and the inner box's fragments paint over the outer
-/// box's on every line.
 #[test]
 fn text_nested_inline_box_across_a_wrap() {
     const FRAGMENT: &str = r#"
@@ -248,24 +230,12 @@ fn text_nested_inline_box_across_a_wrap() {
     assert_text_golden("nested-inline-box-wrap", &actual);
 }
 
-/// Which paragraph an editing golden's host lays its text out in.
 #[derive(Clone, Copy)]
 enum EditingHost {
-    /// A Lynx `<text contenteditable>`: its own Lynx paragraph.
     Text,
-    /// A flex `<div contenteditable>` with loose text: the standard inline
-    /// formatting context of the anonymous block box around it.
     Flex,
 }
 
-/// One focused editing host in a `width` × `height` page, Roboto at 24px
-/// with no host font behind it, edited by `edit` before the capture.
-///
-/// The document's text context is adopted without system fonts, so a
-/// character Roboto lacks — the emoji below — renders as Roboto's own
-/// `.notdef` box on every machine rather than as whichever emoji face the
-/// host has: the golden is about where the selection and the caret fall
-/// around the surrogate pair, not about the emoji's picture.
 fn editing_golden(
     case: &str,
     kind: EditingHost,
@@ -283,7 +253,6 @@ fn editing_golden(
         dom.register_fonts(terminus::link::FontBlob::from_static(screenshot::ROBOTO)),
         1
     );
-    // The embedder's UA rule for an editing host (bobcat-core's sheet).
     dom.add_stylesheet(
         "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }",
         StylesheetOrigin::UserAgent,
@@ -386,8 +355,6 @@ fn editing_emoji_boundary() {
         "width: 300px",
         |dom| {
             use terminus::link::editing::Command;
-            // Exactly the surrogate pair's two units: the highlight covers its
-            // one box and neither neighbour.
             assert!(
                 dom.apply_editing(Command::SetSelection { range: 1..3 })
                     .applied
@@ -396,11 +363,6 @@ fn editing_emoji_boundary() {
     );
 }
 
-/// A flex host's loose text, laid out by the anonymous block box's standard
-/// inline formatting context under an author `white-space: normal`: the
-/// double space after "Loose" shows as one, and a selection from inside it
-/// to the second line covers the one space it emitted and wraps with the
-/// line.
 #[test]
 fn editing_flex_host_selection() {
     editing_golden(
@@ -418,8 +380,6 @@ fn editing_flex_host_selection() {
     );
 }
 
-/// An empty flex host lays out no paragraph: its caret is painted with its
-/// own box, at the content box's origin and one line tall.
 #[test]
 fn editing_empty_flex_host_caret() {
     editing_golden(

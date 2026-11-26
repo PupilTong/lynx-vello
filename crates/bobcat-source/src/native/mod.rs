@@ -24,21 +24,11 @@ mod tokenize;
 
 pub use error::ConvertError;
 
-/// Converts a source-based Lynx native external bundle to a web binary
-/// template (`SDRA WROF`).
-///
-/// # Errors
-///
-/// Returns [`ConvertError::CodeCacheBundle`] when any executable section is
-/// bytecode-only. Other errors describe malformed or currently unsupported
-/// native encodings.
 pub fn convert(native_bundle: &[u8]) -> Result<Vec<u8>, ConvertError> {
     let native = decode(native_bundle)?;
     encode::encode(native)
 }
 
-/// Decodes a source-based native external bundle without serializing an intermediate web bundle.
-/// Named external modules retain their names; no page root is invented.
 pub fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertError> {
     decode::decode(bytes)
 }

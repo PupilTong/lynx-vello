@@ -15,14 +15,12 @@ use stylo::values::specified::position::{PositionAreaAxis, PositionAreaTrack};
 
 use crate::geometry::{Edges, Point, Rect, Size};
 
-/// A `<position-area>` as one keyword per physical axis.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AreaKeywords {
     horizontal: PositionAreaKeyword,
     vertical: PositionAreaKeyword,
 }
 
-/// The only writing modes the fork has: `horizontal-tb`, `ltr` or `rtl`.
 #[inline]
 fn writing_mode(rtl: bool) -> WritingMode {
     if rtl {
@@ -33,15 +31,9 @@ fn writing_mode(rtl: bool) -> WritingMode {
 }
 
 impl AreaKeywords {
-    /// §3.1.2: the plain logical keywords "refer to the writing mode of the
-    /// box's containing block", the `self-*` ones to "the box's own writing
-    /// mode"; an omitted second keyword and the ambiguous ones resolve as
-    /// the grammar says, which `to_physical` does.
     pub(super) fn physical(value: PositionArea, containing_rtl: bool, self_rtl: bool) -> Self {
         let physical = value.to_physical(writing_mode(containing_rtl), writing_mode(self_rtl));
         let (mut horizontal, mut vertical) = (physical.first, physical.second);
-        // `to_physical` puts the horizontal keyword first; an axis-less
-        // keyword (`center`, `span-all`) may sit on either side of it.
         if horizontal.axis() == PositionAreaAxis::Vertical
             || vertical.axis() == PositionAreaAxis::Horizontal
         {
@@ -67,15 +59,11 @@ impl AreaKeywords {
     }
 }
 
-/// The start and end of the tracks `keyword` selects among the grid lines
-/// `lines` (§3.1.2): a single track, the center track plus one side
-/// (`span-*`), or all three (`span-all`). `None` keyword: all three.
 fn tracks(keyword: PositionAreaKeyword, lines: [f32; 4]) -> (f32, f32) {
     let (start, end) = track_lines(keyword);
     (lines[start], lines[end])
 }
 
-/// The indices of the grid lines `keyword`'s tracks start and end at.
 fn track_lines(keyword: PositionAreaKeyword) -> (usize, usize) {
     match keyword.track().unwrap_or(PositionAreaTrack::SpanAll) {
         PositionAreaTrack::Start => (0, 1),
@@ -87,10 +75,6 @@ fn track_lines(keyword: PositionAreaKeyword) -> (usize, usize) {
     }
 }
 
-/// Whether grid line `index` of [`grid_lines`]`(origin, containing,
-/// anchor_start, anchor_end)` is one of the default anchor box's own edges,
-/// and so moves with it: the two inner lines always, an outer line only
-/// where the anchor box reaches past the containing block's edge.
 fn anchor_line(index: usize, origin: f32, containing: f32, anchor: (f32, f32)) -> bool {
     match index {
         0 => anchor.0 < origin,
@@ -99,19 +83,6 @@ fn anchor_line(index: usize, origin: f32, containing: f32, anchor: (f32, f32)) -
     }
 }
 
-/// §3.1.1's four grid lines on one axis, from the pre-modification
-/// containing block `[0, containing]` and the default anchor box
-/// `[anchor_start, anchor_end]`:
-///
-/// > the start edge of the box's pre-modification containing block, or the
-/// > start edge of the default anchor box if that is more start-ward; the
-/// > start edge of the default anchor box; the end edge of the default anchor
-/// > box; the end edge of the box's pre-modification containing block, or the
-/// > end edge of the default anchor box if that is more end-ward.
-///
-/// Physical and logical order agree here: the lines are symmetric, so
-/// resolving the keywords to physical ones first (which flips the track of
-/// an `rtl` inline keyword) is the same as walking them in the writing mode.
 #[inline]
 fn grid_lines(origin: f32, containing: f32, anchor_start: f32, anchor_end: f32) -> [f32; 4] {
     [
@@ -122,9 +93,6 @@ fn grid_lines(origin: f32, containing: f32, anchor_start: f32, anchor_end: f32) 
     ]
 }
 
-/// The region of the position-area grid `keywords` select, in the
-/// coordinates of the pre-modification containing block `original` (which
-/// `anchor` shares): the box's new containing block.
 pub(super) fn position_area_region(
     keywords: AreaKeywords,
     original: Rect<f32>,
@@ -148,15 +116,9 @@ pub(super) fn position_area_region(
             anchor.origin.y + anchor.size.height,
         ),
     );
-    // The lines ascend: the containing block and (`AnchorMemo::rect`'s
-    // assertion) the anchor box have non-negative sizes.
     Rect::new(Point::new(left, top), Size::new(right - left, bottom - top))
 }
 
-/// Which edges of the region [`position_area_region`] selects — left,
-/// right, top, bottom — are the default anchor box's edges rather than the
-/// pre-modification containing block's: the edges a scroll of the anchor
-/// carries along (§3.3's default scroll shift moves them with the box).
 pub(super) fn position_area_carried(
     keywords: AreaKeywords,
     original: Rect<f32>,
@@ -188,21 +150,6 @@ pub(super) fn position_area_carried(
     }
 }
 
-/// §4.1's used value of `normal` self-alignment on `axis` of a box with a
-/// `position-area`, as physical-or-writing-mode-relative `AlignFlags` the
-/// absolute pass aligns with:
-///
-/// > If the only the center track in an axis is selected, the default
-/// > alignment in that axis is center. If all three tracks are selected, the
-/// > default alignment in that axis is anchor-center. Otherwise, the default
-/// > alignment in that axis is toward the non-specified side track: if it's
-/// > specifying the "start" track of its axis, the default alignment in that
-/// > axis is end; etc. However, if only one inset property in the relevant
-/// > axis is auto, the default alignment is instead towards the edge with the
-/// > non-auto inset; and this is an unsafe alignment.
-///
-/// `auto_insets` are the computed-`auto` flags of the start and end (left or
-/// top, right or bottom) insets.
 pub(super) fn area_default_alignment(
     keywords: AreaKeywords,
     axis: PhysicalAxis,
@@ -284,8 +231,6 @@ mod tests {
         );
     }
 
-    /// The anchor's own lines are carried, wherever they land; an outer line
-    /// only where the anchor reaches past the containing block.
     #[test]
     fn carried_lines_are_the_anchors_edges() {
         use PositionAreaKeyword as K;

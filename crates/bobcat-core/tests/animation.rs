@@ -19,15 +19,12 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 const SCRIPT_URL: &str = "app:///main.js";
 const STYLE_URL: &str = "app:///author.css";
 
-/// One 8x8 red square, animated by an author `@keyframes` rule.
 const SLIDER_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -45,8 +42,6 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     }
 }
 
-/// `.slider` plus a `slide` keyframes rule that translates it 16px right over
-/// one second, linearly.
 fn slider_sheet() -> PreparsedStyleSheet {
     PreparsedStyleSheet {
         rules: vec![
@@ -82,8 +77,6 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
         .with_preparsed_style_sheet(sheet)
 }
 
-/// A view built the only way there is to build one: its sheet and its entry
-/// module are its construction inputs.
 async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
     let fetcher = Rc::new(resources(slider_sheet()));
     let (mut view, painter) = solo_view(
@@ -104,7 +97,6 @@ async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
     (view, painter)
 }
 
-/// The x of the leftmost red pixel in the committed frame.
 fn red_left_edge(painter: &mut Painter) -> usize {
     let shot = painter.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
@@ -119,25 +111,17 @@ fn red_left_edge(painter: &mut Painter) -> usize {
         .expect("the animated square is painted")
 }
 
-/// A host that arranges nothing still gets a running animation: the view's
-/// timeline is the engine's, and no embedder API touches it.
 #[tokio::test]
 async fn a_view_animates_with_the_host_arranging_no_timeline() {
     let (_view, mut painter) = booted().await;
 
     tick(&mut painter, true).expect("first frame");
-    // The painter answers this over the frame that tick just read, so there
-    // is no reply to be ahead of.
     assert!(
         painter.is_animating(),
         "the engine's clock keeps the animation asking for frames"
     );
     let first = red_left_edge(&mut painter);
 
-    // A quarter of the 1s travel is 4px. The square is *not* asserted to have
-    // moved right: the animation is infinite, boot takes an unknown slice of
-    // the first second, and a sample near 16px wraps back to 0. Only that it
-    // moved at all, which no phase can fake at a quarter of a period.
     tokio::time::sleep(Duration::from_millis(250)).await;
     tick(&mut painter, true).expect("later frame");
     let later = red_left_edge(&mut painter);
@@ -148,15 +132,9 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
     );
 }
 
-/// The slider's `translateX` keyframes export as a curve, so the square
-/// moves between two captures with no tick in between — no frame post,
-/// no restyle, no commit: the same committed frame composed at two clock
-/// readings.
 #[tokio::test]
 async fn an_exported_curve_moves_pixels_between_commits() {
     let (_view, mut painter) = booted().await;
-    // The synchronizing tick promotes the pending animation to running,
-    // which is when the commit exports its curve.
     tick(&mut painter, true).expect("first frame");
 
     let first = red_left_edge(&mut painter);

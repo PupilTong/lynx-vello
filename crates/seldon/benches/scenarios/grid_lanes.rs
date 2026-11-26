@@ -22,8 +22,6 @@ fn lanes_fixture(width: f32, height: f32, extra: &str) -> LayoutFixture {
     LayoutFixture::new(Size::new(width.max(1.0), height.max(1.0)), &style)
 }
 
-/// Fixed-length lanes: the branch that builds no per-position sizing item at
-/// all, so the cost is placement and the per-item commit.
 fn fixed_lanes_fixture(item_count: usize) -> LayoutFixture {
     let count = item_count.max(1);
     let mut fixture = lanes_fixture(
@@ -43,10 +41,6 @@ fn fixed_lanes_fixture(item_count: usize) -> LayoutFixture {
     fixture.prepare()
 }
 
-/// The shape the Lynx `<list list-type="waterfall">` component lowers onto:
-/// `minmax(0, 1fr)` lanes and a zero tolerance, so every item lands in the
-/// strictly shortest lane. The flexible maximum makes every track consult its
-/// items, which is what puts the per-position clones on this path.
 fn waterfall_fixture(item_count: usize) -> LayoutFixture {
     let count = item_count.max(1);
     let mut fixture = lanes_fixture(
@@ -66,9 +60,6 @@ fn waterfall_fixture(item_count: usize) -> LayoutFixture {
     fixture.prepare()
 }
 
-/// Intrinsic lanes whose items overflow their own boxes: every track consults
-/// its items, and every item's scrollable overflow escapes into the
-/// container's.
 fn intrinsic_lanes_fixture(item_count: usize) -> LayoutFixture {
     let count = item_count.max(1);
     let mut fixture = lanes_fixture(
@@ -95,9 +86,6 @@ fn intrinsic_lanes_fixture(item_count: usize) -> LayoutFixture {
     fixture.prepare()
 }
 
-/// Mixed spans with a full-span item every eighth: each full-span item levels
-/// every lane, so the stacking pass alternates between a spread state and a
-/// flat one.
 fn mixed_span_fixture(item_count: usize) -> LayoutFixture {
     let count = item_count.max(1);
     let mut fixture = lanes_fixture(
@@ -122,9 +110,6 @@ fn mixed_span_fixture(item_count: usize) -> LayoutFixture {
     fixture.prepare()
 }
 
-/// One item in the middle of a waterfall goes dirty between passes. The lane
-/// every later item chooses follows its predecessors' sizes, so the pass has
-/// to re-place the whole tail even though only one item changed.
 #[derive(Debug)]
 struct DirtyItemFixture {
     fixture: LayoutFixture,

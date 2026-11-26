@@ -103,28 +103,18 @@ use terminus::link::{CustomElement, NodeId};
 
 use super::LynxDocument;
 
-/// Native's tag, and the tag a compiled `.web.bundle` writes.
 pub(super) const BLUR_VIEW_TAG: &str = "blur-view";
 pub(super) const X_BLUR_VIEW_TAG: &str = "x-blur-view";
 
 const BLUR_RADIUS_ATTRIBUTE: &str = "blur-radius";
 const BACKDROP_FILTER: &str = "backdrop-filter";
 
-/// Installs the component under both tag names. Must run before any element
-/// could carry either, which is [`Document::define`](terminus::link::Document::define)'s
-/// own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     for tag in [BLUR_VIEW_TAG, X_BLUR_VIEW_TAG] {
         document.define(tag, Box::new(BlurView));
     }
 }
 
-/// Reflects `blur-radius` into the element's `backdrop-filter` hint.
-///
-/// `attribute_changed_callback` is the whole component, for the same reason it
-/// is the whole of [`super::image`]'s: `__CreateElement` mints the element
-/// before `__SetAttribute` writes on it, so `constructed` could observe
-/// nothing, and a removal frees nothing that a disconnect would have to undo.
 struct BlurView;
 
 impl CustomElement<()> for BlurView {
@@ -144,9 +134,6 @@ impl CustomElement<()> for BlurView {
             name, BLUR_RADIUS_ATTRIBUTE,
             "`blur-view` observes `blur-radius` alone"
         );
-        // Clear before setting: a value the grammar rejects leaves the hint
-        // alone rather than removing it, so the previous radius would survive
-        // `blur-radius="abc"`. See the module docs.
         document.set_presentational_hint(element, BACKDROP_FILTER, "");
         let Some(radius) = new.map(str::trim).filter(|value| !value.is_empty()) else {
             return;
@@ -159,22 +146,6 @@ impl CustomElement<()> for BlurView {
     }
 }
 
-/// The CSS length the attribute's text names.
-///
-/// A finite, non-negative bare number is the only value rewritten, and it is
-/// rewritten to pixels: web-core's `parseFloat(v) + 'px'`, iOS's `doubleValue`
-/// read as points and Android's `UnitUtils` fallthrough (`Float.parseFloat` of
-/// the whole string) all agree that an unsuffixed `blur-radius` is pixels,
-/// while CSS has no unitless non-zero length. Everything else passes through
-/// for the cascade to accept or reject — a unit this engine knows resolves, and
-/// `abc`, `-4px` or `10qq` reach no hint at all.
-///
-/// Reflecting the *parsed* number rather than appending `px` to the text is
-/// what keeps the number spellings CSS does not share honest: `5.` is a number
-/// to `parseFloat` and to Rust but not a CSS one, so glued text would have
-/// produced a declaration the cascade throws away where both references blur
-/// by 5. It also keeps `inf` and `NaN` — which `f32::from_str` accepts and
-/// `parseFloat` does not — out of the declaration entirely.
 fn blur_length(value: &str) -> Cow<'_, str> {
     match value.parse::<f32>() {
         Ok(number) if number.is_finite() && number >= 0.0 => Cow::Owned(format!("{number}px")),
@@ -191,20 +162,11 @@ mod tests {
     use super::super::test_support::{child, document, element_under, style_of};
     use super::{BLUR_RADIUS_ATTRIBUTE, BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 
-    /// Every tag this module defines.
     const TAGS: [&str; 2] = [BLUR_VIEW_TAG, X_BLUR_VIEW_TAG];
 
-    /// `1rpx` is the viewport width over 750, and every viewport-derived
-    /// length truncates onto Stylo's 1/60 px `Au` grid:
-    /// `(393 * 60 * 20 / 750).trunc() / 60`. That truncation is why this is
-    /// not `20 * 393 / 750 = 10.48`.
     const TWENTY_RPX: f32 = 628.0 / 60.0;
-    /// The same arithmetic with `vw`'s denominator: `(393 * 60 * 2 / 100)`
-    /// truncates to 471 au, not the 471.6 that `393 * 0.02` would give.
     const TWO_VW: f32 = 471.0 / 60.0;
 
-    /// The one `blur()` radius the element's computed `backdrop-filter`
-    /// carries, in CSS pixels, or `None` for the initial `none`.
     fn blur_radius(document: &LynxDocument, element: NodeId) -> Option<f32> {
         let style = style_of(document, element);
         let filters = &style.get_effects().backdrop_filter.0;
@@ -218,8 +180,6 @@ mod tests {
         })
     }
 
-    /// A blur view with `blur-radius` written the way script writes it, laid
-    /// out so its computed style is available.
     fn blurred(document: &mut LynxDocument, tag: &str, style: &str, radius: &str) -> NodeId {
         let element = child(document, tag, style);
         document.set_attribute(element, BLUR_RADIUS_ATTRIBUTE, radius);
@@ -241,10 +201,6 @@ mod tests {
         }
     }
 
-    /// The bare-number path reflects the parsed *number*, not the text, so
-    /// however the page spelled it the radius is the same. `5.` is the one in
-    /// this list CSS itself would have rejected with `px` glued on — the
-    /// others pin that nothing else about the spelling survives either.
     #[test]
     fn a_number_is_a_radius_however_it_is_spelled() {
         for (written, expected) in [
@@ -264,8 +220,6 @@ mod tests {
         }
     }
 
-    /// The ruling this module exists to implement: the value is a CSS length,
-    /// so the cascade resolves its unit instead of a `parseFloat` dropping it.
     #[test]
     fn a_unit_resolves_through_the_cascade() {
         let mut document = document();
@@ -291,9 +245,6 @@ mod tests {
         );
     }
 
-    /// A removal, an empty value and a value the grammar rejects all mean no
-    /// blur — and they have to mean it *after* a valid radius, which is the
-    /// case a plain `set_presentational_hint` would get wrong.
     #[test]
     fn a_missing_or_rejected_radius_leaves_no_backdrop_filter() {
         for tag in TAGS {
@@ -315,9 +266,6 @@ mod tests {
                 "removing the attribute removes the hint: {tag}"
             );
 
-            // `none` is in the list on purpose: the attribute names a radius,
-            // never a whole `backdrop-filter` value, so the CSS keyword that
-            // would have parsed as one is text like any other.
             for rejected in [
                 "", " ", "abc", "-4px", "-4", "10qq", "inf", "NaN", "none", "25px)",
             ] {
@@ -337,10 +285,6 @@ mod tests {
         }
     }
 
-    /// The value reaches the cascade as one declaration's value, never as
-    /// declaration *text*, so a radius carrying `;` or `)` cannot open a
-    /// second declaration: the whole value fails to parse and the hint stays
-    /// empty.
     #[test]
     fn a_radius_cannot_smuggle_in_a_second_declaration() {
         let mut document = document();
@@ -361,8 +305,6 @@ mod tests {
         );
     }
 
-    /// Whitespace around the value is the page's formatting, not part of the
-    /// length — and `trim` is the only normalization the reflection does.
     #[test]
     fn a_padded_radius_is_the_same_radius() {
         let mut document = document();
@@ -370,8 +312,6 @@ mod tests {
         assert_eq!(blur_radius(&document, element), Some(7.0));
     }
 
-    /// The hint is at [`CascadeOrigin::PresHints`], so the author wins — which
-    /// is also what web-core's per-instance `:host` rule does.
     #[test]
     fn author_style_outranks_the_attribute() {
         let mut document = document();
@@ -401,12 +341,6 @@ mod tests {
         );
     }
 
-    /// The attribute reflection is the tag's, which is why it is a
-    /// `CustomElement` and not an attribute hook keyed on the name: a
-    /// `blur-radius` written on a `view` — or on an `image`, where web-core
-    /// spends the very same attribute name on a `filter: blur()` of the
-    /// picture itself through `--blur-radius` (`XImage/ImageSrc.ts:40-43`,
-    /// `x-image.css:20-22`) — must not blur a backdrop.
     #[test]
     fn a_blur_radius_on_another_tag_is_not_a_backdrop_filter() {
         let mut document = document();
@@ -418,12 +352,6 @@ mod tests {
         }
     }
 
-    /// A blurred box is a stacking context and an absolute/fixed containing
-    /// block, filter-effects-2 §2.1, and it has to become one from the
-    /// *attribute* just as it does from author CSS. The fixed child is the
-    /// observable half of that: `rounded_layout` reports a parent-relative
-    /// location, so a child resolving against the viewport instead would land
-    /// at `10 - 60 = -50`.
     #[test]
     fn a_blurred_box_captures_its_fixed_descendants() {
         for (radius, expected) in [("25", 10.0), ("", -50.0)] {
@@ -453,10 +381,6 @@ mod tests {
         }
     }
 
-    /// Children are ordinary content: web-core's template is
-    /// `<style id="dynamic-style"></style><slot></slot>`, so everything
-    /// written inside a blur view renders, and native's `insertChild` puts
-    /// each child view into the effect view's `contentView`.
     #[test]
     fn a_blur_view_lays_its_children_out() {
         for tag in TAGS {
@@ -474,8 +398,6 @@ mod tests {
         }
     }
 
-    /// Both tags are one component, so a page can write either and a bundle
-    /// mixing them is not a special case.
     #[test]
     fn the_two_tag_names_behave_identically() {
         let mut document = document();

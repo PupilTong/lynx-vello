@@ -24,12 +24,6 @@ pub(crate) fn z_index_applies(position: PositionProperty, is_item: bool) -> bool
     position != PositionProperty::Static || is_item
 }
 
-/// `node` carries the animation driver's `animates` bits, and lets the
-/// containment trigger read the same `skips_contents` answer layout does.
-/// The latter cannot change this predicate's result — `effective_containment`
-/// gives a `content-visibility: auto` box `LAYOUT | PAINT` whether or not it
-/// is skipping, and the skip bit adds only `SIZE` — but deriving the same fact
-/// two ways is how the two halves of the pipeline drift apart.
 pub(crate) fn establishes_stacking_context<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -50,9 +44,6 @@ pub(crate) fn establishes_stacking_context<T>(
         return true;
     }
     let effects = style.get_effects();
-    // filter-effects-1 §2.1 for `filter`, filter-effects-2 §2.1 for
-    // `backdrop-filter`: a non-`none` computed value on either is a stacking
-    // context trigger.
     if !effects.filter.0.is_empty() || !effects.backdrop_filter.0.is_empty() {
         return true;
     }
@@ -82,9 +73,6 @@ pub(crate) fn establishes_stacking_context<T>(
     if z_applies && will_change.intersects(WillChangeBits::Z_INDEX) {
         return true;
     }
-    // web-animations-1: a current or in-effect `opacity` or `transform`
-    // animation acts as `will-change` naming it, whether or not its curve
-    // exports, so paint order is the same on either side of the handover.
     if node.animates_opacity() || node.animates_transform() {
         return true;
     }
@@ -105,11 +93,6 @@ pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
     let effects = style.get_effects();
     effects.opacity < 1.0
         || !effects.filter.0.is_empty()
-        // `backdrop-filter` needs a layer of its own even though it paints
-        // nothing of the element: filter-effects-2 §2.1 puts the filtered
-        // backdrop image inside the element's effect layer, so this element's
-        // `opacity`, `filter`, `clip-path` and `mask-image` apply to the
-        // backdrop and to the element's own painting together.
         || !effects.backdrop_filter.0.is_empty()
         || effects.mix_blend_mode != MixBlendMode::Normal
         || style.get_svg().clip_path != ClipPath::None

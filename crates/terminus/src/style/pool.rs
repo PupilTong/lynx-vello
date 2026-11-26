@@ -47,31 +47,14 @@ use std::{fmt, io};
 use stylo::parallel::STYLE_THREAD_STACK_SIZE_KB;
 use stylo::thread_state;
 
-/// The most threads one pool may hold, the flushing thread included.
-///
-/// Stylo's `ScopedTLS` — the per-traversal home of every thread's
-/// `ThreadLocalStyleContext` — is a fixed-length array indexed by rayon's
-/// thread index, and its length is Stylo's own private `STYLO_MAX_THREADS`.
-/// A wider pool indexes past the end of that array, so this is a hard
-/// ceiling rather than a tuning knob, and it has to track that constant.
-///
-/// Stylo caps its own pool at the same six, counted the same way, and for a
-/// reason of its own: the benefit of more threads levels off there.
 pub const MAX_STYLE_THREADS: usize = 6;
 
-/// Names each pool's threads apart, so a process hosting several views can
-/// tell whose workers are whose in a profile or a backtrace.
 static NEXT_STYLE_POOL: AtomicU64 = AtomicU64::new(0);
 
-/// Why a pool could not be built.
 #[derive(Debug)]
 pub enum StylePoolError {
-    /// More workers were asked for than [`MAX_STYLE_THREADS`].
     TooManyThreads(usize),
-    /// A worker thread could not be started.
     Spawn(String),
-    /// This thread already took over a pool. Rayon's takeover is permanent,
-    /// so a thread gets one pool for its whole life.
     ThreadAlreadyPooled,
 }
 
@@ -92,14 +75,6 @@ impl fmt::Display for StylePoolError {
 
 impl std::error::Error for StylePoolError {}
 
-/// One managed pool thread, before it runs.
-///
-/// Index zero is never one of these: that member is the flushing thread,
-/// taken over in place rather than started.
-///
-/// The seam an embedder whose threads are not `std::thread`'s needs: a Wasm
-/// host spawns a Worker and calls [`StyleWorker::run`] inside it. Wrapping
-/// rayon's own builder keeps that dependency out of this crate's public API.
 pub struct StyleWorker(rayon::ThreadBuilder);
 
 impl fmt::Debug for StyleWorker {
@@ -113,67 +88,38 @@ impl fmt::Debug for StyleWorker {
 }
 
 impl StyleWorker {
-    /// The name the thread should carry.
     #[must_use]
     pub fn name(&self) -> Option<&str> {
         self.0.name()
     }
 
-    /// The stack the thread needs; Stylo's recursive matching sizes it.
     #[must_use]
     pub fn stack_size(&self) -> Option<usize> {
         self.0.stack_size()
     }
 
-    /// Runs the worker loop. Returns when the pool that owns it is dropped.
     pub fn run(self) {
         self.0.run();
     }
 }
 
-/// One thread's style threads, one of which is that thread itself.
-///
-/// Dropping it retires the managed members; they exit once the work they hold
-/// finishes, and nothing waits for them. What rayon leaked to take over the
-/// flushing thread is not reclaimed.
 #[derive(Debug)]
 pub struct StylePool {
     pool: rayon::ThreadPool,
 }
 
 impl StylePool {
-    /// The pool size a machine with this much parallelism gets, the flushing
-    /// thread included: Stylo's own heuristic — three quarters of it, under
-    /// [`MAX_STYLE_THREADS`] — with Stylo's own arithmetic and Stylo's own
-    /// meaning for the number.
-    ///
-    /// `None` at one, where the pool would hold the flushing thread and
-    /// nothing else; that document traverses on the flushing thread with no
-    /// pool at all, which is the same work on the same thread for none of the
-    /// bookkeeping. Stylo cuts off at the same place for the same reason.
-    ///
-    /// Every target computes this from the same function, so a Wasm view and
-    /// a native view on comparable hardware get the same pool. The input is
-    /// what differs: `std::thread::available_parallelism` cannot answer on
-    /// Wasm, so the embedder passes `navigator.hardwareConcurrency` here
-    /// instead of doing arithmetic of its own.
     #[must_use]
     pub fn thread_count_for(available: usize) -> Option<NonZeroUsize> {
         NonZeroUsize::new((available * 3 / 4).min(MAX_STYLE_THREADS))
             .filter(|count| count.get() > 1)
     }
 
-    /// [`StylePool::thread_count_for`] this machine's own parallelism.
-    ///
-    /// `None` on every target whose parallelism the standard library cannot
-    /// answer for, Wasm among them.
     #[must_use]
     pub fn default_thread_count() -> Option<NonZeroUsize> {
         Self::thread_count_for(std::thread::available_parallelism().ok()?.get())
     }
 
-    /// Builds a pool the calling thread joins, using this runtime's threads
-    /// for the rest of it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_threads(threads: NonZeroUsize) -> Result<Self, StylePoolError> {
         Self::with_spawn_handler(threads, |worker| {
@@ -188,18 +134,6 @@ impl StylePool {
         })
     }
 
-    /// Builds a pool that the calling thread joins as index zero and that
-    /// `spawn` starts the other `threads - 1` members of.
-    ///
-    /// **Call this on the thread that will flush the document.** That thread
-    /// is taken over in place and permanently: it runs the root closure of
-    /// every traversal inline, it can never join a second pool, and about
-    /// 25 KB of it is never reclaimed. The module documentation says why that
-    /// is the affordable side of the trade.
-    ///
-    /// Construction does not wait for the other members to come up: rayon
-    /// primes the pool lazily, so a host that cannot block — or whose threads
-    /// are Workers that boot asynchronously — is not asked to.
     pub fn with_spawn_handler<S>(
         threads: NonZeroUsize,
         mut spawn: S,
@@ -221,9 +155,6 @@ impl StylePool {
             .spawn_handler(move |thread| spawn(StyleWorker(thread)))
             .build()
             .map_err(|error| {
-                // Rayon reports the refusal to take over a thread twice the
-                // same way it reports a spawn failure, so it is read back out
-                // of the message rather than matched on a private kind.
                 if error
                     .to_string()
                     .contains("already part of another thread pool")
@@ -236,7 +167,6 @@ impl StylePool {
         Ok(Self { pool })
     }
 
-    /// How many threads the pool holds, the flushing thread included.
     #[must_use]
     pub fn thread_count(&self) -> usize {
         self.pool.current_num_threads()

@@ -12,7 +12,6 @@ use crate::layout::box_parent;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
-/// One axis of the sticky view rectangle and its containing-block limit.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StickyAxis {
     normal_start: f32,
@@ -22,13 +21,10 @@ pub(crate) struct StickyAxis {
     inset_start: Option<f32>,
     inset_end: Option<f32>,
     scrollport_size: f32,
-    /// Whether the physical low edge is the logical end edge.
     end_is_start: bool,
 }
 
 impl StickyAxis {
-    /// The box's own displacement, excluding the displacement inherited from
-    /// sticky ancestors between its containing block and this scrollport.
     pub(crate) fn offset(self, scroll: f32, ancestor_shift: f32) -> f32 {
         if self.inset_start.is_none() && self.inset_end.is_none() {
             return 0.0;
@@ -46,8 +42,6 @@ impl StickyAxis {
         shift.clamp(min, max)
     }
 
-    /// The view rectangle's insets `(start, end)`, a box larger than the
-    /// rectangle taking the deficit off its logical end.
     fn edges(self) -> (f32, f32) {
         let mut start = self.inset_start.unwrap_or(0.0);
         let mut end = self.inset_end.unwrap_or(0.0);
@@ -60,15 +54,9 @@ impl StickyAxis {
         (start, end)
     }
 
-    /// Every `scroll - ancestor_shift` at which [`Self::offset`] may change
-    /// slope. The offset is piecewise linear in that difference, with slopes
-    /// 0 and 1, and constant outside these points; the list may hold points
-    /// where nothing changes.
     pub(crate) fn kinks(self) -> [f32; 6] {
         let (start, end) = self.edges();
         let (min, max) = self.offset_bounds();
-        // Where `start - normal` and `scrollport - end - size - normal` cross
-        // zero, and where each reaches a travel bound.
         let from_start = self.normal_start - start;
         let from_end = self.normal_start + self.size + end - self.scrollport_size;
         [
@@ -81,8 +69,6 @@ impl StickyAxis {
         ]
     }
 
-    /// Conservative travel bounds, also used to retain ink that can become
-    /// visible later without rebuilding a frame.
     pub(crate) fn offset_bounds(self) -> (f32, f32) {
         (
             if self.inset_end.is_some() {
@@ -142,7 +128,6 @@ fn scrollport_axis<T>(document: &Document<T>, scroller: Option<NodeId>, axis: us
 
 fn containing_block<T>(document: &Document<T>, id: NodeId, parent: Option<&Node<T>>) -> Edges<f32> {
     if let Some(bounds) = document.sticky_containing_block(id) {
-        // A grid item: its area, recorded by the layout run.
         return bounds;
     }
     let Some((parent, layout)) = parent.and_then(|node| {
@@ -181,8 +166,6 @@ fn containing_block<T>(document: &Document<T>, id: NodeId, parent: Option<&Node<
     }
 }
 
-/// Resolve the CSS constraints once when the frame is built. A missing
-/// scroll node selects the viewport; each axis may select a different node.
 pub(crate) fn axes<T>(
     document: &Document<T>,
     id: NodeId,
@@ -198,8 +181,6 @@ pub(crate) fn axes<T>(
         .expect("a sticky box has style");
     let position = style.get_position();
     let margin_style = style.get_margin();
-    // WPT position-sticky-margins-002/003: an auto margin contributes zero
-    // to sticky limits, even if flex/grid distributed free space into it.
     let used_margin = |margin: &Margin, resolved| {
         if matches!(margin, Margin::Auto) {
             0.0
@@ -256,9 +237,6 @@ pub(crate) fn axes<T>(
                 )
             };
         let (scrollport_start, scrollport_size) = scrollport_axis(document, scroller, axis);
-        // css-position-3's position box reduces a margin to the distance
-        // between that margin edge and the containing-block edge when that
-        // distance is smaller. Keep signed values, including negative margins.
         let start_margin = margin_start.min(normal - margin_start - cb_start);
         let end_margin = margin_end.min(cb_end - normal - size - margin_end);
         StickyAxis {
@@ -266,9 +244,6 @@ pub(crate) fn axes<T>(
             size,
             min_offset: cb_start + start_margin - normal,
             max_offset: cb_end - end_margin - normal - size,
-            // A sticky box is not absolutely positioned, so an
-            // `anchor-size()` inset takes its fallback, or leaves the side
-            // `auto` without one.
             inset_start: seldon::compute::used_inset(low, Some(scrollport_size)),
             inset_end: seldon::compute::used_inset(high, Some(scrollport_size)),
             scrollport_size,
@@ -277,8 +252,6 @@ pub(crate) fn axes<T>(
     })
 }
 
-/// Samples one box's own shift for the untransformed geometry API. Memoizing
-/// ancestor samples keeps a chain of nested sticky boxes linear in samples.
 pub(crate) fn live_offset<T>(
     document: &Document<T>,
     id: NodeId,
@@ -366,9 +339,6 @@ mod tests {
             end_is_start: true,
             ..ltr
         };
-        // The 200px box cannot fit between 20px and 90px. LTR preserves the
-        // left inset; RTL preserves the right inset, allowing the opposite
-        // edge to overflow rather than forcing the box back and forth.
         assert_eq!(ltr.offset(0.0, 0.0), 20.0);
         assert_eq!(rtl.offset(0.0, 0.0), -110.0);
         assert_eq!(ltr.offset(50.0, 0.0), 70.0);

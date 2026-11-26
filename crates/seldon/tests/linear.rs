@@ -762,12 +762,10 @@ fn content_independent_contained_measure_skips_children_but_noncontained_keeps_b
         (output, tree.child_layout_calls.get())
     };
 
-    // A caller that reads the first baseline gets the child's, probed.
     let (noncontained, noncontained_calls) = run(Contain::empty(), true);
     assert_eq!(noncontained.first_baseline, Some(7.0));
     assert_eq!(noncontained_calls, 2);
 
-    // One that does not read it gets no probe of the fixed-size child.
     let (unread, unread_calls) = run(Contain::empty(), false);
     assert_eq!(unread.size, noncontained.size);
     assert_eq!(unread_calls, 1);
@@ -825,7 +823,6 @@ fn a_probed_linear_item_is_asked_for_its_own_first_baseline() {
         )
         .reading_first_baseline(true),
     );
-    // The leaf's 7px, not the inner column's synthesized 10px bottom edge.
     assert_eq!(output.first_baseline, Some(7.0));
 }
 
@@ -2004,9 +2001,6 @@ fn aspect_ratio_transfers_percentage_definiteness_across_axes() {
 
 #[test]
 fn a_scrolling_linear_container_counts_its_items_margin_areas() {
-    // web-core lowers `display: linear` to `display: flex`, whose items'
-    // margin areas css-overflow-3 §3.3 adds to a scroll container's
-    // scrollable overflow: border boxes end at 180, the last margin at 200.
     use stylo::values::computed::Overflow;
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 60.0, 20.0);

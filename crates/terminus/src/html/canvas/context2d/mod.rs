@@ -64,24 +64,16 @@ pub use style::{
 };
 pub use text::TextMetrics;
 
-/// The exception a call throws, named as the standard names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasError {
-    /// `DOMException` `IndexSizeError`.
     IndexSize,
-    /// `DOMException` `InvalidStateError`.
     InvalidState,
-    /// `DOMException` `SyntaxError`.
     Syntax,
-    /// ECMAScript `TypeError`.
     Type,
-    /// ECMAScript `RangeError`.
     Range,
 }
 
 impl CanvasError {
-    /// The exception's name: the `DOMException` name, or the ECMAScript
-    /// error constructor's.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -93,8 +85,6 @@ impl CanvasError {
         }
     }
 
-    /// Whether the JavaScript layer throws a `DOMException` (rather than an
-    /// ECMAScript error object).
     #[must_use]
     pub fn is_dom_exception(self) -> bool {
         matches!(self, Self::IndexSize | Self::InvalidState | Self::Syntax)

@@ -29,7 +29,6 @@ fn the_footprint_counts_live_elements_and_not_text() {
     assert_eq!(grown.node_stride_bytes, start.node_stride_bytes);
     assert!(grown.slot_bound >= grown.live_elements);
 
-    // A removal frees nothing; a drop does.
     let last = doc.el(root, "box");
     doc.dom.remove_element(last);
     assert_eq!(

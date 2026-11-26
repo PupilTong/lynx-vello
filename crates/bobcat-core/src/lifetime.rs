@@ -95,47 +95,15 @@ use crate::jobs::{JobKind, JsThreadHandle, JsThreadName};
 use crate::link::HostOutbox;
 use crate::performance::{EntryTypes, LongTaskEntry, PerformanceEntry, Timestamp, WorkerAudience};
 
-/// The tasks that act on one realm-owning object, the one signal that ends
-/// them, and the latch that says whether this thread has ended it.
-///
-/// `!Sync` — the `Cell`s and the `RefCell`. It is only ever reached through an
-/// `Rc` inside a `!Send` owner on the `LocalSet`'s thread, which is what keeps
-/// it with the realm its tasks enter.
 pub(crate) struct Lifetime {
-    /// Every task of the object. Borrowed only inside synchronous calls and
-    /// inside single polls, never across an `.await`, which is why a task can
-    /// spawn a sibling while the owner is parked on the set.
     tasks: RefCell<JoinSet<()>>,
-    /// The end signal every thread can read and cancel.
     token: CancellationToken,
-    /// The end as this thread knows it. See the module doc: this is what an
-    /// entry checks, and the token is not.
     ended: Cell<bool>,
-    /// The latch the one report that ends the object goes through: a view's
-    /// `StartupFailed`, a worker's `Failed` or `Closed`.
-    ///
-    /// The first report wins, so one failure is one report and a worker's
-    /// `Failed` and `Closed` cannot both arrive. Every other script failure
-    /// is reported where it happens and leaves the object running.
     terminal_reported: Cell<bool>,
-    /// The latch the one payload-bearing panic report goes through.
-    ///
-    /// Separate from [`Self::terminal_reported`], which a `StartupFailed` or
-    /// a worker's `Failed` has already spent by the time a task traps: a panic
-    /// is reported whatever else was reported before it, and exactly once.
-    /// [`Self::serve`], [`Self::reap`] and a panic the owner caught inside its
-    /// own entry boundary all share this one.
     panic_reported: Cell<bool>,
-    /// This realm's earliest armed timer, for [`serve_clock`]. Republished only
-    /// when it moves, so no `Sleep` is rebuilt for a wake that changed nothing.
     deadline: watch::Sender<Option<ClockInstant>>,
-    /// The runtime-wide checkpoint generation as of this object's own last
-    /// entry, which is what lets [`serve_clock`] ignore its own bumps.
     own_checkpoint: Cell<u64>,
-    /// The engine thread this object's tasks run on and its jobs queue on.
     thread: JsThreadHandle,
-    /// How many times the object's epilogue has run, for the tests that count
-    /// the wakes a view or a worker answers.
     #[cfg(test)]
     epilogues: Cell<u64>,
 }
@@ -156,37 +124,14 @@ impl Lifetime {
         }
     }
 
-    /// The engine thread this object belongs to, which is what its entries are
-    /// queued on and what a synchronous host member parks on.
     pub(crate) const fn thread(&self) -> &JsThreadHandle {
         &self.thread
     }
 
-    /// Starts one more task of this object.
-    ///
-    /// The future is taken as it is. What a panic in it costs the object is
-    /// the *owner's* business — a frame post to acknowledge — so the guard
-    /// that ends the object during the unwind is [`EndOnUnwind`], which
-    /// [`crate::realm::owner::spawn`] wraps the future in: it holds the
-    /// object, where anything stored here would be an `Rc` cycle through the
-    /// object that holds this.
-    ///
-    /// The set is named explicitly rather than read out of the ambient
-    /// context, because this is also called from an epilogue — which is job
-    /// context, where `JoinSet::spawn_local` would panic.
     pub(crate) fn spawn(&self, future: impl Future<Output = ()> + 'static) {
         self.thread.spawn_into(&mut self.tasks.borrow_mut(), future);
     }
 
-    /// Ends the object, once. `true` for the call that did it.
-    ///
-    /// Synchronous, because the latch is what makes an end immediate: every
-    /// entry point returns at once when it is set, and the owner's abort only
-    /// reclaims the tasks rather than being what stops them.
-    ///
-    /// The deadline is withdrawn here, during the end rather than after it: a
-    /// realm that has ended fires no timer, and publishing `None` is what wakes
-    /// [`serve_clock`], whose own end check then returns it.
     pub(crate) fn end(&self) -> bool {
         if self.ended.replace(true) {
             return false;
@@ -201,10 +146,6 @@ impl Lifetime {
         self.ended.get()
     }
 
-    /// Publishes this realm's earliest armed timer, for the clock task to wait
-    /// out. Republished only when it moved, because a `Sleep` registers with
-    /// the platform's timer on its first poll and one per wake would leave a
-    /// registration behind per wake.
     pub(crate) fn arm_deadline(&self, deadline: Option<ClockInstant>) {
         self.deadline.send_if_modified(|armed| {
             if *armed == deadline {
@@ -215,19 +156,14 @@ impl Lifetime {
         });
     }
 
-    /// Records the generation this object's own entry ran the shared job queue
-    /// up to, which is what the clock task compares a bump against.
     pub(crate) fn record_checkpoint(&self, generation: u64) {
         self.own_checkpoint.set(generation);
     }
 
-    /// A second reader on the armed deadline, for the clock task.
     pub(crate) fn deadlines(&self) -> watch::Receiver<Option<ClockInstant>> {
         self.deadline.subscribe()
     }
 
-    /// This realm's earliest armed timer, for a test that pins the end
-    /// withdrawing it.
     #[cfg(test)]
     pub(crate) fn armed_deadline(&self) -> Option<ClockInstant> {
         *self.deadline.borrow()
@@ -237,38 +173,24 @@ impl Lifetime {
         &self.token
     }
 
-    /// Whether this is the first report that ends the object. `true` exactly
-    /// once, for whichever end was reported first.
     pub(crate) fn report_terminal(&self) -> bool {
         !self.terminal_reported.replace(true)
     }
 
-    /// Whether this is the first panic report of the object's life. `true`
-    /// exactly once, for whichever of the owner's paths saw the panic first.
     pub(crate) fn report_panic(&self) -> bool {
         !self.panic_reported.replace(true)
     }
 
-    /// Counts one run of the object's epilogue.
     #[cfg(test)]
     pub(crate) fn count_epilogue(&self) {
         self.epilogues.set(self.epilogues.get() + 1);
     }
 
-    /// How many times the object's epilogue has run.
     #[cfg(test)]
     pub(crate) fn epilogue_count(&self) -> u64 {
         self.epilogues.get()
     }
 
-    /// The owner's one wait: the end, or the next task to finish.
-    ///
-    /// Returns when the token is cancelled — by this thread's own [`Self::end`]
-    /// or by an embedder releasing what owns this — or when the set is empty,
-    /// which is every task of the object having returned. A task that returned
-    /// normally is nothing to answer; a task that panicked hands its payload to
-    /// `on_panic`; an aborted task is ignored, since the abort is the owner's
-    /// own doing.
     pub(crate) async fn serve(&self, on_panic: &mut dyn FnMut(Box<dyn Any + Send>)) {
         loop {
             let finished = tokio::select! {
@@ -280,12 +202,6 @@ impl Lifetime {
         }
     }
 
-    /// Aborts every task of the object and drains the set.
-    ///
-    /// The abort is what makes a parked task return; the latch is what already
-    /// stopped it from doing anything. Awaiting each of them is what makes the
-    /// owner the last holder of the object: a task holds an `Rc` of it until
-    /// its future is dropped.
     pub(crate) async fn reap(&self, on_panic: &mut dyn FnMut(Box<dyn Any + Send>)) {
         self.tasks.borrow_mut().abort_all();
         while let Some(finished) = self.join_next().await {
@@ -293,69 +209,30 @@ impl Lifetime {
         }
     }
 
-    /// The next task of this object to finish, `None` for a set that is empty.
-    ///
-    /// Hand-polled rather than `JoinSet::join_next`, because that takes the set
-    /// by `&mut` for the whole of an `.await` while a task of this object may
-    /// be spawning a sibling into it. Here the `RefMut` lives inside one poll:
-    /// polling a `JoinHandle` runs no task, so nothing of this object's can be
-    /// entered while it is held.
     fn join_next(&self) -> impl Future<Output = Option<Result<(), JoinError>>> {
         poll_fn(|context| self.tasks.borrow_mut().poll_join_next(context))
     }
 
-    /// How many tasks the set still holds, finished-and-unjoined included.
     #[cfg(test)]
     pub(crate) fn task_count(&self) -> usize {
         self.tasks.borrow().len()
     }
 }
 
-/// What [`serve_clock`], [`EndOnUnwind`] and [`run_job`] need of the object
-/// they serve: its [`Lifetime`], the epilogue a wake that carries no operation
-/// runs, the end, how a panic in one of its jobs is reported, and where a job
-/// that ran long is recorded.
-///
-/// Implemented once, by a blanket impl over every
-/// [`RealmOwner`](crate::realm::owner::RealmOwner) beside the driver functions
-/// it forwards to: the view's `Page` and the worker's `Worker`, which is every
-/// realm-owning object there is. The last three are associated functions over
-/// an `Rc` rather than methods, because every caller here holds the object
-/// that way and the settle queues a job, which needs one.
 pub(crate) trait Settles: Sized + 'static {
     fn lifetime(&self) -> &Lifetime;
 
-    /// The engine thread this object's jobs run on.
     const THREAD: JsThreadName;
 
-    /// The object's view outbox: its registry holds the long task monitor,
-    /// and its wake is the embedder's turn that reports a long task.
     fn outbox(&self) -> &HostOutbox;
 
-    /// Runs the epilogue alone, for a wake that carries no operation of its
-    /// own, as a job of `kind`. A job, so the caller waits for it: see
-    /// [`serve_clock`]. `None` is an epilogue that never ran, which the one
-    /// caller has nothing to do about.
     fn settle(owner: &Rc<Self>, kind: JobKind) -> impl Future<Output = Option<()>>;
 
-    /// Ends the object and everything that end owes.
     fn end(owner: &Rc<Self>);
 
-    /// Reports a panic as this object's, and ends it.
     fn trapped(owner: &Rc<Self>, payload: &(dyn Any + Send));
 }
 
-/// Queues one job of `owner`'s, of `kind`, and answers with what it
-/// returned.
-///
-/// The whole body runs under one `catch_unwind`, because a job runs in the
-/// engine thread's top loop rather than inside a task: an escaping panic would
-/// unwind the thread instead of the one object it belongs to. `None` is a job
-/// that trapped, or one that never ran because the thread was already over.
-///
-/// The long task monitor times the job here, around the `catch_unwind`, so a
-/// job that trapped is recorded too when it ran long. With the monitor off
-/// this is one atomic load per job and no clock reading.
 pub(crate) fn run_job<S, T, B>(
     owner: &Rc<S>,
     kind: JobKind,
@@ -402,28 +279,6 @@ where
     async move { answer.await.flatten() }
 }
 
-/// One realm's whole wait on its clock: the deadline it armed, and a sibling's
-/// entry into JavaScript.
-///
-/// The `select!` is this task's own wait and dispatches nothing — each arm ends
-/// in the owner's epilogue, which is what fires the timers a passed deadline
-/// named and commits what a continuation changed. One `Sleep` for the whole
-/// task, re-armed only when the deadline moved.
-///
-/// The checkpoint arm exists because the promise-job queue is the *runtime's*:
-/// a sibling's checkpoint drains this realm's jobs too, so an import of this
-/// realm's may have finished inside an entry that had nothing to do with it,
-/// and what that continuation arms is a deadline only this owner's epilogue
-/// publishes. Equality with the generation [`Lifetime::record_checkpoint`]
-/// recorded is what keeps this object's own bumps from waking it.
-///
-/// Each settle is *awaited*, which is what keeps this a wait rather than a
-/// producer: the deadline a settle's epilogue republishes is not visible until
-/// its job has run, so a turn that looped without waiting would re-read the
-/// deadline it just passed, re-arm an already-expired sleep, and queue settles
-/// without bound for as long as another job held the thread.
-///
-/// Returning is this object having ended, or either watch having been closed.
 pub(crate) async fn serve_clock<S: Settles>(
     owner: Rc<S>,
     mut deadlines: watch::Receiver<Option<ClockInstant>>,
@@ -435,8 +290,6 @@ pub(crate) async fn serve_clock<S: Settles>(
         if owner.lifetime().ended() {
             return;
         }
-        // Copied out: nothing holds a `Ref` of the watch across the awaits
-        // below.
         let deadline = *deadlines.borrow_and_update();
         if deadline != armed {
             if let Some(deadline) = deadline {
@@ -446,8 +299,6 @@ pub(crate) async fn serve_clock<S: Settles>(
         }
         tokio::select! {
             () = &mut sleep, if armed.is_some() => {
-                // Consumed: the next turn arms a wait of its own rather than
-                // polling this one again.
                 armed = None;
                 let _ = S::settle(&owner, JobKind::Timer).await;
             }
@@ -465,14 +316,6 @@ pub(crate) async fn serve_clock<S: Settles>(
     }
 }
 
-/// Ends the object if the task it guards is unwinding.
-///
-/// It holds the object rather than its [`Lifetime`] because what an end owes is
-/// the object's — a view's pending frame post acknowledgement — and because a
-/// guard the lifetime stored would be an `Rc` cycle through the object that
-/// holds the lifetime. The payload is not reachable from a `Drop`, so the report
-/// stays the owner's, out of the `JoinError` the lifetime yields; what runs here
-/// is the end itself, so a sibling polled during the unwind already finds it.
 pub(crate) struct EndOnUnwind<S: Settles>(Rc<S>);
 
 impl<S: Settles> EndOnUnwind<S> {
@@ -489,8 +332,6 @@ impl<S: Settles> Drop for EndOnUnwind<S> {
     }
 }
 
-/// Hands a panic's payload on, once the borrow of the set that yielded it has
-/// been released — `on_panic` is the owner's, and reports and ends the object.
 fn report(finished: Result<(), JoinError>, on_panic: &mut dyn FnMut(Box<dyn Any + Send>)) {
     let Err(error) = finished else { return };
     if !error.is_panic() {

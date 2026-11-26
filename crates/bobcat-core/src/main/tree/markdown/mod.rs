@@ -224,57 +224,28 @@ use terminus::link::{
 use self::build::{Builder, IMAGE_TAG, Newlines};
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument};
 
-/// Native's tag, and the JSX tag the typings declare.
 pub(super) const MARKDOWN_TAG: &str = "markdown";
-/// web-core's tag.
 pub(super) const X_MARKDOWN_TAG: &str = "x-markdown";
-/// The Markdown source.
 const CONTENT_ATTRIBUTE: &str = "content";
-/// A UTF-16 slice of `content` to render instead of all of it.
 const CONTENT_RANGE_ATTRIBUTE: &str = "content-range";
-/// The id the events and `getParseResult` report.
 const CONTENT_ID_ATTRIBUTE: &str = "content-id";
-/// The JSON style object [`style`] translates.
 const MARKDOWN_STYLE_ATTRIBUTE: &str = "markdown-style";
 
-/// The gesture Lynx synthesizes at a release, which the component observes
-/// to hear a tap at its shadow content.
 const TAP_EVENT: &str = "tap";
-/// The root's id, and the part name web-core exports it under.
 const ROOT_ID: &str = "markdown-root";
-/// The root's class, which every [`style`] selector starts from.
 const ROOT_CLASS: &str = "markdown-body";
-/// Where the `markdown-style` sheet sits among the shadow root's sheets:
-/// after [`SHADOW_RULES`].
 const MARKDOWN_STYLE_SHEET: usize = 1;
 
-/// A method the tests read the rendered text through, which no build but a
-/// test's answers.
 #[cfg(test)]
 const RENDERED_TEXT_METHOD: &str = "renderedText";
-/// A method the tests count the definition's per-element entries through.
 #[cfg(test)]
 const STATE_COUNT_METHOD: &str = "stateCount";
 
-/// The host's own rules, from `x-markdown.css`, for both tags.
 pub(super) const UA_RULES: &str = "\
 markdown, x-markdown { display: flex; flex-direction: column; align-items: stretch; color: inherit; }
 markdown::part(root), x-markdown::part(root) { width: 100%; }
 ";
 
-/// The shadow sheet, mounted first on each instance's shadow root: web-core's
-/// template `<style>` (`htmlTemplates.ts:280-362`) in this engine's boxes,
-/// after the HTML rendering defaults it relies on. See the module
-/// documentation for the outline; each rule says where it comes from.
-///
-/// It is the engine's own sheet ([`terminus::link::Document::parse_engine_shadow_stylesheet`]),
-/// so it can write the flow layout `display: block` and `inline` that the
-/// `lynx` grammar keeps from authors, `markdown-style` included.
-///
-/// The HTML defaults are a browser's UA sheet under web-core, below every
-/// template rule by origin. Here they share the template's origin, so they
-/// are written with their selectors in `:where()`, at zero specificity, and
-/// first: every template and `markdown-style` rule outranks them.
 const SHADOW_RULES: &str = r#"
 /* HTML §15.3.6 (sections and headings): font sizes and weight. */
 :where(h1) { font-size: 2em; }
@@ -356,43 +327,25 @@ const SHADOW_RULES: &str = r#"
 .markdown-body a { color: #0366d6; text-decoration: underline; }
 "#;
 
-/// Installs one component under both tag names, over the queue its events
-/// go into. Must run after [`super::image::define`], whose component the
-/// shadow tree's images are, and before any element could carry either tag,
-/// which is [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let markdown: Rc<dyn CustomElement<()>> = Rc::new(Markdown::new(events));
     document.define_shared(MARKDOWN_TAG, Rc::clone(&markdown));
     document.define_shared(X_MARKDOWN_TAG, markdown);
 }
 
-/// The markdown component: builds the shadow tree, re-renders it on
-/// `content` and `content-range`, swaps the `markdown-style` sheet, turns
-/// taps into `link` and `imageTap`, and answers the UI methods. See the
-/// module documentation.
 struct Markdown {
     events: ComponentEvents,
     states: RefCell<FxHashMap<NodeId, State>>,
-    /// The two sheets every shadow tree starts with, [`SHADOW_RULES`] and
-    /// the empty one a `markdown-style` attribute replaces, parsed by the
-    /// first element of either tag and mounted on every one's tree.
     shadow_sheets: OnceCell<[ShadowSheet; 2]>,
 }
 
-/// What one element's shadow tree was built from.
 #[derive(Default)]
 struct State {
-    /// The `#markdown-root` element.
     root: Option<NodeId>,
-    /// The parse the root's children were built from.
     tree: parse::MarkdownTree,
-    /// The root's children, one per top-level block of [`Self::tree`].
     elements: Vec<NodeId>,
-    /// The `content-range` in force.
     range: Option<(usize, usize)>,
-    /// The `markdown-style` sheet's text in force.
     css: String,
-    /// markdown-it's line breaks around the built elements.
     newlines: FxHashMap<NodeId, Newlines>,
 }
 
@@ -405,8 +358,6 @@ impl Markdown {
         }
     }
 
-    /// Takes `element`'s state out for the length of a mutation, so a
-    /// reaction the mutation runs can never find it borrowed.
     fn take_state(&self, element: NodeId) -> State {
         self.states
             .borrow_mut()
@@ -418,7 +369,6 @@ impl Markdown {
         self.states.borrow_mut().insert(element, state);
     }
 
-    /// Re-renders `element`'s content into its root and queues `parseEnd`.
     fn render(&self, document: &mut LynxDocument, element: NodeId, state: &mut State) {
         let Some(root) = state.root.or_else(|| markdown_root(document, element)) else {
             return;
@@ -466,8 +416,6 @@ impl Markdown {
         }
     }
 
-    /// A `tap` in the bubble pass at a node of `element`'s shadow tree:
-    /// `link` or `imageTap`, or nothing. See the module documentation.
     fn tap(&self, document: &LynxDocument, element: NodeId, target: NodeId, x: f32, y: f32) {
         let Some(root) = markdown_root(document, element) else {
             return;
@@ -583,18 +531,11 @@ impl CustomElement<()> for Markdown {
                     state.css = css;
                 }
             }
-            // Read when an event or `getParseResult` reports it.
             _ => {}
         }
         self.put_state(element, state);
     }
 
-    /// A `tap` at its own shadow content: the non-composed one the runtime
-    /// fires at the node the tap hit (`MainThreadRuntime::tap_shadow_content`),
-    /// heard at the shadow root's step with that node as the target, in its
-    /// bubble pass. The composed `tap` of the one dispatch reaches the host
-    /// as itself, `AtTarget` with the host as the target, and is ignored: it
-    /// no longer says which node was hit.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
@@ -664,7 +605,6 @@ impl CustomElement<()> for Markdown {
     }
 }
 
-/// `element`'s shadow `#markdown-root`, the one element of its shadow tree.
 fn markdown_root(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
     let shadow = document.shadow_root(element)?;
     document
@@ -678,12 +618,10 @@ fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Opt
     document.get(element).and_then(|node| node.attribute(name))
 }
 
-/// The `content-id` the events carry: the attribute, or no key at all.
 fn content_id(document: &LynxDocument, element: NodeId) -> Option<String> {
     attribute(document, element, CONTENT_ID_ATTRIBUTE).map(Cow::into_owned)
 }
 
-/// DOM's `closest(tag)` from `node`, stopping below `root`.
 fn closest(document: &LynxDocument, node: NodeId, root: NodeId, tag: &str) -> Option<NodeId> {
     let mut current = Some(node);
     while let Some(id) = current {
@@ -699,8 +637,6 @@ fn closest(document: &LynxDocument, node: NodeId, root: NodeId, tag: &str) -> Op
     None
 }
 
-/// The innermost `a` holding the character a tap at `point` (viewport CSS
-/// px) hits in the paragraph `target` belongs to.
 fn anchor_at(
     document: &LynxDocument,
     target: NodeId,
@@ -727,7 +663,6 @@ fn anchor_at(
     best.map(|(anchor, _)| anchor)
 }
 
-/// DOM's `textContent` of an element: its text nodes' data, in tree order.
 fn text_content(document: &LynxDocument, element: NodeId) -> String {
     let mut text = String::new();
     let mut stack = vec![element];

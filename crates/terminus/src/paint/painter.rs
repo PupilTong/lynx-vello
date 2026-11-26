@@ -68,53 +68,21 @@ use crate::paint::display_list::DisplayList;
 use crate::tree::document::Document;
 use crate::visual::{CommittedFrame, PaintOrder};
 
-/// The document-owned painter that builds the committed frame: it walks the
-/// paint order into fragments and a compose program, publishes the result as
-/// the document's [`CommittedFrame`], and keeps the storage of the frames it
-/// retires for the next build. Not the presenting painter
-/// ([`crate::painter::Painter`]), which composes and draws frames this one
-/// commits.
 #[derive(Default)]
 pub(crate) struct FramePainter {
     scratch: crate::paint::walker::Scratch,
     build_scratch: crate::visual::BuildScratch,
-    /// The `content-visibility: auto` determination's working storage, kept
-    /// here for the same reason `build_scratch` is: a settled page must
-    /// determine relevance without allocating.
     relevance_scratch: crate::visual::relevance::RelevanceScratch,
-    /// The frame the last successful paint committed — the hit-test snapshot,
-    /// and the object [`Document::commit`](crate::tree::document::Document::commit) publishes.
     frame: Option<Arc<CommittedFrame>>,
-    /// A frame retired while something else still held it — in the engine's
-    /// flow the frame hub always still holds the previous commit at the
-    /// moment it retires here, and releases it only when the commit after it
-    /// publishes. Reclaimed at the next paint, one retirement late.
     retiring: Option<Arc<CommittedFrame>>,
-    /// Storage reclaimed from a retired frame nobody else was still holding,
-    /// kept for the next build.
-    ///
-    /// Kept apart from `frame` because `frame` is the one thing hit testing
-    /// can read between renders: emptying it in place would leave the
-    /// document frameless for the length of a build, and permanently
-    /// frameless if that build panicked.
     spare: crate::visual::FrameBuffers,
-    /// Retired frames' scenes — fragments and committed compositions —
-    /// emptied but with their encoding capacity intact, pooled for the next
-    /// paint's fragments and composition.
     spare_scenes: Vec<DisplayList>,
-    /// A retired frame's emptied fragment container, capacity intact.
     spare_fragments: Vec<DisplayList>,
-    /// A retired frame's emptied compose program, capacity intact.
     spare_program: Vec<crate::paint::compose::ComposeOp>,
-    /// A retired frame's emptied image-draw table, capacity intact.
     spare_image_draws: Vec<crate::paint::compose::ImageDraw>,
-    /// A retired frame's emptied vector-draw table, capacity intact.
     spare_vector_draws: Vec<crate::paint::compose::VectorDraw>,
-    /// A retired frame's emptied filter-group table, capacity intact.
     spare_filter_groups: Vec<crate::paint::compose::FilterGroup>,
-    /// A retired frame's emptied composed-slot lists, capacity intact.
     spare_composed: crate::visual::ComposedSlots,
-    /// Scratch for marking the slots each committed program composes.
     composed_marks: crate::visual::ComposedMarks,
 }
 
@@ -144,9 +112,6 @@ impl FramePainter {
             std::mem::take(&mut self.spare_filter_groups),
             std::mem::take(&mut self.spare_scenes),
         );
-        // A panicking walk drops the half-encoded assembly here and leaves
-        // the previously committed frame retained: the frame either advances
-        // whole or not at all.
         crate::paint::walker::walk_compose(
             &mut assembly,
             &mut self.scratch,
@@ -177,9 +142,6 @@ impl FramePainter {
             &mut self.composed_marks,
             &mut composed,
         );
-        // An SVG image whose isolated document still animates keeps the host
-        // ticking while this frame draws it or a box presents it
-        // (`crate::svg::image`). One test on a page without one.
         let images_run = document.note_drawn_images(&vector_draws);
         let animations_active = animations_active || images_run;
         let needs_main_ticks = needs_main_ticks || images_run;
@@ -202,9 +164,6 @@ impl FramePainter {
             paints_content,
             container_rects,
         });
-        // Reclaiming here, past the point where the walk can fail, is what
-        // keeps a frame retained at every instant. A frame still shared at
-        // reclaim time is given up rather than waited on.
         if let Some(waiting) = self.retiring.take()
             && let Ok(inner) = Arc::try_unwrap(waiting)
         {
@@ -245,8 +204,6 @@ impl FramePainter {
         self.spare_composed = composed;
     }
 
-    /// The spare frame buffers' and the build scratch's capacities, for the
-    /// reuse tests.
     #[cfg(test)]
     pub(crate) fn storage_capacities(&self) -> ([usize; 8], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
@@ -264,9 +221,6 @@ impl FramePainter {
         std::mem::take(&mut self.spare)
     }
 
-    /// Takes back the storage of a paint order that was built and then
-    /// discarded — a relevance pass whose flips voided it — so the pass that
-    /// replaces it reuses the very buffers it just filled.
     pub(crate) fn restore_spare_buffers(&mut self, discarded: PaintOrder) {
         self.spare = discarded.into_buffers();
     }

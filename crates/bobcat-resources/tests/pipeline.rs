@@ -19,12 +19,10 @@ use bobcat_core::{
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 
-/// The picture a page names by `source`.
 fn url(source: &str) -> bobcat_core::PictureKey {
     bobcat_core::PictureKey::Url(Arc::from(source))
 }
 
-/// A width x height PNG whose quadrants are red, green, blue and white.
 fn quadrant_png(width: u32, height: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
@@ -80,7 +78,6 @@ impl Harness {
         }
     }
 
-    /// Drives painter turns until the inbox carries a report for `source`.
     fn settle(&self, source: &str) -> ImageEvent {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -113,7 +110,6 @@ impl Harness {
         }
     }
 
-    /// Requests `source` and returns the document it was parsed into.
     fn load_svg(&self, source: &str) -> Arc<VectorDocument> {
         self.view.request_image(source);
         match self.settle(source) {
@@ -125,7 +121,6 @@ impl Harness {
         }
     }
 
-    /// Requests `source` and asserts it fails, returning the notes.
     fn fail(&self, source: &str) -> Vec<String> {
         self.view.request_image(source);
         let event = self.settle(source);
@@ -136,8 +131,6 @@ impl Harness {
         self.resources.take_notes()
     }
 
-    /// The pixels a frame drawing `source` at `hint` is answered with, if
-    /// the tier holds them.
     fn pixels(&self, source: &str, hint: ImageSizeHint) -> Option<bobcat_core::peniko::ImageData> {
         self.view
             .describe(&url(source), hint)
@@ -145,9 +138,6 @@ impl Harness {
             .map(bobcat_core::PictureFrame::into_pixels)
     }
 
-    /// Wants `source` at `hint`, as a painter with nothing to draw it from
-    /// does, and drives turns until the restore lands; answers the restored
-    /// pixels. Nothing is restored before a turn applies the completion.
     fn restore(&self, source: &str, hint: ImageSizeHint) -> bobcat_core::peniko::ImageData {
         assert!(
             self.pixels(source, hint).is_none(),
@@ -182,7 +172,6 @@ impl Harness {
         }
     }
 
-    /// Drives turns until the resident bitmap for `source` has `size`.
     fn settle_resident(&self, source: &str, size: (u32, u32)) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -225,7 +214,6 @@ fn a_registered_png_loads_reports_its_size_and_is_described_at_the_drawn_size() 
         "top-left is red"
     );
 
-    // Asking again answers from what is known, without a second load.
     let (reports, inbox) = ImageInbox::new();
     let second = harness.resources.for_view(reports);
     second.request_image("app:///checker.png");
@@ -256,8 +244,6 @@ fn a_draw_far_smaller_than_the_bitmap_refines_it_to_the_drawn_size() {
         Some((1024, 512))
     );
 
-    // The first describe answers with what is resident and starts the
-    // refinement.
     let first = harness
         .pixels("app:///big.png", ImageSizeHint::new(100, 100))
         .expect("resident");
@@ -274,7 +260,6 @@ fn a_draw_far_smaller_than_the_bitmap_refines_it_to_the_drawn_size() {
     );
     assert_eq!(&refined.data.as_ref()[..4], &[255, 0, 0, 255]);
 
-    // Drawn larger again: the image has more to give, so it refines back up.
     let _ = harness
         .view
         .describe(&url("app:///big.png"), ImageSizeHint::new(400, 400));
@@ -297,7 +282,6 @@ fn an_evicted_bitmap_is_restored_once_wanted() {
     let used = harness.resources.memory_used_bytes();
     assert!(used >= 2 * 32 * 32 * 4, "both bitmaps are resident: {used}");
 
-    // A budget for one bitmap, with `b` as the working set: `a` is evicted.
     harness.view.retain(&[url("app:///b.png")]);
     harness.resources.set_memory_budget_bytes(32 * 32 * 4 + 16);
     assert!(!harness.resources.is_resident("app:///a.png"));
@@ -312,9 +296,6 @@ fn an_evicted_bitmap_is_restored_once_wanted() {
     assert!(harness.resources.is_resident("app:///a.png"));
 }
 
-/// A bitmap the painter's rasterizer holds is released from the tier, pinned
-/// or not: its bytes leave the accounting, a describe answers its descriptor
-/// without pixels, and a want restores it.
 #[test]
 fn a_released_bitmap_leaves_the_tier_and_a_want_restores_it() {
     let harness = Harness::new(Harness::quiet());
@@ -423,7 +404,6 @@ fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
     );
 }
 
-/// A file under the platform's temp directory, removed when it goes.
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
@@ -445,10 +425,6 @@ impl Drop for TempFile {
     }
 }
 
-/// A `file:`-backed image keeps no encoded bytes — the file is the tier that
-/// can hand them back — so an evicted one that is wanted is re-fetched *and*
-/// re-decoded by a job, off the thread that wanted it. This test's thread is
-/// inside another runtime's `block_on`, which the capture server's is too.
 #[tokio::test(flavor = "current_thread")]
 async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_once_wanted() {
     let file = TempFile::new("restore.png", &quadrant_png(64, 64));
@@ -460,7 +436,6 @@ async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_once_wanted() {
         "the bitmap is resident"
     );
 
-    // Nothing is pinned, so a zero budget evicts it; the file kept no bytes.
     harness.view.retain(&[]);
     harness.resources.set_memory_budget_bytes(0);
     assert!(!harness.resources.is_resident(&source));
@@ -476,17 +451,12 @@ async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_once_wanted() {
     assert_eq!(harness.resources.take_notes(), [] as [String; 0]);
 }
 
-/// An SVG document whose root carries `attributes`, with one filled rect.
 fn svg(attributes: &str) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" {attributes}><rect x="1" y="1" width="6" height="4" fill="#dc2626"/></svg>"##
     )
 }
 
-/// What the engine's parser makes of `svg`, as text: a reported document
-/// prints the same exactly when it was parsed from the same bytes. The
-/// document has no public members, so its `Debug` is what a test outside
-/// `terminus` can compare.
 fn parse_of(svg: &[u8]) -> String {
     match ImageEvent::parse_document(Arc::from("app:///expected.svg"), svg, DocumentKind::Svg) {
         ImageEvent::ParsedDocument { document, .. } => format!("{document:?}"),
@@ -494,9 +464,6 @@ fn parse_of(svg: &[u8]) -> String {
     }
 }
 
-/// A registered SVG document is not decoded: the fetcher parses it with the
-/// engine's parser and reports the parsed document, and keeps neither it nor
-/// a bitmap, so it counts nothing. Sizing is the engine's, pinned in `terminus`.
 #[test]
 fn a_registered_svg_loads_as_the_document_it_parses_to() {
     let harness = Harness::new(Harness::quiet());
@@ -517,8 +484,6 @@ fn a_registered_svg_loads_as_the_document_it_parses_to() {
     assert!(harness.wakeups.load(Ordering::SeqCst) >= 1);
 }
 
-/// The fixtures inline SVGs as base64 `data:` URLs; one loads as the
-/// document it carries.
 #[test]
 fn svg_data_urls_load_in_base64_form() {
     let harness = Harness::new(Harness::quiet());
@@ -534,8 +499,6 @@ fn svg_data_urls_load_in_base64_form() {
     );
 }
 
-/// A document that does not parse is the load's failure, reported and
-/// noted like a decode that failed, and terminal like one.
 #[test]
 fn a_malformed_svg_fails_its_source() {
     let harness = Harness::new(Harness::quiet());
@@ -557,10 +520,6 @@ fn a_malformed_svg_fails_its_source() {
     harness.fail("app:///broken.svg");
 }
 
-/// An SVG is the one image that is text, so it is recognised from its bytes
-/// only where its label says nothing specific (`mime::sniff`): an
-/// `application/octet-stream` label or no label at all loads, while a
-/// `text/plain` label is trusted and is not an image.
 #[test]
 fn an_svg_is_sniffed_from_its_bytes_only_under_a_label_that_says_nothing() {
     let harness = Harness::new(Harness::quiet());
@@ -600,9 +559,6 @@ fn an_svg_is_sniffed_from_its_bytes_only_under_a_label_that_says_nothing() {
     );
 }
 
-/// Drives turns of `view` until `inbox` holds `count` reports, then one more
-/// turn after a pause, and returns every report taken, so a test expecting
-/// `count` sees an extra one.
 fn reports_of(view: &ViewResources, inbox: &ImageInbox, count: usize) -> Vec<ImageEvent> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
@@ -622,8 +578,6 @@ fn reports_of(view: &ViewResources, inbox: &ImageInbox, count: usize) -> Vec<Ima
     events
 }
 
-/// The documents in `events`, each of which must be a parsed document for
-/// `source`.
 fn documents_for<'a>(source: &str, events: &'a [ImageEvent]) -> Vec<&'a Arc<VectorDocument>> {
     events
         .iter()
@@ -637,10 +591,6 @@ fn documents_for<'a>(source: &str, events: &'a [ImageEvent]) -> Vec<&'a Arc<Vect
         .collect()
 }
 
-/// Nothing of a parsed document is kept, so a later request for a source
-/// already parsed, from the same view or another, is not answered at once:
-/// the source is fetched and parsed again, and each request is reported a
-/// document of its own. The source stays known.
 #[test]
 fn a_repeated_request_for_an_svg_fetches_and_parses_it_again() {
     const SOURCE: &str = "app:///repeat.svg";
@@ -676,15 +626,8 @@ fn a_repeated_request_for_an_svg_fetches_and_parses_it_again() {
     assert_eq!(harness.resources.memory_used_bytes(), 0);
 }
 
-/// The synthetic source a document request names markup by: never resolved
-/// or fetched.
 const MARKUP_SOURCE: &str = "svg-content:0123456789abcdef0123456789abcdef";
 
-/// Markup a page handed over arrives as a document request under the
-/// synthetic source the engine named: nothing is resolved or fetched, and
-/// the bytes are parsed as a fetched document's are and reported once. Nothing
-/// is kept: the source is not known, no describe answers for it, and the memory
-/// used does not move.
 #[test]
 fn a_document_request_is_parsed_and_reported_once() {
     let harness = Harness::new(Harness::quiet());
@@ -726,10 +669,6 @@ fn a_document_request_is_parsed_and_reported_once() {
     );
 }
 
-/// Nothing answers a document request but its own parse: a request for a
-/// source parsed before is not answered at once, and two requests for one
-/// source, from one view or two, are two parses and two reports, each a
-/// document of its own.
 #[test]
 fn two_document_requests_for_one_source_are_two_parses_and_two_reports() {
     let harness = Harness::new(Harness::quiet());
@@ -765,8 +704,6 @@ fn two_document_requests_for_one_source_are_two_parses_and_two_reports() {
     assert_eq!(harness.resources.memory_used_bytes(), 0);
 }
 
-/// Markup that does not parse is reported as a failure of its source, with
-/// a note, and leaves nothing behind either.
 #[test]
 fn a_malformed_document_request_reports_failed() {
     const BROKEN: &str = "svg-content:fedcba9876543210fedcba9876543210";
@@ -791,9 +728,6 @@ fn a_malformed_document_request_reports_failed() {
     assert!(!harness.resources.knows_image(BROKEN));
 }
 
-/// The engine draws a document itself, so the pixel seam has nothing for
-/// it: no describe answers, nothing is resident, and no describe starts a
-/// refinement. Nothing of the document is kept.
 #[test]
 fn an_svg_document_is_never_described_and_never_resident() {
     let harness = Harness::new(Harness::quiet());

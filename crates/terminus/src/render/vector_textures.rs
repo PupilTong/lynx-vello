@@ -76,43 +76,25 @@ use crate::paint::display_list::{DisplayList, Texture};
 use crate::peniko::Color;
 use crate::visual::CommittedFrame;
 
-/// The bytes of baked vector textures kept across frames.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_VECTOR_TEXTURE_BYTES: u64 = 64 * 1024 * 1024;
-/// The bytes of baked vector textures kept across frames.
 #[cfg(target_arch = "wasm32")]
 pub(crate) const MAX_VECTOR_TEXTURE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Bytes per `Rgba8Unorm` texel.
 const BYTES_PER_TEXEL: u64 = 4;
 
-/// One baked texture, by the handle the compose program draws it through.
-///
-/// The texture itself is held by the rasterizer's table of bound textures
-/// — a `wgpu::Texture` is a shared handle — and goes when it is unbound, so
-/// nothing here has to own it twice.
 struct Entry {
     handle: Texture,
     bytes: u64,
-    /// The prepare that last drew it; see [`VectorTextures::tick`].
     last_used: u64,
 }
 
-/// The device side of vector images: the texture bank. See the module doc.
 pub(crate) struct VectorTextures {
     entries: FxHashMap<(u64, u32, u32), Entry>,
-    /// Index-parallel with the prepared frame's vector draws: the texture
-    /// each draw is drawn through, or `None` for a draw with no texture.
     images: Vec<Option<Texture>>,
-    /// Bytes of every resident texture.
     bytes: u64,
-    /// How many prepares this bank has run. An entry's `last_used` is the
-    /// tick of the prepare that last drew it, so the entries at the current
-    /// tick are the pinned ones and the smallest tick is the LRU victim.
     tick: u64,
     budget: u64,
-    /// The scene one bake encodes. Reset per bake, so its capacity is
-    /// reused across bakes and frames.
     bake: DisplayList,
 }
 
@@ -134,9 +116,6 @@ impl std::fmt::Debug for VectorTextures {
 }
 
 impl VectorTextures {
-    /// A bank bounded by `budget` bytes. Production uses
-    /// [`MAX_VECTOR_TEXTURE_BYTES`] through `Default`; a test shrinks it to
-    /// watch eviction.
     pub(crate) fn with_budget(budget: u64) -> Self {
         Self {
             entries: FxHashMap::default(),
@@ -148,21 +127,6 @@ impl VectorTextures {
         }
     }
 
-    /// Brings the bank up to `frame`: bakes the texture of every vector
-    /// draw whose `(key, size)` is not resident, pins the ones the frame
-    /// draws, evicts the rest past the budget, and answers the table the
-    /// compose program indexes by draw.
-    ///
-    /// Cheap and allocation-free for a frame whose draws are all resident
-    /// — every frame after the first that shows the same pictures at the
-    /// same sizes — and for a frame with no vector draw at all, which
-    /// touches no GPU resource.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Render`] if a bake render fails. The table is then
-    /// incomplete and should not be composed from; the next prepare starts
-    /// over, with every texture baked before the failure still resident.
     pub(crate) fn prepare(
         &mut self,
         frame: &CommittedFrame,
@@ -208,22 +172,18 @@ impl VectorTextures {
         Ok(&self.images)
     }
 
-    /// Bytes of texture resident right now.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn resident_bytes(&self) -> u64 {
         self.bytes
     }
 
-    /// Textures resident right now.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn resident(&self) -> usize {
         self.entries.len()
     }
 
-    /// Evicts unpinned entries, least recently used first, until the total
-    /// is within the budget or only pinned entries remain.
     fn evict(&mut self, raster: &mut Raster) {
         while self.bytes > self.budget {
             let victim = self
@@ -245,9 +205,6 @@ impl VectorTextures {
     }
 }
 
-/// The size of the texture a `width` × `height` bake renders into: the
-/// key's size plus one texel on each axis the device allows, for the
-/// repeated edge (module documentation).
 fn texture_size(device: &wgpu::Device, width: u32, height: u32) -> (u32, u32) {
     let longest = device.limits().max_texture_dimension_2d;
     (
@@ -256,13 +213,9 @@ fn texture_size(device: &wgpu::Device, width: u32, height: u32) -> (u32, u32) {
     )
 }
 
-/// The usage a bake's texture needs beyond the rasterizer's: the copies
-/// [`repeat_edge`] makes.
 const EDGE_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::COPY_SRC.union(wgpu::TextureUsages::COPY_DST);
 
-/// Renders `draw`'s scene into a new texture for a `width` × `height` key
-/// and binds it to a new handle, answering the handle it is drawn through.
 fn bake(
     scene: &mut DisplayList,
     draw: &VectorDraw,
@@ -284,7 +237,6 @@ fn bake(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        // Rendered into by the rasterizer, then bound to the handle.
         usage: Raster::TARGET_USAGE
             .union(Raster::BOUND_USAGE)
             .union(EDGE_USAGE),
@@ -316,12 +268,6 @@ fn bake(
     Ok(handle)
 }
 
-/// Copies the last column and the last row of the `width` × `height`
-/// picture in `texture` once more beyond it, on the axes where `texture` is
-/// longer; the row after the column, so the corner repeats too.
-///
-/// wgpu copies between regions of one texture only through another, so each
-/// goes through a one-texel-thick scratch texture.
 fn repeat_edge(gpu: &SharedGpu, texture: &wgpu::Texture, width: u32, height: u32) {
     let device = &gpu.device;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -404,7 +350,6 @@ mod tests {
     use crate::render::picture::PictureKey;
     use crate::test_common::Doc;
 
-    /// A 64×64 document filled with `fill`.
     fn square(fill: &str) -> String {
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
@@ -412,15 +357,8 @@ mod tests {
         )
     }
 
-    /// The bytes of one 64×64 picture's texture, its repeated edge
-    /// included.
     const SQUARE_BYTES: u64 = 65 * 65 * 4;
 
-    /// A page showing each `(source, document)` as a 64×64 `<image>`, the
-    /// `n`th at `x = 100n`, with every document parsed into the registry,
-    /// and the elements so a test can hide and show them. One document,
-    /// because an image's key is per parse: the same markup parsed into a
-    /// second document is another picture to the cache.
     fn page(images: &[(&str, &str)]) -> (Doc, Vec<crate::tree::document::NodeId>) {
         let mut doc = Doc::with_css(
             "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -445,8 +383,6 @@ mod tests {
             })
             .collect();
         doc.dom.apply_image_events(&events);
-        // Each box takes its document's natural size, as an embedder's
-        // element does when its source settles.
         for (&node, (source, _)) in nodes.iter().zip(images) {
             let natural = doc.dom.image_status(source).natural_size();
             doc.dom
@@ -456,7 +392,6 @@ mod tests {
         (doc, nodes)
     }
 
-    /// Commits a frame of `doc` showing exactly the images in `shown`.
     fn showing(
         doc: &mut Doc,
         nodes: &[crate::tree::document::NodeId],
@@ -482,12 +417,6 @@ mod tests {
         table[index].expect("the draw has a texture").id()
     }
 
-    /// Two pictures under a budget that holds one texture: a frame drawing
-    /// the second evicts the first's texture, a frame drawing the first
-    /// again bakes it again (a fresh handle), a frame repeating a picture
-    /// reuses its texture, and a frame drawing both keeps both for itself —
-    /// pinned past the budget — until the next frame lets one go. And the
-    /// texture holds the picture: the composed frame shows it.
     #[test]
     fn a_tiny_budget_evicts_the_unpinned_texture_and_re_bakes_it_on_return() {
         let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
@@ -508,7 +437,6 @@ mod tests {
             "a frame repeating the picture reuses its texture",
         );
 
-        // The texture shows the picture where the element is.
         let vectors = gpu.prepare_vectors(&red_frame).expect("hit").to_vec();
         let mut scene = DisplayList::new();
         red_frame.compose_into(&mut scene, &[], &[], &vectors, &|_| None, None);
@@ -552,9 +480,6 @@ mod tests {
         );
     }
 
-    /// A draw whose texture alone exceeds the budget gets none: the table
-    /// says so, nothing is resident, and the composed frame simply lacks
-    /// the picture.
     #[test]
     fn a_draw_larger_than_the_whole_budget_gets_no_texture() {
         let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");
@@ -570,10 +495,6 @@ mod tests {
         assert_eq!(scene.image_draws(), 0, "no texture is drawn");
     }
 
-    /// A picture drawn off the pixel grid, so it is filtered: the half-covered
-    /// pixel past its right edge reads the picture's last column, clamped to
-    /// its edge — the rasterizer reads it through the texture's repeated edge,
-    /// without which it would blend the last two columns half and half.
     #[test]
     fn a_filtered_draw_reads_the_last_column_at_the_pictures_edge() {
         let mut gpu = Headless::new().expect("a usable GPU adapter is mandatory");

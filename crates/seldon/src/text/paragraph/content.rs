@@ -55,154 +55,70 @@ use core::ops::Range;
 use super::style::{RunStyle, TextSecurity, VerticalAlign, WhiteSpaceCollapse};
 use crate::geometry::Size;
 
-/// One flattened paragraph item, in source order.
 #[derive(Clone, Copy, Debug)]
 pub enum InlineItem<'src> {
     Run(TextRunItem<'src>),
     Box(InlineBoxSpec),
-    /// A place in the content that is no content: no source unit, no
-    /// text, and no break in white space collapsing — the white space around
-    /// it collapses as if it were not there. Opaque to the core, which
-    /// reports where it fell ([`MarkerPlaces::markers`]); what it marks is
-    /// the consumer's.
     Marker,
 }
 
-/// One text run carrying the fully resolved style of its innermost enclosing
-/// text element.
 #[derive(Clone, Copy, Debug)]
 pub struct TextRunItem<'src> {
     pub text: &'src str,
     pub style: &'src RunStyle,
-    /// The run's computed `white-space-collapse`. Lynx raw-text keeps
-    /// literal newlines (`preserve-breaks` on the web target); a `pre`
-    /// block preserves everything.
     pub white_space: WhiteSpaceCollapse,
-    /// The run's computed `-webkit-text-security`: under any value but
-    /// `none` every character shows as the value's mask, one per Unicode
-    /// scalar value, before white-space processing reads it.
     pub text_security: TextSecurity,
 }
 
-/// One atomic inline — a Lynx inline image or inline view, or an atom of a
-/// CSS inline formatting context.
-///
-/// It carries no content, no children, and no measure hook: the inner text of
-/// an inline view can never join the paragraph because there is nothing to
-/// put it in. The host measures the subtree independently and hands in the
-/// margin-box numbers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InlineBoxSpec {
-    /// Host-owned identity, unique within one block.
     pub id: u64,
-    /// Margin-box size.
     pub size: Size<f32>,
-    /// Distance from the box top to its baseline. `None` applies the Lynx
-    /// rule: a box without a baseline sits with its bottom edge on the text
-    /// baseline.
     pub baseline: Option<f32>,
     pub vertical_align: VerticalAlign,
 }
 
-/// How a paragraph's white space is processed before shaping.
-///
-/// The choice is the paragraph consumer's: [`normalize`] is the one place it
-/// is read, and everything after it sees only the normalized block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text) enum WhiteSpaceProcessing {
-    /// css-text-3 §4.1 per run, including §4.1.2 rule 1 at the start of the
-    /// paragraph: a collapsible whitespace sequence there is removed, as it
-    /// is after a preserved break.
     Css,
-    /// No white-space processing: the native Lynx `<text>`. Every run is
-    /// processed as `preserve` whatever its own `white-space-collapse` —
-    /// native reads no such property — so every space, tab and carriage
-    /// return is kept and every newline is a forced break; a newline that
-    /// ends the text is followed by an empty last line
-    /// ([`SourceMap::final_empty_line`]).
-    ///
-    /// `first_line_only` is native's `white-space: nowrap`: the text ends
-    /// after the first newline, which is kept so a paragraph whose first
-    /// character is that newline still shows its one empty line. What
-    /// follows is dropped — counted in source units, emitted nowhere, and an
-    /// atomic box in it listed in [`NormalizedBlock::dropped_boxes`].
     Verbatim { first_line_only: bool },
 }
 
-/// Whitespace-normalized paragraph content with its source map.
 #[derive(Debug)]
 pub(in crate::text) struct NormalizedBlock {
     pub(in crate::text) text: String,
-    /// Contiguous, non-overlapping, covering `0..text.len()` but for the
-    /// segments [`Self::splice`] inserted, which `super::Flow::spans`
-    /// interleaves to meet the `style_run_builder` precondition. `item`
-    /// indexes the input slice.
     pub(in crate::text) ranges: Vec<StyledRange>,
     pub(in crate::text) boxes: Vec<BoxAt>,
     pub(in crate::text) map: SourceMap,
-    /// Each input item's source units, indexed like the input slice.
-    ///
-    /// Every source character counts on arrival, whatever collapsing later
-    /// makes of it, so these are contiguous, cover `0..map.source_len()`, and
-    /// a run's span is its whole pre-collapse text even where none of it
-    /// survived; a box's is its one unit.
     pub(in crate::text) item_units: Vec<Range<u32>>,
-    /// The byte of every preserved tab, ascending. Each is one space in
-    /// `text`, a cluster of its own, whose advance the block widens to the
-    /// next tab stop at break time.
     pub(in crate::text) tabs: Vec<u32>,
-    /// The box items a `first_line_only` processing dropped, in order: they
-    /// have a source unit and no place in the text.
     pub(in crate::text) dropped_boxes: Vec<u32>,
 }
 
-/// Where the normalizer met the [`InlineItem::Marker`]s of one block.
 #[derive(Debug)]
 pub(in crate::text) struct MarkerPlaces {
-    /// Where each marker fell, in item order.
     pub(in crate::text) markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence a marker was met in
-    /// kept a space, by the sequence's index ([`MarkerAt::space`]).
     pub(in crate::text) space_kept: Vec<bool>,
 }
 
-/// Where the normalizer met one [`InlineItem::Marker`].
 #[derive(Debug, Clone, Copy)]
 pub(in crate::text) struct MarkerAt {
-    /// The marker's item.
     pub(in crate::text) item: u32,
-    /// The text length when it was met.
     pub(in crate::text) byte: u32,
-    /// The collapsible white space sequence open when it was met, if any:
-    /// the marker lies after that sequence's first character in source
-    /// order, and a space the sequence keeps ([`MarkerPlaces::space_kept`])
-    /// sits at `byte`.
     pub(in crate::text) space: Option<u32>,
-    /// How many atomic boxes came before it, which orders it against a box
-    /// at the same byte.
     pub(in crate::text) atoms_before: u32,
 }
 
-/// Text a consumer inserts into the normalized text ([`NormalizedBlock::splice`]).
 #[derive(Debug, Clone)]
 pub(in crate::text) struct Insertion {
-    /// The byte of the text before any insertion it goes in front of.
     pub(in crate::text) at: u32,
-    /// How many atomic boxes come before it: a box at `at` past that count
-    /// follows it.
     pub(in crate::text) atoms_before: u32,
     pub(in crate::text) text: String,
-    /// The style it is shaped in.
     pub(in crate::text) style: RunStyle,
-    /// Added to the style's letter-spacing: the advance parley adds after
-    /// each of its clusters.
     pub(in crate::text) extra_spacing: f32,
-    /// The item whose paint identity and line-breaking values it is shaped
-    /// with.
     pub(in crate::text) item: u32,
 }
 
-/// One inserted segment in the normalized text: bytes with no source unit.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::text) struct InsertedSegment {
     pub(in crate::text) bytes: Range<u32>,
@@ -217,7 +133,6 @@ pub(in crate::text) struct StyledRange {
     pub(in crate::text) item: u32,
 }
 
-/// One atomic box's place in both offset spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text) struct BoxAt {
     pub(in crate::text) byte: u32,
@@ -225,23 +140,12 @@ pub(in crate::text) struct BoxAt {
     pub(in crate::text) item: u32,
 }
 
-/// Piecewise mapping between normalized UTF-8 bytes and source UTF-16 units.
 #[derive(Debug, Default)]
 pub(in crate::text) struct SourceMap {
     segments: Vec<Segment>,
     source_len: u32,
-    /// Where the source content the text shows ends: `source_len`, or
-    /// earlier where a `first_line_only` processing dropped the rest. The
-    /// segments cover `0..shown_len`.
     shown_len: u32,
-    /// Whether every space at a line's end hangs outside the line's content,
-    /// preserved or not: a verbatim paragraph's, as native Lynx's line extent
-    /// excludes trailing whitespace (Android `Layout.getLineMax`).
     hanging_spaces: bool,
-    /// Whether a newline that ends the text is followed by an empty last
-    /// line: a verbatim paragraph's without the `nowrap` cut, as Android's
-    /// `StaticLayout` ends such text with an empty line. Under the cut the
-    /// text ends at its first newline by construction, and shows one line.
     final_empty_line: bool,
 }
 
@@ -252,7 +156,6 @@ struct Segment {
     kind: SegmentKind,
 }
 
-/// A `Copy` byte/unit span (`core::ops::Range` is not `Copy`).
 #[derive(Debug, Clone, Copy)]
 struct Range2 {
     start: u32,
@@ -261,47 +164,26 @@ struct Range2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SegmentKind {
-    /// Every emitted char stands for one source char of the same UTF-16
-    /// length — itself, or a space for a preserved tab or carriage return —
-    /// so intra-segment offsets are recomputed from the normalized text.
     Verbatim,
-    /// A whitespace span: several source units emitting zero or one byte.
     Collapsed,
-    /// One source unit, zero bytes; `norm.start` is the box's byte index.
     Box,
-    /// An inserted segment ([`NormalizedBlock::splice`]): bytes and no
-    /// source unit, so `units` is empty.
     Inserted,
-    /// A masked run's characters (`-webkit-text-security`): every char of
-    /// the segment is a mask of [`MASK_BYTES`] bytes standing for one source
-    /// char, and every source char in it has the same UTF-16 length, one or
-    /// two units, so intra-segment offsets are arithmetic.
     Masked,
 }
 
-/// The UTF-8 length of every mask character [`TextSecurity::mask`] answers.
 pub(in crate::text) const MASK_BYTES: u32 = 3;
 
-/// The longest a verbatim segment holding a character other than ASCII
-/// grows, in bytes: the most an intra-segment lookup decodes. An ASCII
-/// segment grows without bound, since its offsets in both spaces are equal.
 const VERBATIM_DECODE: u32 = 128;
 
 impl Segment {
-    /// Whether every character of this verbatim segment is ASCII: one byte
-    /// and one unit each. Any other character is longer in UTF-8 than in
-    /// UTF-16, so the two lengths are equal exactly then.
     const fn is_ascii(&self) -> bool {
         self.units.end - self.units.start == self.norm.end - self.norm.start
     }
 
-    /// The source units each mask of this masked segment stands for.
     const fn units_per_mask(&self) -> u32 {
         (self.units.end - self.units.start) / ((self.norm.end - self.norm.start) / MASK_BYTES)
     }
 
-    /// The source units of this verbatim or masked segment's text before
-    /// `byte`, a char boundary inside it.
     fn units_before(&self, text: &str, byte: u32) -> u32 {
         if self.kind == SegmentKind::Masked {
             (byte - self.norm.start) / MASK_BYTES * self.units_per_mask()
@@ -318,27 +200,15 @@ impl SourceMap {
         self.source_len
     }
 
-    /// Where the source content the text shows ends: [`Self::source_len`]
-    /// unless a `first_line_only` processing dropped what follows the first
-    /// forced break.
     pub(in crate::text) const fn shown_len(&self) -> u32 {
         self.shown_len
     }
 
-    /// Whether a newline that ends the text is followed by an empty last
-    /// line rather than ending the paragraph, as css-text-3 has it.
     pub(in crate::text) const fn final_empty_line(&self) -> bool {
         self.final_empty_line
     }
 
-    /// How many atomic boxes the source units before `unit` hold: the box
-    /// segments whose unit is less than `unit`. Each box counts one source
-    /// unit and is no text, so `unit - boxes_before(unit)` is the offset of
-    /// `unit` in the text alone. Only the shown source content has
-    /// segments ([`Self::shown_len`]), so a box past it is not counted.
     pub(in crate::text) fn boxes_before(&self, unit: u32) -> u32 {
-        // The segments are in unit order, so the ones starting before
-        // `unit` are a prefix.
         let before = self
             .segments
             .partition_point(|segment| segment.units.start < unit);
@@ -349,14 +219,7 @@ impl SourceMap {
         u32::try_from(boxes).expect("a box count fits u32")
     }
 
-    /// Source unit of a normalized byte offset used as a *start*: the unit
-    /// of the character at that byte. A box or a dropped whitespace span
-    /// sharing the byte lies before that character and is not part of what
-    /// starts here.
     pub(in crate::text) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
-        // The segments are in text order and the ones with bytes cover the
-        // text, so the first ending after `byte` holds it; a segment of no
-        // bytes never does.
         let segment = self
             .segments
             .get(
@@ -374,16 +237,7 @@ impl SourceMap {
         }
     }
 
-    /// Source unit boundary at `byte` used as an *end*: everything strictly
-    /// before the byte, plus collapsed whitespace sitting at it — but never a
-    /// box at it, whether the byte is mid-text or the text end. A box at the
-    /// boundary is content of whatever follows, and a caller whose range
-    /// includes the box accounts for its unit separately.
     pub(in crate::text) fn unit_before(&self, text: &str, byte: u32) -> u32 {
-        // Everything strictly before the byte: every segment ending before
-        // it, and one with bytes ending at it. In text order these are a
-        // prefix of the segments, and the last of them ends at the unit they
-        // all end before.
         let before = self.segments.partition_point(|segment| {
             segment.norm.end < byte || (segment.norm.end == byte && segment.norm.start < byte)
         });
@@ -411,11 +265,6 @@ impl SourceMap {
         result
     }
 
-    /// The end of `text[start..end]` with its trailing newlines and
-    /// *collapsible* spaces dropped — the line-end whitespace that belongs to
-    /// no line's content. A preserved space is content and stops the walk,
-    /// wherever it sits, except in a verbatim paragraph, where every space
-    /// at a line's end hangs as native Lynx hangs it.
     pub(in crate::text) fn visible_end(&self, text: &str, start: u32, end: u32) -> u32 {
         let mut visible = end;
         for (offset, character) in text[start as usize..end as usize].char_indices().rev() {
@@ -433,7 +282,6 @@ impl SourceMap {
         visible
     }
 
-    /// Whether the byte is the one space a collapsed whitespace span emitted.
     fn is_collapsed_byte(&self, byte: u32) -> bool {
         let index = self
             .segments
@@ -444,21 +292,10 @@ impl SourceMap {
             .any(|segment| segment.kind == SegmentKind::Collapsed && segment.norm.start == byte)
     }
 
-    /// Normalized byte of a source cut, or `None` when the cut lies at or
-    /// past the end of the shown source (nothing to cut): past
-    /// [`Self::shown_len`] the text already ends.
-    ///
-    /// Snap rules: a unit inside a surrogate pair rounds down to the char
-    /// start, or to its mask's start in a masked run; a unit inside a
-    /// collapsed span lands on the span's emitted byte; a unit on a box lands
-    /// on the box's byte (cutting there hides the box).
     pub(in crate::text) fn unit_to_byte(&self, text: &str, unit: u32) -> Option<u32> {
         if unit >= self.shown_len {
             return None;
         }
-        // The units are in segment order and every shown unit is in one
-        // segment, so the first ending after `unit` holds it; an inserted
-        // segment, holding none, never does.
         let segment = self
             .segments
             .get(
@@ -502,17 +339,10 @@ fn utf16_len(text: &str) -> u32 {
         .sum()
 }
 
-/// What an open whitespace span will emit when it resolves.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingKind {
-    /// Collapses to one space.
     Space,
-    /// A collapsible segment break: a space, unless the segment-break
-    /// transformation removes it.
     SegmentBreak,
-    /// Whitespace at the start of a line — after a preserved newline, and
-    /// at the start of the paragraph under [`WhiteSpaceProcessing::Css`]:
-    /// always removed (css-text-3 §4.1.2 rule 1).
     Suppressed,
 }
 
@@ -520,9 +350,6 @@ struct Pending {
     unit_start: u32,
     item: u32,
     kind: PendingKind,
-    /// Which sequence this is, for the markers met while it was open
-    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`],
-    /// given when the first of them is met. `None` while none is.
     id: Option<u32>,
 }
 
@@ -533,30 +360,17 @@ struct Normalizer {
     segments: Vec<Segment>,
     units: u32,
     pending: Option<Pending>,
-    /// Whether nothing but removed whitespace has been emitted since the
-    /// last line start that normalization can see: a preserved break, or the
-    /// paragraph start when the processing removes leading whitespace there.
     at_line_start: bool,
     tabs: Vec<u32>,
     processing: WhiteSpaceProcessing,
-    /// Where a `first_line_only` processing stopped emitting: the source
-    /// unit after the first forced break. Everything from it on is counted
-    /// and dropped.
     dropped_from: Option<u32>,
     dropped_boxes: Vec<u32>,
-    /// Every marker, in source order.
     markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence a marker was met in
-    /// kept its space, by [`Pending::id`].
     space_kept: Vec<bool>,
 }
 
-/// The sentinel handed to the segment-break predicate when the next content
-/// is an atomic box rather than a character.
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
-/// Collapses whitespace across the flattened items and builds the source map,
-/// reporting where the items' markers fell.
 pub(in crate::text) fn normalize(
     items: &[InlineItem<'_>],
     processing: WhiteSpaceProcessing,
@@ -609,8 +423,6 @@ impl Normalizer {
                 continue;
             }
             if let Some(mask) = mask {
-                // Masking comes before white-space processing: a masked
-                // space or newline is content like any other character.
                 self.flush_pending(mask);
                 self.emit_masked(
                     mask,
@@ -634,8 +446,6 @@ impl Normalizer {
         }
     }
 
-    /// A marker: no source unit, no text, and the white space around it
-    /// untouched; only where it fell is recorded.
     fn mark(&mut self, item: u32) {
         let space_kept = &mut self.space_kept;
         let space = self.pending.as_mut().map(|pending| {
@@ -669,8 +479,6 @@ impl Normalizer {
         self.at_line_start = false;
     }
 
-    /// A collapsible space, tab, or carriage return joins the open whitespace
-    /// span, opening one if none is open.
     fn queue_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         if self.pending.is_none() {
@@ -688,8 +496,6 @@ impl Normalizer {
         self.units += 1;
     }
 
-    /// A collapsible newline upgrades the span to a segment break unless a
-    /// preserved break directly precedes it.
     fn queue_segment_break(&mut self, item: u32) {
         if let Some(pending) = &mut self.pending {
             if pending.kind == PendingKind::Space {
@@ -711,13 +517,6 @@ impl Normalizer {
         self.units += 1;
     }
 
-    /// A preserved space, tab or carriage return is content: it resolves any
-    /// collapsible span still open before it (a neighbouring run's), then
-    /// emits one space for its one source unit. css-text-3 §4
-    /// (`#white-space-processing`) treats a carriage return as a space in all
-    /// respects; a tab is recorded for the tab-stop pass. Unlike a collapsible
-    /// space it is never suppressed after a preserved break — that is the
-    /// indentation a `pre` block keeps.
     fn preserved_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         self.flush_pending(' ');
@@ -728,12 +527,6 @@ impl Normalizer {
         self.at_line_start = false;
     }
 
-    /// A preserved newline drops the open whitespace span and emits itself.
-    ///
-    /// A collapsible space directly before the break is always still pending
-    /// here — an emitted space is only ever produced with its following
-    /// content (a character or a box) already appended — so dropping the span
-    /// is the whole of the space-before-preserved-break rule.
     fn preserved_break(&mut self, character: char, item: u32) {
         if let Some(pending) = self.pending.take() {
             self.close_collapsed(pending.unit_start, 0);
@@ -749,7 +542,6 @@ impl Normalizer {
         }
     }
 
-    /// Resolves the open whitespace span against the next piece of content.
     fn flush_pending(&mut self, next: char) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -758,9 +550,6 @@ impl Normalizer {
             PendingKind::Suppressed => false,
             PendingKind::Space => true,
             PendingKind::SegmentBreak => {
-                // A box between the last character and the break stands in as
-                // the preceding content, exactly as a box after the break
-                // does on the other side.
                 let previous = if self
                     .boxes
                     .last()
@@ -786,9 +575,6 @@ impl Normalizer {
         }
     }
 
-    /// Records a collapsed span covering the units from `unit_start` to the
-    /// current position. The span's units were already counted as their
-    /// characters arrived, so this never advances the unit counter.
     fn close_collapsed(&mut self, unit_start: u32, bytes: u32) {
         let end = self.byte_len();
         self.segments.push(Segment {
@@ -804,7 +590,6 @@ impl Normalizer {
         });
     }
 
-    /// Emits `character` for one source character of the same UTF-16 length.
     fn emit_verbatim(&mut self, character: char, item: u32) {
         let start = self.byte_len();
         self.text.push(character);
@@ -816,7 +601,6 @@ impl Normalizer {
         );
     }
 
-    /// Emits `mask` for one source character of `units` UTF-16 units.
     fn emit_masked(&mut self, mask: char, units: u32, item: u32) {
         debug_assert_eq!(mask.len_utf8(), MASK_BYTES as usize);
         let start = self.byte_len();
@@ -825,11 +609,6 @@ impl Normalizer {
         self.push_segment(SegmentKind::Masked, start..self.byte_len(), units);
     }
 
-    /// Appends or extends a segment; adjacent verbatim segments coalesce
-    /// because they are contiguous in both offset spaces, as long as the
-    /// result is all ASCII or at most [`VERBATIM_DECODE`] bytes long, and
-    /// adjacent masked segments as long as their source chars have the same
-    /// UTF-16 length.
     fn push_segment(&mut self, kind: SegmentKind, norm: Range<u32>, units: u32) {
         let unit_end = self.units + units;
         if kind == SegmentKind::Masked
@@ -948,14 +727,6 @@ impl Normalizer {
 }
 
 impl NormalizedBlock {
-    /// Inserts `insertions`, in text order, into the normalized text: each
-    /// before the byte `at` of the text as it was, after the atomic boxes at
-    /// that byte it counts in `atoms_before` and before the rest. Every byte
-    /// offset after one moves past it, a styled range or segment it falls
-    /// inside is cut there, and the source map counts its bytes as no source
-    /// unit, so every source offset a caller sees is unchanged. Returns the
-    /// inserted segments, ascending, which the shaper interleaves with the
-    /// styled ranges (`super::Additions::inserted`).
     pub(in crate::text) fn splice(&mut self, insertions: Vec<Insertion>) -> Vec<InsertedSegment> {
         if insertions.is_empty() {
             return Vec::new();
@@ -982,8 +753,6 @@ impl NormalizedBlock {
             entry.byte = byte;
         }
 
-        // A styled range an insertion falls inside is cut there, so no range
-        // covers inserted bytes.
         let mut ranges = Vec::with_capacity(self.ranges.len() + insertions.len());
         for range in &self.ranges {
             let mut from = range.bytes.start;
@@ -1039,12 +808,6 @@ impl NormalizedBlock {
         inserted
     }
 
-    /// The source map's segments in the spliced text: cut like the styled
-    /// ranges, with one inserted segment per insertion, sorted by where they
-    /// start — a segment of no bytes before an inserted one starting at the
-    /// same byte, and an inserted one before text starting there. An
-    /// inserted segment holds no unit: it sits at the unit the segment before
-    /// it ends at.
     fn spliced_segments(&mut self, shifts: &Shifts<'_>, box_bytes: &[u32]) -> Vec<Segment> {
         let old = core::mem::take(&mut self.map.segments);
         let mut sorted: Vec<(u32, u8, Segment)> =
@@ -1076,10 +839,6 @@ impl NormalizedBlock {
                     },
                 ));
             } else if matches!(segment.kind, SegmentKind::Verbatim | SegmentKind::Masked) {
-                // A verbatim segment re-decodes its text for intra-segment
-                // offsets, and a masked one counts its bytes, so inserted
-                // bytes inside either would count as source: it is cut at
-                // every insertion point.
                 let mut from = segment.norm.start;
                 let mut unit = segment.units.start;
                 for point in shifts.cuts(segment.norm.start, segment.norm.end) {
@@ -1153,15 +912,11 @@ impl NormalizedBlock {
     }
 }
 
-/// Where a list of insertions moves the bytes of the text before them.
 struct Shifts<'a> {
     insertions: &'a [Insertion],
 }
 
 impl Shifts<'_> {
-    /// The bytes inserted before old byte `byte`: strictly before it, or,
-    /// `inclusive`, at it as well — which is where text starting at `byte`
-    /// moves to, past the insertions in front of it.
     fn before(&self, byte: u32, inclusive: bool) -> u32 {
         self.insertions
             .iter()
@@ -1176,9 +931,6 @@ impl Shifts<'_> {
             .sum()
     }
 
-    /// The bytes inserted before atomic box `slot` at old byte `byte`: every
-    /// insertion before that byte, and the ones at it that count the box
-    /// among the boxes before them.
     fn before_box(&self, byte: u32, slot: u32) -> u32 {
         self.insertions
             .iter()
@@ -1188,11 +940,6 @@ impl Shifts<'_> {
             .sum()
     }
 
-    /// The insertion points strictly inside `start..end`, then `end`, each
-    /// once: where a range from `start` is cut into pieces no insertion
-    /// falls inside, none of them empty. Insertions at one byte — an end
-    /// cluster and a start cluster where one box closes and the next opens —
-    /// cut there once.
     fn cuts(&self, start: u32, end: u32) -> impl Iterator<Item = u32> + '_ {
         let mut last = start;
         self.insertions
@@ -1208,10 +955,6 @@ impl Shifts<'_> {
     }
 }
 
-/// The CSS segment-break transformation rules.
-///
-/// Lives here rather than on the measurement path because this is the
-/// paragraph implementation that survives; that path borrows it back.
 pub(in crate::text) fn should_remove_segment_break(previous: Option<char>, next: char) -> bool {
     previous.is_some_and(|character| character == '\u{200B}')
         || next == '\u{200B}'
@@ -1244,8 +987,6 @@ mod tests {
     use super::*;
     use crate::geometry::Size;
 
-    /// css-text-3 processing, which every test below that names no processing
-    /// was written against. A `<text>` takes [`WhiteSpaceProcessing::Verbatim`].
     fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
         super::normalize(items, WhiteSpaceProcessing::Css).0
     }
@@ -1302,16 +1043,12 @@ mod tests {
         let block = normalize(&items);
 
         assert_eq!(block.text, "a b\u{a0}c");
-        // Source: 'a', ' ', '\t', '\r', '\n', ' ', ' ', 'b', NBSP, 'c' = 10 units.
         assert_eq!(block.map.source_len(), 10);
         assert_eq!(block.map.byte_to_unit(&block.text, 0), 0);
-        // The collapsed span covers units 1..7 and answers with its start.
         assert_eq!(block.map.byte_to_unit(&block.text, 1), 1);
         assert_eq!(block.map.byte_to_unit(&block.text, 2), 7);
-        // An end offset at the text end covers the trailing units.
         let end = u32::try_from(block.text.len()).expect("fits");
         assert_eq!(block.map.unit_before(&block.text, end), 10);
-        // A cut anywhere inside the collapsed span lands on the emitted space.
         for unit in 1..7 {
             assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(1));
         }
@@ -1327,8 +1064,6 @@ mod tests {
         let block = normalize(&items);
 
         assert_eq!(block.text, "a b");
-        // The pending space belongs to the item that opened it; identical
-        // style values in different items stay distinct ranges.
         assert_eq!(
             block.ranges,
             [
@@ -1350,12 +1085,8 @@ mod tests {
         let items = [raw(&style, "one \r\n \t two\nthree")];
         let block = normalize(&items);
 
-        // ' ' and '\r' collapse away before the preserved '\n'; the
-        // whitespace after it is suppressed; the second '\n' is preserved too.
         assert_eq!(block.text, "one\ntwo\nthree");
         assert_eq!(block.map.source_len(), 18);
-        // Bytes of "two" start at 4; their units start at 9 (after
-        // "one \r\n \t " = 9 units).
         assert_eq!(block.map.byte_to_unit(&block.text, 4), 9);
         assert_eq!(block.map.unit_to_byte(&block.text, 6), Some(4));
     }
@@ -1366,7 +1097,6 @@ mod tests {
         let removed = normalize(&[run(&style, "你\n好")]);
         assert_eq!(removed.text, "你好");
         assert_eq!(removed.map.source_len(), 3);
-        // The dropped break still occupies its source unit.
         assert_eq!(removed.map.unit_to_byte(&removed.text, 1), Some(3));
         assert_eq!(removed.map.byte_to_unit(&removed.text, 3), 2);
 
@@ -1385,8 +1115,6 @@ mod tests {
         ];
         let block = normalize(&items);
         assert_eq!(block.text, "a  b\u{1F600}");
-        // 'a' and the collapsed " \n"; the box; two spaces collapsed into
-        // nothing; 'b' and a surrogate pair.
         assert_eq!(block.item_units, [0..3, 3..4, 4..6, 6..9]);
         assert_eq!(block.map.source_len(), 9);
         assert_eq!(normalize(&[]).item_units, []);
@@ -1398,14 +1126,11 @@ mod tests {
         let items = [run(&style, "a \n"), atom(7), run(&style, " b")];
         let block = normalize(&items);
 
-        // The segment break before the box resolves to a space (the box is
-        // not an East Asian character), and the space after it collapses.
         assert_eq!(block.text, "a  b");
         assert_eq!(block.boxes.len(), 1);
         let placed = block.boxes[0];
         assert_eq!(placed.byte, 2);
         assert_eq!(placed.item, 1);
-        // Units: 'a'=0, collapsed " \n"=1..3, box=3, collapsed " "=4, 'b'=5.
         assert_eq!(placed.unit, 3);
         assert_eq!(block.map.source_len(), 6);
         assert_eq!(block.map.unit_to_byte(&block.text, 3), Some(2));
@@ -1424,7 +1149,6 @@ mod tests {
             run(&style, "c"),
         ];
         let block = normalize(&items);
-        // Units: box=0, 'a'=1, 'b'=2, box=3, box=4, 'c'=5.
         assert_eq!(block.map.source_len(), 6);
         let counts: Vec<u32> = (0..=6).map(|unit| block.map.boxes_before(unit)).collect();
         assert_eq!(counts, [0, 1, 1, 1, 2, 3, 3]);
@@ -1456,8 +1180,6 @@ mod tests {
         assert_eq!(block.map.unit_to_byte("", 0), Some(0));
         assert_eq!(block.map.unit_to_byte("", 2), None);
 
-        // Trailing whitespace after a box survives as one hanging space even
-        // with no text bytes before it.
         let trailing = normalize(&[atom(1), run(&style, "  ")]);
         assert_eq!(trailing.text, " ");
         assert_eq!(trailing.map.source_len(), 3);
@@ -1468,8 +1190,6 @@ mod tests {
         let style = RunStyle::default();
         let block = normalize(&[run(&style, "a🙂b")]);
         assert_eq!(block.map.source_len(), 4);
-        // Unit 1 is the pair start, unit 2 is inside it: both land on the
-        // emoji's first byte.
         assert_eq!(block.map.unit_to_byte(&block.text, 1), Some(1));
         assert_eq!(block.map.unit_to_byte(&block.text, 2), Some(1));
         assert_eq!(block.map.unit_to_byte(&block.text, 3), Some(5));
@@ -1508,15 +1228,11 @@ mod tests {
     #[test]
     fn a_space_before_a_preserved_break_is_dropped_unless_a_box_intervenes() {
         let style = RunStyle::default();
-        // The box flushes the pending space into an emitted byte; the break
-        // then follows the box, not the space, so the space stays and the
-        // box keeps its byte position.
         let items = [run(&style, "a "), atom(1), raw(&style, "\nb")];
         let block = normalize(&items);
         assert_eq!(block.text, "a \nb");
         assert_eq!(block.boxes[0].byte, 2);
 
-        // Adjacent to the break, the pending space is dropped.
         let plain = normalize(&[run(&style, "a "), raw(&style, "\nb")]);
         assert_eq!(plain.text, "a\nb");
     }
@@ -1529,16 +1245,10 @@ mod tests {
         assert_eq!(trailing_box.map.unit_before(&trailing_box.text, 3), 3);
 
         let box_then_space = normalize(&[run(&style, "a"), atom(1), run(&style, "  ")]);
-        // 'a' = 0, box = 1, collapsed spaces = 2..4. An end at the box's own
-        // byte stops before it; an end past the emitted space consumes the
-        // box and the whitespace both.
         assert_eq!(box_then_space.text, "a ");
         assert_eq!(box_then_space.map.unit_before(&box_then_space.text, 1), 1);
         assert_eq!(box_then_space.map.unit_before(&box_then_space.text, 2), 4);
 
-        // Mid-text: a box sharing its byte with the following character is
-        // not consumed by an end at that byte, while a dropped-whitespace
-        // span at the boundary is.
         let mid = normalize(&[run(&style, "a"), atom(1), run(&style, "b")]);
         assert_eq!(mid.text, "ab");
         assert_eq!(mid.map.unit_before(&mid.text, 1), 1);
@@ -1553,21 +1263,15 @@ mod tests {
         let style = RunStyle::default();
         let block = normalize(&[pre(&style, "  a\t b\r\n  c ")]);
 
-        // Nothing collapses: the tab and the carriage return each emit one
-        // space, the newline is a preserved break, and the indentation after
-        // it survives.
         assert_eq!(block.text, "  a  b \n  c ");
         assert_eq!(block.tabs, [3]);
         assert_eq!(block.map.source_len(), 12);
         assert_eq!(block.item_units.first(), Some(&(0..12)));
-        // One byte per unit, both ways, across the whole run.
         for unit in 0..12 {
             assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(unit));
             assert_eq!(block.map.byte_to_unit(&block.text, unit), unit);
         }
         assert_eq!(block.map.unit_before(&block.text, 12), 12);
-        // A line's visible end drops its newline but keeps a preserved space
-        // in front of it, and a trailing preserved space is content too.
         assert_eq!(block.map.visible_end(&block.text, 0, 8), 7);
         assert_eq!(block.map.visible_end(&block.text, 8, 12), 12);
     }
@@ -1588,7 +1292,6 @@ mod tests {
         for block in [&collapsed, &breaks, &preserved] {
             assert_eq!(block.item_units, [0..4, 4..12]);
             assert_eq!(block.map.source_len(), 12);
-            // `c` is unit 11 in every mode.
             let byte = block.map.unit_to_byte(&block.text, 11).expect("in range");
             assert_eq!(&block.text[byte as usize..], "c");
         }
@@ -1597,19 +1300,15 @@ mod tests {
     #[test]
     fn preserved_and_collapsible_whitespace_meet_at_run_boundaries() {
         let style = RunStyle::default();
-        // A collapsible space before a preserved one is not collapsed by it:
-        // only a collapsible space following another collapsible one is.
         let before = normalize(&[run(&style, "a  "), pre(&style, "  b")]);
         assert_eq!(before.text, "a   b");
         assert_eq!(before.item_units, [0..3, 3..6]);
         assert_eq!(before.map.byte_to_unit(&before.text, 1), 1);
         assert_eq!(before.map.byte_to_unit(&before.text, 2), 3);
 
-        // And one after a preserved space opens a span of its own.
         let after = normalize(&[pre(&style, "a  "), run(&style, "  b")]);
         assert_eq!(after.text, "a   b");
 
-        // Only the collapsed trailing space is line-end whitespace.
         let trailing = normalize(&[pre(&style, "a "), run(&style, "  ")]);
         assert_eq!(trailing.text, "a  ");
         assert_eq!(trailing.map.visible_end(&trailing.text, 0, 3), 2);
@@ -1627,9 +1326,6 @@ mod tests {
     #[test]
     fn a_box_stands_in_as_the_content_before_a_segment_break() {
         let style = RunStyle::default();
-        // Without the box the break between East Asian characters is
-        // removed; with the box in between, the break is adjacent to the box
-        // and collapses to a space instead.
         let removed = normalize(&[run(&style, "你\n好")]);
         assert_eq!(removed.text, "你好");
 
@@ -1641,11 +1337,9 @@ mod tests {
     #[test]
     fn css_processing_removes_the_collapsible_whitespace_a_paragraph_starts_with() {
         let style = RunStyle::default();
-        // Spaces, a tab and a segment break, split across two runs.
         let items = [run(&style, " \t"), run(&style, "\n  a b ")];
         let block = normalize(&items);
         assert_eq!(block.text, "a b ");
-        // Every source unit is still counted, the removed ones included.
         assert_eq!(block.map.source_len(), 9);
         assert_eq!(block.map.byte_to_unit(&block.text, 0), 5);
     }
@@ -1654,20 +1348,12 @@ mod tests {
     fn css_processing_keeps_preserved_spaces_at_the_paragraph_start() {
         let style = RunStyle::default();
         assert_eq!(normalize(&[pre(&style, "  a")]).text, "  a");
-        // A collapsible span before a preserved one is still at the line
-        // start, and goes.
         assert_eq!(normalize(&[run(&style, " "), pre(&style, " a")]).text, " a");
     }
 
-    /// The lookups as linear scans over every segment, each verbatim offset
-    /// decoded from the segment's start: the definition the binary searches,
-    /// the ASCII arithmetic and the bounded verbatim segments must answer
-    /// exactly as.
     mod scan {
         use super::super::{MASK_BYTES, Segment, SegmentKind, SourceMap, utf16_len};
 
-        /// The source units of a masked segment's masks before `byte`: each
-        /// mask's share of the segment's units.
         fn masked_units(segment: &Segment, text: &str, byte: u32) -> u32 {
             let masks = text[segment.norm.start as usize..segment.norm.end as usize]
                 .chars()
@@ -1751,8 +1437,6 @@ mod tests {
                     Some(byte)
                 }
                 SegmentKind::Masked => {
-                    // The mask holding the unit, a pair's second half
-                    // included.
                     let mut byte = segment.norm.start;
                     while byte + MASK_BYTES < segment.norm.end
                         && segment.units.start + masked_units(segment, text, byte + MASK_BYTES)
@@ -1768,7 +1452,6 @@ mod tests {
         }
     }
 
-    /// Every lookup at every byte and unit of `block` against [`scan`].
     fn assert_lookups_match_the_scan(block: &NormalizedBlock) {
         let text = block.text.as_str();
         let map = &block.map;
@@ -1797,8 +1480,6 @@ mod tests {
         }
     }
 
-    /// [`assert_lookups_match_the_scan`] over `items` normalized, and again
-    /// with text a consumer splices in.
     fn assert_spliced_lookups_match_the_scan(
         items: &[InlineItem<'_>],
         processing: WhiteSpaceProcessing,
@@ -1806,11 +1487,6 @@ mod tests {
         for per_point in [1, 2] {
             let (mut block, _) = super::normalize(items, processing);
             assert_lookups_match_the_scan(&block);
-            // The same content with text a consumer inserts: inside a long
-            // verbatim segment, at an atomic box and at the text's end; then
-            // two insertions at each of those places, as an end edge cluster
-            // and a start edge cluster where one inline box closes and the
-            // next opens.
             let boxes: Vec<(u32, u32)> = block
                 .boxes
                 .iter()
@@ -1967,21 +1643,16 @@ mod tests {
             normalize(&[raw(&style, "a\n"), run(&style, "  b")]).text,
             "a\nb"
         );
-        // Only whitespace: nothing at all.
         assert_eq!(normalize(&[run(&style, " \n\t ")]).text, "");
     }
     #[test]
     fn a_masked_run_shows_one_mask_per_source_character_white_space_included() {
         let style = RunStyle::default();
-        // ASCII, a surrogate pair, a space, a newline, a tab.
         let block = normalize(&[masked(&style, "a\u{1F600} \n\tb")]);
         assert_eq!(block.text, "\u{2022}".repeat(6));
-        // Nothing collapses, nothing breaks, no tab stop.
         assert_eq!(block.tabs, []);
         assert_eq!(block.map.source_len(), 7);
         assert_eq!(block.item_units.first(), Some(&(0..7)));
-        // Masks start at bytes 0, 3, …, 15; their source chars at units
-        // 0, 1, 3, 4, 5, 6.
         let starts = [0, 1, 3, 4, 5, 6];
         for (mask, &unit) in starts.iter().enumerate() {
             let byte = u32::try_from(mask).unwrap() * MASK_BYTES;
@@ -1989,15 +1660,12 @@ mod tests {
             assert_eq!(block.map.unit_before(&block.text, byte), unit);
             assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(byte));
         }
-        // The second half of the pair rounds down to its mask.
         assert_eq!(block.map.unit_to_byte(&block.text, 2), Some(3));
         assert_eq!(block.map.unit_before(&block.text, 18), 7);
         assert_eq!(block.map.unit_to_byte(&block.text, 7), None);
-        // A mask is content, never line-end white space.
         assert_eq!(block.map.visible_end(&block.text, 0, 18), 18);
         assert_lookups_match_the_scan(&block);
 
-        // Every value has its own mask, each three bytes long.
         for (security, mask) in [
             (TextSecurity::Circle, '\u{25E6}'),
             (TextSecurity::Disc, '\u{2022}'),
@@ -2012,9 +1680,6 @@ mod tests {
     #[test]
     fn a_masked_run_resolves_the_white_space_an_unmasked_neighbour_left_open() {
         let style = RunStyle::default();
-        // The collapsible spaces before the masked run collapse to one
-        // space, which the mask after them keeps; the masked run's own
-        // spaces are masks.
         let block = normalize(&[run(&style, "a  "), masked(&style, "  "), run(&style, "  b")]);
         assert_eq!(block.text, "a \u{2022}\u{2022} b");
         assert_eq!(block.item_units, [0..3, 3..5, 5..8]);
@@ -2025,13 +1690,9 @@ mod tests {
         assert_eq!(block.map.unit_to_byte(&block.text, 4), Some(5));
         assert_lookups_match_the_scan(&block);
 
-        // At the paragraph start a masked space is content too.
         let leading = normalize(&[masked(&style, " "), run(&style, " a")]);
         assert_eq!(leading.text, "\u{2022} a");
 
-        // Under a verbatim `nowrap` processing a masked newline is no
-        // forced break; the unmasked one after it is, and what follows it is
-        // counted and dropped, masked or not.
         let first_line = super::normalize(
             &[
                 masked(&style, "a\nb"),
@@ -2053,7 +1714,6 @@ mod tests {
     fn a_splice_cuts_a_masked_segment_and_keeps_its_units() {
         let style = RunStyle::default();
         let mut block = normalize(&[masked(&style, "ab\u{1F600}\u{1F600}cd")]);
-        // Three segments: two one-unit chars, two pairs, two one-unit chars.
         assert_eq!(block.map.segments.len(), 3);
         block.splice(vec![
             Insertion {
@@ -2078,7 +1738,6 @@ mod tests {
             block.text,
             format!("{bullet}x{bullet}{bullet}yz{bullet}{bullet}{bullet}"),
         );
-        // Every mask keeps its source unit; the inserted bytes have none.
         for (byte, unit) in [(0, 0), (4, 1), (7, 2), (12, 4), (15, 6), (18, 7)] {
             assert_eq!(block.map.byte_to_unit(&block.text, byte), unit, "{byte}");
         }
@@ -2096,8 +1755,6 @@ mod tests {
         assert!(plain.markers.is_empty());
         assert_eq!(plain.space_kept, []);
 
-        // A removed sequence at the start, a kept one between `a` and `b`,
-        // and a marker in none.
         let items = [
             run(&style, "  "),
             InlineItem::Marker,

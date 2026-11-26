@@ -55,78 +55,35 @@ const OPACITY: OwnedPropertyDeclarationId =
 const TRANSFORM: OwnedPropertyDeclarationId =
     OwnedPropertyDeclarationId::Longhand(LonghandId::Transform);
 
-/// One element's exported animation state.
 #[derive(Debug, Clone)]
 pub(crate) struct CompositeCurve {
-    /// The set's animations in its order, canceled ones dropped: the order
-    /// the cascade inserts them in, a later one winning a property. Each
-    /// with the timeline it reads its progress from.
     pub(crate) animations: Box<[(Animation, Timeline)]>,
-    /// The set's pending and running transitions in its order.
     pub(crate) transitions: Box<[Transition]>,
-    /// The timeline second the curve was committed at: a sample with no
-    /// clock reading samples the document timeline here, which is the
-    /// committed cascade's instant.
     pub(crate) committed_at: f64,
-    /// The timeline second the first animation or transition ends at: past
-    /// it its contribution can be replaced by the base value, which only a
-    /// commit knows. `None` when nothing ends.
     pub(crate) expires_at: Option<f64>,
-    /// Present when an animation animates `transform`.
     pub(crate) transform: Option<TransformTrack>,
 }
 
-/// Where one exported animation reads its progress.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
-    /// `Animation::progress_at`: the document timeline at the instant
-    /// sampled; for a progress-driven animation, its cloned
-    /// `timeline_sample` — held while paused, `None` on an inactive timeline.
     Clock,
-    /// A running animation on an active scroll progress timeline.
     Scroll(ScrollTimeline),
 }
 
-/// A running animation's scroll progress timeline, as the commit bound it.
 #[derive(Debug, Clone)]
 pub(crate) struct ScrollTimeline {
-    /// The scroll container whose offset drives it.
     pub(crate) source: NodeId,
-    /// `source`'s scroll slot in this frame, bound after the build's walk
-    /// (the element's own slot, and a later-painted source's, do not exist
-    /// yet when the curve is built). `None` when the frame has none: nothing
-    /// moves the source between commits then, and the animation holds its
-    /// cloned sample.
     pub(crate) slot: Option<u32>,
     pub(crate) axis: Axis,
     pub(crate) timing: ProgressTiming,
-    /// Whether this is a scroll or a view progress timeline: where an offset
-    /// through a circular axis's seam samples.
     pub(crate) kind: ProgressKind,
 }
 
 impl ScrollTimeline {
-    /// Whether this is a view progress timeline over scroll slot `slot`:
-    /// the timeline a seam copy of that slot's content samples again at the
-    /// copy's own offset ([`SeamPass`](super::space::SeamPass)).
     pub(crate) fn views(&self, slot: u32) -> bool {
         self.kind == ProgressKind::View && self.slot == Some(slot)
     }
 
-    /// Where the animation stands with `slot` at `offsets`: the offset along
-    /// `axis`, clamped to the scroll range as the main thread clamps it (a
-    /// `contain-bounce` stretch is no scroll offset) and unsnapped.
-    ///
-    /// Through a circular axis's seam the two kinds part: a scroll progress
-    /// timeline reads the offset's representative nearer the range
-    /// ([`ScrollSlot::unwrap`], which normalizes first, so a seam pass's
-    /// shifted offset reads as the original's); a view progress timeline
-    /// reads the offset as `offsets` hands it — inside the period in the
-    /// frame's own pass, one period back in a seam pass — and unclamped,
-    /// since on such an axis every offset of the period is a position and
-    /// the subject's ranges lie anywhere in it.
-    ///
-    /// [`ScrollSlot::unwrap`]: super::ScrollSlot::unwrap
     fn progress(
         &self,
         slot: u32,
@@ -155,23 +112,15 @@ impl ScrollTimeline {
     }
 }
 
-/// The constant factors the transform delta folds a sampled list with.
 #[derive(Debug, Clone)]
 pub(crate) struct TransformTrack {
     context: ContextMatrix,
     parent_world: Transform3D<f32>,
-    /// `planar(W_c)⁻¹`: the committed world the frame was baked at, undone.
     committed_inverse: Affine,
-    /// Where the delta can carry content over the curve's domain.
     pub(crate) reach: Reach,
 }
 
 impl TransformTrack {
-    /// The track of `curve` on an element whose world folds as `context`
-    /// then `parent_world`, committed at `world` with transform list
-    /// `committed`. `None` where composition, a 2D affine, cannot follow: a
-    /// committed world that is not 2D or not invertible, or a keyframe value
-    /// some interpolation takes out of the plane.
     pub(crate) fn new(
         curve: &CompositeCurve,
         context: ContextMatrix,
@@ -191,7 +140,6 @@ impl TransformTrack {
         if committed_matrix.determinant().abs() < 1e-9 || world.determinant().abs() < 1e-9 {
             return None;
         }
-        // `W = pre · Lc · origin⁻¹`, every factor of `pre` constant.
         let pre = world * context.origin() * committed_matrix.inverse();
         let reach = Reach::of(
             curve.transform_segments(),
@@ -208,7 +156,6 @@ impl TransformTrack {
         })
     }
 
-    /// The element's world with `list` as its transform.
     pub(crate) fn world(&self, list: &ComputedTransform) -> Transform3D<f32> {
         self.context.with_list(list).then(&self.parent_world)
     }
@@ -218,8 +165,6 @@ impl TransformTrack {
     }
 }
 
-/// What one sample answers: the CSS-px delta against the committed bake and
-/// the opacity replacing the committed one.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CurveSample {
     pub(crate) delta: Affine,
@@ -227,10 +172,6 @@ pub(crate) struct CurveSample {
 }
 
 impl CompositeCurve {
-    /// Samples the curve at timeline second `now` — the committed instant
-    /// when `None` — with each scroll slot at `offsets`, and `values` as
-    /// scratch. A property no animation contributes keeps its committed
-    /// value: identity delta, `None` alpha.
     pub(crate) fn sample(
         &self,
         now: Option<f64>,
@@ -239,7 +180,6 @@ impl CompositeCurve {
     ) -> CurveSample {
         self.values_at(now, offsets, values);
         let alpha = match values.get(&OPACITY) {
-            // Paint clamps the committed opacity the same way.
             Some(AnimationValue::Opacity(opacity)) => Some(opacity.clamp(0.0, 1.0)),
             _ => None,
         };
@@ -250,18 +190,12 @@ impl CompositeCurve {
         CurveSample { delta, alpha }
     }
 
-    /// Whether an animation of this curve runs on a view progress timeline
-    /// over scroll slot `slot`, so a seam copy of that slot's content
-    /// samples the curve again at the copy's offset.
     pub(crate) fn views(&self, slot: u32) -> bool {
         self.animations
             .iter()
             .any(|(_, timeline)| matches!(timeline, Timeline::Scroll(scroll) if scroll.views(slot)))
     }
 
-    /// Fills `values` with what the cascade at `now` (the committed instant
-    /// when `None`) and `offsets` takes from the animations, in their order,
-    /// then from the transitions over them.
     pub(crate) fn values_at(
         &self,
         now: Option<f64>,
@@ -269,8 +203,6 @@ impl CompositeCurve {
         values: &mut AnimationValueMap,
     ) {
         let now = now.unwrap_or(self.committed_at);
-        // Past its domain the curve holds the domain's last instant until the
-        // hand-back commit is adopted.
         let now = self.expires_at.map_or(now, |end| now.min(end.next_down()));
         values.clear();
         for (animation, timeline) in &self.animations {
@@ -292,15 +224,6 @@ impl CompositeCurve {
         }
     }
 
-    /// Every segment an animation or a transition interpolates `transform`
-    /// over, with the eased progress it samples there. An animation's
-    /// segment eases by the lower keyframe's function running forward and by
-    /// the upper's over flipped progress running reversed, as stylo eases
-    /// them, in the direction the sample runs; iterations, fill and a scroll
-    /// timeline only pick progress in `[0, 1]`, and stylo yields every
-    /// segment whose span meets it, zero-length ones at a tie included, so
-    /// every value a sample there returns is an endpoint of, or lies on, one
-    /// of them. A transition runs once forward from its `from` to its `to`.
     fn transform_segments(&self) -> impl Iterator<Item = Segment<'_>> {
         fn list(value: &AnimationValue) -> &ComputedTransform {
             let AnimationValue::Transform(list) = value else {
@@ -323,9 +246,6 @@ impl CompositeCurve {
             .animations
             .iter()
             .flat_map(move |(animation, timeline)| {
-                // A progress-driven animation's direction is its binding's, read
-                // from the style by name, which stylo's `return;` deviation can
-                // leave apart from the clone's; a held sample's binding is gone.
                 let direction = match timeline {
                     Timeline::Scroll(scroll) => Some(scroll.timing.direction),
                     Timeline::Clock if animation.is_progress_driven() => None,
@@ -357,8 +277,6 @@ impl CompositeCurve {
         animations.chain(transitions)
     }
 
-    /// Whether an animation or a transition reads the document timeline:
-    /// the compositor then recomposes each frame at its clock reading.
     pub(crate) fn reads_clock(&self) -> bool {
         !self.transitions.is_empty()
             || self
@@ -367,7 +285,6 @@ impl CompositeCurve {
                 .any(|(animation, _)| !animation.is_progress_driven())
     }
 
-    /// Whether an animation reads a scroll slot's offset.
     pub(crate) fn reads_scroll(&self) -> bool {
         self.animations.iter().any(|(_, timeline)| {
             matches!(
@@ -380,8 +297,6 @@ impl CompositeCurve {
 
 #[cfg(test)]
 impl CompositeCurve {
-    /// A curve with no animations, so it samples the committed values: the
-    /// shape the compose-program tests need.
     pub(crate) fn inert(transform: Option<TransformTrack>) -> Self {
         Self {
             animations: Box::new([]),
@@ -392,7 +307,6 @@ impl CompositeCurve {
         }
     }
 
-    /// Whether an animation or a transition animates `property`.
     pub(crate) fn animates(&self, property: LonghandId) -> bool {
         let property = PropertyDeclarationId::Longhand(property);
         self.animations.iter().any(|(animation, _)| {
@@ -408,8 +322,6 @@ impl CompositeCurve {
 
 #[cfg(test)]
 impl TransformTrack {
-    /// A track on an element at the root with a zero-sized box, whose reach
-    /// is `reach`.
     pub(crate) fn with_reach(reach: Reach) -> Self {
         Self {
             context: ContextMatrix::identity(),

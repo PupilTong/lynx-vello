@@ -27,9 +27,6 @@ use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 
-/// Registers one member per `fn`, each `$parser` applied at its argument's
-/// position; `NAME` is the member's full name, which every message it
-/// throws starts with ([`named`]).
 macro_rules! members {
     ($engine:ident, $table:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$this:ident| $body:block
@@ -56,9 +53,6 @@ macro_rules! members {
     })*};
 }
 
-/// Runs `member`, its error message starting with the member's full name
-/// `name`: a message an argument parser wrote already does, and one of
-/// [`CanvasTable`]'s lookups ([`no_such`]) is prefixed with it.
 fn named(
     name: &str,
     member: impl FnOnce() -> Result<HostValue, String>,
@@ -72,9 +66,6 @@ fn named(
     })
 }
 
-/// Runs `$call` on the path the id `$id` names: a canvas's current default
-/// path, through its 2D context, or a path entry. Both have the builder
-/// methods under the same names.
 macro_rules! on_path {
     ($table:ident, $id:ident, |$path:ident| $call:expr) => {
         match $table.entries().get_mut(&$id) {
@@ -88,8 +79,6 @@ macro_rules! on_path {
     };
 }
 
-/// Installs every canvas member on `engine`, over `table`, and in a realm
-/// with a document `canvasTransferControl` too.
 pub(crate) fn install(engine: &ScriptEngine, table: &Rc<CanvasTable>) -> Result<(), ScriptError> {
     install_context_members(engine, table)?;
     if let Fonts::Document(document) = &table.fonts {
@@ -98,11 +87,6 @@ pub(crate) fn install(engine: &ScriptEngine, table: &Rc<CanvasTable>) -> Result<
     Ok(())
 }
 
-/// `canvasTransferControl(node)`: HTML's `transferControlToOffscreen()` on
-/// the element `node`, the canvas it makes filed in `table`.
-/// Answers `[id, width, height]` as a `Float64Array`'s bytes, or
-/// `"InvalidStateError"` for an element that is not a canvas in context mode
-/// none.
 fn install_transfer(
     engine: &ScriptEngine,
     table: &Rc<CanvasTable>,
@@ -144,7 +128,6 @@ fn install_context_members(
     table: &Rc<CanvasTable>,
 ) -> Result<(), ScriptError> {
     members! { engine, table;
-        // Objects.
         fn canvasCreate(width: size, height: size) |this| {
             Ok(id_value(this.insert(Entry::Canvas(CanvasEntry::new(width, height)))))
         }
@@ -158,7 +141,6 @@ fn install_context_members(
                 return Err(no_such("canvas", target));
             };
             entry.set_size(width, height);
-            // A bitmap there was is now transparent black.
             if entry.canvas.is_some() {
                 this.note_drawn(target, entry);
             }
@@ -168,7 +150,6 @@ fn install_context_members(
             Ok(id_value(this.detach(target)?))
         }
         fn canvasAttach(token: number) |this| {
-            // A token is a positive integer; anything else names nothing.
             let attached = token_of(token).and_then(|token| this.attach(token));
             Ok(attached.map_or_else(|| error_value(CanvasError::InvalidState), |entry| float_bytes(&entry)))
         }
@@ -199,7 +180,6 @@ fn install_context_members(
             Ok(HostValue::Undefined)
         }
 
-        // The state stack.
         fn canvasSave(target: id) |this| {
             this.context(target, |context| context.save()).map(undefined)
         }
@@ -210,7 +190,6 @@ fn install_context_members(
             this.draw(target, |context| context.reset()).map(undefined)
         }
 
-        // Transformations.
         fn canvasScale(target: id, x: number, y: number) |this| {
             this.context(target, |context| context.scale(x, y)).map(undefined)
         }
@@ -235,7 +214,6 @@ fn install_context_members(
             this.context(target, |context| context.reset_transform()).map(undefined)
         }
 
-        // Numeric, keyword and boolean attributes.
         fn canvasGetNumber(target: id, which: selector) |this| {
             this.context(target, |context| {
                 HostValue::Number(match which {
@@ -278,7 +256,6 @@ fn install_context_members(
             })
         }
         fn canvasSetKeyword(target: id, which: selector, value: text) |this| {
-            // A string the attribute does not take is ignored.
             this.context(target, |context| match which {
                 COMPOSITE => CompositeOp::from_name(value)
                     .map(|op| context.set_global_composite_operation(op)),
@@ -301,7 +278,6 @@ fn install_context_members(
                 .map(undefined)
         }
 
-        // Fill, stroke and shadow styles.
         fn canvasSetColor(target: id, which: selector, css: text) |this| {
             this.context(target, |context| match which {
                 FILL => context.set_fill_style_css(css),
@@ -352,7 +328,6 @@ fn install_context_members(
             Ok(outcome(pattern.set_transform([a, b, c, d, e, f])))
         }
 
-        // Rectangles.
         fn canvasClearRect(target: id, x: number, y: number, w: number, h: number) |this| {
             this.draw(target, |context| context.clear_rect(x, y, w, h)).map(undefined)
         }
@@ -363,7 +338,6 @@ fn install_context_members(
             this.draw(target, |context| context.stroke_rect(x, y, w, h)).map(undefined)
         }
 
-        // Building paths, on a canvas's default path or a path entry.
         fn canvasBeginPath(target: id) |this| {
             this.context(target, |context| context.begin_path()).map(undefined)
         }
@@ -407,14 +381,11 @@ fn install_context_members(
         }
         fn canvasRoundRect(target: id, x: number, y: number, w: number, h: number,
             radii: rest) |this| {
-            // Each radius is an `[x, y]` pair; a caller writes a number `r`
-            // as `r, r`.
             let pairs: SmallVec<[[f64; 2]; 4]> =
                 radii.as_chunks::<2>().0.iter().copied().collect();
             on_path!(this, target, |path| path.round_rect(x, y, w, h, &pairs)).map(outcome)
         }
 
-        // Drawing paths. A path id of 0 is the current default path.
         fn canvasFill(target: id, path: optional_id, rule: fill_rule) |this| {
             let path = path.map(|path| this.path(path)).transpose()?;
             this.draw(target, |context| match &path {
@@ -459,7 +430,6 @@ fn install_context_members(
             })
         }
 
-        // Line styles.
         fn canvasSetLineDash(target: id, segments: rest) |this| {
             this.context(target, |context| context.set_line_dash(&segments)).map(undefined)
         }
@@ -467,7 +437,6 @@ fn install_context_members(
             this.context(target, |context| float_bytes(context.line_dash()))
         }
 
-        // Text.
         fn canvasSetFont(target: id, css: text) |this| {
             this.context(target, |context| context.set_font_css(css)).map(serialization)
         }
@@ -505,7 +474,6 @@ fn install_context_members(
             ]))
         }
 
-        // Images and pixels.
         fn canvasDrawImage(target: id, source: id, rects: rest) |this| {
             let image = this.image(source)?;
             this.draw(target, |context| match *rects.as_slice() {
@@ -519,8 +487,6 @@ fn install_context_members(
             .map(outcome)
         }
         fn canvasGetImageData(target: id, sx: long, sy: long, sw: long, sh: long) |this| {
-            // The read is issued under the table's borrow and waited on
-            // after it.
             let read = this.context(target, |context| context.read_image_data(sx, sy, sw, sh))?;
             Ok(match read.and_then(|read| this.reads.wait(read)) {
                 Ok(pixels) => HostValue::Bytes(pixels.into_boxed_slice()),
@@ -565,8 +531,6 @@ fn install_context_members(
     Ok(())
 }
 
-// `canvasGetNumber`/`canvasSetNumber`'s `which`, in `canvas-host.d.ts`'s order;
-// anything past the last is `lineDashOffset`.
 const GLOBAL_ALPHA: u8 = 0;
 const SHADOW_BLUR: u8 = 1;
 const SHADOW_OFFSET_X: u8 = 2;
@@ -574,8 +538,6 @@ const SHADOW_OFFSET_Y: u8 = 3;
 const LINE_WIDTH: u8 = 4;
 const MITER_LIMIT: u8 = 5;
 
-// `canvasGetKeyword`/`canvasSetKeyword`'s `which`; anything past the last is
-// `direction`.
 const COMPOSITE: u8 = 0;
 const SMOOTHING_QUALITY: u8 = 1;
 const LINE_CAP: u8 = 2;
@@ -583,13 +545,10 @@ const LINE_JOIN: u8 = 3;
 const TEXT_ALIGN: u8 = 4;
 const TEXT_BASELINE: u8 = 5;
 
-// `canvasSetColor`/`canvasSetPaint`'s `which`: anything else is the stroke
-// style for a paint and the shadow color for a color.
 const FILL: u8 = 0;
 const STROKE: u8 = 1;
 
 impl CanvasTable {
-    /// A clone of the path under `id`.
     fn path(&self, id: u64) -> Result<Path, String> {
         match self.entries().get(&id) {
             Some(Entry::Path(path)) => Ok(path.clone()),
@@ -611,7 +570,6 @@ impl CanvasTable {
         }
     }
 
-    /// The pixels of the image bitmap under `id`.
     fn bitmap(&self, id: u64) -> Result<Image, String> {
         match self.entries().get(&id) {
             Some(Entry::Bitmap(image)) => Ok(image.clone()),
@@ -619,9 +577,6 @@ impl CanvasTable {
         }
     }
 
-    /// Runs a text call on the canvas under `id` with this realm's fonts,
-    /// listing the canvas as drawn. `None` when the realm has no fonts to
-    /// lend yet (an MTS realm before its document).
     fn text<R>(
         &self,
         id: u64,
@@ -634,12 +589,7 @@ impl CanvasTable {
     }
 }
 
-/// `canvasBitmapFrom`'s and `canvasBitmapFromPixels`' crop of `image`: none, or `[sx, sy, sw, sh]`,
-/// a negative size counted back from its corner, the area outside the image
-/// transparent black.
 fn cropped(image: &Image, crop: &[f64]) -> Result<Image, CanvasError> {
-    // HTML: a source whose bitmap has a zero side, which a canvas over the
-    // size limit is too.
     if image.width() == 0 || image.height() == 0 {
         return Err(CanvasError::InvalidState);
     }
@@ -656,8 +606,6 @@ fn cropped(image: &Image, crop: &[f64]) -> Result<Image, CanvasError> {
     image.crop(Some((x0, y0, width, height)))
 }
 
-/// `offset..offset + length` of a buffer the caller passed with the offset
-/// and length of the bytes to read.
 fn view(buffer: &[u8], offset: u32, length: u32) -> Result<&[u8], String> {
     let start = offset as usize;
     start
@@ -666,14 +614,11 @@ fn view(buffer: &[u8], offset: u32, length: u32) -> Result<&[u8], String> {
         .ok_or_else(|| "the bytes to read are outside the buffer".to_owned())
 }
 
-/// A number taken as a `long`: its fraction dropped, clamped to the `i32`
-/// range, `NaN` as 0.
 #[expect(clippy::cast_possible_truncation, reason = "the value is a long")]
 fn to_long(value: f64) -> i32 {
     value as i32
 }
 
-/// `value` as a token of the view's store, if it can be one.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -688,8 +633,6 @@ fn undefined<T>(_: T) -> HostValue {
     HostValue::Undefined
 }
 
-/// What a string setter answers: the attribute's serialization when it took
-/// the string, `undefined` when it ignored it.
 fn serialization(css: Option<String>) -> HostValue {
     css.map_or(HostValue::Undefined, HostValue::String)
 }
@@ -707,7 +650,6 @@ fn outcome(result: Result<(), CanvasError>) -> HostValue {
     result.map_or_else(error_value, undefined)
 }
 
-/// Files a new object, or answers why it could not be made.
 fn created(table: &CanvasTable, entry: Result<Entry, CanvasError>) -> HostValue {
     match entry {
         Ok(entry) => id_value(table.insert(entry)),
@@ -715,7 +657,6 @@ fn created(table: &CanvasTable, entry: Result<Entry, CanvasError>) -> HostValue 
     }
 }
 
-/// `values` as the bytes of a `Float64Array`.
 fn float_bytes(values: &[f64]) -> HostValue {
     HostValue::Bytes(
         values
@@ -724,8 +665,6 @@ fn float_bytes(values: &[f64]) -> HostValue {
             .collect(),
     )
 }
-
-// Argument parsers, each at one position of a member's arguments.
 
 fn argument<'a>(arguments: &[HostArgument<'a>], index: usize) -> HostArgument<'a> {
     arguments
@@ -752,13 +691,10 @@ fn optional_number(
     }
 }
 
-/// A number taken as a `long` ([`to_long`]).
 fn long(function: &str, arguments: &[HostArgument<'_>], index: usize) -> Result<i32, String> {
     number(function, arguments, index).map(to_long)
 }
 
-/// A size or offset: a non-negative integer, at most `u32::MAX` (a canvas
-/// side beyond that has no bitmap either way).
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -772,7 +708,6 @@ fn size(function: &str, arguments: &[HostArgument<'_>], index: usize) -> Result<
     Ok(value.min(f64::from(u32::MAX)) as u32)
 }
 
-/// An element's node id.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -802,7 +737,6 @@ fn id(function: &str, arguments: &[HostArgument<'_>], index: usize) -> Result<u6
     Ok(value as u64)
 }
 
-/// Which attribute a shared getter or setter is for: a small integer.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -819,7 +753,6 @@ fn selector(function: &str, arguments: &[HostArgument<'_>], index: usize) -> Res
     }
 }
 
-/// An id, or 0 for none.
 fn optional_id(
     function: &str,
     arguments: &[HostArgument<'_>],
@@ -873,7 +806,6 @@ fn bytes<'a>(
     }
 }
 
-/// Every number from `index` on.
 fn rest(
     function: &str,
     arguments: &[HostArgument<'_>],

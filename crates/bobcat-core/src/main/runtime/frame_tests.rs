@@ -35,15 +35,8 @@ use crate::view::{EngineEvent, NoWakeup};
 
 const CARD: &str = "app:///child.web.bundle";
 
-/// A second card the host serves, with no page CSS: what replaces [`CARD`]
-/// when the host page writes a new `src`.
 const SECOND: &str = "app:///second.web.bundle";
 
-/// The nested card's `root`, as a compiled card's root defines its
-/// `renderPage`: a global the boot calls with the processed init data. It
-/// throws — which the test sees as a diagnostic — unless its `__Card__` is
-/// `card`, the frame's `src` resolved against the view's base, and its
-/// `SystemInfo` is the host's.
 fn root(card: &str) -> String {
     format!(
         "if (__Card__ !== '{card}') throw Error('__Card__ is ' + __Card__); \
@@ -54,23 +47,14 @@ fn root(card: &str) -> String {
     )
 }
 
-/// The host page: a text of its own, then a 100×50 frame showing `src`.
-/// `updatePage` writes the data's `src` to the frame, `null` included, so a
-/// test reaches the page realm through `LynxView::update_data`; a `data` or
-/// a `globalProps` key instead writes its value, as the object itself, to the
-/// frame's `data` or `global-props`; an `op` detaches the frame, attaches it
-/// again, lets go of its handle, or logs what two UI methods answer for it.
 fn host_entry(src: &str) -> String {
     host_page(src, true)
 }
 
-/// [`host_entry`], with the frame appended to the page or left detached.
 fn host_page(src: &str, attached: bool) -> String {
     host_page_with(src, attached, "")
 }
 
-/// [`host_page`], running `before` — which names the frame `frame` — after
-/// the frame is created and before its `src` is written.
 fn host_page_with(src: &str, attached: bool, before: &str) -> String {
     format!(
         r"
@@ -123,14 +107,6 @@ fn host_page_with(src: &str, attached: bool, before: &str) -> String {
     )
 }
 
-/// The BTS boot a host serves at `<card>#background-thread`, which a
-/// frame's card connects its background thread to: a stand-in for
-/// `bobcat-source`'s, which loads the card's `/app-service.js`, that logs
-/// what the BTS was started with and every update and app hook it is
-/// handed, each line as `bts <card> …`, and then runs `extra`.
-///
-/// `data` lines also read the group's shared data under `from`, which a
-/// page's BTS may have set.
 fn bts_boot(card: &str, extra: &str) -> String {
     format!(
         "import {{ lynx, NativeModules }} from 'bobcat:bts-runtime';
@@ -144,24 +120,18 @@ fn bts_boot(card: &str, extra: &str) -> String {
     )
 }
 
-/// `spec` serving `card`'s BTS boot, [`bts_boot`] with `extra`.
 fn with_bts(spec: TestViewSpec, card: &str, extra: &str) -> TestViewSpec {
     spec.with_module(&format!("{card}#background-thread"), &bts_boot(card, extra))
 }
 
-/// A host serving the card at [`CARD`], with its root, its page CSS and its
-/// BTS boot, for a frame whose `src` is `src`.
 fn serving_the_card(src: &str) -> TestViewSpec {
     serving_a_root(src, &root(CARD))
 }
 
-/// The same, with `root` as the card's root body. [`SECOND`] is served
-/// too, with its own root, its BTS boot and no page CSS.
 fn serving_a_root(src: &str, root: &str) -> TestViewSpec {
     serving_a_root_under(&host_entry(src), root)
 }
 
-/// [`serving_a_root`], with `entry` as the host page.
 fn serving_a_root_under(entry: &str, root: &str) -> TestViewSpec {
     let spec = TestViewSpec::new(entry)
         .with_fetchable(CARD)
@@ -176,8 +146,6 @@ fn serving_a_root_under(entry: &str, root: &str) -> TestViewSpec {
     with_bts(with_bts(spec, CARD, ""), SECOND, "")
 }
 
-/// Writes `src` (JSON: a string or `null`) to the host's frame through
-/// `updatePage`.
 fn write_src(engine: &mut TestEngine, src: &str) {
     engine
         .view
@@ -185,7 +153,6 @@ fn write_src(engine: &mut TestEngine, src: &str) {
         .expect("the view takes an update");
 }
 
-/// Runs one of `updatePage`'s operations on the host's frame.
 fn operate(engine: &mut TestEngine, op: &str) {
     engine
         .view
@@ -193,10 +160,8 @@ fn operate(engine: &mut TestEngine, op: &str) {
         .expect("the view takes an update");
 }
 
-/// What the frame shows, read off the document.
 struct FrameState {
     frame_size: (f32, f32),
-    /// The nested page's id and its element children's ids.
     nested: Vec<terminus::link::NodeId>,
     nested_color: Option<AbsoluteColor>,
     host_color: Option<AbsoluteColor>,
@@ -242,8 +207,6 @@ fn frame_state(tree: &mut LynxDocument) -> Option<FrameState> {
     })
 }
 
-/// Pumps until `done` holds of the frame, collecting every event; any
-/// event that ends the view fails the test.
 fn pump_until(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
@@ -256,8 +219,6 @@ fn pump_until(
             assert!(!event.is_fatal(), "the view ended: {event:?}");
             events.push(event);
         }
-        // Briefly: the document's thread may be parked on a source the next
-        // turn of this one answers.
         if let Some(state) = engine
             .view
             .probe_document_within(Duration::from_millis(20), frame_state)
@@ -271,9 +232,6 @@ fn pump_until(
     }
 }
 
-/// Every diagnostic among `events`, as its message: the realms' own reports,
-/// a listener's throw in any realm, and every worker's throw or end, so a
-/// frame's card's BTS that failed is one too.
 fn reported(events: &[EngineEvent]) -> Vec<&str> {
     events
         .iter()
@@ -288,14 +246,12 @@ fn reported(events: &[EngineEvent]) -> Vec<&str> {
         .collect()
 }
 
-/// Whether some console message among `events` is exactly `message`.
 fn logged(events: &[EngineEvent], message: &str) -> bool {
     events.iter().any(
         |event| matches!(event, EngineEvent::ConsoleMessage { message: seen, .. } if seen == message),
     )
 }
 
-/// How many console messages among `events` are exactly `message`.
 fn logged_times(events: &[EngineEvent], message: &str) -> usize {
     events
         .iter()
@@ -305,8 +261,6 @@ fn logged_times(events: &[EngineEvent], message: &str) -> usize {
         .count()
 }
 
-/// Pumps until a console message among `events` is exactly `message`,
-/// collecting every event.
 fn pump_until_logged(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, message: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !logged(events, message) {
@@ -322,21 +276,11 @@ fn pump_until_logged(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, mes
     }
 }
 
-/// A frame's `src` boots the card in a `ShadowRealm` bound to it: the
-/// card's tree is the nested page in the frame's shadow root, inside the
-/// frame's own 100×50 box, and its page CSS styles that tree alone. Removing
-/// `src` keeps the card, as native and web-core do; a different `src`
-/// replaces it, and the first card's nodes are freed.
 #[test]
 fn a_frames_src_boots_the_card_inside_it() {
     a_frame_boots(CARD);
 }
 
-/// A relative `src` is resolved against the view's base once, by
-/// `resolveUrl`, the way the fetcher resolves it: the card's `__Card__`, its
-/// section URLs and its BTS entry are all that absolute URL, so they name
-/// what the fetch registered, while the frame keeps `src` as written for
-/// its unchanged-`src` check.
 #[test]
 fn a_relative_frame_src_resolves_against_the_view_base() {
     a_frame_boots("child.web.bundle");
@@ -351,7 +295,6 @@ fn a_frame_boots(src: &str) {
         "the nested card rendered",
         |state| state.nested.len() == 2 && state.nested_color.is_some(),
     );
-    // Its background thread, at the card's resolved URL.
     pump_until_logged(
         &mut engine,
         &mut events,
@@ -376,8 +319,6 @@ fn a_frame_boots(src: &str) {
     );
 
     let nested = state.nested;
-    // A removal does nothing. `update_data` is answered in order, so once
-    // a later update has run, so has this one.
     write_src(&mut engine, "null");
     write_src(&mut engine, &format!("{src:?}"));
     for _ in 0..20 {
@@ -389,8 +330,6 @@ fn a_frame_boots(src: &str) {
     assert_eq!(kept.nested_color, Some(red));
 
     write_src(&mut engine, &format!("{SECOND:?}"));
-    // The nested page is the card's: the second card renders under a page
-    // of its own.
     let replaced = pump_until(
         &mut engine,
         &mut events,
@@ -413,8 +352,6 @@ fn a_frame_boots(src: &str) {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A `src` the fetcher cannot fetch is one diagnostic naming it, and the
-/// view goes on: boot finishes and the frame stays empty.
 #[test]
 fn a_frame_src_that_does_not_fetch_is_one_diagnostic() {
     let missing = "app:///missing.web.bundle";
@@ -434,7 +371,6 @@ fn a_frame_src_that_does_not_fetch_is_one_diagnostic() {
         assert!(Instant::now() < deadline, "no diagnostic: {events:?}");
         std::thread::sleep(Duration::from_millis(2));
     }
-    // A few more turns, for a second report that should not come.
     for _ in 0..20 {
         events.extend(engine.pump());
         std::thread::sleep(Duration::from_millis(2));
@@ -453,9 +389,6 @@ fn a_frame_src_that_does_not_fetch_is_one_diagnostic() {
     assert!(events.iter().all(|event| !event.is_fatal()));
 }
 
-/// The card's root is app code: one that throws is one diagnostic, reported
-/// in the frame's realm, and boot goes on to render what it defined, as the
-/// page's boot renders a page whose entry threw.
 #[test]
 fn a_throwing_root_is_reported_once_and_still_renders() {
     let mut engine = serving_a_root(
@@ -485,11 +418,6 @@ fn a_throwing_root_is_reported_once_and_still_renders() {
     );
 }
 
-/// The host page with a page-realm registration of each kind for `load` —
-/// a `bindload` worklet and a listener on the frame, a listener on the page,
-/// a `global-bindEvent` on the host's own text — and a frame showing `src`.
-/// Each logs `load <label> <detail> <whether the target is the frame>
-/// <phase>`.
 fn load_host(src: &str) -> String {
     host_page_with(
         src,
@@ -508,9 +436,6 @@ fn load_host(src: &str) -> String {
     )
 }
 
-/// [`root`] for [`CARD`], whose `root` first files a listener for `load` on
-/// its own page, logging `load card <detail> <whether the target is the
-/// page> <phase>`, then runs `after`.
 fn load_root(after: &str) -> String {
     format!(
         "const cardPage = __CreatePage('0', 0); \
@@ -522,11 +447,6 @@ fn load_root(after: &str) -> String {
     )
 }
 
-/// The lines [`load_host`]'s and [`load_root`]'s registrations log for one
-/// `load` of a card loaded from `src` as written, in the order they run: the
-/// page realm's walk — the frame's worklet and listener at the target, the
-/// page's listener as it bubbles, the global pass with no phase — and then
-/// the card's own, the dispatching realm, at its page.
 fn load_lines(src: &str) -> [String; 5] {
     let detail = format!(r#"{{"statusCode":0,"statusMessage":"success","url":"{src}"}}"#);
     [
@@ -538,7 +458,6 @@ fn load_lines(src: &str) -> [String; 5] {
     ]
 }
 
-/// Every console message among `events` that starts with `load `.
 fn load_logged(events: &[EngineEvent]) -> Vec<&str> {
     events
         .iter()
@@ -551,13 +470,6 @@ fn load_logged(events: &[EngineEvent]) -> Vec<&str> {
         .collect()
 }
 
-/// Once a frame's card has loaded its root, its boot dispatches one `load`
-/// at its nested page (user rulings 2026-10-21 and 2026-10-23), bubbling and
-/// composed, with web-core's success `detail` and the frame's `src` as
-/// written: the page realm hears it on the frame, retargeted to the frame —
-/// its `bindload`, its listener there, its listener on the page as it
-/// bubbles and its `global-bindEvent` — each once, and then the card's own
-/// listener on its page.
 #[test]
 fn a_frames_card_fires_load_once_its_root_has_loaded() {
     let src = "child.web.bundle";
@@ -580,8 +492,6 @@ fn a_frames_card_fires_load_once_its_root_has_loaded() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card whose `root` throws has still loaded it: the throw is reported
-/// once, in the card's realm, and the `load` is dispatched all the same.
 #[test]
 fn a_frames_card_whose_root_threw_still_fires_load() {
     let mut engine = serving_a_root_under(
@@ -602,8 +512,6 @@ fn a_frames_card_whose_root_threw_still_fires_load() {
     assert!(messages[0].contains("the root threw"), "{messages:?}");
 }
 
-/// A `src` that does not fetch boots nothing and fires no `load`: its one
-/// diagnostic is all there is (native's failure `load` is not built).
 #[test]
 fn a_frame_src_that_does_not_fetch_fires_no_load() {
     let missing = "app:///missing.web.bundle";
@@ -637,11 +545,6 @@ fn a_frame_src_that_does_not_fetch_fires_no_load() {
     );
 }
 
-/// A page-realm `load` listener runs inside the card's boot, so one that
-/// gives the frame a new `src` lets go of the card that is still booting:
-/// that boot stops there, connecting no BTS and rendering nothing into the
-/// page the teardown freed, and the new `src`'s card boots into the fresh
-/// page and fires its own `load`.
 #[test]
 fn a_load_listener_that_writes_a_new_src_replaces_the_booting_card() {
     let entry = host_page_with(
@@ -686,13 +589,10 @@ fn a_load_listener_that_writes_a_new_src_replaces_the_booting_card() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card whose `root` also logs `tick` every few milliseconds, for as long
-/// as its realm lives.
 fn ticking_root() -> String {
     format!("{} setInterval(() => console.log('tick'), 5);", root(CARD))
 }
 
-/// How many `tick`s among `events`.
 fn ticks(events: &[EngineEvent]) -> usize {
     events
         .iter()
@@ -702,7 +602,6 @@ fn ticks(events: &[EngineEvent]) -> usize {
         .count()
 }
 
-/// Pumps for `duration`, answering every event.
 fn pump_for(engine: &mut TestEngine, duration: Duration) -> Vec<EngineEvent> {
     let deadline = Instant::now() + duration;
     let mut events = Vec::new();
@@ -716,7 +615,6 @@ fn pump_for(engine: &mut TestEngine, duration: Duration) -> Vec<EngineEvent> {
     events
 }
 
-/// Pumps until the card's realm has logged a `tick`.
 fn pump_until_ticking(engine: &mut TestEngine, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while ticks(&pump_for(engine, Duration::from_millis(10))) == 0 {
@@ -724,17 +622,12 @@ fn pump_until_ticking(engine: &mut TestEngine, what: &str) {
     }
 }
 
-/// Asserts that no `tick` comes any more: what the card's realm queued
-/// before it was let go of, and what it ran while its BTS acknowledged its
-/// disposal, are drained first, then nothing more arrives.
 fn assert_no_more_ticks(engine: &mut TestEngine, what: &str) {
     pump_for(engine, Duration::from_millis(150));
     let later = pump_for(engine, Duration::from_millis(200));
     assert_eq!(ticks(&later), 0, "{what}: {later:?}");
 }
 
-/// The nested page of the frame `frame` and its element children, read
-/// wherever the frame is.
 fn nested_of(
     engine: &mut TestEngine,
     frame: terminus::link::NodeId,
@@ -754,11 +647,6 @@ fn nested_of(
         .expect("the document answers")
 }
 
-/// Disconnecting a frame disposes of its card, as web-core's `LynxView`
-/// does on `disconnectedCallback`: the card's nested page is freed and an
-/// empty one put in its place, its sheet removed and the card's realm gone,
-/// so its timers stop. Connecting it again loads the frame's `src` again,
-/// into that page, as `connectedCallback` renders it.
 #[test]
 fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
     let mut engine = serving_a_root(CARD, &ticking_root()).create(Arc::new(NoWakeup));
@@ -821,11 +709,6 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A frame that was given its `src` while detached loads and renders all
-/// the same; one whose handle is then collected — it never connected, so
-/// no disconnection disposes of it — disposes of its card through
-/// `bobcat:frame`'s `FinalizationRegistry`, and no orphan realm is left
-/// running on its timers.
 #[test]
 fn a_collected_frame_handle_disposes_of_its_card() {
     let spec = TestViewSpec::new(&host_page(CARD, false))
@@ -842,13 +725,6 @@ fn a_collected_frame_handle_disposes_of_its_card() {
     assert_no_more_ticks(&mut engine, "the collected frame's card is disposed of");
 }
 
-/// A card's `root` that shows its page data: one `text` reading
-/// `<data.label>/<global props' message>`, which `renderPage` builds from
-/// the processed init data. Its `updatePage` merges an update into
-/// `lynx.__initData`, as a compiled card's own `updatePage` keeps its data,
-/// and its `updateGlobalProps` reads the merged `lynx.__globalProps`; both
-/// rewrite the same raw text in place. It logs `booted <src>` once per realm
-/// it runs in.
 fn data_root(src: &str) -> String {
     format!(
         "if (__Card__ !== '{src}') throw Error('__Card__ is ' + __Card__); \
@@ -866,8 +742,6 @@ fn data_root(src: &str) -> String {
     )
 }
 
-/// A host running `entry` that serves [`CARD`] and [`SECOND`], each with a
-/// [`data_root`], a [`bts_boot`] and no page CSS.
 fn serving_data_cards(entry: &str) -> TestViewSpec {
     let spec = TestViewSpec::new(entry)
         .with_fetchable(CARD)
@@ -884,9 +758,6 @@ fn serving_data_cards(entry: &str) -> TestViewSpec {
     with_bts(with_bts(spec, CARD, ""), SECOND, "")
 }
 
-/// Writes `value` (JSON, `null` for a removal) to the host's frame through
-/// `updatePage`: `key` is `data` for the frame's `data`, `globalProps` for
-/// its `global-props`.
 fn write_frame(engine: &mut TestEngine, key: &str, value: &str) {
     engine
         .view
@@ -894,8 +765,6 @@ fn write_frame(engine: &mut TestEngine, key: &str, value: &str) {
         .expect("the view takes an update");
 }
 
-/// The text the frame's card shows — the raw text of the nested page's
-/// `text` — and that `text`'s id, read off the document.
 fn nested_text(tree: &mut LynxDocument) -> Option<(terminus::link::NodeId, String)> {
     let frame = tree
         .document_element()
@@ -913,10 +782,6 @@ fn nested_text(tree: &mut LynxDocument) -> Option<(terminus::link::NodeId, Strin
     Some((text.id(), raw.attribute("text")?.into_owned()))
 }
 
-/// Pumps until the frame's card shows `expected` — in a `text` other than
-/// `replacing`, when given, so that a card booted in place of another one
-/// showing the same text is told apart — collecting every event, and
-/// answers the id of the `text` showing it.
 fn pump_until_text(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
@@ -936,8 +801,6 @@ fn pump_until_text(
             && shown == expected
             && replacing != Some(text)
         {
-            // What the card logged before it rendered was sent before the
-            // probe was answered: one more turn collects it.
             events.extend(engine.pump());
             return text;
         }
@@ -949,7 +812,6 @@ fn pump_until_text(
     }
 }
 
-/// How many realms booted `src` among `events`.
 fn boots(events: &[EngineEvent], src: &str) -> usize {
     let booted = format!("booted {src}");
     events
@@ -960,12 +822,6 @@ fn boots(events: &[EngineEvent], src: &str) -> usize {
         .count()
 }
 
-/// A frame's `data` and `global-props`: what is written before `src` is
-/// what the card boots with; a write after boot is the card's own
-/// `updateData`/`updateGlobalProps`, re-rendered in place by the same realm;
-/// a new `src` and a reconnection boot with the last plain objects written;
-/// anything else is ignored without a diagnostic, and a removal leaves the
-/// running card as it is and boots the next one with `{}`.
 #[test]
 fn a_frames_data_and_global_props_reach_its_card() {
     let before = "__SetAttribute(frame, 'data', {label: 'first'}); \
@@ -989,34 +845,26 @@ fn a_frames_data_and_global_props_reach_its_card() {
     );
     assert_eq!(boots(&events, CARD), 1, "and boots nothing");
 
-    // None of these is a plain object, so none replaces what the next
-    // boot reads.
     for ignored in ["3", "[1]", r#""nope""#, r#""[1]""#] {
         write_frame(&mut engine, "data", ignored);
         write_frame(&mut engine, "globalProps", ignored);
     }
     write_src(&mut engine, &format!("{SECOND:?}"));
-    // The first card showed the same text: the second one is its own `text`.
     let second = pump_until_text(&mut engine, &mut events, "second/there", Some(text));
     assert_eq!(boots(&events, SECOND), 1);
 
-    // A write while the frame is detached reaches the card it boots when
-    // it is attached again.
     operate(&mut engine, "detach");
     write_frame(&mut engine, "data", r#"{"label":"third"}"#);
     operate(&mut engine, "attach");
     let third = pump_until_text(&mut engine, &mut events, "third/there", Some(second));
     assert_eq!(boots(&events, SECOND), 2);
 
-    // A removal leaves the running card's data alone: the next update
-    // still reads `third`.
     write_frame(&mut engine, "data", "null");
     write_frame(&mut engine, "globalProps", r#"{"message":"last"}"#);
     assert_eq!(
         pump_until_text(&mut engine, &mut events, "third/last", None),
         third
     );
-    // And the next boot reads `{}`, which has no label.
     operate(&mut engine, "detach");
     operate(&mut engine, "attach");
     pump_until_text(&mut engine, &mut events, "undefined/last", Some(third));
@@ -1024,9 +872,6 @@ fn a_frames_data_and_global_props_reach_its_card() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A frame answers the base set's methods as any element does —
-/// `boundingClientRect` with code 0 and its box — and has no method of its
-/// own: `updateData` is code 3, the shared table's "no such method".
 #[test]
 fn a_frame_answers_the_base_methods_and_none_of_its_own() {
     let mut engine = serving_the_card(CARD).create(Arc::new(NoWakeup));
@@ -1077,14 +922,6 @@ fn a_frame_answers_the_base_methods_and_none_of_its_own() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A frame's card has a background thread of its own, as in native and in
-/// web-core: a `Worker` at `bobcat:bts` its child realm creates and connects
-/// to the card's BTS boot. It starts with the frame's `data` and
-/// `global-props`; a later write reaches it as `updateCardData` and
-/// `updateGlobalProps` — what re-renders a compiled card once its first
-/// screen is out — after the card's main thread took it; and it shares the
-/// group's `sharedData` with the page's BTS, as native's nested view joins
-/// its parent's group.
 #[test]
 fn a_frames_card_runs_a_background_thread_that_takes_its_data() {
     let before = "__SetAttribute(frame, 'data', {label: 'first'}); \
@@ -1126,11 +963,6 @@ fn a_frames_card_runs_a_background_thread_that_takes_its_data() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// The card's background thread gets the view's native modules, as native's
-/// nested view inherits its parent's: `bobcat:frame` hands the page realm's
-/// module table to the card, which posts it in its BTS's `initialize`, and
-/// the answer comes back to the frame's BTS through the inbox the view
-/// registered for the worker the child created.
 #[test]
 fn a_frames_card_background_thread_calls_the_views_native_modules() {
     let spec = TestViewSpec::new(&host_entry(CARD))
@@ -1153,10 +985,6 @@ fn a_frames_card_background_thread_calls_the_views_native_modules() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// The card's background thread loads the view's native module ES modules
-/// as the view's own BTS does: the one flagged `import_before_entry` has run
-/// before the card's BTS entry, and an `import` of it there answers the
-/// module the view was built with, from the view's bytecode.
 #[test]
 fn a_frames_card_background_thread_loads_the_views_native_es_modules() {
     let spec = TestViewSpec::new(&host_entry(CARD))
@@ -1185,13 +1013,6 @@ fn a_frames_card_background_thread_loads_the_views_native_es_modules() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// Letting go of a frame's card disposes of its background thread before its
-/// realm goes, as both references do: the card's BTS runs its app cleanup
-/// (`callDestroyLifetimeFun`, `ReactLynx`'s `destroyCard`) and acknowledges,
-/// the child terminates it, and only then closes. The child is kept the
-/// while: here the BTS's cleanup holds the worker thread for a while, and
-/// the card's main thread goes on ticking after the cleanup began. Then
-/// both threads stop, and a reconnection boots the card with a new BTS.
 #[test]
 fn a_frames_card_background_thread_is_disposed_before_its_realm_goes() {
     let spec = TestViewSpec::new(&host_entry(CARD))
@@ -1250,14 +1071,8 @@ fn a_frames_card_background_thread_is_disposed_before_its_realm_goes() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A third card, which [`EVENT_CARD`] shows in a frame of its own.
 const GRAND: &str = "app:///grand.web.bundle";
 
-/// The worklet runtime, and what every events card files: `log(label)`, a
-/// worklet, and `listen(label)`, a listener, each logging
-/// `<label> <type> <target id>`, then the `detail`'s `x,y` when it has
-/// them. Both, because an element holds one worklet per event name, whatever
-/// its form.
 const LOGGING_WORKLETS: &str = "
     globalThis.runWorklet = (value, params) => value.body(params[0]);
     const listen = (label) => (e) => console.log(
@@ -1266,16 +1081,6 @@ const LOGGING_WORKLETS: &str = "
     const log = (label) => ({ type: 'worklet', value: { body: listen(label) } });
 ";
 
-/// The host page for the event tests: a `wrapper` padded 20px left and 30px
-/// top holds a 200×200 `frame` showing `src`, so the frame's
-/// border box starts at (20, 30). The page captures `tap`, the wrapper binds
-/// it, the page binds it globally and binds `keydown`; it captures
-/// `uiappear` too. `updatePage`'s `op` changes them: `catch` files a
-/// `capture-catch` on the wrapper in place of its bind, `src` writes
-/// [`SECOND`] to the frame's `src`, `detach` removes the frame, and
-/// `remove-on-tap` and `src-on-tap` add a capturing listener on the page
-/// that does either of those inside the next tap; each logs `page-op <op>`
-/// once done.
 fn event_host(src: &str) -> String {
     format!(
         r"
@@ -1316,13 +1121,6 @@ fn event_host(src: &str) -> String {
     )
 }
 
-/// The card [`event_host`]'s frame shows: a column of three 200×60 boxes —
-/// `cv`, a view; `swiper`, an `x-swiper` with no items, so its own shadow
-/// content is what a tap there hits; `inner`, a frame showing [`GRAND`].
-/// `cv` catches `tap` with a worklet and binds it with a background-thread
-/// handler, `card-handler`; the card's page captures `tap` with a listener,
-/// binds it with a worklet and binds it globally; the swiper binds it; `cv` binds `keydown` and
-/// binds it globally, and listens for its own `uiappear`.
 fn event_card() -> String {
     format!(
         r"
@@ -1356,9 +1154,6 @@ fn event_card() -> String {
     )
 }
 
-/// The card [`event_card`]'s inner frame shows: one 200×60 `gv` the page
-/// captures `tap` over and `gv` binds, and which listens for its own
-/// `uiappear`.
 fn grand_card() -> String {
     format!(
         r"
@@ -1378,8 +1173,6 @@ fn grand_card() -> String {
     )
 }
 
-/// The card [`event_host`]'s `src` op writes: one 200×60 `sv` that binds
-/// `tap`.
 fn second_event_card() -> String {
     format!(
         r"
@@ -1396,12 +1189,8 @@ fn second_event_card() -> String {
     )
 }
 
-/// The card [`event_view`]'s host shows.
 const EVENT_CARD: &str = CARD;
 
-/// A view running [`event_host`], serving [`EVENT_CARD`], [`GRAND`] and
-/// [`SECOND`], each with a BTS boot; [`EVENT_CARD`]'s logs every event
-/// published to it as `bts <card> published <handler> <target id> <x,y>`.
 fn event_view() -> TestEngine {
     let spec = TestViewSpec::new(&event_host(EVENT_CARD))
         .with_fetchable(EVENT_CARD)
@@ -1429,10 +1218,6 @@ fn event_view() -> TestEngine {
     with_bts(with_bts(spec, GRAND, ""), SECOND, "").create(Arc::new(NoWakeup))
 }
 
-/// What the published frame hits at `(x, y)`: the hit node's `id`, and the
-/// `id` of the shadow host of the tree it is in. Asked briefly, as
-/// [`pump_until`] asks: the document's thread may be parked on a source the
-/// next turn of this one answers.
 fn hit_ids(engine: &mut TestEngine, x: f32, y: f32) -> Option<(Option<String>, Option<String>)> {
     let frame = engine.published_frame()?;
     let node = frame
@@ -1453,8 +1238,6 @@ fn hit_ids(engine: &mut TestEngine, x: f32, y: f32) -> Option<(Option<String>, O
         })
 }
 
-/// Pumps until the published frame hits what `wanted` accepts at `(x, y)`,
-/// collecting every event.
 fn pump_until_hit(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
@@ -1479,7 +1262,6 @@ fn pump_until_hit(
     }
 }
 
-/// A tap at `(x, y)`: a touch down and its release in place.
 fn tap(engine: &mut TestEngine, (x, y): (f32, f32)) {
     for phase in [
         terminus::link::input::PointerPhase::Down,
@@ -1494,9 +1276,6 @@ fn tap(engine: &mut TestEngine, (x, y): (f32, f32)) {
     }
 }
 
-/// The console lines among `events` that a `tap` or a `keydown` handler of
-/// the event tests logged, in order: none of the `uiappear` lines, whose
-/// delivery entry may land anywhere among them, nor the BTS's.
 fn event_lines(events: &[EngineEvent]) -> Vec<&str> {
     const LABELS: [&str; 13] = [
         "page-capture ",
@@ -1526,9 +1305,6 @@ fn event_lines(events: &[EngineEvent]) -> Vec<&str> {
         .collect()
 }
 
-/// Pumps until `last` is logged, then a little longer for anything that
-/// should not come, and answers the event lines logged meanwhile; nothing
-/// may be reported.
 fn lines_until(engine: &mut TestEngine, last: &str) -> Vec<String> {
     let mut events = Vec::new();
     pump_until_logged(engine, &mut events, last);
@@ -1540,7 +1316,6 @@ fn lines_until(engine: &mut TestEngine, last: &str) -> Vec<String> {
         .collect()
 }
 
-/// Runs one of [`event_host`]'s ops and waits until it ran.
 fn event_op(engine: &mut TestEngine, op: &str) {
     operate(engine, op);
     let mut events = Vec::new();
@@ -1548,8 +1323,6 @@ fn event_op(engine: &mut TestEngine, op: &str) {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// Boots [`event_view`] and waits until its card and grand-card are hit
-/// where they are drawn.
 fn booted_event_view() -> TestEngine {
     let mut engine = event_view();
     let mut events = Vec::new();
@@ -1563,27 +1336,11 @@ fn booted_event_view() -> TestEngine {
     engine
 }
 
-/// Inside `cv`: the frame's border box starts at (20, 30), so (100, 30) in
-/// the card.
 const CV: (f32, f32) = (120.0, 60.0);
-/// Inside the swiper's own shadow content, its `#content`: (100, 90) in the
-/// card.
 const SWIPER: (f32, f32) = (120.0, 120.0);
-/// Inside the grand-card's `gv`: the inner frame starts at (20, 150) in the
-/// viewport, so (100, 30) in the grand-card and (100, 150) in the card.
 const GV: (f32, f32) = (120.0, 180.0);
-/// Inside the wrapper's padding, outside the frame.
 const PADDING: (f32, f32) = (5.0, 5.0);
 
-/// A tap inside a frame's card runs the page's handlers first, at the
-/// frame — `target` the frame, retargeted, and `detail` in the viewport —
-/// then the card's own, at its node, with `detail` relative to the frame's
-/// border box; the card's background-thread handler is published to the
-/// card's own BTS. The kernel calls the page realm and then the card's
-/// realm, each once at the path's top, and each walks the steps of the path
-/// it holds handles for. Each card's `catch` ends its own
-/// walk alone: `cv`'s `catchtap` stops the card's page's bind and leaves the
-/// host's wrapper's alone (web-core's semantics, user ruling).
 #[test]
 fn a_tap_in_a_frames_card_runs_the_pages_handlers_then_the_cards() {
     let mut engine = booted_event_view();
@@ -1610,9 +1367,6 @@ fn a_tap_in_a_frames_card_runs_the_pages_handlers_then_the_cards() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// The other direction: the page's `capture-catch` on the wrapper ends the
-/// page's walk — its frame and the wrapper's bubble hear nothing — and the
-/// card's whole dispatch still runs, as each web-core card walks its own.
 #[test]
 fn a_pages_catch_does_not_stop_the_frames_card() {
     let mut engine = booted_event_view();
@@ -1632,10 +1386,6 @@ fn a_pages_catch_does_not_stop_the_frames_card() {
     );
 }
 
-/// A card's `global-bindtap` hears the taps inside its frame, and no
-/// other: a tap in the wrapper's padding is the page's alone. The card's
-/// registration is reached only by a path through the frame's shadow root,
-/// its tree's root, as web-core's card listens on its own shadow root.
 #[test]
 fn a_cards_global_bind_hears_only_taps_inside_its_frame() {
     let mut engine = booted_event_view();
@@ -1655,10 +1405,6 @@ fn a_cards_global_bind_hears_only_taps_inside_its_frame() {
     );
 }
 
-/// A non-composed event at a card's node — `cv`'s own `uiappear` — stays in
-/// the card's tree: the card hears it, and the page, which captures
-/// `uiappear`, hears only its own. So does one in the grand-card, whose
-/// frame is no step of the path.
 #[test]
 fn a_non_composed_event_at_a_cards_node_reaches_only_the_card() {
     let mut engine = event_view();
@@ -1689,9 +1435,6 @@ fn a_non_composed_event_at_a_cards_node_reaches_only_the_card() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A UA component inside a card stays what it is to script: a tap on its
-/// own shadow content reaches the card at the component, retargeted, and
-/// nothing names an inner node. The page hears it at the frame.
 #[test]
 fn a_ua_component_inside_a_card_is_retargeted_to_its_host() {
     let mut engine = booted_event_view();
@@ -1715,9 +1458,6 @@ fn a_ua_component_inside_a_card_is_retargeted_to_its_host() {
     );
 }
 
-/// A frame inside a frame's card: the page, then the card at its inner
-/// frame, then the grand-card at its own node, each `detail` relative to
-/// that realm's own frame.
 #[test]
 fn a_grand_cards_steps_follow_the_cards() {
     let mut engine = booted_event_view();
@@ -1738,9 +1478,6 @@ fn a_grand_cards_steps_follow_the_cards() {
     );
 }
 
-/// A key reaches every card's `global-bindkeydown`, with no path in the
-/// card — its `bindkeydown` hears nothing, and its `target` is the element
-/// that bound it — after the page, which hears it at its page as before.
 #[test]
 fn a_key_reaches_a_cards_global_bind() {
     let mut engine = booted_event_view();
@@ -1758,10 +1495,6 @@ fn a_key_reaches_a_cards_global_bind() {
     );
 }
 
-/// A frame showing no card — here one whose `src` does not fetch, so no
-/// realm is made for it — has no realm of its own to call: a tap
-/// inside it is the page's alone, at the frame, and nothing but the one
-/// fetch diagnostic is reported.
 #[test]
 fn a_frame_showing_no_card_leaves_its_taps_to_the_page() {
     let missing = "app:///missing.web.bundle";
@@ -1798,13 +1531,6 @@ fn a_frame_showing_no_card_leaves_its_taps_to_the_page() {
     );
 }
 
-/// A new `src` hands the frame's events to the new card; a disconnection
-/// to nobody, the page alone hearing what lands where the frame was.
-///
-/// The tap does not wait for the first card's `closeRealm`: the new `src`'s
-/// `resetFrame` freed that card's page, and its rows went with its nodes, so
-/// only the new card is called, whether or not the first card's background
-/// thread has acknowledged its disposal yet.
 #[test]
 fn a_frames_events_follow_its_card() {
     let mut engine = booted_event_view();
@@ -1843,17 +1569,6 @@ fn a_frames_events_follow_its_card() {
     );
 }
 
-/// A page listener that takes the frame out of the tree inside the tap: the
-/// card is still called, after the page's walk — the
-/// behavior #428 did not have, where the realm of the frame found the frame
-/// out of its page tree and handed the card nothing. Here the realms a
-/// dispatch calls are fixed before its first step, and the card's realm
-/// keeps its registrations until its `closeRealm` runs, which the
-/// frame's disconnection starts in a later entry (design
-/// `event-dispatch-root-registration-design.md` §4.5; deviations.md, the
-/// realms of a dispatch are fixed before its walk). The frame has left the
-/// layout by then, so the card's `boundingClientRect` readback answers no
-/// box and its `detail` falls back to the viewport's origin (`pageOrigin`).
 #[test]
 fn a_frame_an_earlier_listener_removed_still_has_its_card_called() {
     let mut engine = booted_event_view();
@@ -1873,14 +1588,6 @@ fn a_frame_an_earlier_listener_removed_still_has_its_card_called() {
     );
 }
 
-/// A page listener that gives the frame a new `src` inside the tap: the
-/// page's walk goes on — the wrapper's bind and the page's global after the
-/// listener still run — the first card hears nothing, and nothing is
-/// reported, as #428 had it. The new `src` runs the first card's `teardown`
-/// inside the listener, and its `resetFrame` frees that card's page, whose
-/// nodes take the card's rows with them, so the card's call later at the
-/// same step finds it no registration for `tap` and is skipped, though its
-/// realm stays until its background thread acknowledges the disposal.
 #[test]
 fn a_frame_an_earlier_listener_gave_a_new_src_mid_dispatch() {
     let mut engine = booted_event_view();
@@ -1897,16 +1604,6 @@ fn a_frame_an_earlier_listener_gave_a_new_src_mid_dispatch() {
     );
 }
 
-// --- exposure and the nested lifecycle -----------------------------------
-//
-// Each exposure record is a `bobcat:exposure` event at its element and each
-// frame connection a `bobcat:frameconnected`/`bobcat:framedisconnected`
-// event at its frame; the listener table calls the realm that holds the
-// handle. Each card's BTS so hears its own card's records alone, and a frame
-// a card created is that card's to load and let go of.
-
-/// The page realm's BTS for the exposure tests: it logs each `exposure` and
-/// `disexposure` list it hears as `page-bts <list> <ids>`.
 const EXPOSURE_PAGE_BTS: &str = "
 import { lynx } from 'bobcat:bts-runtime';
 const emitter = lynx.getJSModule('GlobalEventEmitter');
@@ -1916,11 +1613,6 @@ for (const name of ['exposure', 'disexposure']) {
 }
 ";
 
-/// What every exposure card's BTS adds to [`bts_boot`]: each `exposure` and
-/// `disexposure` list it hears, logged as `bts <card> <list> <id>:<typeof
-/// dataset.rowIndex>,…` — a typed value under its own camelCase key reads
-/// `number` — and an `updateCardData` whose `op` is `stop` running the card's
-/// own `lynx.stopExposure()`.
 const EXPOSURE_CARD_BTS: &str = "
 const emitter = lynx.getJSModule('GlobalEventEmitter');
 for (const name of ['exposure', 'disexposure']) {
@@ -1935,16 +1627,6 @@ app.updateCardData = (data) => {
 };
 ";
 
-/// The host page of the exposure tests: a 50×50 `page-own` with an
-/// `exposure-id`, then a 200×300 frame showing [`CARD`]. `updatePage`'s `op`:
-/// `src` writes [`SECOND`] to the frame's `src`, `src-back` [`CARD`] again,
-/// each also logging `reset-at-once <whether the frame's nested page was
-/// replaced inside the write>`; `card` writes `{op: data.card}` to the
-/// frame's `data`, which the card's `updatePage` and its BTS take; `late`
-/// appends a second exposed element, `page-late`, and has the card add one
-/// of its own in the same update; `detach` takes the frame out of the page,
-/// keeping its handle, and `attach` puts it back. Each logs `page-op <op>`
-/// once done.
 fn exposure_host() -> String {
     format!(
         r"
@@ -1991,14 +1673,6 @@ fn exposure_host() -> String {
     )
 }
 
-/// [`CARD`] for the exposure tests: a column of a 100×50 `card-cv`, exposed,
-/// with a typed `rowIndex` in its dataset, and a 200×100 frame `inner`
-/// showing [`GRAND`], which this card creates and so holds. Its `updatePage`
-/// takes the `op` the host writes to its frame's `data`: `remove-cv` takes
-/// `card-cv` out of its tree, `detach-inner` the inner frame, `attach-inner`
-/// puts the inner frame back, `move-inner` does both in one call, `add`
-/// appends a `card-late` with an `exposure-id`; each keeps its handles. Every `op`, these and the
-/// ones only its BTS acts on, logs `card-op <op>` once done.
 fn exposure_card() -> String {
     format!(
         r"
@@ -2039,8 +1713,6 @@ fn exposure_card() -> String {
     )
 }
 
-/// [`GRAND`] for the exposure tests: one 100×50 `grand-gv`, exposed, with a
-/// typed `rowIndex`.
 fn exposure_grand_card() -> String {
     r"
         globalThis.renderPage = () => {
@@ -2055,8 +1727,6 @@ fn exposure_grand_card() -> String {
     .to_owned()
 }
 
-/// [`SECOND`] for the exposure tests: one 100×50 `second-sv`, exposed, with
-/// no dataset.
 fn exposure_second_card() -> String {
     r"
         globalThis.renderPage = () => {
@@ -2070,11 +1740,6 @@ fn exposure_second_card() -> String {
     .to_owned()
 }
 
-/// A view running [`exposure_host`] with [`EXPOSURE_PAGE_BTS`], serving
-/// `card` as [`CARD`]'s root and [`GRAND`] and [`SECOND`] as the exposure
-/// cards, each with a BTS boot that logs with [`EXPOSURE_CARD_BTS`]. Its
-/// fetcher has a fetch probe, as a caching resource system does, so a card
-/// fetched once starts again in a microtask.
 fn exposure_view_with(card: &str) -> TestEngine {
     let spec = TestViewSpec::new(&exposure_host())
         .with_background_entry(EXPOSURE_PAGE_BTS)
@@ -2097,7 +1762,6 @@ fn exposure_view_with(card: &str) -> TestEngine {
     with_bts(spec, SECOND, EXPOSURE_CARD_BTS).create(Arc::new(NoWakeup))
 }
 
-/// The console lines among `events` that start with `prefix`, in order.
 fn lines_with<'a>(events: &'a [EngineEvent], prefix: &str) -> Vec<&'a str> {
     events
         .iter()
@@ -2110,7 +1774,6 @@ fn lines_with<'a>(events: &'a [EngineEvent], prefix: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Every exposure line among `events`, from any of the BTSs.
 fn exposure_lines(events: &[EngineEvent]) -> Vec<&str> {
     events
         .iter()
@@ -2123,8 +1786,6 @@ fn exposure_lines(events: &[EngineEvent]) -> Vec<&str> {
         .collect()
 }
 
-/// Boots the exposure view and waits until each of its three BTSs heard its
-/// own element's exposure; answers every event so far.
 fn booted_exposure_view() -> (TestEngine, Vec<EngineEvent>) {
     let mut engine = exposure_view_with(&exposure_card());
     let mut events = Vec::new();
@@ -2142,15 +1803,11 @@ fn booted_exposure_view() -> (TestEngine, Vec<EngineEvent>) {
     (engine, events)
 }
 
-/// Runs one of [`exposure_host`]'s ops and waits until it ran, collecting
-/// every event.
 fn exposure_op(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, op: &str) {
     operate(engine, op);
     pump_until_logged(engine, events, &format!("page-op {op}"));
 }
 
-/// Runs one of [`exposure_card`]'s ops, through the frame's `data`, and
-/// waits until the card ran it.
 fn exposure_card_op(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, op: &str) {
     engine
         .view
@@ -2159,7 +1816,6 @@ fn exposure_card_op(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, op: 
     pump_until_logged(engine, events, &format!("card-op {op}"));
 }
 
-/// Pumps until `line` has been logged `times` times, collecting every event.
 fn pump_until_logged_times(
     engine: &mut TestEngine,
     events: &mut Vec<EngineEvent>,
@@ -2176,8 +1832,6 @@ fn pump_until_logged_times(
     }
 }
 
-/// The nested page of the host's frame, the page element's only `frame`,
-/// and the tags of its element children.
 fn host_nested_page(engine: &mut TestEngine) -> (terminus::link::NodeId, Vec<String>) {
     engine
         .probe_document(|tree| {
@@ -2199,16 +1853,10 @@ fn host_nested_page(engine: &mut TestEngine) -> (terminus::link::NodeId, Vec<Str
         .expect("the document answers")
 }
 
-/// Each BTS hears its own card's elements' records alone — the page's BTS
-/// the page's element, the card's BTS the card's, the grand-card's BTS the
-/// grand-card's — each built from that realm's own handle, so a typed
-/// dataset value stays a number under its own camelCase key. The page realm
-/// holds no handle for a card's node and sends its BTS nothing of them.
 #[test]
 fn each_background_thread_hears_its_own_cards_exposure_alone() {
     let (mut engine, mut events) = booted_exposure_view();
     events.extend(pump_for(&mut engine, Duration::from_millis(100)));
-    // Three realms' logs, each ordered only among its own lines.
     let mut lines = exposure_lines(&events);
     lines.sort_unstable();
     let card = format!("bts {CARD} exposure card-cv:number");
@@ -2219,9 +1867,6 @@ fn each_background_thread_hears_its_own_cards_exposure_alone() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card taking one of its own elements out of its tree sends the card's
-/// own BTS the `disexposure`, built from the card's handle; the page's BTS
-/// hears nothing of it.
 #[test]
 fn a_card_removing_its_element_disexposes_it_to_its_own_background_thread() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2239,14 +1884,6 @@ fn a_card_removing_its_element_disexposes_it_to_its_own_background_thread() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card that takes its own frame out of its tree, keeping the handle, lets
-/// go of that frame's card, as each web-core nested `lynx-view` hears its
-/// own `disconnectedCallback`: the disconnection is an event at the frame,
-/// which the card's realm, holding its handle, hears. The grand-card's BTS
-/// hears its element's `disexposure` once — dispatched at the detached
-/// element, whose path starts at itself — and is then disposed of. Putting
-/// the frame back boots the grand-card again, with a BTS of its own that
-/// hears its element again.
 #[test]
 fn a_card_detaching_its_own_frame_lets_go_of_that_frames_card() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2276,13 +1913,6 @@ fn a_card_detaching_its_own_frame_lets_go_of_that_frames_card() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A frame removed from the page, its handle kept, with a card that shows a
-/// frame of its own: both cards are let go of and each BTS hears its last
-/// `disexposure` list once, before its disposal, dispatched at the detached
-/// cards' elements. The outer card's teardown closes the inner frame's
-/// card, so the inner frame's own disconnection, which the same removal
-/// queued, finds nothing left to let go of. Putting the frame back boots
-/// both cards again.
 #[test]
 fn a_removed_frame_sends_each_cards_last_list_and_lets_go_of_both() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2314,11 +1944,6 @@ fn a_removed_frame_sends_each_cards_last_list_and_lets_go_of_both() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card that takes its own frame out and puts it back in one call
-/// re-renders that frame's card, as a web-core `lynx-view` moved in the DOM
-/// does: the disconnection lets go of the card, whose last list is sent,
-/// and the connection loads it again, which boots once the nested page was
-/// reset.
 #[test]
 fn a_card_moving_its_own_frame_re_renders_that_frames_card() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2342,14 +1967,6 @@ fn a_card_moving_its_own_frame_re_renders_that_frames_card() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card let go of while its elements are exposed sends its BTS one last
-/// `disexposure` list before its BTS is disposed of — native's order, user
-/// ruling, option A — and nothing after, its grand-card too: the nested page
-/// is not reset inside the `src` write, but once the records were dispatched
-/// at the card's still-live elements. Switching back to the first card,
-/// which is fetched by then and so starts in a microtask, waits for that
-/// reset and boots into a fresh nested page: the new card's BTS hears its
-/// own element alone, and no card hears another's.
 #[test]
 fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2370,7 +1987,6 @@ fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
     );
     assert_eq!(tags, ["view"], "and rendered into it");
 
-    // Back to the first card, which is fetched by now.
     exposure_op(&mut engine, &mut events, "src-back");
     assert_eq!(logged_times(&events, "reset-at-once false"), 2);
     pump_until_logged(&mut engine, &mut events, &format!("bts {SECOND} destroyed"));
@@ -2382,11 +1998,8 @@ fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
         third_page != second_page && third_page != first_page,
         "the first card again, in a page of its own"
     );
-    // Booted into the page the reset built, not into the second card's,
-    // which the reset freed with whatever was rendered into it.
     assert_eq!(tags, ["view", "frame"], "and rendered into it");
 
-    // In each card's BTS's own log: its last list, then its disposal, once.
     for (card, id) in [
         (CARD, "card-cv:number"),
         (GRAND, "grand-gv:number"),
@@ -2402,7 +2015,6 @@ fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
         );
         assert_eq!(logged_times(&events, &last), 1, "{card}: {lines:?}");
     }
-    // No card heard another's element.
     let lines = exposure_lines(&events);
     assert!(
         lines.iter().all(|line| {
@@ -2416,9 +2028,6 @@ fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card with nothing exposed is let go of at once, as before the last
-/// list existed: the new `src` frees its nested page inside the write, and
-/// its BTS is disposed of.
 #[test]
 fn a_card_teardown_with_nothing_exposed_proceeds_at_once() {
     let mut engine = exposure_view_with(&root(CARD));
@@ -2444,11 +2053,6 @@ fn a_card_teardown_with_nothing_exposed_proceeds_at_once() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// A card's own `lynx.stopExposure()`, from its BTS, stops its own elements
-/// alone — the card realm lists the elements it registered: its BTS hears
-/// its element's `disexposure`, an element it adds later is stopped as it is
-/// registered and so not detected, and the page's exposure goes on — an
-/// element the page adds in the same update is exposed to the page's BTS.
 #[test]
 fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
     let (mut engine, mut events) = booted_exposure_view();
@@ -2472,8 +2076,6 @@ fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
         lines_with(&events, "page-bts disexposure"),
         Vec::<&str>::new()
     );
-    // The grand-card's elements are its own realm's: still exposed, never
-    // disexposed.
     assert_eq!(
         lines_with(&events, &format!("bts {GRAND} disexposure")),
         Vec::<&str>::new()
@@ -2481,14 +2083,6 @@ fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
-/// Once a frame's card has loaded — its first frame presented and its BTS's
-/// entry loaded — the card's realm dispatches the frame's `loadmetrics`
-/// (Lynx's `LynxFrameView.onFrameLoadMetricsEvent`) at its page, bubbling
-/// and composed, with native's detail: the frame's `src` as written,
-/// `mode: "standard"`, and the card's `pipeline.loadBundle` entry. The
-/// frame's `bindloadmetrics` hears it retargeted to the frame and the page's
-/// listener as it bubbles, once each, with nobody observing performance;
-/// the page's own load fires none.
 #[test]
 fn a_frames_card_fires_loadmetrics_once_its_load_completes() {
     let src = "child.web.bundle";
@@ -2509,8 +2103,6 @@ fn a_frames_card_fires_loadmetrics_once_its_load_completes() {
         __AddEventListener(page, 'loadmetrics', heard('page'), {});
         ",
     );
-    // No `SystemInfo` check: this view's painter draws into a small
-    // texture of its own, which a load waits to present.
     let root = "globalThis.renderPage = () => { const p = __CreatePage('0', 0); \
                 const t = __CreateText(0); __AppendElement(t, __CreateRawText('nested')); \
                 __AppendElement(p, t); };";
@@ -2535,7 +2127,6 @@ fn a_frames_card_fires_loadmetrics_once_its_load_completes() {
         assert!(Instant::now() < deadline, "no loadmetrics: {events:?}");
         std::thread::sleep(Duration::from_millis(2));
     }
-    // Long enough for any second one, the page's own load's included.
     for _ in 0..40 {
         let _ = engine.tick(true);
         events.extend(engine.pump());

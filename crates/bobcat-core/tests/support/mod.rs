@@ -17,17 +17,6 @@ use bobcat_core::{
 };
 use url::Url;
 
-/// One view in a group of its own, with a painter attached to it, at Stylo's
-/// own thread count.
-///
-/// Almost every test here is about a page rather than about sharing, so it
-/// wants exactly one view and never names the group again. The group handle
-/// is dropped as this returns: the view holds its thread alive by itself, and
-/// dropping the view is what ends it.
-///
-/// # Errors
-///
-/// Whatever building the group, the view or the painter failed with.
 pub async fn solo_view<R, F, B>(
     event_requester: Arc<R>,
     width: f32,
@@ -57,24 +46,9 @@ where
     Ok((view, painter))
 }
 
-/// Drives normal view turns until the terminal boot event arrives, and
-/// answers with what the turn that reported `ScriptFinished` reported after
-/// it.
-///
-/// The view alone: booting needs the resource protocol serviced, which is
-/// `LynxView::pump`'s and nobody else's.
-///
-/// One turn hands over everything since the last, so a host that took no turn
-/// for a while — a test thread the OS left unscheduled under parallel load —
-/// gets boot's end and whatever the view did next in one batch. That rest is
-/// not boot's: it is handed back rather than dropped, for a test that reads
-/// what the view did after boot. A failure ends the wait where it is, and a
-/// test about what follows a failure pumps the view itself.
 pub fn wait_for_script<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
 ) -> Result<Vec<EngineEvent>, LynxViewError> {
-    // Generous: a debug-build boot takes about two seconds on its own, so a
-    // tight deadline only ever fires spuriously under parallel test load.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut events = view.pump().into_iter();
@@ -93,24 +67,6 @@ pub fn wait_for_script<F: ResourceFetcher + 'static>(
     }
 }
 
-/// One offscreen frame for a page that asks its host for nothing while the
-/// frame is outstanding: post it, wait for the view to service it, draw.
-///
-/// The wait is this helper's own, because the engine has none: a host waits
-/// in its own loop, where it also takes the view's turn. This one takes no
-/// turn, which is right for a page whose scripts make no synchronous request
-/// during a frame, and wrong for one that does — its job would park on an
-/// answer only `LynxView::pump` gives, with the frame post queued behind it.
-/// Such a test drives the three calls itself and pumps in between; this
-/// helper fails rather than drawing a frame the view never serviced.
-///
-/// # Errors
-///
-/// Whatever the post or the draw failed with.
-///
-/// # Panics
-///
-/// If the view does not service the frame within thirty seconds.
 pub fn tick(painter: &mut Painter, force: bool) -> Result<bool, bobcat_core::EngineError> {
     let posted = painter.post_frame()?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -125,35 +81,21 @@ pub fn tick(painter: &mut Painter, force: bool) -> Result<bool, bobcat_core::Eng
     painter.draw_posted(posted, force)
 }
 
-/// What the double resolves to, and the one payload it hands back.
 #[derive(Debug)]
 pub struct FetcherDouble {
     pub bytes: Vec<u8>,
-    /// Overrides the resolved URL, so a test can drive the `data:` branch or a host rewrite
-    /// without a real network.
     pub resolve_to: Mutex<Option<String>>,
     pub resolves: AtomicUsize,
     pub fetches: AtomicUsize,
-    /// When set, stylesheet requests are answered pre-parsed instead of as
-    /// CSS text — the arm a bundle-decoding embedder uses.
     pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
-    /// When set, stylesheet requests use these bytes while every other source
-    /// keeps using `bytes` for the entry module.
     pub style_sheet_text: Option<Vec<u8>>,
     pub style_sheet_fetches: AtomicUsize,
-    /// The images this host serves, if a test installed any. Shared with the
-    /// test through an `Arc` so it can publish pixels and read the retain log
-    /// while the painter owns its own handle.
     pub images: Option<Rc<prime_radiant::TestImages>>,
-    /// Every call the view made on this host's image half, counted whether or
-    /// not a store was installed — which is what a test asserting that a view
-    /// stopped asking reads.
     pub image_requests: AtomicUsize,
     pub image_services: AtomicUsize,
 }
 
 impl FetcherDouble {
-    /// Serves `bytes` as they are, for every source this double is asked for.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
@@ -170,10 +112,6 @@ impl FetcherDouble {
         }
     }
 
-    /// Serves a card's MTS body as the entry `bobcat-source` registers for
-    /// it: [`bobcat_core::MTS_CHUNK_PREAMBLE`], then the body on the
-    /// preamble's own line. The engine adds nothing to an entry, so this is
-    /// what a host serving a card's root serves.
     #[must_use]
     pub fn card(body: impl AsRef<[u8]>) -> Self {
         let mut bytes = bobcat_core::MTS_CHUNK_PREAMBLE.as_bytes().to_vec();
@@ -189,16 +127,12 @@ impl FetcherDouble {
         self.image_services.load(Ordering::Relaxed)
     }
 
-    /// Serves images from `images`, which the test keeps a handle on so it
-    /// can publish pixels and read the retain log.
     #[must_use]
     pub fn with_images(mut self, images: Rc<prime_radiant::TestImages>) -> Self {
         self.images = Some(images);
         self
     }
 
-    /// Points this double's store at the view's sink, so completed loads
-    /// reach the document the way a real host's per-view value would.
     #[must_use]
     pub fn serving(self, sink: bobcat_core::ImageReports) -> Self {
         if let Some(images) = self.images.as_ref() {
@@ -207,15 +141,12 @@ impl FetcherDouble {
         self
     }
 
-    /// Answers stylesheet requests with a host-decoded sheet.
     #[must_use]
     pub fn with_preparsed_style_sheet(mut self, sheet: PreparsedStyleSheet) -> Self {
         self.style_sheet = Some(Arc::new(sheet));
         self
     }
 
-    /// Answers stylesheet requests with raw text bytes independently of the
-    /// payload every other source is served from.
     #[must_use]
     pub fn with_style_sheet_text(mut self, bytes: Vec<u8>) -> Self {
         self.style_sheet_text = Some(bytes);
@@ -240,10 +171,6 @@ impl FetcherDouble {
         self.resolves.load(Ordering::Relaxed)
     }
 
-    /// Where `specifier` resolves, counting the resolve a real host would do.
-    ///
-    /// `resolve_to` overrides the answer, so a test can point every source at
-    /// one URL or at something that is not a URL at all.
     fn resolve(&self, specifier: &str) -> Result<Url, ResourceError> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let text = self
@@ -261,21 +188,15 @@ impl FetcherDouble {
         })
     }
 
-    /// The one payload this double serves every source from, counted as a
-    /// fetch — which is what a test asserting that a pre-parsed sheet cost no
-    /// payload reads.
     fn payload(&self) -> Vec<u8> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
         self.bytes.clone()
     }
 
-    /// Resolves and serves one source out of memory, inline.
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
         let (specifier, style_sheet) = match request {
             SourceRequest::StyleSheet(url) => (url, true),
             SourceRequest::Module(url) => (url, false),
-            // This double serves one payload, which is not a font. Refusing
-            // the request is what a host with no fonts does.
             SourceRequest::Font { url } => {
                 return Err(ResourceError {
                     kind: ResourceErrorKind::NotFound,
@@ -286,7 +207,6 @@ impl FetcherDouble {
                 }
                 .into());
             }
-            // Nor a plain fetch: this double has nothing to fetch from.
             SourceRequest::Fetch { url, .. } => {
                 return Err(ResourceError {
                     kind: ResourceErrorKind::NotFound,
@@ -356,8 +276,6 @@ impl ResourceFetcher for FetcherDouble {
     }
 }
 
-/// A double serves images only when a test gave it a store; otherwise every
-/// image draw resolves to nothing, which is what an unloaded image looks like.
 impl bobcat_core::FrameImages for FetcherDouble {
     type PlatformFrame = std::convert::Infallible;
 

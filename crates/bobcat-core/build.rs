@@ -31,8 +31,6 @@ fn main() {
     let package_dir = workspace_dir.join("packages/bobcat-element");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo always provides OUT_DIR"));
 
-    // Directory tracking includes added and removed modules. Configuration and
-    // compiler version changes also invalidate the emit; Cargo owns the cache.
     for input in [
         package_dir.join("src"),
         package_dir.join("scripts/build.ts"),
@@ -62,12 +60,6 @@ fn main() {
     );
 }
 
-/// Compiles every module `tsconfig` maps a specifier to, from the JavaScript
-/// `tsc` emitted for it under `runtime`, to `<file>.qbc` beside it.
-///
-/// The specifier table is the `paths` of the built-ins' own `tsconfig`,
-/// which `esm.rs`'s `BUILTIN_MODULES` is tested to equal, one entry per
-/// line in the form `"bobcat:name": ["./name.ts"],`.
 fn compile_bytecode(tsconfig: &Path, runtime: &Path) {
     let tsconfig_text = fs::read_to_string(tsconfig)
         .unwrap_or_else(|error| panic!("reading {}: {error}", tsconfig.display()));
@@ -95,10 +87,6 @@ fn compile_bytecode(tsconfig: &Path, runtime: &Path) {
         tsconfig.display()
     );
 
-    // The built-ins' source text is not kept: nothing in the engine reads a
-    // built-in function's text back, and leaving it out keeps the bytecode,
-    // and so every realm's copy of it, at a fraction of the size. Line and
-    // column information stays for stack traces.
     let compiler = Runtime::with_options(RuntimeOptions {
         strip_source: true,
         ..RuntimeOptions::default()
