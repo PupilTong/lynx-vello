@@ -235,6 +235,8 @@ struct Worker {
     lifetime: Lifetime,
     host: HostOutbox,
     boot_finished: watch::Sender<bool>,
+    #[cfg(feature = "devtools")]
+    console: Rc<crate::devtools::runtime::ConsoleTap>,
 }
 
 impl Worker {
@@ -256,6 +258,8 @@ impl Worker {
             lifetime: Lifetime::new(token, thread),
             host,
             boot_finished: watch::channel(false).0,
+            #[cfg(feature = "devtools")]
+            console: Rc::default(),
         })
     }
 
@@ -292,6 +296,8 @@ impl Worker {
                             url: Arc::from(self.url.as_str()),
                         },
                         opener: crate::performance::Opener::Worker(self.key),
+                        #[cfg(feature = "devtools")]
+                        console: Rc::clone(&self.console),
                     },
                     None,
                     crate::canvas::CanvasHost::Worker(Arc::clone(self.host.worker_fonts())),
@@ -371,6 +377,11 @@ impl Worker {
 }
 
 impl RealmOwner for Worker {
+    #[cfg(feature = "devtools")]
+    fn console(&self) -> Option<&crate::devtools::runtime::ConsoleTap> {
+        Some(&self.console)
+    }
+
     type Realm = WorkerRealm;
     type Event = WorkerPayload;
     const THREAD: JsThreadName = JsThreadName::Workers;
@@ -603,8 +614,14 @@ fn deliver_memory_sample(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
 
 #[cfg(feature = "devtools")]
 fn deliver_devtools(worker: &Rc<Worker>, message: Box<crate::devtools::worker::WorkerDevtools>) {
-    owner::queue(worker, JobKind::Devtools, move |realm, _| {
-        crate::devtools::worker::handle(&mut realm.devtools, *message);
+    let delivering = Rc::clone(worker);
+    owner::queue(worker, JobKind::Devtools, move |realm, js| {
+        let ready = realm.scope_installed.get();
+        if let Err(error) =
+            crate::devtools::worker::handle(&mut realm.devtools, &realm.core, js, *message, ready)
+        {
+            policy::report(&delivering, Scene::Devtools, error);
+        }
     });
 }
 

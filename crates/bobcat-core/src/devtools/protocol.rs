@@ -96,6 +96,7 @@ const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
+const SERVER_ERROR: i32 = -32000;
 const SESSION_NOT_FOUND: i32 = -32001;
 
 #[derive(Debug, Serialize)]
@@ -128,6 +129,10 @@ impl Error {
             data: Some(data.into()),
             ..Self::new(INVALID_PARAMS, "Invalid parameters")
         }
+    }
+
+    pub(crate) fn server(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(SERVER_ERROR, message)
     }
 
     pub(crate) fn session_not_found() -> Self {

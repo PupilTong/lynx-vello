@@ -258,9 +258,10 @@ invocation, and runs only the feature's own tests in two `cargo test`
 invocations that select the same packages and features, so the second builds
 nothing the first did not. The first, `--lib --test gpu_pixels -- devtools
 highlight`, runs the unit tests whose path contains `devtools` or `highlight`
-(`bobcat-core`'s `devtools::` modules, `terminus`'s `paint::highlight` tests)
-and the highlight case of `terminus`'s `tests/gpu_pixels.rs`; the second,
-`--test devtools --test matched_styles`, runs `quickjs-rust-bridge`'s
-`tests/devtools.rs` and `terminus`'s `tests/matched_styles.rs` in full. Locally:
+(`bobcat-core`'s `devtools::` modules and the devtools row test in
+`realm::policy`, `terminus`'s `paint::highlight` tests) and the highlight case
+of `terminus`'s `tests/gpu_pixels.rs`; the second, `--test devtools --test
+matched_styles`, runs `quickjs-rust-bridge`'s `tests/devtools.rs` and
+`terminus`'s `tests/matched_styles.rs` in full. Locally:
 `cargo test -p bobcat-core --features devtools devtools` runs `bobcat-core`'s
 devtools tests alone.

@@ -1,15 +1,19 @@
 //! The page session on `bobcat-main`: its state and the routing of its
 //! messages to the domains.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::MainThreadRuntime;
 use crate::devtools::protocol::{self, Error};
-use crate::devtools::{Attachment, Frontend, Outlet, target};
+use crate::devtools::{Attachment, Frontend, Outlet, runtime, target};
+use crate::main::quickjs::ScriptRuntime;
+use crate::script::ScriptError;
 
 pub(crate) struct PageSession {
     frontend: Frontend,
+    runtime: RefCell<runtime::RuntimeState>,
     attachment: Attachment,
 }
 
@@ -19,6 +23,7 @@ impl MainThreadRuntime {
         let outlet = Arc::clone(&attachment.outlet);
         let session = Rc::new(PageSession {
             frontend: Frontend::new(Arc::clone(&outlet), None),
+            runtime: RefCell::default(),
             attachment,
         });
         self.devtools = Some(session);
@@ -36,33 +41,40 @@ impl MainThreadRuntime {
     }
 
     fn devtools_detach(&mut self) {
-        let Some(_session) = self.devtools.take() else {
+        let Some(session) = self.devtools.take() else {
             return;
         };
+        runtime::detach(&mut session.runtime.borrow_mut(), &self.core);
         target::detach(self.workers.devtools_auto_attach());
     }
 
-    pub(crate) fn devtools_message(&self, outlet: &Arc<Outlet>, text: &str) {
+    pub(crate) fn devtools_message(
+        &self,
+        js: &mut ScriptRuntime,
+        outlet: &Arc<Outlet>,
+        text: &str,
+    ) -> Result<(), ScriptError> {
         let Some(session) = self
             .devtools
             .clone()
             .filter(|session| session.frontend.is(outlet))
         else {
-            return;
+            return Ok(());
         };
         let frontend = &session.frontend;
         let envelope = match protocol::parse(text) {
             Ok(envelope) => envelope,
             Err((id, error)) => {
                 frontend.error(id, &error);
-                return;
+                return Ok(());
             }
         };
         let request = &envelope.request;
         if envelope.session_id.is_some() {
             frontend.error(Some(request.id), &Error::session_not_found());
-            return;
+            return Ok(());
         }
+        let mut left = Ok(());
         match request.domain() {
             "Target" => target::dispatch(
                 frontend,
@@ -71,7 +83,18 @@ impl MainThreadRuntime {
                 || self.workers.devtools_live_workers(),
                 request,
             ),
+            "Runtime" | "Console" => {
+                left = runtime::dispatch(
+                    &mut session.runtime.borrow_mut(),
+                    &self.core,
+                    js,
+                    frontend,
+                    request,
+                    true,
+                );
+            }
             _ => frontend.not_found(request),
         }
+        left
     }
 }

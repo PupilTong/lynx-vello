@@ -111,6 +111,9 @@ pub(crate) trait RealmOwner: Sized + 'static {
 
     fn before_operation(&self, _realm: &mut Self::Realm) {}
 
+    #[cfg(feature = "devtools")]
+    fn console(&self) -> Option<&crate::devtools::runtime::ConsoleTap>;
+
     fn run_due_timers(realm: &mut Self::Realm, js: &mut ScriptRuntime) -> Vec<ScriptError>;
 
     fn after_timers(_owner: &Rc<Self>, _realm: &mut Self::Realm) {}

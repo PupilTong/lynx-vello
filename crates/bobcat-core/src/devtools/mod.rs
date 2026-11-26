@@ -3,6 +3,7 @@
 //! `crates/bobcat-core/docs/devtools.md` is the description.
 
 pub(crate) mod protocol;
+pub(crate) mod runtime;
 pub(crate) mod target;
 #[cfg(test)]
 pub(crate) mod test_support;

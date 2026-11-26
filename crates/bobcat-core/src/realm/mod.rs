@@ -60,6 +60,8 @@ pub(crate) struct RealmCore {
     pub(crate) timers: Rc<TimerState>,
     pub(crate) futures: Rc<FutureTable>,
     pub(crate) canvases: Rc<CanvasTable>,
+    #[cfg(feature = "devtools")]
+    pub(crate) console: Rc<crate::devtools::runtime::ConsoleTap>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -171,6 +173,8 @@ pub(crate) fn open_realm<T>(
     engine.enable_module_loading();
     let children = Rc::new(ChildRealms::new());
     engine.set_children(Rc::downgrade(&children));
+    #[cfg(feature = "devtools")]
+    let console = Rc::clone(&names.console);
     let CoreTables {
         timers,
         futures,
@@ -193,6 +197,8 @@ pub(crate) fn open_realm<T>(
             timers,
             futures,
             canvases,
+            #[cfg(feature = "devtools")]
+            console,
         },
         installed,
     ))
@@ -207,6 +213,8 @@ pub(crate) enum FrameDemand {
 pub(crate) struct RealmNames {
     pub(crate) source: ScriptSource,
     pub(crate) opener: Opener,
+    #[cfg(feature = "devtools")]
+    pub(crate) console: Rc<crate::devtools::runtime::ConsoleTap>,
 }
 
 pub(crate) struct CoreTables {
@@ -226,7 +234,6 @@ fn install_realm_core(
     child_hosts: Option<Rc<dyn ChildHostModules>>,
     canvas_host: CanvasHost,
 ) -> Result<CoreTables, ScriptError> {
-    let RealmNames { source, opener } = names;
     let notices = host.clone();
     crate::script_frames::install(engine, move |pending| {
         if let FrameDemand::Report(worker) = frames {
@@ -240,12 +247,18 @@ fn install_realm_core(
     let futures = Rc::new(FutureTable::new());
     crate::future::install(engine, &futures, host.token().clone(), thread.clone())
         .map_err(|error| context_of("installing Future", error))?;
-    crate::fetch::install(engine, host, &futures, opener)
+    crate::fetch::install(engine, host, &futures, names.opener)
         .map_err(|error| context_of("installing fetchResource", error))?;
     crate::require::install(engine, host.clone(), thread.clone())
         .map_err(|error| context_of("installing require", error))?;
-    install_diagnostics(engine, host, source.clone())
+    install_diagnostics(engine, host, &names)
         .map_err(|error| context_of("installing the diagnostics members", error))?;
+    let RealmNames {
+        source,
+        opener,
+        #[cfg(feature = "devtools")]
+        console,
+    } = names;
     let canvases = Rc::new(CanvasTable::new(
         &canvas_host,
         ReadWait::new(host.token(), &thread),
@@ -263,6 +276,8 @@ fn install_realm_core(
             opener,
             child_hosts,
             canvas_host,
+            #[cfg(feature = "devtools")]
+            console,
         },
     )
     .map_err(|error| context_of("installing ShadowRealm", error))?;
@@ -276,16 +291,25 @@ fn install_realm_core(
 fn install_diagnostics(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
-    source: ScriptSource,
+    names: &RealmNames,
 ) -> Result<(), ScriptError> {
-    for (name, is_error, source) in [
-        ("reportScriptError", true, source.clone()),
-        ("logScriptMessage", false, source),
-    ] {
+    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
         let reporting = host.clone();
+        let source = names.source.clone();
+        #[cfg(feature = "devtools")]
+        let console = Rc::clone(&names.console);
         engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, 2, move |arguments| {
             let level = string_argument(name, arguments, 0)?.to_owned();
             let message = string_argument(name, arguments, 1)?.to_owned();
+            #[cfg(feature = "devtools")]
+            if console.is_on() {
+                let call = if is_error {
+                    crate::devtools::runtime::ConsoleCall::Report
+                } else {
+                    crate::devtools::runtime::ConsoleCall::Log
+                };
+                console.message(call, &level, &message);
+            }
             let source = source.clone();
             reporting.engine_event(if is_error {
                 EngineEvent::ScriptReported {

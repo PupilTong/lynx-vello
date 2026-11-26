@@ -607,6 +607,41 @@ impl ScriptEngine {
     }
 }
 
+#[cfg(feature = "devtools")]
+impl ScriptEngine {
+    pub(crate) const fn devtools_realm(&self) -> &quickjs::Context {
+        &self.realm
+    }
+
+    pub(crate) fn devtools_run<T>(
+        &self,
+        runtime: &mut ScriptRuntime,
+        run: impl FnOnce(&quickjs::Context) -> T,
+    ) -> (T, Result<(), ScriptError>) {
+        let value = run(&self.realm);
+        (value, self.checkpoint_after_calls(runtime))
+    }
+
+    pub(crate) fn devtools_function<F>(
+        &self,
+        name: &str,
+        arity: u32,
+        handler: F,
+    ) -> Result<quickjs::Value, quickjs::Error>
+    where
+        F: Fn(&quickjs::Context, &[quickjs::Value]) -> Result<quickjs::HostValue, String> + 'static,
+    {
+        let host_panic = Rc::clone(&self.host_panic);
+        self.realm
+            .function_with_values(name, arity, move |realm, arguments| {
+                keep_host_panic(&host_panic, "the host function panicked", || {
+                    handler(realm, arguments)
+                })
+                .map_err(quickjs::HostFunctionError::new)
+            })
+    }
+}
+
 fn resolve_export(
     realm: &quickjs::Context,
     specifier: &str,

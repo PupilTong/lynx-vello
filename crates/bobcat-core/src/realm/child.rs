@@ -347,6 +347,8 @@ pub(crate) struct ShadowRealmHook {
     pub(crate) opener: Opener,
     pub(crate) child_hosts: Option<Rc<dyn ChildHostModules>>,
     pub(crate) canvas_host: CanvasHost,
+    #[cfg(feature = "devtools")]
+    pub(crate) console: Rc<crate::devtools::runtime::ConsoleTap>,
 }
 
 pub(crate) fn install(engine: &mut ScriptEngine, hook: ShadowRealmHook) -> Result<(), ScriptError> {
@@ -374,6 +376,8 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         RealmNames {
             source: hook.source.clone(),
             opener: own_opener.map_or(hook.opener, Opener::Realm),
+            #[cfg(feature = "devtools")]
+            console: Rc::clone(&hook.console),
         },
         &hook.children,
         hook.child_hosts.clone(),
