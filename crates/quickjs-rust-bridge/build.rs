@@ -65,7 +65,7 @@ fn main() {
     };
 
     let mut shim_build = configure_quickjs_build();
-    shim_build
+    define_shim_features(&mut shim_build)
         .flag("-isystem")
         .flag(&quickjs_dir)
         .file(manifest_dir.join("src/shim.c"))
@@ -163,6 +163,13 @@ impl Fnv1a {
     const fn finish(&self) -> u64 {
         self.0
     }
+}
+
+fn define_shim_features(build: &mut cc::Build) -> &mut cc::Build {
+    if env::var_os("CARGO_FEATURE_DEVTOOLS").is_some() {
+        build.define("QJS_BRIDGE_DEVTOOLS", None);
+    }
+    build
 }
 
 fn assert_supported_target(target_os: &str, target_env: &str) {

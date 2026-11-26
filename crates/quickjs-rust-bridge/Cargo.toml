@@ -15,6 +15,10 @@ links = "quickjs"
 # only the `benches/` targets").
 bench = false
 
+[features]
+# Debugger reflection over a realm's values (`src/implementation/devtools.rs`).
+devtools = []
+
 [dependencies]
 chrono = { workspace = true }
 getrandom = { workspace = true }

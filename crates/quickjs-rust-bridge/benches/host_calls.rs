@@ -58,7 +58,7 @@ fn append_handler(arguments: &[HostArgument<'_>]) -> Result<HostValue, HostFunct
 
 #[divan::bench]
 fn no_arguments(bencher: divan::Bencher) {
-    let (mut realm, run, undefined) = driver(
+    let (realm, run, undefined) = driver(
         |realm| {
             realm
                 .define_global_function("flush", 0, |_| Ok(HostValue::Undefined))
@@ -71,7 +71,7 @@ fn no_arguments(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn one_number_argument(bencher: divan::Bencher) {
-    let (mut realm, run, undefined) = driver(
+    let (realm, run, undefined) = driver(
         |realm| {
             let mut next_id = 0u32;
             realm
@@ -88,7 +88,7 @@ fn one_number_argument(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn two_number_arguments(bencher: divan::Bencher) {
-    let (mut realm, run, undefined) = driver(
+    let (realm, run, undefined) = driver(
         |realm| {
             realm
                 .define_global_function("append", 2, append_handler)
@@ -101,7 +101,7 @@ fn two_number_arguments(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn string_and_number_arguments(bencher: divan::Bencher) {
-    let (mut realm, run, undefined) = driver(
+    let (realm, run, undefined) = driver(
         |realm| {
             realm
                 .define_global_function("create", 2, |_| Ok(HostValue::Undefined))
@@ -114,7 +114,7 @@ fn string_and_number_arguments(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn string_return(bencher: divan::Bencher) {
-    let (mut realm, run, undefined) = driver(
+    let (realm, run, undefined) = driver(
         |realm| {
             realm
                 .define_global_function("tag", 1, |_| Ok(HostValue::String("view".to_owned())))

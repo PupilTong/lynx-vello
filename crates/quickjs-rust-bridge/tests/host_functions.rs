@@ -408,7 +408,7 @@ fn many_arguments_do_not_leak() {
 
 #[test]
 fn a_dropped_function_value_stays_callable_once_installed() {
-    let mut realm = realm();
+    let realm = realm();
     let global = realm.global_object().unwrap();
     let function = realm
         .function("f", 0, |_| Ok(HostValue::Number(5.0)))
@@ -442,7 +442,7 @@ fn a_realm_with_live_host_functions_drops_cleanly() {
 fn set_property_honors_the_execution_timeout() {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut realm = Runtime::with_options(RuntimeOptions {
+        let realm = Runtime::with_options(RuntimeOptions {
             execution_timeout: Some(Duration::from_millis(20)),
             ..RuntimeOptions::default()
         })
@@ -467,7 +467,7 @@ fn set_property_honors_the_execution_timeout() {
 
 #[test]
 fn set_property_runs_a_proxy_trap_and_reports_refusal() {
-    let mut realm = realm();
+    let realm = realm();
     let accepting = realm
         .evaluate(
             EvalSource::new(
