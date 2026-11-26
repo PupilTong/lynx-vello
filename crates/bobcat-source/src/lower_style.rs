@@ -43,12 +43,14 @@
 //! unchanged, and its script never calls `__SetCSSId`. `@keyframes` and
 //! `@font-face` stay global, as web-core emits them verbatim.
 //!
-//! web-core's tag map is applied to one tag only: a `Type` component `svg`
-//! is written as the document tag `lynx-svg` ([`write_component`] over
-//! `bobcat_core::document_tag`), as web-core's decoder writes `x-svg`.
-//! web-core's other selector rewrites are absent, because nothing here needs
-//! them: every other Lynx tag name is this DOM's real element name (no
-//! `view` → `x-view` mapping), the `page` element really is the document
+//! web-core's tag map is applied to three tags only: a `Type` component
+//! `svg` is written as the document tag `lynx-svg`, `input` as `x-input` and
+//! `textarea` as `x-textarea` ([`write_component`] over
+//! `bobcat_core::document_tag`), as web-core's decoder writes `x-svg`,
+//! `x-input` and `x-textarea`. web-core's other selector rewrites are absent,
+//! because nothing here needs them: every other Lynx tag name is this DOM's
+//! real element name (no `view` → `x-view` mapping), the `page` element really
+//! is the document
 //! element (so `:root` matches natively), and there is no entry-name
 //! `:not([l-e-name])` guard. That guard separates a lazy bundle's own
 //! `StyleInfo` from its host card's, and a lazy bundle's `StyleInfo` is not
@@ -296,7 +298,8 @@ fn scoped_selector_text(
 
 /// Appends one component's CSS text, with a type selector naming the
 /// document tag of its Lynx tag (`bobcat_core::document_tag`: `svg` is the
-/// document's `lynx-svg`), as web-core's decoder maps a `TypeSelector`
+/// document's `lynx-svg`, `input` its `x-input`, `textarea` its
+/// `x-textarea`), as web-core's decoder maps a `TypeSelector`
 /// through its tag map (`style_info_decoder.rs:148-156`). Only a `Type`
 /// component is a tag: a class, an id, an attribute and a pseudo-class's
 /// argument text (`:not(svg)`) are written as they are, as in web-core.
@@ -1228,7 +1231,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The Lynx `svg` type selector
+    // The Lynx `svg`, `input` and `textarea` type selectors
     // -----------------------------------------------------------------------
 
     /// One unscoped selector, in fragment 0.
@@ -1259,6 +1262,32 @@ mod tests {
         assert_eq!(
             scoped_once(&[(Type, "svg"), (Combinator, " "), (Type, "svg")]),
             r#"lynx-svg lynx-svg:where([l-css-id="1"])"#
+        );
+    }
+
+    /// The `Type` components `input` and `textarea` name the document's
+    /// `x-input` and `x-textarea` (`bobcat_core::document_tag`, user ruling
+    /// 2026-11-26), as web-core's decoder maps them; the `-ng` aliases are
+    /// not renamed, and a class or a pseudo-class's argument keeps the name.
+    #[test]
+    fn the_type_selectors_input_and_textarea_are_written_as_the_fields() {
+        use SimpleSelectorKind::{Class, Combinator, PseudoClass, Type};
+        assert_eq!(unscoped(&[(Type, "input")]), "x-input");
+        assert_eq!(unscoped(&[(Type, "textarea")]), "x-textarea");
+        assert_eq!(
+            unscoped(&[(Type, "view"), (Combinator, ">"), (Type, "input")]),
+            "view > x-input"
+        );
+        assert_eq!(
+            scoped_once(&[(Type, "textarea")]),
+            r#"x-textarea:where([l-css-id="1"])"#
+        );
+        assert_eq!(unscoped(&[(Type, "x-input-ng")]), "x-input-ng");
+        assert_eq!(unscoped(&[(Type, "x-textarea-ng")]), "x-textarea-ng");
+        assert_eq!(unscoped(&[(Class, "input")]), ".input");
+        assert_eq!(
+            unscoped(&[(PseudoClass, "not(textarea)")]),
+            ":not(textarea)"
         );
     }
 

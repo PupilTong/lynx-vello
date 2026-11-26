@@ -13382,10 +13382,11 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
     assert!(timing.frame_build_start <= timing.frame_build_end);
 }
 
-/// A pre-parsed page stylesheet sizing the type selector `svg`, as
-/// `bobcat-source` lowers a `StyleInfo` `Type` component `svg`: written as
-/// the document tag `lynx-svg` (`bobcat_core::document_tag`).
-fn svg_sheet() -> crate::resource::LoadedSource {
+/// A pre-parsed page stylesheet sizing the type selector `lynx_tag`, as
+/// `bobcat-source` lowers a `StyleInfo` `Type` component: written as the
+/// document tag (`bobcat_core::document_tag`), so `svg` as `lynx-svg` and
+/// `input` as `x-input`.
+fn type_sheet(lynx_tag: &str) -> crate::resource::LoadedSource {
     use crate::resource::{LoadedSource, StyleSheetSource};
     let rule = |selectors: &str, property: &'static str, value: &str| crate::PreparsedRule::Style {
         selectors: selectors.into(),
@@ -13395,13 +13396,13 @@ fn svg_sheet() -> crate::resource::LoadedSource {
             important: false,
         }],
     };
-    let svg = crate::document_tag("svg");
+    let tag = crate::document_tag(lynx_tag);
     LoadedSource::StyleSheet(StyleSheetSource::Preparsed(Arc::new(
         crate::PreparsedStyleSheet {
             rules: vec![
-                rule(svg, "width", "30px"),
-                rule(svg, "height", "20px"),
-                rule(&format!("view > {svg}"), "height", "25px"),
+                rule(tag, "width", "30px"),
+                rule(tag, "height", "20px"),
+                rule(&format!("view > {tag}"), "height", "25px"),
             ],
         },
     )))
@@ -13423,7 +13424,7 @@ fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
     runtime
         .run_main_thread_script_over_sheets(
             &mut js,
-            vec![("app:///index.css", svg_sheet())],
+            vec![("app:///index.css", type_sheet("svg"))],
             r"
         const page = __CreatePage();
         const holder = __CreateView(0);
@@ -13490,6 +13491,96 @@ fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
         Display::None,
         "the component's `lynx-svg > *` rule"
     );
+}
+
+/// The Lynx `input` and `textarea` are the document elements `x-input` and
+/// `x-textarea` (`crate::main::tree::tag_map`, user ruling 2026-11-26):
+/// `__CreateElement` of the Lynx tag creates the field, `__GetTag` answers
+/// the Lynx tag for it and for the field the page created under its
+/// document tag, and a pre-parsed sheet's type selector sizes both. The
+/// `-ng` aliases are not mapped. A selector query is not mapped, as for
+/// `svg`: the Lynx tag finds nothing, the document tag finds the two
+/// elements.
+#[test]
+fn the_lynx_input_and_textarea_tags_are_the_fields_in_the_document() {
+    for (lynx, document, ng) in [
+        ("input", "x-input", "x-input-ng"),
+        ("textarea", "x-textarea", "x-textarea-ng"),
+    ] {
+        let (mut js, mut runtime, elements, _far) = runtime_over_watching_names(ingredients());
+        runtime
+            .run_main_thread_script_over_sheets(
+                &mut js,
+                vec![("app:///index.css", type_sheet(lynx))],
+                &format!(
+                    r"
+        const page = __CreatePage();
+        const holder = __CreateView(0);
+        const mapped = __CreateElement('{lynx}', 0);
+        const own = __CreateElement('{document}', 0);
+        const ng = __CreateElement('{ng}', 0);
+        __AppendElement(page, holder);
+        __AppendElement(holder, mapped);
+        __AppendElement(page, own);
+        __AppendElement(page, ng);
+        globalThis.held = [page, holder, mapped, own, ng];
+    "
+                ),
+                "app:///main.js",
+            )
+            .unwrap();
+        runtime
+            .evaluate_module(
+                &mut js,
+                &format!(
+                    r"
+            import {{
+              __FlushElementTree,
+              __GetTag,
+              __QuerySelector,
+              __QuerySelectorAll,
+            }} from 'bobcat:element';
+            const [page, holder, mapped, own, ng] = held;
+            if (__GetTag(mapped) !== '{lynx}' || __GetTag(own) !== '{lynx}') {{
+              throw new Error('tags: ' + __GetTag(mapped) + ', ' + __GetTag(own));
+            }}
+            if (__GetTag(ng) !== '{ng}') throw new Error('the alias mapped: ' + __GetTag(ng));
+            if (__QuerySelector(page, '{lynx}', {{}}) !== undefined ||
+                __QuerySelectorAll(page, '{lynx}', {{}}).length !== 0) {{
+              throw new Error('a query selector was mapped');
+            }}
+            const all = __QuerySelectorAll(page, '{document}', {{}});
+            if (all.length !== 2 || all[0] !== mapped || all[1] !== own) {{
+              throw new Error('{document} matched ' + all.length);
+            }}
+            __FlushElementTree();
+            "
+                ),
+                "app:///verify-field.js",
+                "verifying",
+            )
+            .expect("verification");
+
+        let mut tree = elements.tree();
+        let page = tree.document_element().id();
+        let found = tree.query_selector_all(page, document).unwrap();
+        assert_eq!(
+            found.len(),
+            2,
+            "both elements are {document} in the document"
+        );
+        assert!(
+            tree.shadow_root(found[0]).is_some(),
+            "the Lynx `{lynx}` is the text field"
+        );
+        tree.layout();
+        let size = |tree: &LynxDocument, node| {
+            let layout = tree.rounded_layout(node).unwrap();
+            (layout.size.width, layout.size.height)
+        };
+        assert_eq!(size(&tree, found[0]), (30.0, 25.0), "{lynx}");
+        assert_eq!(size(&tree, found[1]), (30.0, 20.0), "{lynx}");
+    }
 }
 
 /// Each canvas entry lives in the realm's table until `canvasDrop` names

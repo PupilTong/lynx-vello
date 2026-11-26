@@ -208,11 +208,11 @@ matches (native keeps what matches); a textarea confirms only with
 the end when it never had one (native `-1`);
 `selection` fires for selected ranges only (native: every change).
 
-Two follow native or a user ruling instead (2026-10-19): the HTML names
-`input` and `textarea` are not text fields here (web-core maps both to its
-fields and native registers its fields under them; an HTML-named element
-follows HTML, which is not built), and `x-textarea` enforces `maxlines`,
-which web-core does not read.
+One follows native instead (2026-10-19): `x-textarea` enforces
+`maxlines`, which web-core does not read. The Lynx tags `input` and
+`textarea` are the fields, as in web-core and native (user ruling
+2026-11-26, reversing the 2026-10-19 ruling that kept them as HTML names;
+"Tags" below).
 
 ## E1: what was built
 
@@ -885,20 +885,23 @@ Public surface:
 
 ### Choices made where the brief left one
 
-- **Tags: the four Lynx names only** (user ruling 2026-10-19). `x-input`,
-  `x-input-ng`, `x-textarea` and `x-textarea-ng`: web-core's element names
-  (`XInput.ts`, `XTextarea.ts`) and the `-ng` aliases its tag map sends to
-  them (`constants.ts:105,107`). A compiled bundle writes the JSX tag
-  verbatim here. `input` and `textarea` are HTML element names, and an
-  element with an HTML name follows HTML, which this component does not
-  implement, so neither is defined — though web-core maps both to its fields
-  (`constants.ts:104,106`) and native Lynx registers its fields under exactly
-  those names (`LynxUIInputAutoRegistry.m`, `LynxUITextAreaAutoRegistry.m`,
-  with `x-input-ng`/`x-textarea-ng` mapped onto them in `LynxUIOwner.m`). An
-  HTML `<input>`/`<textarea>` would be a separate element with HTML's
-  semantics; it is not built (`docs/tracking/components.md`,
-  `docs/tracking/deviations.md`). They are not Lynx tags for the `raw-text`
-  rules either.
+- **Tags: the four Lynx element names, and the Lynx tags `input` and
+  `textarea` mapped onto two of them** (user ruling 2026-11-26, reversing
+  the ruling of 2026-10-19). `x-input`, `x-input-ng`, `x-textarea` and
+  `x-textarea-ng` are web-core's element names (`XInput.ts`,
+  `XTextarea.ts`) and the `-ng` aliases its tag map sends to them
+  (`constants.ts:105,107`); a compiled bundle writes these verbatim, and
+  each is its own document tag here. The Lynx tags `input` and `textarea`
+  are mapped to the document tags `x-input` and `x-textarea`, as web-core's
+  tag map does (`constants.ts:104,106`), by `bobcat-core`'s
+  `tree/tag_map.rs`, at creation, at the tag read (`__GetTag` answers
+  `input` or `textarea`) and in a `StyleInfo` type selector. Native Lynx
+  registers its fields under the same names (`LynxUIInputAutoRegistry.m`,
+  `LynxUITextAreaAutoRegistry.m`, with `x-input-ng`/`x-textarea-ng` mapped
+  onto them in `LynxUIOwner.m`). The document tags `input` and `textarea`
+  define no field, and HTML's own form controls are not built
+  (`docs/tracking/components.md`, `docs/tracking/deviations.md`). The
+  `raw-text` rules list the document tags `x-input` and `x-textarea`.
 - **The host is the field's box**, not web-core's `display: contents` host
   with an inner `<input>` that inherits a dozen box properties through
   `::part`. The editor fills the host's content box (a row flex box with
@@ -1059,7 +1062,8 @@ Public surface:
   detail to follow is a native-vs-web-core question for the user. The
   count itself is cheap (`paragraph_line_count` after the pass `maxlines`
   already runs).
-- HTML `<input>` and `<textarea>` are not implemented (see "Tags").
+- HTML's own `<input>` and `<textarea>` form controls are not implemented;
+  the Lynx tags `input` and `textarea` are the fields (see "Tags").
 - The standard `beforeinput` and composition events of a field are not
   visible to script at the field's host (web-core lets `beforeinput` and the
   composition events through; no Lynx event names them).

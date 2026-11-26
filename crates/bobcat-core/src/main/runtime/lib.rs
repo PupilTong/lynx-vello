@@ -4687,7 +4687,8 @@ fn install_host_module(
             Ok(node_id_value(document.document_element().id()))
         }
         // The page's tag, as `crate::main::tree::document_tag` maps it: a
-        // Lynx `svg` is the document's `lynx-svg`.
+        // Lynx `svg` is the document's `lynx-svg`, a Lynx `input` its
+        // `x-input`, a Lynx `textarea` its `x-textarea`.
         fn createElement(tag: string_argument) |document| {
             let tag = crate::main::tree::document_tag(tag);
             Ok(node_id_value(document.create_element(tag, ())))

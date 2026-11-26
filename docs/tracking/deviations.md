@@ -3858,17 +3858,33 @@ consequential choice about whether to follow the spec or the quirk.
     carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
     what makes it the host's `::placeholder` to `terminus`.
 
-  Three differ from web-core by user ruling (2026-10-19, 2026-10-20):
-  - *`input` and `textarea` are not text fields.* web-core's tag map sends
-    the JSX tags `input` and `textarea` to `x-input`/`x-textarea`
-    (`web-core/ts/constants.ts:104,106`), and native Lynx registers its
-    fields under exactly those names (`LynxUIInputAutoRegistry.m:17`,
-    `LynxUITextAreaAutoRegistry.m:17`, `x-input-ng`/`x-textarea-ng` mapped
-    onto them in `LynxUIOwner.m`). Here they are HTML element names, an
-    element with an HTML name follows HTML, and HTML's `<input>` and
-    `<textarea>` are not implemented, so a card that writes `<input>` or
-    `<textarea>` gets a plain element with no field. The fields are
-    `x-input`, `x-input-ng`, `x-textarea` and `x-textarea-ng`.
+  The Lynx tags `input` and `textarea` are the fields (user ruling
+  2026-11-26, reversing the ruling of 2026-10-19 that kept both as HTML
+  element names with no field): `bobcat-core`'s `tree/tag_map.rs` maps them
+  to the document tags `x-input` and `x-textarea` at creation, at the tag
+  read and in a `StyleInfo` type selector, as web-core's tag map does
+  (`web-core/ts/constants.ts:104,106`, `src/constants.rs:34-36`). Native
+  Lynx registers its fields under the same names
+  (`LynxUIInputAutoRegistry.m:17`, `LynxUITextAreaAutoRegistry.m:17`). The
+  `-ng` aliases are not mapped: `x-input-ng` and `x-textarea-ng` stay their
+  own document tags and define the same fields. HTML's own `<input>` and
+  `<textarea>` are not built.
+
+  - *`__GetTag` of an `x-input` answers `input`.* The tag map is read both
+    ways, so every `x-input` document element reads `input`, also one the
+    page created as `x-input`, and one created as `x-input-ng` reads
+    `x-input-ng`. web-core answers `x-input-ng` for all three (its
+    `HTML_TAG_TO_LYNX_TAG_MAP` override `'x-input': 'x-input-ng'`,
+    `ts/constants.ts:125-136`; `__GetTag` at
+    `ts/client/mainthread/elementAPIs/pureElementPAPIs.ts:148-151`), and
+    native Lynx answers the tag the element was created under. For
+    `x-textarea` this engine and web-core agree (its override is
+    `'x-textarea': 'textarea'`): `textarea` for an element created as
+    `textarea` or `x-textarea`. An element created as `x-textarea-ng` reads
+    `x-textarea-ng` here; web-core answers `textarea` for it, since its map
+    sends `x-textarea-ng` to the document tag `x-textarea`.
+
+  Two differ from web-core by user ruling (2026-10-19, 2026-10-20):
   - *`maxlines` is enforced on `x-textarea`* (native). web-core reads no
     such attribute (its inner `<textarea>` has no line limit). Here, as
     Android's `maxLinesFilter` does, an insertion that lays the value out
