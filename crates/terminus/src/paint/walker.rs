@@ -139,13 +139,6 @@ use crate::visual::{
     AutoBox, ClipNode, LayerKind, PaintItem, PaintItemKind, PaintOrder, RenderLayer,
 };
 
-/// Where one walk's output goes.
-///
-/// `Monolithic` is the pre-compose shape — one scene, everything inline —
-/// which an SVG image's walk draws into ([`walk_uncultured`]) and the
-/// equivalence tests compare against; a document's frame encodes through
-/// `Compose`, where walker-level pushes become program ops and content
-/// between them lands in per-space fragments.
 pub(crate) enum WalkSink<'s> {
     Monolithic(
         &'s mut DisplayList,
@@ -155,7 +148,6 @@ pub(crate) enum WalkSink<'s> {
 }
 
 impl WalkSink<'_> {
-    /// The scene content in `space` encodes into.
     pub(super) fn scene_for(&mut self, space: Option<u32>) -> &mut DisplayList {
         match self {
             Self::Monolithic(scene, _) => scene,
@@ -163,12 +155,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// One image draw.
-    ///
-    /// In compose mode it is a program op the painter resolves and encodes.
-    /// In the monolithic mode the equivalence tests use it is encoded inline
-    /// against that walk's own pixel source, so a culling regression in image
-    /// draws stays observable to the culling oracle.
     pub(super) fn image(&mut self, space: Option<u32>, draw: crate::paint::compose::ImageDraw) {
         match self {
             Self::Monolithic(scene, pixels) => {
@@ -189,10 +175,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// How many image and vector draws the walk has recorded so far — what
-    /// [`paint_item`] compares before and after an item to learn whether the
-    /// item drew an image. The monolithic sink encodes its draws inline and
-    /// counts none; only the compose walk decides `paints_content`.
     fn content_draws(&self) -> usize {
         match self {
             Self::Monolithic(..) => 0,
@@ -200,12 +182,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// One vector draw.
-    ///
-    /// In compose mode it is a program op the painter bakes a texture for
-    /// and encodes. In the monolithic mode the equivalence tests use, the
-    /// walk has no renderer to bake with, so the draw appends the image's
-    /// scene inline — the picture the texture would show, as paths.
     pub(super) fn vector(&mut self, space: Option<u32>, draw: crate::paint::compose::VectorDraw) {
         match self {
             Self::Monolithic(scene, _) => {
@@ -295,9 +271,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// Pushes one layer of an `svg` element's recording under `transform`:
-    /// through [`svg::Layer::push`] in the monolithic walk,
-    /// as the program op that replays the same push in the compose walk.
     fn push_svg_layer(
         &mut self,
         space: Option<u32>,
@@ -348,12 +321,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// Opens a `filter: blur()` group, answering whether one was recorded.
-    ///
-    /// The monolithic sink records none: it has no side table and no
-    /// composer, so its walk encodes the group's content inline and the
-    /// frame is simply unblurred — which is what makes it still a usable
-    /// culling oracle for a filtered page.
     pub(super) fn push_filter(&mut self, group: FilterGroup) -> bool {
         match self {
             Self::Monolithic(..) => false,
@@ -373,10 +340,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// Seals any open fragment and answers the program length — the boundary
-    /// a `backdrop-filter` range starts or ends at. Zero for the monolithic
-    /// sink, which has no program; its ranges are therefore always empty and
-    /// it records no backdrop at all.
     fn content_boundary(&mut self) -> u32 {
         match self {
             Self::Monolithic(..) => 0,
@@ -384,14 +347,6 @@ impl WalkSink<'_> {
         }
     }
 
-    /// Records a `backdrop-filter` entry over the ops already emitted from
-    /// its Backdrop Root's content start up to `end`, answering whether one
-    /// was recorded.
-    ///
-    /// The monolithic sink records none, for the same reason it records no
-    /// filter group: with no side table and no composer its walk simply
-    /// leaves the backdrop unfiltered, which keeps it a usable culling
-    /// oracle for a page that uses the property.
     fn push_backdrop(&mut self, entry: FilterGroup, end: u32, frame: &PaintOrder) -> bool {
         match self {
             Self::Monolithic(..) => false,
@@ -406,7 +361,6 @@ impl WalkSink<'_> {
     }
 }
 
-/// Reused per-frame buffers.
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -417,161 +371,51 @@ pub(crate) struct Scratch {
     clip_stack: Vec<usize>,
     chain: Vec<usize>,
     scopes: Vec<Scope>,
-    /// Per clip link the walk pushes, in push order: the link's index and
-    /// the region the content inside it can put ink in, in the link's space
-    /// (viewport CSS px, committed). Filled by [`plan_clip_pushes`],
-    /// consumed by [`push_clip`] through [`Self::push_cursor`].
     push_holds: Vec<(usize, Hold)>,
     push_cursor: usize,
-    /// Per layer, whether its element has `filter` or `backdrop-filter`,
-    /// which makes its scope open inside its own chain and its items push
-    /// only the links below ([`open_scope`]). Index-parallel with
-    /// [`PaintOrder::layers`].
     layer_floored: Vec<bool>,
     layer_bounds: Vec<Rect>,
     open_layers: Vec<usize>,
     bounds_acc: Vec<Option<Rect>>,
-    /// Per layer, whether a transform curve on its space's path moves it:
-    /// its content is then held to [`CullPlan::clip_extent`] (see [`held`]).
-    /// Index-parallel with [`PaintOrder::layers`].
     layer_moves: Vec<bool>,
-    /// Per layer, the blur sigma of its `filter` in *viewport* CSS px — the
-    /// element's own sigma scaled by its local-to-viewport map. Zero for
-    /// every layer with no `blur()`. Index-parallel with
-    /// [`PaintOrder::layers`].
     layer_sigma: Vec<f64>,
-    /// Per item, the item-local to viewport-CSS-px map [`paint_item`] paints
-    /// with, or `None` when the item encodes nothing — a non-invertible
-    /// transform, or no reachable ink. Index-parallel with
-    /// [`PaintOrder::items`].
     item_plan: Vec<Option<Affine>>,
-    /// Per layer, whether its scope opens: an item in its range encodes, or
-    /// it has a `backdrop-filter`, which draws through the border box even
-    /// with no item of its own (`visibility: hidden`). A scope with neither
-    /// draws nothing, and leaving it out keeps its space and curves out of
-    /// the program. Nested layers are sub-ranges, so an open scope's parent
-    /// is open too. Index-parallel with [`PaintOrder::layers`].
     layer_live: Vec<bool>,
-    /// The per-frame cull geometry, shared with the relevance pass.
     plan: CullPlan,
     paths: PathScratch,
-    /// Whether this walk decides [`Self::contentful`]: the document's
-    /// content detection (`Document::set_content_detection`), read once per
-    /// walk. Off, [`paint_item`], [`open_scope`] and [`close_scope`] each
-    /// test this one `bool` and do nothing else for Paint Timing.
     detect_content: bool,
-    /// Whether the last walk encoded contentful ink, as Paint Timing defines
-    /// it (`CommittedFrame::paints_content`): a text run with a glyph that is
-    /// not white space, or an image or vector draw of an element box or a
-    /// text run's inline boxes, outside any `::backdrop` and any
-    /// transparent scope ([`Self::transparent_depth`]). Set by
-    /// [`paint_item`] as it encodes, so deciding it walks nothing; once set,
-    /// no later item tests again. Always `false` after a walk with
-    /// [`Self::detect_content`] off.
     contentful: bool,
-    /// The depth of `scopes`, counting the scope itself, of the outermost
-    /// open scope that is `opacity: 0` with no animation to fade it, or
-    /// `None` while no such scope is open. Everything inside one paints at a
-    /// used opacity of zero, which Paint Timing does not count as content.
-    /// Kept only while [`Self::track_transparent`] is on.
     transparent_depth: Option<usize>,
-    /// Whether this walk attributes contentful paints to Container Timing
-    /// roots: whether the document has any root
-    /// ([`crate::visual::container_timing`]), read once per walk. Off,
-    /// [`paint_item`] tests this one `bool` and does nothing else for
-    /// Container Timing.
     container_timing: bool,
-    /// Whether [`Self::transparent_depth`] is kept: either
-    /// [`Self::detect_content`] or [`Self::container_timing`] is on.
-    /// [`open_scope`] and [`close_scope`] test this one `bool`.
     track_transparent: bool,
-    /// The contentful paints the last walk attributed to Container Timing
-    /// roots, one per paint and root. Always empty after a walk with
-    /// [`Self::container_timing`] off.
     container_hits: Vec<ContainerHit>,
 }
 
 impl Scratch {
-    /// Whether the last walk encoded contentful ink ([`Self::contentful`]).
     pub(crate) const fn paints_content(&self) -> bool {
         self.contentful
     }
 
-    /// Whether the last walk attributed paints to Container Timing roots at
-    /// all ([`Self::container_timing`]).
     #[cfg(test)]
     pub(crate) const fn times_containers(&self) -> bool {
         self.container_timing
     }
 }
 
-/// The frame-wide geometry the cull test is decided against: the region every
-/// clip chain admits and how far every scroll slot's committed encode window
-/// reaches.
-///
-/// It is a type of its own, and `pub(crate)`, because two consumers must
-/// agree exactly: [`plan_frame`], which decides what the paint walk encodes,
-/// and [`crate::visual::relevance`], which decides which
-/// `content-visibility: auto` boxes are relevant. Relevance is defined *as*
-/// the admitted region, so deriving it a second way would make "an element is
-/// relevant wherever its contents could paint" an invariant to be tested
-/// rather than one that holds by construction.
 #[derive(Debug, Default)]
 pub(crate) struct CullPlan {
-    /// The admitted base region: the viewport plus its slack, or `None` with
-    /// culling switched off entirely.
     cull: Option<Rect>,
-    /// Per clip node, what its whole chain admits in the clip's **own**
-    /// space, already intersected with `cull` pulled back into that space.
-    /// [`Admitted::Nothing`] means the chain admits nothing: it leaves the
-    /// cull rect, or one of its links has a non-invertible transform, which
-    /// [`push_clip`] encodes as an empty clip. [`Admitted::Everything`] means
-    /// a transform curve whose scale range reaches 0 moves the chain.
-    /// Index-parallel with [`PaintOrder::clips`].
     clip_bounds: Vec<Admitted>,
-    /// Per scroll slot, the offset range `(low, high)` the plan must stay
-    /// valid for: the committed encode window for the paint walk, the wider
-    /// relevance window for the `content-visibility: auto` determination
-    /// ([`Self::resolve_for_relevance`]). Index-parallel with
-    /// [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
-    /// Per clip node, what its chain alone admits in its own space, with no
-    /// viewport — resolved only when a transform curve can move content,
-    /// since only [`held`] and [`into_group`] read it, and only for content a
-    /// curve moves. It is independent of the cull rect, so a group's bounds
-    /// stay the same whether or not culling is on.
-    /// Index-parallel with [`PaintOrder::clips`].
     clip_extent: Vec<Admitted>,
-    /// Per group layer, the summed 3-sigma ink reach of that layer and every
-    /// filtered layer outside it. Content inside a filtered group can put ink
-    /// that far past its own box, so the viewport admitted for it grows by
-    /// the sum — the reaches of nested blurs compose. Index-parallel with
-    /// [`PaintOrder::layers`], resolved by one forward pass because a layer's
-    /// parent is always an earlier entry.
     layer_inflate: Vec<f64>,
-    /// Per group layer, the outermost layer enclosing it, itself included,
-    /// whose filter blurs — the group whose units the summed reach is
-    /// measured against. Index-parallel with [`PaintOrder::layers`].
     blur_roots: Vec<Option<usize>>,
-    /// Per group layer, the innermost layer enclosing it, itself included,
-    /// whose filter blurs: the group whose own clip chain the cull test
-    /// stops at ([`Self::chain_below`]). Index-parallel with
-    /// [`PaintOrder::layers`].
     inner_blurs: Vec<Option<usize>>,
 }
 
-/// Which offset range [`CullPlan::resolve`] takes each scroll slot to
-/// stand anywhere in: [`ScrollSlot::encode_window`] or
-/// [`ScrollSlot::relevance_window`].
-///
-/// [`ScrollSlot::encode_window`]: crate::visual::ScrollSlot::encode_window
-/// [`ScrollSlot::relevance_window`]: crate::visual::ScrollSlot::relevance_window
 type SlotWindow = fn(&crate::visual::ScrollSlot) -> (Vector2D<f32>, Vector2D<f32>);
 
 impl CullPlan {
-    /// Resolves the whole plan for one frame against an admitted region, in
-    /// viewport CSS px, or `None` to admit everything, with each scroll
-    /// slot standing anywhere in the offset range `window` answers for it.
     fn resolve<T>(
         &mut self,
         document: &Document<T>,
@@ -627,21 +471,11 @@ impl CullPlan {
         self.clip_extent = extent;
     }
 
-    /// The same plan, resolved from a document's own device metrics — the
-    /// cull rect the production walk uses — over each slot's
-    /// [`encode_window`](crate::visual::ScrollSlot::encode_window): the
-    /// plan the production walk resolves for itself, for the tests that ask
-    /// it directly.
     #[cfg(test)]
     pub(crate) fn resolve_for<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
         self.resolve_with(document, frame, crate::visual::ScrollSlot::encode_window);
     }
 
-    /// [`Self::resolve_for`] over each slot's
-    /// [`relevance_window`](crate::visual::ScrollSlot::relevance_window)
-    /// instead: the region css-contain-2 §4.1's relevance is decided against,
-    /// which contains the encode window and stretches toward where each
-    /// container is going (`visual::relevance`).
     pub(crate) fn resolve_for_relevance<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
         self.resolve_with(document, frame, crate::visual::ScrollSlot::relevance_window);
     }
@@ -657,8 +491,6 @@ impl CullPlan {
         );
     }
 
-    /// The region this frame's culling admits for content in `space` inside
-    /// `clip` and inside group `layer`.
     fn admitted_for(
         &self,
         frame: &PaintOrder,
@@ -673,11 +505,6 @@ impl CullPlan {
         else {
             return admitted_region(self, frame, space, clip);
         };
-        // Only the links below the innermost blur's own chain cut this
-        // content before a blur does. The viewport grows by every enclosing
-        // blur's 3 sigma, in that group's units, times how far a curve
-        // between the outermost blurred group and this content can shrink it
-        // — without bound when a scale range reaches 0.
         let clips = self.chain_below(frame, clip, space, Some(layer));
         let viewport = match inverse_norm_within(frame, space, frame.layers()[root].space) {
             Some(norm) => pull_back(
@@ -693,19 +520,6 @@ impl CullPlan {
         clips.meet(viewport)
     }
 
-    /// What the links of `clip`'s chain below the innermost blurred group at
-    /// or around `layer` admit, with no viewport, for content in `space`:
-    /// each pulled back into `space` and met.
-    ///
-    /// A group whose element has `filter` opens inside its own chain's links
-    /// and its content pushes only the ones below them (see [`open_scope`]).
-    /// The links below cut the content before any blur; the ones from the
-    /// blurred group's own chain outward cut its blurred output, which the
-    /// blur spreads back past them, so they are left out rather than grown —
-    /// coarser, and never smaller. With no blurred group the whole chain
-    /// takes part. The cull test passes the content's own group, since its
-    /// own blur carries its ink too; a group's bounds pass the group's
-    /// parent, since the group's own margin is added when it closes.
     fn chain_below(
         &self,
         frame: &PaintOrder,
@@ -722,7 +536,6 @@ impl CullPlan {
             && floor.is_none_or(|floor| next != floor)
         {
             let node = &frame.clips()[index];
-            // A singular link is an empty clip: nothing passes it.
             let Some(bounds) = clip_bounds(frame, node) else {
                 return Admitted::Nothing;
             };
@@ -743,16 +556,6 @@ impl CullPlan {
         region
     }
 
-    /// Whether this `content-visibility: auto` box can put ink in that
-    /// region — the whole of the relevance test.
-    ///
-    /// It is [`plan_frame`]'s own first cull test, reached through the same
-    /// [`Self::admitted_for`] and the same [`box_bounds`]: the one that lets
-    /// a box already reaching the admitted region paint without computing any
-    /// fragment reach. Everything uncertain (a singular transform, a
-    /// non-finite bound, a curve whose scale range reaches 0, culling
-    /// switched off) answers `true`, because a cull needs a proof and
-    /// relevance needs none.
     pub(crate) fn admits_auto_box(&self, frame: &PaintOrder, auto: &AutoBox) -> bool {
         let Some(local) = convert::item_affine(&frame.matrix(auto.transform), auto.size) else {
             return true;
@@ -762,21 +565,14 @@ impl CullPlan {
     }
 }
 
-/// What a frame's culling admits for one piece of content, in the CSS px of
-/// the space that content rides.
 #[derive(Clone, Copy, Debug)]
 enum Admitted {
-    /// No proof is possible at all: culling is switched off, or a transform
-    /// curve on the path scales through 0. Everything paints.
     Everything,
-    /// The region content in this space may put ink in.
     Region(Rect),
-    /// The clip chain admits nothing whatever.
     Nothing,
 }
 
 impl Admitted {
-    /// What this and `other` both admit.
     fn meet(self, other: Self) -> Self {
         match (self, other) {
             (Self::Nothing, _) | (_, Self::Nothing) => Self::Nothing,
@@ -792,7 +588,6 @@ impl Admitted {
         }
     }
 
-    /// This region grown by `reach` on every side.
     fn grown(self, reach: f64) -> Self {
         match self {
             Self::Region(region) => Self::Region(inflate_rect(region, reach)),
@@ -800,8 +595,6 @@ impl Admitted {
         }
     }
 
-    /// `bounds` cut down to what this admits, or `None` when nothing of it
-    /// is. Non-finite bounds are undecidable and pass whole.
     fn cut(self, bounds: Rect) -> Option<Rect> {
         match self {
             Self::Region(region) if is_finite(bounds) => {
@@ -813,9 +606,6 @@ impl Admitted {
         }
     }
 
-    /// Whether `bounds` reaches it. Undecidable bounds reach everything but
-    /// [`Self::Nothing`]; see [`can_reach`], which this defers to so the
-    /// non-finite rule has one definition.
     fn reached_by(self, bounds: Rect) -> bool {
         match self {
             Self::Everything => true,
@@ -825,39 +615,22 @@ impl Admitted {
     }
 }
 
-/// Device pixels of slack around the viewport before an item may be culled.
-///
-/// Three things add up to well under this. An embedder sizes its target
-/// `round(css * device_pixel_ratio)` device px, up to half a device pixel past
-/// the CSS viewport. The rasterizer's area antialiasing samples across a whole pixel.
-/// And the frame carries f32 geometry that is converted to f64 here.
 const VIEWPORT_SLACK_DEVICE_PX: f64 = 2.0;
 
-/// The two reaches around one item's box, in CSS px.
-///
-/// `layer` is what the group bounds are accumulated from. `cull` is never
-/// smaller, and is infinite when the reach cannot be established at all.
 #[derive(Clone, Copy, Debug)]
 struct Extents {
     layer: f64,
     cull: f64,
 }
 
-/// The read-only context every step of one walk shares.
 struct Painting<'a, T> {
     document: &'a Document<T>,
     frame: &'a PaintOrder,
     images: &'a ImageRegistry,
-    /// The document's device scale, applied once at the root: the paint order
-    /// is in viewport CSS px and the scene is in device px.
     scale: Affine,
-    /// That scale as a scalar, for the device-pixel geometry a filter bake
-    /// is recorded in.
     ratio: f64,
 }
 
-// Derived `Copy` would demand `T: Copy`, and the document's payload type has
-// nothing to do with whether four references can be copied.
 impl<T> Clone for Painting<'_, T> {
     fn clone(&self) -> Self {
         *self
@@ -866,21 +639,14 @@ impl<T> Clone for Painting<'_, T> {
 
 impl<T> Copy for Painting<'_, T> {}
 
-/// What one pushed clip link holds, in the link's space.
 #[derive(Debug, Clone, Copy)]
 enum Hold {
-    /// No item has been accumulated yet.
     Nothing,
-    /// Every item inside it puts ink within this region.
     Region(Rect),
-    /// Content with no bound — a curve whose scale range reaches 0, a
-    /// non-finite bound, or the output clips of a filtered group, which hold
-    /// the whole group.
     Everything,
 }
 
 impl Hold {
-    /// This hold widened to take in `region`.
     fn with(self, region: Admitted) -> Self {
         match (self, region) {
             (Self::Everything, _) | (_, Admitted::Everything | Admitted::Nothing) => {
@@ -893,10 +659,6 @@ impl Hold {
     }
 }
 
-/// CSS px added around what a pushed clip link holds before the link is cut
-/// to it, so the cut edge never lies on an edge of the content: two
-/// anti-aliased edges on one pixel multiply their coverage, and a link cut
-/// exactly to a fractional box would lighten that box's edge.
 const HOLD_SLACK_CSS_PX: f64 = 2.0;
 
 #[derive(Debug)]
@@ -904,33 +666,14 @@ struct Scope {
     layer: usize,
     base: usize,
     pushed: u32,
-    /// The output clips [`open_scope`] pushed outside this scope's own
-    /// layers, which [`close_scope`] pops after them.
     output: u32,
-    /// The innermost clip of the chain the items in this scope do not push:
-    /// the element's own chain for a scope whose element has `filter` or
-    /// `backdrop-filter`, the enclosing scope's floor otherwise, and `None`
-    /// — push everything — outside every such scope.
     floor: Option<usize>,
     filtered: bool,
-    /// Whether [`open_scope`] recorded a filter group for this scope, which
-    /// [`close_scope`] then has to close.
     blurred: bool,
-    /// The program length right after this scope's own pushes and its
-    /// `PushFilter`, and right *before* its own `PushBackdrop` — where a
-    /// descendant's Backdrop Root Image begins when this scope is that
-    /// descendant's Backdrop Root. Including this scope's own
-    /// `PushBackdrop` is deliberate: filter-effects-2 draws the filtered
-    /// backdrop inside the element's group, so it is part of what a nested
-    /// element sees behind itself.
     content_start: u32,
-    /// Whether this scope is a Backdrop Root (filter-effects-2 §2.2); see
-    /// [`is_backdrop_root`].
     backdrop_root: bool,
 }
 
-/// One culled monolithic walk — the pre-compose shape, kept beside
-/// [`walk_compose`] for the equivalence tests.
 #[cfg(test)]
 pub(crate) fn walk<T>(
     scene: &mut DisplayList,
@@ -955,8 +698,6 @@ pub(crate) fn walk<T>(
     );
 }
 
-/// The production walk: encodes the frame as per-space fragments plus the
-/// compose program over them.
 pub(crate) fn walk_compose<T>(
     assembly: &mut ComposeAssembly,
     scratch: &mut Scratch,
@@ -979,14 +720,6 @@ pub(crate) fn walk_compose<T>(
     );
 }
 
-/// The monolithic walk with culling switched off entirely: every planned
-/// item is encoded into `scene`.
-///
-/// An SVG image's scene is this walk over its plan
-/// (`Document::plan_svg_image`): a destination can show what lies outside
-/// the image's viewport, so nothing is culled against it. The tests also
-/// encode one frame both ways and compare, which is the statement that
-/// culling changes nothing an observer of the viewport can see.
 pub(crate) fn walk_uncultured<T>(
     scene: &mut DisplayList,
     scratch: &mut Scratch,
@@ -1000,7 +733,6 @@ pub(crate) fn walk_uncultured<T>(
     walk_within(&mut sink, scratch, document, frame, images, ratio, None);
 }
 
-/// Per item of `frame`, whether the production walk encodes it.
 #[cfg(test)]
 pub(crate) fn encoded_items<T>(document: &Document<T>, frame: &PaintOrder) -> Vec<bool> {
     let mut scratch = Scratch::default();
@@ -1009,8 +741,6 @@ pub(crate) fn encoded_items<T>(document: &Document<T>, frame: &PaintOrder) -> Ve
     scratch.item_plan.iter().map(Option::is_some).collect()
 }
 
-/// Per group layer of `frame`, the rect the production walk pushes it with,
-/// in CSS px of the layer's space.
 #[cfg(test)]
 pub(crate) fn layer_rects<T>(document: &Document<T>, frame: &PaintOrder) -> Vec<Rect> {
     let mut scratch = Scratch::default();
@@ -1019,8 +749,6 @@ pub(crate) fn layer_rects<T>(document: &Document<T>, frame: &PaintOrder) -> Vec<
     scratch.layer_bounds
 }
 
-/// [`walk`] against an explicit admitted region, in viewport CSS px, or
-/// `None` to encode every item.
 fn walk_within<T>(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -1061,10 +789,6 @@ fn walk_within<T>(
     let mut next_open = 0_usize;
 
     for (index, item) in items.iter().enumerate() {
-        // Both of these are driven by item index and must run for every item,
-        // painted or not: a scope opens and closes where the paint order says,
-        // never where the encode happens to land. A layer with no encoded item
-        // and no backdrop opens no scope at all (see `Scratch::layer_live`).
         while scratch
             .scopes
             .last()
@@ -1093,13 +817,6 @@ fn walk_within<T>(
     pop_clips_to(sink, scratch, 0);
 }
 
-/// The viewport, in CSS px, grown by the slack every consumer of the retained
-/// scene is allowed to render past it.
-///
-/// A device pixel ratio that is not a usable scale yields an unbounded rect.
-/// That disables the viewport half of the cull test and leaves the clip half,
-/// which is sound: a clip chain's bound is frame geometry and does not depend
-/// on the ratio.
 fn cull_rect(viewport: euclid::Size2D<f32, stylo_traits::CSSPixel>, ratio: f64) -> Rect {
     let slack = if ratio.is_finite() && ratio > 0.0 {
         VIEWPORT_SLACK_DEVICE_PX / ratio
@@ -1114,13 +831,6 @@ fn cull_rect(viewport: euclid::Size2D<f32, stylo_traits::CSSPixel>, ratio: f64) 
     )
 }
 
-/// Resolves every clip chain in the frame to what it admits into `out`, each
-/// in its own clip's space, intersected with `root` pulled back into that
-/// space.
-///
-/// One forward pass suffices because a clip node's parent is always an earlier
-/// entry: [`crate::visual`]'s builder pushes a clip only after the clip it
-/// nests inside.
 fn resolve_clips(
     windows: &[(Vector2D<f32>, Vector2D<f32>)],
     frame: &PaintOrder,
@@ -1133,11 +843,7 @@ fn resolve_clips(
             clip.parent.is_none_or(|parent| parent < index),
             "a clip node nests inside an earlier clip node",
         );
-        // The inherited region arrives pulled back into this clip's own
-        // space, where the clip's rect is expressed.
         let inherited = admitted_under(windows, frame, out, root, clip.space, clip.parent);
-        // `push_clip` pushes an empty clip for a singular transform, so
-        // nothing under this chain reaches the scene at all.
         let resolved = match clip_bounds(frame, clip) {
             None => Admitted::Nothing,
             Some(own) if !is_finite(own) => inherited,
@@ -1147,11 +853,6 @@ fn resolve_clips(
     }
 }
 
-/// One clip node's rounded rect as an axis-aligned viewport-CSS-px bound.
-///
-/// Mirrors [`push_clip`], including its `Size2D`-only perspective fit, so this
-/// is never tighter than the clip the painter pushes; taking the bounding box
-/// of a rounded rect only widens it, which is the safe direction.
 fn clip_bounds(frame: &PaintOrder, clip: &ClipNode) -> Option<Rect> {
     let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let affine = convert::item_affine(&frame.matrix(clip.transform), size)?;
@@ -1166,12 +867,6 @@ fn clip_bounds(frame: &PaintOrder, clip: &ClipNode) -> Option<Rect> {
     ))
 }
 
-/// Whether `bounds` can put ink inside `admitted`, where `None` means the
-/// item's clip chain admits nothing at all.
-///
-/// Answers `true` for anything it cannot decide. A rect with a non-finite
-/// coordinate compares false against everything, so [`Rect::overlaps`] alone
-/// would discard it, and culling is only ever safe on a proof of no ink.
 fn can_reach(bounds: Rect, admitted: Option<Rect>) -> bool {
     let Some(admitted) = admitted else {
         return false;
@@ -1186,14 +881,6 @@ fn is_finite(rect: Rect) -> bool {
     rect.x0.is_finite() && rect.y0.is_finite() && rect.x1.is_finite() && rect.y1.is_finite()
 }
 
-/// The `(low, high)` interval of `o_content − o_frame` over the two chains'
-/// encode windows, in CSS px.
-///
-/// Content and regions are both baked unscrolled; at compose, content on
-/// chain `c` appears translated by `−o_c` and a region on chain `f` by
-/// `−o_f`, so comparing them means expanding the region by every value
-/// `o_c − o_f` may take while both stay inside their windows. The common
-/// prefix of the two chains cancels and is skipped.
 fn relative_offset_range(
     slots: &[crate::visual::ScrollSlot],
     windows: &[(Vector2D<f32>, Vector2D<f32>)],
@@ -1240,7 +927,6 @@ fn relative_offset_range(
     (low, high)
 }
 
-/// An offset rectangle mapped through a scrollport's linear transform.
 fn viewport_window(
     slot: &crate::visual::ScrollSlot,
     (low, high): (Vector2D<f32>, Vector2D<f32>),
@@ -1261,9 +947,6 @@ fn viewport_window(
     )
 }
 
-/// A region on the frame chain, expanded to admit content whose relative
-/// translation ranges over `[low, high]`: content `p` overlaps the composed
-/// region iff `p` overlaps `region ⊕ [low, high]`.
 fn expand_region(region: Rect, low: Vector2D<f32>, high: Vector2D<f32>) -> Rect {
     Rect::new(
         region.x0 + f64::from(low.x),
@@ -1273,9 +956,6 @@ fn expand_region(region: Rect, low: Vector2D<f32>, high: Vector2D<f32>) -> Rect 
     )
 }
 
-/// Content bounds carried into the frame chain's coordinates: the union of
-/// `bounds − t` over `t ∈ [low, high]` — what a group layer's clip must
-/// cover for content that composes inside it.
 fn expand_cover(bounds: Rect, low: Vector2D<f32>, high: Vector2D<f32>) -> Rect {
     Rect::new(
         bounds.x0 - f64::from(high.x),
@@ -1302,28 +982,15 @@ fn open_scope<T>(
     let space = layer.space;
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     let enclosing_floor = scratch.scopes.last().and_then(|scope| scope.floor);
-    // The scope opens outside the clips its enclosing scope's items pushed;
-    // its own items push their chains again inside it.
     pop_clips_to(sink, scratch, base);
 
     let style = document
         .paint_style(layer.node)
         .expect("a group-effect stacking context keeps its style for the frame");
-    // filter-effects-2 §2.2: the Backdrop Root Image is everything painted
-    // before *this element*, so the range ends here — before this scope's own
-    // effect layer, its `clip-path` layer and, decisively, the mask pattern
-    // `mask::paint` would otherwise draw into it. The ops from here to the
-    // `PushBackdrop` recorded below are this element's own painting.
     let backdrop_end = (!style.get_effects().backdrop_filter.0.is_empty())
         .then(|| (nearest_backdrop_root(scratch), sink.content_boundary()));
     let bounds = scratch.layer_bounds[layer_index];
     let effects = style.get_effects();
-    // `filter` and `backdrop-filter` move pixels and contain their
-    // positioned descendants, so this scope opens inside the links of its own
-    // chain below the enclosing floor and its items push only the links
-    // below it: the ancestors' clips cut the filtered output, not the input.
-    // Everything else re-pushes whole chains, which lets a fixed descendant
-    // of an `opacity` group escape the group's ancestors' clips.
     let floored = !effects.filter.0.is_empty() || !effects.backdrop_filter.0.is_empty();
     let (floor, output) = if floored {
         (
@@ -1335,8 +1002,6 @@ fn open_scope<T>(
     };
     let blend = blend_mode(style);
     let mut pushed = 1_u32;
-    // The effect layer's alpha is replaced at compose time when this group's
-    // own element exports an opacity curve.
     let alpha_animation = space::nearest_animation(frame.spaces(), space)
         .filter(|&slot| frame.animations()[slot as usize].node == layer.node);
     sink.push_layer_rect(
@@ -1379,17 +1044,9 @@ fn open_scope<T>(
         pushed += 1;
     }
 
-    // The blur scope opens *inside* the scope's own layers, so the group it
-    // bakes is exactly the pixels the effect/clip-path/mask stack will then
-    // clip, mask and fade — filter-effects-1's order, with clip and mask
-    // swapped (both intersective, so unobservable; see the module doc).
     let blurred = filter_group(scratch, layer_index, space, ratio)
         .is_some_and(|group| sink.push_filter(group));
 
-    // Innermost of all, and before any item: the filtered backdrop is the
-    // first thing painted inside this element's own group, so this scope's
-    // `opacity`, `clip-path`, `mask-image` and `filter` apply to the backdrop
-    // and to the element together.
     let content_start = sink.content_boundary();
     if let Some((root, end)) = backdrop_end
         && let Some(entry) = backdrop_entry(style, frame, layer, space, scale, ratio, root)
@@ -1397,9 +1054,6 @@ fn open_scope<T>(
         sink.push_backdrop(entry, end, frame);
     }
 
-    // A current `opacity` animation roots at every reading, 1 included,
-    // exported or not: the range a descendant's backdrop fixes here is
-    // composed at all of them.
     let fades = document
         .get(layer.node)
         .is_some_and(crate::tree::node::Node::animates_opacity);
@@ -1414,8 +1068,6 @@ fn open_scope<T>(
         content_start,
         backdrop_root: fades || is_backdrop_root(style),
     });
-    // An exported or main-thread opacity animation can raise the alpha
-    // without a commit, so only a still zero is transparent.
     if scratch.track_transparent
         && scratch.transparent_depth.is_none()
         && effects.opacity <= 0.0
@@ -1426,14 +1078,6 @@ fn open_scope<T>(
     }
 }
 
-/// Opens the scope of one layer push of an `svg` element's recording: the
-/// push itself, as the recording draws it (`paint::svg`), and nothing else.
-/// Such a scope has no filter, no backdrop and no mask, is no Backdrop Root
-/// and is never floored, so its items push the clip chains a scope around
-/// it would have them push. A singular map pushes an empty clip, which
-/// keeps everything inside from drawing. A compositing layer whose element
-/// exports an opacity curve takes its alpha from the curve at compose time,
-/// as `open_scope`'s effect layer does.
 fn open_svg_scope<T>(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -1450,7 +1094,6 @@ fn open_svg_scope<T>(
     let layer = &frame.layers()[layer_index];
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     let floor = scratch.scopes.last().and_then(|scope| scope.floor);
-    // Outside the clips the enclosing scope's items pushed, as every scope.
     pop_clips_to(sink, scratch, base);
     let pushed = convert::item_affine(&frame.matrix(layer.transform), layer.size)
         .and_then(|local| svg::layer_push(document, recorded, scale * local));
@@ -1460,7 +1103,6 @@ fn open_svg_scope<T>(
                 !pushed.clip_only && frame.animations()[slot as usize].node == layer.node
             });
         sink.push_svg_layer(layer.space, alpha_animation, pushed, *transform);
-        // As for an element's group: only a still zero is transparent.
         let fades = document
             .get(layer.node)
             .is_some_and(crate::tree::node::Node::animates_opacity);
@@ -1485,12 +1127,6 @@ fn open_svg_scope<T>(
     }
 }
 
-/// Pushes this scope's `clip-path` clip, answering whether it pushed one.
-///
-/// A plain clip: where the group holds a blend (a mask's `SrcIn`, a filter's
-/// colour passes, a blended child) the display list isolates it. A singular
-/// map has no shape to clip with, so it pushes an empty clip instead — which
-/// records the same "nothing gets through".
 fn push_clip_path(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -1514,13 +1150,6 @@ fn push_clip_path(
     true
 }
 
-/// The Backdrop Root of a scope about to open: the nearest enclosing scope
-/// that is one, or the document's root element when there is none.
-///
-/// Falling back to the document *is* the spec's root-element rule: the
-/// document root element is always a Backdrop Root. Its image begins at
-/// program index zero, before which nothing is painted, and lies over the
-/// canvas, which a group's image does not.
 fn nearest_backdrop_root(scratch: &Scratch) -> BackdropRoot {
     scratch
         .scopes
@@ -1532,28 +1161,6 @@ fn nearest_backdrop_root(scratch: &Scratch) -> BackdropRoot {
         })
 }
 
-/// Whether this element is a Backdrop Root (filter-effects-2 §2.2) by its
-/// committed style. An element with a current `opacity` animation is one as
-/// well, which [`open_scope`] adds: web-animations-1 makes it act as
-/// `will-change: opacity`, and the spec's list (`filter`, `opacity < 1`,
-/// `mask`, `clip-path`, `backdrop-filter`, `mix-blend-mode`, and
-/// `will-change` naming one of them) has no `transform`, so a transform
-/// animation adds nothing here.
-///
-/// The spec's list, and the reason this predicate exists at all rather than
-/// reusing [`crate::visual::stacking::needs_group_rendering`]: that one also
-/// answers `true` for `isolation: isolate`, which the spec's Backdrop Root
-/// list does not contain. `isolation` is not in the fork's author grammar
-/// either, so that exclusion is unobservable here.
-///
-/// The one **observable** omission is an authored `will-change`: a
-/// `will-change: opacity` (or `filter`, `backdrop-filter`, `mask`,
-/// `clip-path`) element is a Backdrop Root per the spec, and this engine
-/// opens no group layer for one, so a `backdrop-filter` element inside such a
-/// wrapper sees through it to the content behind. That is a ruled deviation —
-/// the decision is not to open a layer per `will-change` element — recorded
-/// in `docs/tracking/deviations.md`. The `will-change: opacity` an `opacity`
-/// animation implies is not omitted: the build forces that element's group.
 fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
     use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
     use stylo::values::computed::basic_shape::ClipPath;
@@ -1567,17 +1174,6 @@ fn is_backdrop_root(style: &stylo::properties::ComputedValues) -> bool {
         || mask::has_mask(style)
 }
 
-/// The `backdrop-filter` entry this layer records, if it can bake one.
-///
-/// `None` for an element with no `backdrop-filter`, a singular or degenerate
-/// map (nothing of the backdrop would be visible through it), and a border
-/// box whose device rect is empty or not finite.
-///
-/// The rect is exactly the element's transformed border box, rounded out —
-/// `backdrop-filter` enlarges no ink overflow, so unlike a `filter: blur()`
-/// group there is no 3σ margin. It is also the crop filter-effects-2 §2.2
-/// applies *before* filtering, and the edge the bake's mirror sampler
-/// reflects at.
 fn backdrop_entry(
     style: &stylo::properties::ComputedValues,
     frame: &PaintOrder,
@@ -1611,8 +1207,6 @@ fn backdrop_entry(
         return None;
     }
     let plan = filters::plan(list);
-    // A colour-only list is σ = 0, which bakes and filters as usual; only a
-    // list with no `blur()` at all skips the gaussian.
     let sigma = plan
         .sigma
         .map_or(0.0, |sigma| f64::from(sigma) * mean_scale(local) * ratio);
@@ -1636,15 +1230,6 @@ fn backdrop_entry(
     ))
 }
 
-/// Pushes the links of `clip`'s chain below `floor`, root first — a floored
-/// scope's output clips — and answers how many layers that pushed.
-///
-/// Every link but the innermost is cut to what it holds ([`push_clip`]); the
-/// innermost, directly around the scope's effect layer, is pushed whole.
-///
-/// The chain is the group element's own, and `floor` the innermost clip of
-/// the enclosing floored element's, which an element inside it extends. A
-/// chain that does not is pushed whole, which cuts twice rather than never.
 fn push_output_clips(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -1683,12 +1268,6 @@ fn push_output_clips(
     u32::try_from(scratch.chain.len()).expect("a clip chain is shorter than 2^32 links")
 }
 
-/// The filter group this layer bakes, if it blurs at all.
-///
-/// `None` for a layer with no `blur()`, one whose device rect is empty, and
-/// one whose geometry is not finite: each of those blurs nothing, and a group
-/// that blurs nothing must leave no op behind — a frame with no filter op is
-/// the frame the whole bake pre-step is skipped for.
 fn filter_group(
     scratch: &Scratch,
     layer_index: usize,
@@ -1703,8 +1282,6 @@ fn filter_group(
     if !is_finite(bounds) {
         return None;
     }
-    // Rounded out, so the bake covers every device pixel the group's rect
-    // touches and the texture composes at an integer offset.
     let rect = Rect::new(
         (bounds.x0 * ratio).floor(),
         (bounds.y0 * ratio).floor(),
@@ -1739,9 +1316,6 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     let layer = &frame.layers()[scope.layer];
     let space = layer.space;
     let bounds = scratch.layer_bounds[scope.layer];
-    // The list splits at its first `blur()`: what precedes it composites
-    // against the group's own pixels *inside* the bake, what follows it
-    // against the blurred result.
     let plan = scope
         .filtered
         .then(|| document.paint_style(layer.node))
@@ -1776,12 +1350,6 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
     }
 }
 
-/// Draws the picture a replaced element presents into its content box,
-/// fitted against the natural size it was given with it: a picture it owns,
-/// or a URL resolved against the registry as a CSS image is, which draws
-/// nothing while pending or after failing. An outermost `svg` element
-/// presents no picture: its recorded subtree is items of their own
-/// (`crate::visual::svg`, [`svg`]).
 fn paint_presented<T>(
     sink: &mut WalkSink<'_>,
     document: &Document<T>,
@@ -1814,7 +1382,6 @@ fn paint_presented<T>(
     );
 }
 
-/// Paints one item with the matrix [`plan_frame`] resolved for it.
 fn paint_item<T>(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -1829,16 +1396,12 @@ fn paint_item<T>(
         scale,
         ..
     } = painting;
-    // An inline box fragment is drawn by its paragraph's record; its own
-    // record only answers hits.
     if matches!(item.kind, PaintItemKind::InlineFragment { .. }) {
         return;
     }
     sync_clips(sink, scratch, frame, item, scale);
     let space = item.space;
     let transform = scale * local;
-    // The draws an item adds are its image and vector draws, since a mask's
-    // are made by its scope, not its items.
     let (counts, attributes) = contentful_tests(scratch, document, item);
     let draws_before = (counts || attributes).then(|| sink.content_draws());
     let mut painted_text = false;
@@ -1855,21 +1418,12 @@ fn paint_item<T>(
             let fragment = BoxFragment::new(transform, item.size, item.radii, layout);
             let text_clip =
                 background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
-            // Each painter re-acquires the fragment rather than sharing one
-            // borrow across the item: an image draw between them is a
-            // program op, which cuts the open fragment. `fragment_for` cuts
-            // only when the space actually changed, so re-acquiring where
-            // nothing was emitted costs a comparison.
             shadow::paint_outset(sink, frame, space, &mut scratch.paths, style, &fragment);
             background::paint(sink, space, style, &fragment, images, text_clip.as_ref());
             shadow::paint_inset(sink, frame, space, &mut scratch.paths, style, &fragment);
             paint_presented(sink, document, images, space, style, &fragment, item.node);
             border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
-            // The focused editing host with no paragraph to paint its caret
-            // in — one that establishes none, empty or white space only —
-            // paints it here, over its own box. One `Option` test for every
-            // other element.
             if let Some((caret, color)) = text::empty_host_caret(document, item.node, style) {
                 sink.scene_for(space)
                     .fill(Fill::NonZero, transform, color, None, &caret);
@@ -1877,7 +1431,6 @@ fn paint_item<T>(
         }
         PaintItemKind::InlineFragment { .. } => {}
         PaintItemKind::Svg { root, index } => {
-            // SVG content counts as contentful as an image does.
             painted_svg =
                 svg::paint_item(sink.scene_for(space), document, (root, index), transform)
                     && (counts || attributes);
@@ -1889,9 +1442,6 @@ fn paint_item<T>(
             let Some(paragraph) = document.painted_paragraph(item.node) else {
                 return;
             };
-            // An inline formatting context's inline boxes: their backgrounds
-            // and borders, in tree order, under every glyph (CSS2 Appendix E
-            // step 7.2.1).
             if !paragraph.fragments().is_empty() {
                 paint_inline_boxes(
                     sink,
@@ -1905,23 +1455,12 @@ fn paint_item<T>(
             }
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
-            // One entry per parley style index, so a glyph run resolves its own
-            // element's paint in O(1). A nested scope carries its own colour,
-            // shadow, stroke and decorations; the establishing element answers
-            // for the synthesized ellipsis and for anything unresolvable.
             let runs = text::RunPaints::resolve(document, element, &paragraph, gradient_box);
-            // A nested scope has no box of its own, so its background is an
-            // inline box's: one fragment per line, under every shadow and
-            // every glyph in the paragraph. Only paragraphs that have one pay.
             if runs.has_inline_backgrounds() {
                 paint_inline_backgrounds(
                     sink, space, document, &paragraph, &runs, transform, images,
                 );
             }
-            // The selection host's selection sits over its backgrounds and
-            // under its glyphs; a focused host's caret and composition
-            // underline over them. One `Option` test for every other
-            // paragraph.
             let editing = text::EditingPaint::of(document, item.node, style);
             if let Some(editing) = &editing {
                 text::paint_selection(sink.scene_for(space), paragraph.layout, transform, editing);
@@ -1949,14 +1488,6 @@ fn paint_item<T>(
     }
 }
 
-/// Which of the walk's two contentful tests ask about `item`: Paint Timing's
-/// (`Scratch::contentful`), while the document detects content and until the
-/// first item answers it, and Container Timing's attribution, while the
-/// document has a root (`Scratch::container_timing`) and the item's node
-/// carries `SelfOrAncestorHasContainerTiming` — or is an anonymous box, in
-/// no child list, which the ancestor walk answers for by its container.
-/// Neither counts a `::backdrop` or a still `opacity: 0` group. With both
-/// off, two `bool` tests.
 #[inline]
 fn contentful_tests<T>(
     scratch: &Scratch,
@@ -1975,8 +1506,6 @@ fn contentful_tests<T>(
     (counts, attributes)
 }
 
-/// Records `item`'s contentful paint for every Container Timing root it
-/// counts toward: its box under `local`, before its clips.
 fn attribute_to_containers<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
@@ -1997,16 +1526,6 @@ fn attribute_to_containers<T>(
     });
 }
 
-/// The rects of the paints the last walk attributed to Container Timing
-/// roots ([`Scratch::container_hits`]), each cut by its clip chain and the
-/// viewport at the committed state — scroll offsets, sticky shifts and
-/// anchored shifts as committed, curves at their committed values — in CSS
-/// px of the viewport. Empty, and nothing computed, after a walk that
-/// attributed nothing.
-///
-/// A clip's rect is its bounding box under its matrix, as the cull test
-/// takes it, so a rounded or rotated clip cuts no tighter than its box. A
-/// circular scroll container's seam copy is not counted.
 pub(crate) fn container_rects(
     scratch: &Scratch,
     frame: &PaintOrder,
@@ -2053,23 +1572,6 @@ pub(crate) fn container_rects(
     rects
 }
 
-/// Paints every inline box of an inline formatting context — its background
-/// and its border, fragment by fragment, box by box in tree order — through
-/// the same `background::paint` and `border::paint` an element box uses.
-///
-/// `box-decoration-break: slice` (css-break-3 §5.4; the fork has no other
-/// value): a box is painted as if it were not broken — its fragments placed
-/// end to end in its own inline direction, one strip whose start edge is on
-/// the first fragment and whose end edge is on the last — and that strip is
-/// sliced back into the fragments. So the start side's border, padding and
-/// two corner radii show only on the first fragment and the end side's only
-/// on the last, and a background image is positioned over the whole strip.
-/// A box with one fragment is the whole strip and is painted with no clip.
-///
-/// `background-clip: text` on an inline box clips to its border box, as on
-/// a Lynx scope ([`paint_inline_backgrounds`]); `box-shadow` and `outline`
-/// on an inline box are not painted. A `visibility: hidden` box paints
-/// nothing of its own.
 fn paint_inline_boxes<T>(
     sink: &mut WalkSink<'_>,
     paths: &mut PathScratch,
@@ -2116,8 +1618,6 @@ fn paint_inline_boxes<T>(
         for fragment in run {
             let width = f64::from(fragment.rect.size.width);
             let height = f64::from(fragment.rect.size.height);
-            // The strip, in this fragment's own space: the fragments before
-            // it lie towards the box's start side.
             let left = if rtl {
                 -(total - before - width)
             } else {
@@ -2172,8 +1672,6 @@ fn paint_inline_boxes<T>(
     }
 }
 
-/// Whether an inline box has a background or a border to paint at all, so
-/// one with neither costs no clip.
 fn decorates_inline_box(
     style: &stylo::properties::ComputedValues,
     border: &crate::layout::Edges<f32>,
@@ -2190,18 +1688,6 @@ fn decorates_inline_box(
             .any(|&width| width > 0.0)
 }
 
-/// Paints one fragment per line per backgrounded nested scope, outermost scope
-/// first, through the same `background::paint` an element box uses.
-///
-/// The geometry is [`text::inline_background_fragments`]'s; what is decided
-/// here is the box each fragment presents to the background painter. A
-/// fragment has no border and no padding, so its border, padding and content
-/// boxes coincide, and `border-radius` resolves against the fragment's own
-/// size — `box-decoration-break: clone` where the web default is `slice`.
-/// `background-clip: text` on an inline scope is treated as `border-box`: the
-/// glyph silhouette a text clip needs is the paragraph's, which is the box
-/// being painted into, so clipping to it is a no-op the `None` below spells
-/// directly.
 fn paint_inline_backgrounds<T>(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
@@ -2260,10 +1746,6 @@ fn color_gradient_box<T>(
     if padding_box.width() <= 0.0 || padding_box.height() <= 0.0 {
         return own_box;
     }
-    // Into the paragraph's own space. A block paints its glyphs from its
-    // content box, so that origin — border plus padding — is the offset
-    // between the two, and the paint item is the establishing element itself
-    // rather than a run inside it.
     let content_origin = crate::kurbo::Vec2::new(
         f64::from(element_layout.border.left + element_layout.padding.left),
         f64::from(element_layout.border.top + element_layout.padding.top),
@@ -2290,9 +1772,6 @@ fn collect_text_clip_under<'doc, T>(
     let Some(node_ref) = document.get(node) else {
         return;
     };
-    // A paragraph belongs to the element that establishes it, so the node
-    // being walked can be the one holding the silhouette. Text nodes hold
-    // none — they are content of the block above them.
     let visible = document.paint_style(node).is_none_or(|style| {
         matches!(
             *style.get_visibility(),
@@ -2303,14 +1782,9 @@ fn collect_text_clip_under<'doc, T>(
         && let Some(paragraph) = document.painted_paragraph(node)
         && paragraph.line_count != 0
     {
-        // An element with no runs still establishes a paragraph; it just has
-        // no ink, and a silhouette of nothing would clip everything away.
         clip.runs.push((offset, paragraph.layout));
     }
 
-    // The children layout reads: loose text is laid out by the anonymous
-    // boxes that replace it among them, and those boxes hold its paragraph
-    // (`tree::anonymous`).
     let tree = document.arenas();
     let children = node_ref
         .may_override_children()
@@ -2338,9 +1812,6 @@ fn sync_clips(
         .scopes
         .last()
         .map_or((0, None), |scope| (scope.base, scope.floor));
-    // Below a floor the scope's output clips already cut this item's ink,
-    // after the scope's filter: only the links below the floor are the
-    // item's own to push.
     scratch.chain.clear();
     let mut next = item.clip;
     while let Some(index) = next
@@ -2368,11 +1839,6 @@ fn sync_clips(
     }
 }
 
-/// Pushes clip link `index`, cut to what [`plan_clip_pushes`] recorded it
-/// holds (see the module doc). The plan's entries are consumed in push
-/// order; one missing or naming another link is a mismatch between the plan
-/// and the walk, which debug builds report and release builds answer with
-/// the whole link, the picture either way.
 fn push_clip(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -2403,13 +1869,6 @@ fn push_clip(
     sink.push_clip_box(clip.space, Fill::NonZero, transform, shape);
 }
 
-/// The rect, in `clip`'s local units, that clips exactly what `hold` lets
-/// through of `clip`'s shape — or `None` when the whole shape is wanted: an
-/// unbounded hold, or a cut that meets one of the shape's rounded corners,
-/// where a rect would square the corner off.
-///
-/// A hold the clip's rect does not meet at all is an empty rect: the content
-/// never reaches the clip, and an empty clip draws exactly that.
 fn held_shape(frame: &PaintOrder, clip: &ClipNode, hold: Hold) -> Option<Rect> {
     let region = match hold {
         Hold::Region(region) => inflate_rect(region, HOLD_SLACK_CSS_PX),
@@ -2431,15 +1890,11 @@ fn held_shape(frame: &PaintOrder, clip: &ClipNode, hold: Hold) -> Option<Rect> {
         return Some(Rect::ZERO);
     }
     if cut == rect {
-        // Nothing to gain, and the shape stays the author's.
         return None;
     }
     clear_of_corners(rect, &clip.radii, cut).then_some(cut)
 }
 
-/// Whether `cut`, inside `rect`, stays out of every rounded corner of
-/// `rect`: the corner boxes `radii` spans, which are the only places the
-/// rounded shape and the rect differ.
 fn clear_of_corners(rect: Rect, radii: &crate::visual::CornerRadii, cut: Rect) -> bool {
     let corners = [
         Rect::new(
@@ -2477,8 +1932,6 @@ fn clear_of_corners(rect: Rect, radii: &crate::visual::CornerRadii, cut: Rect) -
     })
 }
 
-/// One clip node's rounded rect and its clip-local to device px map, or
-/// `None` for a singular transform, which has no shape to clip with.
 fn clip_geometry(frame: &PaintOrder, clip: &ClipNode, scale: Affine) -> Option<(Affine, BoxShape)> {
     let size = euclid::default::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let local = convert::item_affine(&frame.matrix(clip.transform), size)?;
@@ -2498,12 +1951,6 @@ fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
     }
 }
 
-/// Per-frame prepass: the bounds every group's effect layer is pushed with,
-/// and one plan entry per item saying whether it paints and with what matrix.
-///
-/// The admitted region every item is tested against comes from `scratch.plan`,
-/// which [`CullPlan::resolve`] filled — including whether culling is on at
-/// all.
 fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     let items = frame.items();
@@ -2511,8 +1958,6 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     scratch.item_plan.clear();
     scratch.item_plan.resize(items.len(), None);
     reset_layers(scratch, document, frame);
-    // CSS px, not device px: the paint order this is intersected against carries CSS-px
-    // transforms — the device scale is applied once, separately, as the root `scale` affine.
     let viewport_size = document.device().viewport_size();
     let viewport = Rect::new(
         0.0,
@@ -2547,22 +1992,12 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
-        // No `continue` on "outside every layer" here: those are precisely
-        // the items no group has already clipped to the viewport, which are
-        // the ones culling exists for.
         let Some(local) = convert::item_affine(&frame.matrix(item.transform), item.size) else {
-            // A singular transform encodes nothing.
             continue;
         };
         let top = scratch.open_layers.last().copied();
         let admitted = scratch.plan.admitted_for(frame, item.clip, item.space, top);
 
-        // An item whose plain border box already reaches the admitted region
-        // paints whatever its fragments reach, because every reach only grows
-        // that box. Items inside a group are excluded: their reach is needed
-        // for the group's bounds regardless of what the cull test decides.
-        // This test is exactly `CullPlan::admits_auto_box`'s, which is what
-        // the `content-visibility: auto` relevance pass asks with.
         if top.is_none() && admitted.reached_by(box_bounds(local, item.size, 0.0)) {
             scratch.item_plan[index] = Some(local);
             continue;
@@ -2574,7 +2009,6 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
             let group = layers[top].space;
             let within = moves_within(frame, item.space, group);
             let moves = scratch.layer_moves[top] || within;
-            // An item's ink stays inside its clips: no margin past them.
             if let Some(bounds) = held(scratch, frame, moves, (item.clip, item.space), top, bounds)
                 && let Some(bounds) = into_group(
                     scratch,
@@ -2599,8 +2033,6 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
                 };
                 admitted.reached_by(inflated)
             }
-            // An unbounded reach can only be discarded by a clip chain that
-            // admits nothing at all.
             Admitted::Region(_) => true,
             Admitted::Nothing => false,
         };
@@ -2617,27 +2049,12 @@ fn plan_frame<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrd
     plan_clip_pushes(scratch, document, frame);
 }
 
-/// The second prepass: what every clip link the walk will push holds, in the
-/// order [`push_clip`] consumes it (see the module doc's "a pushed link is
-/// cut to what it holds").
-///
-/// It replays the walk's stack discipline over [`plan_frame`]'s results: a
-/// scope opens where `layer_live` says one will and pops the chain, its items
-/// push theirs again inside it, a filtered scope pushes its output clips at
-/// open — through [`push_clip`] too, so they take entries here, unbounded,
-/// since they hold the whole group — and everything is popped at close. Each
-/// item the walk paints widens every link on the stack by its layer bound
-/// carried into the link's space; a scope's base is the walk's, so a link
-/// never holds a scope, only items.
 fn plan_clip_pushes<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let items = frame.items();
     let layers = frame.layers();
     let clips = frame.clips();
     scratch.push_holds.clear();
     scratch.push_cursor = 0;
-    // Open scopes, as `(layer, floor)`, and the pushed links, as
-    // `(link, entry)` into `push_holds` — the walk's `scopes` and
-    // `clip_stack`.
     let mut scopes: smallvec::SmallVec<[(usize, Option<usize>); 8]> = smallvec::SmallVec::new();
     let mut stack: smallvec::SmallVec<[(usize, usize); 8]> = smallvec::SmallVec::new();
     let mut next_open = 0_usize;
@@ -2647,19 +2064,14 @@ fn plan_clip_pushes<T>(scratch: &mut Scratch, document: &Document<T>, frame: &Pa
             .is_some_and(|&(layer, _)| layers[layer].items.end == index)
         {
             scopes.pop();
-            // `close_scope` pops to the scope's base, which is the walk's root.
             stack.clear();
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
             if scratch.layer_live[next_open] {
                 let layer = &layers[next_open];
                 let enclosing_floor = scopes.last().and_then(|&(_, floor)| floor);
-                // `open_scope` pops to its base, the walk's root, first.
                 stack.clear();
                 let floor = if scratch.layer_floored[next_open] {
-                    // `push_output_clips`: every link of the element's chain
-                    // below the enclosing floor but the innermost, outermost
-                    // first, each holding the whole group.
                     scratch.chain.clear();
                     let mut next = layer.clip;
                     while let Some(link) = next
@@ -2687,7 +2099,6 @@ fn plan_clip_pushes<T>(scratch: &mut Scratch, document: &Document<T>, frame: &Pa
         if matches!(item.kind, PaintItemKind::InlineFragment { .. }) {
             continue;
         }
-        // `sync_clips`.
         let floor = scopes.last().and_then(|&(_, floor)| floor);
         scratch.chain.clear();
         let mut next = item.clip;
@@ -2723,8 +2134,6 @@ fn plan_clip_pushes<T>(scratch: &mut Scratch, document: &Document<T>, frame: &Pa
     }
 }
 
-/// Resets the per-layer state [`plan_frame`] fills: bounds, blur sigma,
-/// liveness seeded by `backdrop-filter`, and whether the layer moves.
 fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     scratch.layer_bounds.clear();
@@ -2752,7 +2161,6 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
                         )
                     })
             }
-            // An `svg` element's recorded layer has neither.
             LayerKind::Svg { .. } => (false, false),
         };
         scratch.layer_live.push(backdrop);
@@ -2764,11 +2172,6 @@ fn reset_layers<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintO
         .extend(layers.iter().map(|layer| moving(frame, layer.space)));
 }
 
-/// Closes the topmost open layer: its accumulated bounds become its pushed
-/// rect — intersected with the viewport pulled back into the layer's space
-/// through every scroll window, sticky range and curve reach above it, the
-/// places the compose window may show — and fold into the parent layer still
-/// open, carried into that parent's space, as does its liveness.
 fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let layers = frame.layers();
     let closed = scratch
@@ -2776,11 +2179,6 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
         .pop()
         .expect("close is only called with an open layer");
     let own = layers[closed].space;
-    // A blur puts ink 3 sigma past the group's own content, so the group's
-    // pushed rect — which is also the bake's rect — has to carry that margin.
-    // Inflating *before* the viewport intersection is what makes the margin
-    // transparent rather than clipped: the bake's edges read transparent
-    // black, which is filter-effects-1's edge mode.
     if scratch.layer_live[closed]
         && let Some(&parent) = scratch.open_layers.last()
     {
@@ -2790,9 +2188,6 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     let accumulated = scratch.bounds_acc[closed];
     scratch.layer_bounds[closed] = accumulated.map_or(Rect::ZERO, |rect| {
         let rect = inflate_rect(rect, reach);
-        // A scale range reaching 0 above the layer bounds nothing; the
-        // accumulated bounds, finite and cut to the clips holding what moves
-        // inside the layer, stand alone.
         match pull_back(
             &scratch.plan.slot_windows,
             frame,
@@ -2808,8 +2203,6 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     {
         let outer = layers[parent].space;
         let within = moves_within(frame, own, outer);
-        // The blur margin is drawn inside the layer's own clip chain, so it
-        // is held to that chain like the parent's own content.
         if let Some(bounds) = into_group(
             scratch,
             frame,
@@ -2824,23 +2217,9 @@ fn close_layer(scratch: &mut Scratch, frame: &PaintOrder, viewport: Rect) {
     }
 }
 
-/// How many standard deviations of blur ink a group's bounds are grown by.
-///
-/// A gaussian past 3 sigma carries under 0.3% of its mass, which is below one
-/// 8-bit level; filter-effects-1 names the same number for the filter region
-/// of a `blur()`.
 const BLUR_INK_SIGMAS: f64 = 3.0;
 
-/// One layer's blur sigma in *viewport* CSS px: the element's own sigma under
-/// the mean scale of its local-to-viewport linear map.
-///
-/// The mean scale is the arithmetic mean of the map's two singular values,
-/// read off `Affine::nuclear_norm_squared` — the nuclear norm *is* their sum.
-/// Exact for a rotation or a uniform scale, and one isotropic number where a
-/// non-uniform scale or a skew would make the spec's filter region
-/// anisotropic (recorded limit).
 fn layer_blur_sigma<T>(document: &Document<T>, frame: &PaintOrder, layer: &RenderLayer) -> f64 {
-    // An `svg` element's recorded layer draws no `filter`.
     if layer.kind != LayerKind::Element {
         return 0.0;
     }
@@ -2851,7 +2230,6 @@ fn layer_blur_sigma<T>(document: &Document<T>, frame: &PaintOrder, layer: &Rende
         return 0.0;
     };
     let Some(affine) = convert::item_affine(&frame.matrix(layer.transform), layer.size) else {
-        // A singular map encodes nothing, so there is nothing to blur.
         return 0.0;
     };
     let scaled = f64::from(sigma) * mean_scale(affine);
@@ -2862,16 +2240,10 @@ fn layer_blur_sigma<T>(document: &Document<T>, frame: &PaintOrder, layer: &Rende
     }
 }
 
-/// The arithmetic mean of a map's two singular values, read off
-/// `Affine::nuclear_norm_squared` — the nuclear norm *is* their sum. Shared
-/// by `filter` and `backdrop-filter`, which scale σ into device space the
-/// same way.
 fn mean_scale(affine: Affine) -> f64 {
     affine.nuclear_norm_squared().sqrt() / 2.0
 }
 
-/// `rect` grown by `reach` on every side. A zero reach is the rect itself, so
-/// an unfiltered layer pays one comparison.
 fn inflate_rect(rect: Rect, reach: f64) -> Rect {
     if reach <= 0.0 {
         return rect;
@@ -2884,9 +2256,6 @@ fn inflate_rect(rect: Rect, reach: f64) -> Rect {
     )
 }
 
-/// What is admitted for content in `space`: the innermost enclosing `clip`'s
-/// resolved bounds, or the cull rect when there is no clip, pulled back from
-/// the space it is expressed in into `space`.
 fn admitted_region(
     plan: &CullPlan,
     frame: &PaintOrder,
@@ -2904,7 +2273,6 @@ fn admitted_region(
     )
 }
 
-/// [`admitted_region`] over any resolved clip table and root region.
 fn admitted_under(
     windows: &[(Vector2D<f32>, Vector2D<f32>)],
     frame: &PaintOrder,
@@ -2920,17 +2288,6 @@ fn admitted_under(
     pull_back(windows, frame, base, outer, space)
 }
 
-/// The part of `bounds` — content in `space` under `clip`, drawn into group
-/// `layer` — that the group's bounds accumulate.
-///
-/// Content a transform curve `moves` — with its group or inside it — is held
-/// to what its clip chain admits, each clip pulled back through the nodes
-/// between it and the content: a list inside a moving blurred card bakes its
-/// window, not its whole content. Inside a blurred group around `layer` only
-/// the links below that group's own chain hold it ([`CullPlan::chain_below`]),
-/// since the ones from it outward cut only after the blur; `layer`'s own
-/// blur margin is added when it closes. Still content passes whole. Either
-/// way the group's rect meets the viewport at close.
 fn held(
     scratch: &Scratch,
     frame: &PaintOrder,
@@ -2958,20 +2315,6 @@ fn held(
     .cut(bounds)
 }
 
-/// `region`, in `outer`'s coordinates, pulled back into `space`'s, `outer`
-/// being an ancestor-or-self of `space`.
-///
-/// Content is baked unscrolled, unstuck and at committed transforms, so each
-/// node between the two carries it by its whole committed range — a scroll
-/// node by its encode window, a sticky node by its offset bounds, an
-/// anchored node by its default scroll shift over its scrollers' encode
-/// windows (a hidden box draws nothing, so its zero map needs no bound), an
-/// animation node with a transform track by its curve's
-/// [`Reach`](crate::visual::reach::Reach). The region crosses the nodes
-/// outermost first, since that is the order their maps undo in; runs of
-/// translations commute and add. A curve whose scale range reaches 0 has no
-/// reach and makes the region [`Admitted::Everything`]. A region expressed at
-/// or below a node (a clip inside the moving subtree) never walks through it.
 fn pull_back(
     windows: &[(Vector2D<f32>, Vector2D<f32>)],
     frame: &PaintOrder,
@@ -2987,7 +2330,6 @@ fn pull_back(
     let mut current = space;
     while current != outer {
         let Some(index) = current else {
-            // Uncertainty paints.
             debug_assert!(
                 false,
                 "a region's space encloses the space it is pulled into"
@@ -3019,11 +2361,9 @@ fn pull_back(
                 low -= shift_high;
                 high -= shift_low;
             }
-            // The identity, or a hidden box's zero map, which draws nothing.
             SpaceKind::AnchoredVisibility(_) => {}
             SpaceKind::Animation(slot) => {
                 let Some(track) = &frame.animations()[slot as usize].curve.transform else {
-                    // An opacity-only curve moves nothing.
                     continue;
                 };
                 let Some(pulled) = track.reach.pull_back(expand_region(region, low, high)) else {
@@ -3041,30 +2381,21 @@ fn pull_back(
     Admitted::Region(expand_region(region, low, high))
 }
 
-/// Whether animation slot `slot` carries a transform track; an opacity-only
-/// curve moves nothing.
 fn moves(frame: &PaintOrder, slot: u32) -> bool {
     frame.animations()[slot as usize].curve.transform.is_some()
 }
 
-/// Whether a transform curve on `space`'s path moves it.
 fn moving(frame: &PaintOrder, space: Option<u32>) -> bool {
     space::path(frame.spaces(), space)
         .any(|kind| matches!(kind, SpaceKind::Animation(slot) if moves(frame, slot)))
 }
 
-/// Whether a transform curve moves content in `content` inside a group in
-/// `group`; see [`space::curves_within`].
 fn moves_within(frame: &PaintOrder, content: Option<u32>, group: Option<u32>) -> bool {
     space::curves_within(frame.spaces(), frame.animations(), content, group)
         .next()
         .is_some()
 }
 
-/// An upper bound on how far one CSS px in `group`'s coordinates reaches in
-/// `content`'s under the curves [`moves_within`] finds, never below 1 so it
-/// bounds every shorter stretch of the same path too; `None` when a scale
-/// range among them reaches 0.
 fn inverse_norm_within(
     frame: &PaintOrder,
     content: Option<u32>,
@@ -3076,21 +2407,6 @@ fn inverse_norm_within(
         })
 }
 
-/// `bounds`, of content in `content` under clip chain `clip`, in group space
-/// `group`'s coordinates: every place a node between the two can carry them,
-/// or `None` when nothing of them is left.
-///
-/// Content no curve moves inside the group (`within` false) differs from it
-/// by translations alone. Content a curve moves is [`carry`]'d, then cut to
-/// its chain's [`space::still_clip`] carried the same way: however far the
-/// curve carries the content, it shows only inside that clip, which moves
-/// with the group. A closed group's blur margin is content here too, since
-/// its texture is drawn inside its element's clip chain.
-///
-/// Inside a blurred group around layer `layer`, that clip holds only when it
-/// lies below the group's own chain, and then with the links between the two
-/// ([`CullPlan::chain_below`]): from the group's chain outward the clips cut
-/// only after the blur. `layer`'s own margin is added when it closes.
 fn into_group(
     scratch: &Scratch,
     frame: &PaintOrder,
@@ -3128,11 +2444,6 @@ fn into_group(
             });
         return match carry(windows, frame, bounds, content, group) {
             Admitted::Region(carried) => holding.cut(carried),
-            // Unreachable: only a curve on the group's side lacks a
-            // pullback, and an element with a transform curve contains its
-            // positioned descendants whatever its committed transform (the
-            // `animates_transform` bit a curve implies), so no group content
-            // sits outside a curve its group rides.
             Admitted::Everything | Admitted::Nothing => {
                 debug_assert!(false, "group content escapes a curve its group rides");
                 Some(bounds)
@@ -3155,16 +2466,6 @@ fn into_group(
     Some(expand_region(bounds, shift_low, shift_high))
 }
 
-/// `bounds`, in `from`'s coordinates, carried into `into`'s: forward through
-/// every node from `from` out to the two spaces' common ancestor — a scroll
-/// node over its encode window, a sticky node over its range, an anchored
-/// node over its default scroll shift's range
-/// ([`PaintOrder::anchored_slot_range`]), a visibility node unchanged (it
-/// moves nothing), a transform curve over its
-/// [`Reach`](crate::visual::reach::Reach) — then pulled back
-/// from there into `into`. The forward carry is bounded whatever a curve's
-/// scale range; the pullback is [`Admitted::Everything`] through a scale
-/// range reaching 0.
 fn carry(
     windows: &[(Vector2D<f32>, Vector2D<f32>)],
     frame: &PaintOrder,
@@ -3207,18 +2508,6 @@ fn layer_root_rect(frame: &PaintOrder, layer: &RenderLayer) -> Option<Rect> {
     ))
 }
 
-/// How far past its box each of the two reaches carries, for one item.
-///
-/// Element boxes are exact rather than estimated. `shadow::extent` is the
-/// outset shadows' offset plus spread plus the blur cutoff, `outline_extent`
-/// is the outline width and the fork has no `outline-offset`, and every other
-/// element fragment is clipped to a border, padding, or content box. So the
-/// same number serves both jobs and the cull bound needs no margin of its own.
-///
-/// A text run's is an estimate, which is why its cull reach is infinite. Half
-/// an em is fine as a *layer* bound, where too small only trims an effect
-/// layer over content that is not there; as a cull bound too small means the
-/// run vanishes, and nothing here bounds an author-supplied face's ink.
 fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
     match item.kind {
         PaintItemKind::ElementBox | PaintItemKind::Backdrop { .. } => {
@@ -3230,15 +2519,10 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
                 cull: reach,
             }
         }
-        // Drawn by its paragraph's record: no ink of its own.
         PaintItemKind::InlineFragment { .. } => Extents {
             layer: 0.0,
             cull: 0.0,
         },
-        // A recorded path's box already holds its stroke
-        // (`crate::svg::ink_extent`). A text item's is its advance box,
-        // which glyph ink can leave as a text run's line box can, so it is
-        // culled the same way.
         PaintItemKind::Svg { root, index } => {
             if svg::is_text(document, (root, index)) {
                 Extents {
@@ -3265,19 +2549,10 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
     }
 }
 
-/// The rect an item may put ink in, in viewport CSS px.
-///
-/// `affine` is the map [`paint_item`] paints with, so this is the exact
-/// bounding box of the painted box under the exact matrix the painter applies:
-/// rotation, skew, and the perspective corner fit are all handled by
-/// construction rather than approximated again here.
 fn item_bounds(item: &PaintItem, affine: Affine, extent: f64) -> Rect {
     box_bounds(affine, item.size, extent)
 }
 
-/// [`item_bounds`] for a box that is not an item — the
-/// `content-visibility: auto` relevance test's, so that the two ask about a
-/// border box the same way.
 fn box_bounds(affine: Affine, size: Size2D<f32>, extent: f64) -> Rect {
     affine_rect(
         affine,
@@ -3347,14 +2622,10 @@ mod tests {
 
     const VIEWPORT: (f32, f32) = (800.0, 600.0);
 
-    /// A page sized to the viewport, laid out as a positioned canvas so a test
-    /// can put a box anywhere, on screen or off.
     const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
          .box { display: flex; position: absolute; width: 100px; height: 100px;
                 background-color: teal; }";
 
-    /// Both encodings of one frame: the one the painter produces, and the one
-    /// it would produce if nothing were culled.
     struct Frames {
         cultured: DisplayList,
         uncultured: DisplayList,
@@ -3363,9 +2634,6 @@ mod tests {
         painted: usize,
     }
 
-    /// `background-clip: text` clips to the glyphs of loose text too: the
-    /// silhouette walk reaches the anonymous box that lays it out, at the
-    /// box's own offset.
     #[test]
     fn a_text_clip_collects_the_paragraph_of_loose_text() {
         const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
@@ -3395,8 +2663,6 @@ mod tests {
         assert_eq!(layout.len(), 1);
     }
 
-    /// Container Timing's attribution is one `bool` in the walk's scratch,
-    /// off for a document with no root and on only while one is marked.
     #[test]
     fn container_timing_is_off_in_the_walk_until_a_root_is_marked() {
         let mut doc = Doc::with_css(PAGE);
@@ -3424,7 +2690,6 @@ mod tests {
         assert!(walk_once(&mut doc).times_containers());
         doc.dom.stop_container_timing();
         assert!(!walk_once(&mut doc).times_containers());
-        // A freed root is no longer counted.
         doc.dom.set_container_timing(holder, true);
         doc.dom.drop_subtree(holder);
         assert!(!walk_once(&mut doc).times_containers());
@@ -3486,9 +2751,6 @@ mod tests {
 
     #[test]
     fn the_cull_rect_covers_every_device_pixel_the_target_can_hold() {
-        // A target is `round(css * ratio)` device px, so it can reach half a
-        // device pixel past the CSS viewport. A box ending inside that sliver
-        // must survive at every scale.
         for ratio in [1.0_f64, 2.0, 3.0] {
             let rect = cull_rect(euclid::Size2D::new(VIEWPORT.0, VIEWPORT.1), ratio);
             let sliver = 0.5 / ratio;
@@ -3532,9 +2794,6 @@ mod tests {
 
     #[test]
     fn a_rotated_box_is_judged_by_its_rotated_bound() {
-        // Rotating about the box's own centre moves its corners outward, so
-        // the mapped bound is wider than the box. The cull test uses the
-        // painter's own matrix, so it sees exactly that.
         let rotated = item(0.0, 0.0, 100.0);
         let rotation = Transform3D::rotation(0.0, 0.0, 1.0, euclid::Angle::degrees(45.0));
         let upright = item_bounds(&item(0.0, 0.0, 100.0), Affine::IDENTITY, 0.0);
@@ -3546,10 +2805,6 @@ mod tests {
 
     #[test]
     fn a_box_outside_the_viewport_whose_ink_reaches_it_still_encodes() {
-        // The box-shadow blur and the outline both put ink beyond the border
-        // box. A box parked just outside the viewport with one of them reaches
-        // back in, and the box-only test that lets an obviously visible item
-        // skip its style lookup must not be the one that decides this.
         for (extra, offset) in [
             (
                 ".shadow { box-shadow: 0px 0px 40px 20px rgba(0,0,0,0.9); }",
@@ -3649,8 +2904,6 @@ mod tests {
 
     #[test]
     fn rows_clipped_out_of_their_scroll_container_encode_nothing() {
-        // The container sits inside the viewport, so viewport culling alone
-        // would keep every row. What discards them is the clip-chain bound.
         let mut doc = Doc::with_css(
             "page { display: flex; position: relative; width: 800px; height: 600px; }
              .list { display: flex; flex-direction: column; overflow: scroll;
@@ -3678,9 +2931,6 @@ mod tests {
         assert!(draws(&long.uncultured) > draws(&long.cultured));
     }
 
-    /// The same bound for rows a `z-index` sorts out of their scroller into
-    /// the page's stacking context: they paint there, but still carry the
-    /// scroller's clip, so the rows below its scrollport stay unencoded.
     #[test]
     fn hoisted_rows_clipped_out_of_their_scroll_container_encode_nothing() {
         let mut doc = Doc::with_css(
@@ -3710,10 +2960,6 @@ mod tests {
         assert!(draws(&long.uncultured) > draws(&long.cultured));
     }
 
-    /// A list inside a card sliding by an exported transform curve encodes
-    /// what the same list in a still card does: the list's clip and encode
-    /// window move with the card and bound its rows, whatever the card's
-    /// reach.
     #[test]
     fn a_list_inside_an_animated_card_still_encodes_only_its_window() {
         let painted = |animation: &str| {
@@ -3749,8 +2995,6 @@ mod tests {
         );
     }
 
-    /// Starts every animation on the timeline's origin and advances a
-    /// quarter second in, the state the exporter reads.
     fn run_animations(doc: &mut Doc) {
         doc.dom.render();
         doc.dom.advance_animations(0.0);
@@ -3760,9 +3004,6 @@ mod tests {
     const SLIDE: &str = "@keyframes slide { from { transform: translateX(0px); }
                                              to { transform: translateX(600px); } }";
 
-    /// A box off the viewport at the commit encodes when its curve's reach
-    /// carries it into the viewport: the slide brings it in from 300 px left
-    /// of it.
     #[test]
     fn an_off_viewport_box_a_transform_curve_moves_still_encodes() {
         let painted = |animation: &str| {
@@ -3786,9 +3027,6 @@ mod tests {
         );
     }
 
-    /// A list 600 px tall of 200 rows 40 px tall, each row running
-    /// `animation` — `shimmer`, `wobble` or none — except row `lifted`,
-    /// which rises 5000 px.
     fn animated_list(animation: &str, lifted: usize) -> (Doc, Vec<crate::tree::document::NodeId>) {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
@@ -3819,7 +3057,6 @@ mod tests {
         (doc, rows)
     }
 
-    /// Whether `node`'s element box encodes in `doc`'s frame.
     fn box_encodes(
         doc: &Doc,
         frame: &crate::visual::PaintOrder,
@@ -3834,9 +3071,6 @@ mod tests {
             .is_some_and(|(_, encoded)| encoded)
     }
 
-    /// 200 rows each shimmering 10 px sideways encode the rows a still list
-    /// does: each row's reach is its own box ± 10 px, which meets the list's
-    /// window only where the row already does.
     #[test]
     fn shimmering_rows_encode_only_where_their_reach_meets_the_window() {
         let (mut still, _) = animated_list("", usize::MAX);
@@ -3855,9 +3089,6 @@ mod tests {
         );
     }
 
-    /// Rows sliding by `matrix()` keyframes, which stylo interpolates by
-    /// decomposition, have no reach: every row exports and encodes, each
-    /// bounded by the extent budget alone.
     #[test]
     fn matrix_rows_without_a_reach_encode_every_row() {
         let (mut doc, _) = animated_list("animation: wobble 1s linear infinite;", usize::MAX);
@@ -3875,8 +3106,6 @@ mod tests {
         assert!(walk_twice(&mut doc).painted >= 200, "every row encodes");
     }
 
-    /// A row far below the list's window whose keyframes lift it 5000 px
-    /// encodes: its reach carries it through the window.
     #[test]
     fn a_row_lifted_from_far_below_encodes() {
         let (mut doc, rows) = animated_list("", 130);
@@ -3892,9 +3121,6 @@ mod tests {
         );
     }
 
-    /// A scale range reaching 0 bounds nothing: a pop-in far off the
-    /// viewport exports and encodes. A slide whose whole reach stays off the
-    /// viewport exports and is culled.
     #[test]
     fn a_scale_through_zero_bounds_nothing_and_a_slide_off_the_viewport_culls() {
         let painted = |animation: &str| {
@@ -3929,8 +3155,6 @@ mod tests {
         );
     }
 
-    /// The bounds of a group a transform curve moves: the only layer of a
-    /// page built from `css` by `build`, which must export one curve.
     fn moving_layer_bounds(css: &str, build: impl FnOnce(&mut Doc)) -> Rect {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; position: relative; width: 800px; height: 600px; }}
@@ -3954,11 +3178,6 @@ mod tests {
         bounds
     }
 
-    /// A blurred card sliding by an exported curve holds its bounds — its
-    /// bake rect — to what its list's clip and encode window admit: the
-    /// clips moving with it bound it before the viewport, pulled back
-    /// through the slide, does, and the list's 12000 px of rows are not in
-    /// the card's extent.
     #[test]
     fn a_moving_blurred_card_bakes_its_lists_window_not_its_content() {
         let bounds = moving_layer_bounds(
@@ -3978,9 +3197,6 @@ mod tests {
         );
     }
 
-    /// A blurred panel inside a list inside a sliding card: the panel's
-    /// group moves, and the list's clip moving with it bounds the panel's own
-    /// 5000 px box as well as its rows.
     #[test]
     fn a_blurred_panel_in_a_list_in_a_moving_card_bakes_the_lists_window() {
         let bounds = moving_layer_bounds(
@@ -4002,9 +3218,6 @@ mod tests {
         );
     }
 
-    /// Relevance follows the cull rule: under a sliding card a clip-free
-    /// `content-visibility: auto` box is relevant wherever it sits, and one
-    /// inside the card's list only inside the list's encode window.
     #[test]
     fn relevance_under_a_moving_card_is_bounded_by_the_clips_moving_with_it() {
         let mut doc = Doc::with_css(&format!(
@@ -4041,9 +3254,6 @@ mod tests {
         assert!(!relevant(rows[39]), "past the list's window");
     }
 
-    /// The rect of the one group layer of a page built from `css` by
-    /// `build`, which must export one curve inside that group, with its
-    /// filter entries when the group blurs.
     fn still_group_with_a_mover(
         css: &str,
         build: impl FnOnce(&mut Doc),
@@ -4067,8 +3277,6 @@ mod tests {
         (rect, finished.filter_groups)
     }
 
-    /// A still group's rect holds a child sliding out of the group's box to
-    /// every place the slide shows it, up to the viewport's edge.
     #[test]
     fn a_still_group_holds_a_child_sliding_out_of_it() {
         let (rect, _) = still_group_with_a_mover(
@@ -4081,8 +3289,6 @@ mod tests {
                 doc.el(group, "view.mover");
             },
         );
-        // Committed at 250 px along, the mover spans x = 350..400; the slide
-        // carries it from 100 on, past the viewport's right edge at 800.
         assert!(
             (rect.x0 - 100.0).abs() < 1e-3
                 && (rect.x1 - 800.0).abs() < 1e-3
@@ -4092,8 +3298,6 @@ mod tests {
         );
     }
 
-    /// A blurred group whose child slides 5000 px bakes the viewport's worth
-    /// of that slide plus the ink margin: finite, and no wider.
     #[test]
     fn a_blurred_group_with_a_sliding_child_bakes_the_viewport_it_can_show() {
         let (rect, groups) = still_group_with_a_mover(
@@ -4106,7 +3310,6 @@ mod tests {
                 doc.el(group, "view.mover");
             },
         );
-        // 3 sigma = 12 px of ink margin past the viewport's right edge.
         assert!(
             (rect.x0 - 88.0).abs() < 1e-3 && (rect.x1 - 812.0).abs() < 1e-3,
             "{rect:?}"
@@ -4122,10 +3325,6 @@ mod tests {
         assert!(group.samples_animations(), "and follows the slide");
     }
 
-    /// A blurred card's clipping ancestor's clip is one of its output clips,
-    /// outside its bake: its own slide moves the texture across that clip and
-    /// its own fade applies where the texture is drawn, and neither changes a
-    /// baked pixel, so the bake samples the timeline for neither.
     #[test]
     fn a_blurred_cards_own_curve_never_makes_its_bake_sample() {
         let samples = |keyframes: &str| {
@@ -4160,11 +3359,6 @@ mod tests {
         );
     }
 
-    /// A blurred group whose child shrinks to 0.4 carries the ink of that
-    /// child's content 30 px (3 sigma) in the group's units, which is 2.125
-    /// times as far in the content's own units as committed at 0.85: a box
-    /// that only comes within 30 px of the viewport at the smallest scale
-    /// still encodes.
     #[test]
     fn a_blur_margin_grows_by_what_a_curve_inside_its_group_can_shrink() {
         let mut doc = Doc::with_css(
@@ -4184,11 +3378,9 @@ mod tests {
         run_animations(&mut doc);
         let frame = doc.dom.build_paint_order();
         assert_eq!(frame.animations().len(), 1, "the shrink exports");
-        // At 0.4 the dot spans x = 820..824, within 30 px of the viewport.
         assert!(box_encodes(&doc, &frame, dot), "the dot's ink can show");
     }
 
-    /// The alpha of every layer `scene` begins, in record order.
     fn layer_alphas(scene: &DisplayList) -> Vec<f32> {
         scene
             .items()
@@ -4200,9 +3392,6 @@ mod tests {
             .collect()
     }
 
-    /// A fading child inside a fading parent's group: each effect layer's
-    /// push carries its own element's slot, and a compose at a later instant
-    /// fades each layer by its own sampled alpha.
     #[test]
     fn nested_fades_each_retarget_their_own_effect_layer() {
         let mut doc = Doc::with_css(&format!(
@@ -4250,16 +3439,12 @@ mod tests {
         let close = |got: &[f32], expected: [f32; 2]| {
             got.len() == 2 && got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-4)
         };
-        // Committed at 0.25 s: 0.8 outside, 0.9 inside. At 0.5 s: 0.6 and 0.8.
         let committed = alphas(None);
         assert!(close(&committed, [0.8, 0.9]), "committed {committed:?}");
         let sampled = alphas(Some(0.5));
         assert!(close(&sampled, [0.6, 0.8]), "at 0.5 s {sampled:?}");
     }
 
-    /// A toast popping out to `scale(0)` holding a ticker that slides
-    /// 6000 px, built from `css`, with `fill` adding the ticker's children:
-    /// how many curves export, and the rect of every group layer.
     fn toast(
         css: &str,
         fill: impl FnOnce(&mut Doc, crate::tree::document::NodeId),
@@ -4288,11 +3473,6 @@ mod tests {
         (exported, frames.cultured_bounds)
     }
 
-    /// No viewport pulls back through a pop to `scale(0)`, but the toast's
-    /// own clip stays still in its group and holds the ticker's slide to the
-    /// toast: the blurred toast bakes its own box and 3 sigma, not the
-    /// slide. Committed at 0.75, the toast spans (137.5, 107.5)-(362.5,
-    /// 152.5), and its 2 px blur scales to 1.5.
     #[test]
     fn a_popping_toast_holds_its_sliding_ticker_to_its_own_clip() {
         let (exported, rects) = toast(".toast { overflow: hidden; filter: blur(2px); }", |_, _| {});
@@ -4310,8 +3490,6 @@ mod tests {
         );
     }
 
-    /// With no clip on the toast nothing bounds the slide inside the pop,
-    /// so the slide does not export.
     #[test]
     fn a_slide_nothing_bounds_inside_a_popping_group_does_not_export() {
         let (exported, rects) = toast(".toast { filter: blur(2px); }", |_, _| {});
@@ -4322,10 +3500,6 @@ mod tests {
         );
     }
 
-    /// A blurred panel riding the ticker is a group of its own, whose 3 sigma
-    /// — 22.5 px at the committed 0.75 — is drawn inside the panel's clip
-    /// chain, which holds the toast's clip: the toast's rect is that clip,
-    /// with no margin past it, however far the slide goes.
     #[test]
     fn a_blurred_panel_riding_a_ticker_keeps_its_margin_inside_the_toasts_clip() {
         let (exported, rects) = toast(
@@ -4340,7 +3514,6 @@ mod tests {
         let [toast, _panel] = rects[..] else {
             panic!("two group layers, got {rects:?}");
         };
-        // The clip spans x = 137.5..362.5 and y = 107.5..152.5.
         let want = Rect::new(137.5, 107.5, 362.5, 152.5);
         assert!(
             (toast.x0 - want.x0).abs() < 1e-3
@@ -4351,15 +3524,6 @@ mod tests {
         );
     }
 
-    /// A long ticker sliding inside a faded group, inside a blurred group,
-    /// inside an `overflow: clip` frame. The frame's clip is the blurred
-    /// group's output clip, which cuts only after the blur, so the faded
-    /// group does not hold the ticker to it: the viewport pulled back into
-    /// the group holds it instead. A clip on the blurred element itself lies
-    /// below its own chain, cuts before the blur, and holds the ticker
-    /// exactly, as the frame's clip does with no blur at all. Only x
-    /// changes: the ticker runs past the clip that way, and the faded
-    /// group's own box fills it the other.
     #[test]
     fn a_ticker_under_a_blur_around_its_group_is_held_below_the_blur() {
         let rect = |blur: &str| {
@@ -4410,10 +3574,6 @@ mod tests {
         );
     }
 
-    /// A band twice the viewport's width, sliding by its own curve and
-    /// committed 250 px along: its rect is its box cut to the viewport
-    /// pulled back through the slide, which can still show x = -250..1550
-    /// of the band's committed coordinates.
     #[test]
     fn a_sliding_group_is_cut_to_the_viewport_its_slide_can_show() {
         let mut doc = Doc::with_css(&format!(
@@ -4439,9 +3599,6 @@ mod tests {
         );
     }
 
-    /// A clip wholly past the viewport inside a blurred group, but within
-    /// 3 sigma of it, admits its content: the blur carries that content's
-    /// ink onto the viewport. One 3 sigma further out admits nothing.
     #[test]
     fn a_clip_within_a_blurs_reach_of_the_viewport_admits_its_content() {
         let encodes = |left: f32| {
@@ -4460,19 +3617,10 @@ mod tests {
             let frame = doc.dom.build_paint_order();
             box_encodes(&doc, &frame, inner)
         };
-        // The clip spans x = 810..890 against a viewport ending at 800 and a
-        // blur reaching 30 px.
         assert!(encodes(210.0), "the blur carries it onto the viewport");
         assert!(!encodes(240.0), "past the blur's reach");
     }
 
-    /// Content wholly past a clip its blurred group's own chain holds is
-    /// admitted: the clip cuts the group's blurred output, not its content,
-    /// so content within 3 sigma of it reaches back inside — and the cull
-    /// test leaves such a clip out altogether, which admits content further
-    /// past it too, up to the grown viewport. A clip inside the group still
-    /// cuts before the blur. `overflow: clip` rather than `hidden`, whose
-    /// scroll window would admit the content anyway.
     #[test]
     fn content_past_its_blurred_groups_clip_is_admitted() {
         let encodes = |clipped: &str, left: f32| {
@@ -4491,7 +3639,6 @@ mod tests {
             let frame = doc.dom.build_paint_order();
             box_encodes(&doc, &frame, dot)
         };
-        // The card's clip ends at x = 200 and the blur reaches 30 px.
         assert!(
             encodes("", 110.0),
             "10 px past the card's clip, the blur carries it back inside",
@@ -4506,10 +3653,6 @@ mod tests {
         );
     }
 
-    /// A card popping in from `scale(0)` inside a blurred wrapper holds a
-    /// list of 2000 rows: no viewport pulls back through the pop, but the
-    /// list's clip and encode window pop with the card and bound its rows,
-    /// blur or not. Relevance follows.
     #[test]
     fn a_list_in_a_popping_card_in_a_blurred_wrapper_encodes_its_window() {
         let build = |wrap: &str| {
@@ -4586,8 +3729,6 @@ mod tests {
         );
     }
 
-    /// A blurred group's bounds carry the 3 sigma ink margin, and the cull
-    /// region admits everything that can reach it.
     #[test]
     fn a_blurred_group_keeps_the_ink_margin_in_its_bounds() {
         let mut doc = Doc::with_css(&format!("{PAGE} .blurred {{ filter: blur(4px); }}"));
@@ -4596,8 +3737,6 @@ mod tests {
         doc.set_inline(group, "left: 100px; top: 100px");
         let frames = walk_twice(&mut doc);
         let bounds = frames.cultured_bounds[0];
-        // The box is 100x100 at (100, 100), so 3 sigma = 12 px of margin
-        // lands its bounds on (88, 88)-(212, 212).
         assert!(
             (bounds.x0 - 88.0).abs() < 0.5
                 && (bounds.y0 - 88.0).abs() < 0.5
@@ -4610,8 +3749,6 @@ mod tests {
             "the margin is not a cull decision",
         );
 
-        // A box whose own border box is off screen, but whose blur reaches
-        // back onto it, must still paint.
         let mut doc = Doc::with_css(&format!("{PAGE} .blurred {{ filter: blur(40px); }}"));
         let root = doc.root;
         let group = doc.el(root, "view.box.blurred");
@@ -4623,11 +3760,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // `backdrop-filter`
-    // -----------------------------------------------------------------
-
-    /// One compose walk's program and the layer bounds it pushed with.
     fn compose(doc: &mut Doc) -> (crate::paint::compose::Finished, Vec<Rect>) {
         let frame = doc.dom.build_paint_order();
         let images = crate::render::image::ImageRegistry::default();
@@ -4638,12 +3770,6 @@ mod tests {
         (assembly.finish(), bounds)
     }
 
-    /// A marker box, a wrapper carrying `wrapper`, and inside it a second
-    /// marker and a `backdrop-filter` box.
-    ///
-    /// The wrapper is always a group scope, so the two markers always land in
-    /// two fragments; what varies is whether the wrapper is a *Backdrop Root*,
-    /// and therefore whether the outer marker is in the box's range.
     const BACKDROP_PAGE: &str =
         "page { display: flex; position: relative; width: 800px; height: 600px; }
          .mark { display: flex; position: absolute; left: 0px; top: 0px;
@@ -4653,14 +3779,10 @@ mod tests {
          .box { display: flex; position: absolute; left: 10px; top: 10px;
                 width: 100px; height: 100px; backdrop-filter: blur(4px); }";
 
-    /// How many fragments a `backdrop-filter` box's range holds, on a page
-    /// whose wrapper carries `wrapper`.
     fn fragments_behind(wrapper: &str) -> (usize, u32) {
         fragments_behind_in(BACKDROP_PAGE, wrapper, None)
     }
 
-    /// [`fragments_behind`] over `css`, committed a quarter second into the
-    /// timeline when `fade_exports` says whether the wrapper's fade exports.
     fn fragments_behind_in(css: &str, wrapper: &str, fade_exports: Option<bool>) -> (usize, u32) {
         let mut doc = Doc::with_css(css);
         let root = doc.root;
@@ -4697,15 +3819,6 @@ mod tests {
         (count, entry.ops.start)
     }
 
-    /// The range begins at the nearest Backdrop Root's content start.
-    ///
-    /// The second loop pins the two deliberate non-roots beside the two
-    /// stacking contexts that were never roots to begin with.
-    /// `isolation: isolate` is not in the spec's Backdrop Root list (and is
-    /// not in the fork's author grammar either, so its exclusion is
-    /// unobservable), while `will-change: opacity` **is** one per the spec:
-    /// this engine opens no group layer for it, so the element inside sees
-    /// through it. Ruled, and recorded in `docs/tracking/deviations.md`.
     #[test]
     fn a_backdrops_range_begins_at_its_backdrop_root() {
         for wrapper in [
@@ -4718,10 +3831,6 @@ mod tests {
             assert_eq!(count, 1, "{wrapper}: only what it painted itself");
             assert!(start > 0, "{wrapper}: and not from the frame's start");
         }
-        // A stacking context with no group effect roots nothing, so the range
-        // runs from the frame's own start — which is the document root
-        // element's, the spec's root Backdrop Root. `will-change: opacity` is
-        // the deviation: the spec makes it a Backdrop Root and we do not.
         for wrapper in [
             "transform: translate(0px)",
             "z-index: 1",
@@ -4733,11 +3842,6 @@ mod tests {
         }
     }
 
-    /// A wrapper with a current `opacity` animation is a Backdrop Root at
-    /// every reading, 1 included, exported or not: the range a commit fixes
-    /// must hold at every instant the curve is composed at, and the handover
-    /// to main-thread ticks must not move it. Web Animations makes the
-    /// animation act as `will-change: opacity`, which filter-effects-2 lists.
     #[test]
     fn a_fade_roots_a_backdrop_while_it_reads_1() {
         let css = format!(
@@ -4762,10 +3866,6 @@ mod tests {
         }
     }
 
-    /// An element with both properties records its blur bracket first, so the
-    /// filtered backdrop is baked *inside* the element's own blur group — and
-    /// the backdrop's own range ends before either, at the element's first
-    /// layer push.
     #[test]
     fn a_filter_bracket_precedes_the_backdrop_it_encloses() {
         let mut doc = Doc::with_css(BACKDROP_PAGE);
@@ -4808,13 +3908,6 @@ mod tests {
         );
     }
 
-    /// A scope whose element has `filter` (or `backdrop-filter`) opens inside
-    /// the links of its own clip chain — a scroller's clip in the space
-    /// outside the scroller's node, then the card's in the scroller's node,
-    /// right around the effect layer — and its content pushes none of them. So the blur group's
-    /// range is the box's own content alone, which a scroll of the scroller or the card does
-    /// not change, and the bake reads neither. A box no ancestor clips opens
-    /// with no output clip at all.
     #[test]
     fn a_filtered_scope_opens_inside_its_own_chain_and_its_content_pushes_below_it() {
         let css = "page { display: flex; position: relative; width: 800px; height: 600px;
@@ -4893,8 +3986,6 @@ mod tests {
         );
     }
 
-    /// `backdrop-filter` enlarges no ink overflow: the group's pushed rect is
-    /// the element's own box, where the same σ as a `filter` grows it by 3σ.
     #[test]
     fn a_backdrop_inflates_no_bounds() {
         let css = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -4923,8 +4014,6 @@ mod tests {
         );
     }
 
-    /// The clip-link pushes of a composed page: the rect of each plain rect
-    /// push, `None` for any other shape.
     fn clip_pushes(finished: &crate::paint::compose::Finished) -> Vec<Option<Rect>> {
         finished
             .program
@@ -4951,8 +4040,6 @@ mod tests {
          .box { display: flex; position: absolute; width: 100px; height: 100px;
                 background-color: teal; }";
 
-    /// A page of `css` with one clipping box holding one `box` styled by
-    /// `inline`, composed; the clip's pushes.
     fn clipped_box(css: &str, inline: &str, animated: bool) -> Vec<Option<Rect>> {
         let mut doc = Doc::with_css(css);
         let root = doc.root;
@@ -4967,7 +4054,6 @@ mod tests {
         clip_pushes(&finished)
     }
 
-    /// A pushed link is cut to the box it holds, grown by the slack.
     #[test]
     fn a_pushed_link_is_cut_to_what_it_holds() {
         assert_eq!(
@@ -4976,8 +4062,6 @@ mod tests {
         );
     }
 
-    /// A rounded link is cut to a plain rect only where the cut stays clear
-    /// of its corners; content at a corner keeps the rounded shape.
     #[test]
     fn a_rounded_link_keeps_its_shape_where_a_corner_is_met() {
         let css = format!("{CLIPPED} .clip {{ border-radius: 40px; }}");
@@ -4988,12 +4072,9 @@ mod tests {
         assert_eq!(clipped_box(&css, "left: 0px; top: 0px;", false), [None]);
     }
 
-    /// A link holding a box a transform curve slides is cut to the whole
-    /// reach of the slide, not the box's committed place.
     #[test]
     fn a_link_holds_a_sliding_box_over_its_whole_reach() {
         let css = format!("{CLIPPED} {SLIDE} .box {{ animation: slide 1s linear infinite; }}");
-        // 10..110 carried 0..600 px to the right, cut to the 400 px clip.
         assert_eq!(
             clipped_box(&css, "left: 10px; top: 20px;", true),
             [Some(Rect::new(8.0, 18.0, 400.0, 122.0))],

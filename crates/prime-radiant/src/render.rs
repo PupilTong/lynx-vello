@@ -25,9 +25,6 @@ use crate::image::{Image, ImageError};
 pub enum CaptureError {
     Gpu(GpuError),
     Image(ImageError),
-    /// This many pictures the frame draws were answered without pixels and
-    /// are on their way: the store did not restore them by the second
-    /// describe. A capture never draws a frame without them.
     PicturesWanted(usize),
 }
 
@@ -46,14 +43,12 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// Creates the required headless renderer for a GPU-backed test.
 #[must_use]
 #[track_caller]
 pub fn headless(test: &str) -> Headless {
     Headless::new().unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"))
 }
 
-/// Returns the document frame's device-pixel dimensions.
 #[must_use]
 pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
     let viewport = document.viewport_size();
@@ -71,7 +66,6 @@ pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
     }
 }
 
-/// Lays out, paints, and reads back the document's whole frame.
 pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
@@ -82,7 +76,6 @@ pub fn capture_document<T: Sync>(
     capture_document_sized(gpu, document, background, pixels, width, height)
 }
 
-/// [`capture_document`] at an explicit pixel size.
 pub fn capture_document_sized<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
@@ -92,31 +85,17 @@ pub fn capture_document_sized<T: Sync>(
     height: u32,
 ) -> Result<Image, CaptureError> {
     document.render();
-    // One `Headless` captures many documents in these suites and commit ids
-    // restart at one per document, so the bake cache's key cannot tell them
-    // apart. A capture is of a document just rendered, so there is no reuse
-    // worth keeping anyway.
     gpu.forget_filters();
     let frame = document
         .committed_frame()
         .expect("`Document::render` always leaves a committed frame retained");
     let (mut images, mut sources) = (Vec::new(), Vec::new());
-    // A source the store answers without pixels is wanted, and a store that
-    // restores inside `want`, as `TestImages` does, answers the second
-    // describe with them. One that restores off this thread has no event
-    // loop here to answer in, so the capture is refused rather than drawn
-    // without the picture.
     if frame.resolve_images(pixels, &mut images, &mut sources) > 0 {
         let wanted = frame.resolve_images(pixels, &mut images, &mut sources);
         if wanted > 0 {
             return Err(CaptureError::PicturesWanted(wanted));
         }
     }
-    // The vector textures first, since a filter bake may draw them; then,
-    // with no offsets, no generation and no timeline reading, the filter
-    // bakes: a capture composes the frame exactly as it was committed. They
-    // take the capture's background, which is the canvas a backdrop at the
-    // document's root filters.
     let vectors: Vec<Option<Texture>> = gpu
         .prepare_vectors(&frame)
         .map_err(CaptureError::Gpu)?
@@ -146,7 +125,6 @@ pub fn capture_document_sized<T: Sync>(
     Image::from_rgba8(width, height, pixels).map_err(CaptureError::Image)
 }
 
-/// Captures a scene retained by a document's painter.
 pub fn capture_scene<T>(
     gpu: &mut Headless,
     document: &Document<T>,
@@ -157,7 +135,6 @@ pub fn capture_scene<T>(
     capture_scene_sized(gpu, scene, background, width, height)
 }
 
-/// [`capture_scene`] at an explicit pixel size.
 pub fn capture_scene_sized(
     gpu: &mut Headless,
     scene: &DisplayList,

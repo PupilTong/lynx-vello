@@ -23,8 +23,6 @@ use url::Url;
 mod support;
 use support::{DelayedBackground, PendingSource};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
 
@@ -226,8 +224,6 @@ async fn verify_reload(before_background: bool, development: bool) {
     )
     .await;
     if before_background {
-        // MTS boot alone makes the view ready, so the reload is accepted and
-        // waits in the BTS Worker's queue behind its still-loading entry.
         assert!(view.is_ready());
         view.reload("{}".into(), String::new()).unwrap();
         released.set(true);
@@ -328,8 +324,6 @@ async fn wait_pixel(
                     if observed.expect_missing_websocket && level == "warn"
                         && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill.") =>
                 {
-                    // The unmodified default HMR client detects the absent
-                    // platform module, warns once and lets React start.
                     observed.missing_websocket_warnings += 1;
                 }
                 other => panic!("reload failed: {other:?}"),

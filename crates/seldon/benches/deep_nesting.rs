@@ -31,8 +31,6 @@ fn bench_chain(bencher: divan::Bencher<'_, '_>, display: &'static str) {
         });
 }
 
-/// A `DEPTH`-level chain in which no level declares a size, so every level
-/// sizes itself from the level below it.
 fn build_chain(display: &'static str) -> LayoutFixture {
     let style = format!("display:{display}; box-sizing:border-box");
     let mut fixture = LayoutFixture::new(Size::new(800.0, 600.0), &style);

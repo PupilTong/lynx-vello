@@ -38,8 +38,6 @@ impl EventRequester for CaptureWakeup {
 
 const MAX_QUEUED_CAPTURES: usize = 8;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
-/// How long one frame waits for the view to service it before the frame is
-/// drawn from what the view has already published.
 const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 const DEVICE_PIXEL_RATIO: f32 = 1.0;
 
@@ -124,9 +122,6 @@ pub(crate) struct CaptureJob {
     pub(crate) response: oneshot::Sender<Result<Screenshot, CaptureFailure>>,
 }
 
-/// One owner thread behind a bounded FIFO. Bobcat itself has no native Lynx
-/// process-global renderer, but serial admission bounds GPU contexts and keeps
-/// the `!Send` view handle's ownership obvious.
 pub(crate) struct CaptureExecutor {
     failure_receiver: Mutex<Option<oneshot::Receiver<()>>>,
     healthy: Arc<AtomicBool>,
@@ -340,7 +335,6 @@ fn prepare_source(
 ) -> Result<(DeferredPage, Option<ZipSource>), CaptureFailure> {
     let mut archive = None;
     let page = match &request.input {
-        // Decoded while the view boots: only the section table is read here.
         CaptureInput::Bytes(bytes) => PageSource::defer(&request.url, bytes.clone()),
         CaptureInput::Zip(bytes) => {
             let zip = ZipSource::from_bytes(bytes).map_err(|source| CaptureFailure::Zip {
@@ -390,8 +384,6 @@ where
     for note in resources.take_notes() {
         eprintln!("bobcat-server: warning: {note}");
     }
-    // A capture has no screen, so `SystemInfo` reports the requested capture
-    // size in physical pixels, named as such.
     let mut sources = page.view_sources(
         ScreenMetrics::for_viewport(
             f32::from(request.width),
@@ -405,8 +397,6 @@ where
     let startup_deadline = tokio::time::Instant::now() + request.timeout;
     let (mut view, mut painter, before_capture) =
         tokio::time::timeout_at(startup_deadline, async {
-            // Preserve per-capture runtime isolation: the view keeps this
-            // job's group alive until capture finishes and the view drops.
             let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
             let host = create_view(resources, &mut sources);
             let view = group.create_lynx_view(
@@ -448,8 +438,6 @@ where
     frame(&mut view, &mut painter, &wakeup, &request.url, true).await?;
     check_events(&mut view, &request.url)?;
 
-    // UI Judge treats settle time as an explicit post-readiness delay rather
-    // than part of `timeoutMs`; preserve that observable behavior.
     settle(
         &mut view,
         &mut painter,
@@ -499,8 +487,6 @@ fn resources_config(page: &DeferredPage, timeout: Duration) -> ResourcesConfig {
     ResourcesConfig {
         base_url: Some(page.input_url().clone()),
         request_timeout: timeout,
-        // Lazy bundles: a `lynx.fetchBundle` installs its sections through
-        // this, and without one every fetch fails.
         container_installer: Some(std::sync::Arc::new(bobcat_source::BundleInstaller)),
         ..ResourcesConfig::default()
     }
@@ -514,9 +500,6 @@ async fn settle<F: ResourceFetcher + 'static>(
     mut remaining: Duration,
 ) -> Result<(), CaptureFailure> {
     while !remaining.is_zero() {
-        // One display frame at a time. A realm timer is not this loop's to
-        // wait out: the engine waits its own out and commits on its own
-        // thread, and the next frame picks that commit up.
         let step = FRAME_INTERVAL.min(remaining);
         tokio::time::sleep(step).await;
         frame(view, painter, wakeup, url, false).await?;
@@ -526,18 +509,6 @@ async fn settle<F: ResourceFetcher + 'static>(
     Ok(())
 }
 
-/// One frame: post it, take the view's turns until the view has serviced it,
-/// draw.
-///
-/// The wait between the post and the draw is this host's, not the painter's,
-/// because the view may need this host during it. A script that adopts a
-/// stylesheet, requires a module or waits a `Future` parks its job on an
-/// answer `LynxView::pump` gives, and the frame post is queued behind that
-/// job; so every turn of the wait pumps first. The view wakes this host both
-/// when it asks for something and when it services the post, and the
-/// resource system wakes it when a load completes, so the wakeup is what the
-/// wait sleeps on. A frame the view has not serviced by [`FRAME_DEADLINE`] is
-/// drawn from what the view had published.
 async fn frame<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
     painter: &mut Painter<F::PlatformFrame>,
@@ -567,12 +538,6 @@ async fn frame<F: ResourceFetcher + 'static>(
     Ok(())
 }
 
-/// Takes the view's turns until no picture the frame draws is on its way
-/// ([`Painter::awaits_pictures`]): a source the store dropped and the
-/// rasterizer no longer holds is restored off this thread, and the restore
-/// wakes this host when it lands. Bounded by [`FRAME_DEADLINE`]; past it the
-/// capture that follows is refused rather than returning a frame without
-/// the picture.
 async fn pictures<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
     painter: &mut Painter<F::PlatformFrame>,
@@ -601,11 +566,8 @@ fn check_events<F: ResourceFetcher + 'static>(
     let mut finished = false;
     for event in view.pump() {
         match event {
-            // The view has ended, so the capture fails with it.
             event if event.is_fatal() => return Err(fatal_failure(event, url)),
             EngineEvent::ScriptFinished => finished = true,
-            // Not fatal: the view and its realms go on, so the page is still
-            // captured and each of these is only logged.
             EngineEvent::ScriptRunError(error) => {
                 eprintln!("bobcat-server: script failed: {error}");
             }
@@ -639,9 +601,6 @@ fn check_events<F: ResourceFetcher + 'static>(
     Ok(finished)
 }
 
-/// The failure a capture ends with on an event for which
-/// [`EngineEvent::is_fatal`] holds. A view that could not start keeps its own
-/// error; any other fatal event, an engine panic, is a script failure.
 fn fatal_failure(event: EngineEvent, url: &Url) -> CaptureFailure {
     match event {
         EngineEvent::StartupFailed(source) => CaptureFailure::StartView {
@@ -652,8 +611,6 @@ fn fatal_failure(event: EngineEvent, url: &Url) -> CaptureFailure {
             url: url.clone(),
             message: error.to_string(),
         },
-        // A fatal event a later engine adds fails the capture as well, named
-        // by its debug form.
         event => CaptureFailure::Script {
             url: url.clone(),
             message: format!("{event:?}"),
@@ -946,13 +903,6 @@ mod tests {
         );
     }
 
-    /// A compiled `ReactLynx` `<viewpager>` of four coloured pages, styled by
-    /// the engine's UA sheet alone: the pager fills the page, lays its pages
-    /// out as one row of scrollport-wide pages and starts on the one its
-    /// `select-index={1}` names, so the whole capture is page 1's green. The
-    /// card's tap, which turns to page 3
-    /// through `selectTab`, needs input this capture route has no way to
-    /// send; `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_viewpager_card_renders_its_selected_page() {
         let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
@@ -988,22 +938,6 @@ mod tests {
         }
     }
 
-    /// A compiled `ReactLynx` card of six 120px `<x-swiper>`s, laid out by
-    /// the engine's UA sheet alone: the top-left one starts on the blue item
-    /// its `current={2}` names, the `vertical` top-right one on the green
-    /// item of its `current={1}`, and the `coverflow` bottom-left one shows
-    /// its green item centred with its red one turned toward it at its left. The
-    /// bottom-right one starts on its green item, `current={1}`.
-    ///
-    /// The dots: a 9.6px dot every 13.44px (`1rem` is 16px), the strip
-    /// centred 8px in from the bottom edge, or the right edge when vertical,
-    /// so a horizontal swiper's dot `k` is centred at (46.56 + 13.44k, 107.2)
-    /// in it. The top-left one's third dot is the current one, white; the
-    /// vertical one's middle dot, at (227.2, 60), and the bottom-right one's
-    /// middle dot, at (180, 227.2), too. The third row's
-    /// `indicator-dots={false}` swiper shows its red item where its dots
-    /// would be, and the one beside it its custom colours: a cyan current
-    /// first dot and a yellow second.
     #[tokio::test(flavor = "current_thread")]
     async fn a_swiper_card_renders_its_current_items() {
         let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
@@ -1048,14 +982,6 @@ mod tests {
         }
     }
 
-    /// A compiled `ReactLynx` card of two `<x-refresh-view>`s side by side,
-    /// 400 by 600 each, laid out by the engine's UA sheet: each opens on its
-    /// yellow `scroll-view`, whose green items sit at 120, 340 and 560, with
-    /// the red header above the scrollport (its author `position: absolute`
-    /// overridden, so it stays in the column) and the red footer below it.
-    /// The right one, `enable-refresh={false}`, opens the same way. A pull
-    /// needs input this capture route has no way to send;
-    /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_refresh_view_card_opens_on_its_content() {
         let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
@@ -1095,13 +1021,6 @@ mod tests {
         }
     }
 
-    /// A compiled `ReactLynx` `<scroll-coordinator>`, 300 by 400 at the page
-    /// origin and laid out by the engine's UA sheet: a translucent blue
-    /// toolbar 60 tall pinned over a red header 200 tall, and the slot
-    /// starting under the header, at 200, with its scroll-view's green and
-    /// yellow 100px items. The fold a forward drag makes needs input this
-    /// capture route has no way to send;
-    /// `crates/bobcat-source/tests/reactlynx_runtime.rs` drives it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_scroll_coordinator_card_renders_its_header_over_the_slot() {
         let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");
@@ -1143,14 +1062,6 @@ mod tests {
         assert_eq!(pixel(500, 300), [255, 255, 255], "nothing past 300");
     }
 
-    /// A compiled `ReactLynx` card whose stylesheet declares
-    /// `animation-timeline: scroll()`: the lowering carries it to stylo, the
-    /// row binds its list's scroll timeline, and at the boot offset it shows
-    /// its `from` keyframe — opacity 0.25 over white — while its sibling
-    /// stays solid blue. The third row's `view()` animation keys its
-    /// keyframes by named ranges (`entry 100%`, `exit 0%`), which the
-    /// toolchain and the lowering carry as written: at the boot offset its
-    /// `entry` range ends, where `entry 100%` puts opacity 0.25.
     #[tokio::test(flavor = "current_thread")]
     async fn a_scroll_timeline_card_renders_at_its_scroll_progress() {
         let executor = CaptureExecutor::new(Vec::new).expect("start capture owner thread");

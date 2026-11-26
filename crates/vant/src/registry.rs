@@ -24,17 +24,12 @@ use url::Url;
 
 use crate::mime::MediaType;
 
-/// One registered resource.
 #[derive(Debug)]
 pub enum Registered<S> {
-    /// Bytes with the media type they were registered under, if any; an
-    /// absent type is sniffed like a response without a `Content-Type`.
     Bytes {
         bytes: Bytes,
         media_type: Option<MediaType>,
     },
-    /// A stylesheet the host already parsed; it answers only a stylesheet
-    /// source request, since it has no bytes to give any other one.
     StyleSheet(Arc<S>),
 }
 
@@ -50,9 +45,6 @@ impl<S> Clone for Registered<S> {
     }
 }
 
-/// The registered contents, keyed by normalized URL. Read from the fetcher's
-/// blocking-pool threads, which serve image and source loads from it, so it
-/// locks rather than borrows.
 #[derive(Debug)]
 pub struct Registry<S> {
     entries: Mutex<FxHashMap<String, Registered<S>>>,
@@ -67,42 +59,33 @@ impl<S> Default for Registry<S> {
 }
 
 impl<S> Registry<S> {
-    /// Registers `registered` under `url`, replacing any earlier
-    /// registration.
     pub fn insert(&self, url: &Url, registered: Registered<S>) {
         self.lock().insert(url.to_string(), registered);
     }
 
-    /// What is registered under `url`. A clone: the bytes and the sheet are
-    /// both reference-counted.
     #[must_use]
     pub fn get(&self, url: &Url) -> Option<Registered<S>> {
         self.lock().get(url.as_str()).cloned()
     }
 
-    /// Whether anything is registered under `url`.
     #[must_use]
     pub fn contains(&self, url: &Url) -> bool {
         self.lock().contains_key(url.as_str())
     }
 
-    /// Forgets the registration of `url` and returns it.
     pub fn remove(&self, url: &Url) -> Option<Registered<S>> {
         self.lock().remove(url.as_str())
     }
 
-    /// Forgets every registration.
     pub fn clear(&self) {
         self.lock().clear();
     }
 
-    /// How many URLs are registered.
     #[must_use]
     pub fn len(&self) -> usize {
         self.lock().len()
     }
 
-    /// Whether no URL is registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.lock().is_empty()
@@ -113,20 +96,12 @@ impl<S> Registry<S> {
     }
 }
 
-/// A URL could not be registered.
 #[derive(Debug, thiserror::Error)]
 pub enum RegisterError {
     #[error("`{url}` is not a valid URL: {message}")]
     InvalidUrl { url: String, message: String },
 }
 
-/// The normalization every registration goes through: the URL as
-/// [`Url::parse`] writes it, which is the key it is registered and looked up
-/// under.
-///
-/// # Errors
-///
-/// [`RegisterError::InvalidUrl`] for a URL that does not parse.
 pub fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
     Url::parse(url).map_err(|error| RegisterError::InvalidUrl {
         url: url.to_owned(),
@@ -134,16 +109,7 @@ pub fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
     })
 }
 
-/// Something contents can be registered into: the reference fetcher's
-/// resource system, or a [`Registrar`] onto its registry.
 pub trait Register<S> {
-    /// Registers `bytes` under `url`, replacing any earlier registration.
-    /// `media_type` labels them the way a `Content-Type` would; without it
-    /// they are sniffed. Returns the normalized URL they answer to.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
     fn register(
         &self,
         url: &str,
@@ -151,22 +117,9 @@ pub trait Register<S> {
         media_type: Option<&str>,
     ) -> Result<Url, RegisterError>;
 
-    /// Registers a stylesheet the host already parsed. It answers a
-    /// stylesheet source request pre-parsed, and no other request at all.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
     fn register_style_sheet(&self, url: &str, sheet: Arc<S>) -> Result<Url, RegisterError>;
 }
 
-/// What a [`ContainerInstaller`] registers through: the registry alone,
-/// reachable from the thread the load finished on.
-///
-/// It is the resource system's own registration minus the per-scope
-/// stylesheet-cache invalidation, which is thread-bound and has nothing to
-/// invalidate here: a container's section URLs were never asked for before
-/// the container existed, so no cached response for one can be standing.
 pub struct Registrar<S> {
     registry: Arc<Registry<S>>,
 }
@@ -178,18 +131,11 @@ impl<S> fmt::Debug for Registrar<S> {
 }
 
 impl<S> Registrar<S> {
-    /// A registrar onto `registry`.
     #[must_use]
     pub fn new(registry: Arc<Registry<S>>) -> Self {
         Self { registry }
     }
 
-    /// Registers `bytes` under `url`, replacing any earlier registration.
-    /// Returns the normalized URL they answer to.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
     pub fn register(
         &self,
         url: &str,
@@ -207,12 +153,6 @@ impl<S> Registrar<S> {
         Ok(url)
     }
 
-    /// Registers a stylesheet the installer already parsed. It answers a
-    /// stylesheet source request pre-parsed, and no other request at all.
-    ///
-    /// # Errors
-    ///
-    /// [`RegisterError::InvalidUrl`] for a URL that does not parse.
     pub fn register_style_sheet(&self, url: &str, sheet: Arc<S>) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
         self.registry.insert(&url, Registered::StyleSheet(sheet));
@@ -235,47 +175,11 @@ impl<S> Register<S> for Registrar<S> {
     }
 }
 
-/// The hook that makes a fetched Lynx container's sections loadable.
-///
-/// A plain fetch is one where the engine asks for a URL and learns only that
-/// the fetch is over. What the bytes *were* is the fetcher's and its host's
-/// business, and this is where that decision is made: if they are a Lynx
-/// container, its bodies and stylesheets are registered so that the source
-/// requests a realm makes for them by URL answer. Deciding *what* the bytes
-/// are is the source parser's, so what is here is the fetch, the URL an
-/// install is based on, and the registry it writes.
-///
-/// A host without one still fetches; nothing about the completion changes.
-///
-/// It runs on whichever thread the load finished on — a blocking-pool thread
-/// natively — which is why it is `Send + Sync`, and why what it writes
-/// through is a [`Registrar`] rather than the resource system itself.
 pub trait ContainerInstaller<S>: fmt::Debug + Send + Sync + 'static {
-    /// Offers the bytes fetched from `url`. `url` is the **resolved request
-    /// URL**, which is what a realm derives its section URLs from; a redirect
-    /// is the transport's business and no part of it.
-    ///
-    /// `Ok(false)` is "these are not a container I recognize": the fetch
-    /// completes and nothing was registered, which is what an image or a
-    /// script fetched this way leaves. `Ok(true)` is installed. An error is a
-    /// container that would not decode, which **fails the fetch** with that
-    /// message.
-    ///
-    /// # Errors
-    ///
-    /// A container that would not decode or register.
     fn install(&self, url: &Url, bytes: &[u8], registrar: &Registrar<S>) -> Result<bool, String>;
 }
 
-/// A host that can run an install off the calling thread, and hold every
-/// source request for a URL under the container until it has run.
 pub trait RegisterInBackground<S>: Register<S> {
-    /// Runs `install` off this thread with a [`Registrar`] onto this host's
-    /// registry, and holds every source request for a URL under `container`
-    /// until it has run: such a request is then answered from what it
-    /// registered, or fails with the message it failed with. A URL is under
-    /// `container` when, its query and fragment aside, it is the container
-    /// URL's path or below it.
     fn register_in_background(
         &self,
         container: &Url,
@@ -287,7 +191,6 @@ pub trait RegisterInBackground<S>: Register<S> {
 mod tests {
     use super::*;
 
-    /// A stand-in for the host's stylesheet type.
     #[derive(Debug, PartialEq)]
     struct Sheet;
 

@@ -82,27 +82,16 @@ fn main() {
     divan::main();
 }
 
-/// Query containers on the page, and elements under each. Fixed, so the
-/// `args` axis is the page's shape and not its size.
 const GROUPS: usize = 30;
 const LEAVES_PER_GROUP: usize = 100;
 
-/// What the counter reports throughput over: the elements that resolve a
-/// container unit in the cases that have any.
 const LEAVES: usize = GROUPS * LEAVES_PER_GROUP;
 
-/// The viewport `cqw`'s fallback resolves against, and the size
-/// `cqw_leaves_root_container` deliberately gives its one container.
 const VIEWPORT_WIDTH: f32 = 400.0;
 const VIEWPORT_HEIGHT: f32 = 600.0;
 
-/// The narrower viewport `viewport_resize` moves to. No box on the page is
-/// sized against the viewport in the `cq` shapes, so the resize buys a
-/// document-wide recascade and nothing else.
 const RESIZED_VIEWPORT_WIDTH: f32 = 380.0;
 
-/// The width `container_resize` gives every group, different from the
-/// authored `300px` in both axes of the comparison.
 const RESIZED_CONTAINER: &str = "width: 250px";
 
 #[derive(Debug)]
@@ -141,28 +130,18 @@ fn device() -> terminus::link::Device {
     )
 }
 
-/// The groups are size query containers and the leaves are 10px wide: no
-/// style on the page resolves a container unit, so the gate on the recascade
-/// loop never opens.
 const PX_LEAVES_IN_CONTAINERS: &str = "
 page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .group { display: flex; flex-direction: column; container-type: size; width: 300px; }
 .leaf { display: flex; height: 2px; width: 10px; }
 ";
 
-/// The same containers with `10cqw` leaves. The first pass resolves them
-/// against the 400px viewport fallback and the second against the 300px
-/// container, so a leaf's width moves from 40px to 30px: the loop runs a
-/// recascade *and* a relayout.
 const CQW_LEAVES_IN_CONTAINERS: &str = "
 page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .group { display: flex; flex-direction: column; container-type: size; width: 300px; }
 .leaf { display: flex; height: 2px; width: 10cqw; }
 ";
 
-/// The page is the only query container and its content box is the viewport,
-/// so the second pass re-cascades every leaf into the width it already had.
-/// The relayout half of the loop is removed and the recascade half is not.
 const CQW_LEAVES_ROOT_CONTAINER: &str = "
 page { display: flex; flex-direction: column; container-type: size;
        width: 400px; height: 600px; }
@@ -170,11 +149,6 @@ page { display: flex; flex-direction: column; container-type: size;
 .leaf { display: flex; height: 2px; width: 10cqw; }
 ";
 
-/// The same containers with one `10cqw` leaf per group among 99 px ones —
-/// the shape a page that uses the feature sparingly has, and the one the
-/// targeted recascade is for. Every element under the container reads it in
-/// the two all-`cqw` shapes above, so no marking rule can visit fewer of
-/// them; here 1 % of the subtree does.
 const MIXED_LEAVES_IN_CONTAINERS: &str = "
 page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .group { display: flex; flex-direction: column; container-type: size; width: 300px; }
@@ -182,15 +156,12 @@ page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .reader { display: flex; height: 2px; width: 10cqw; }
 ";
 
-/// No containers at all, and leaves 10% of the viewport wide — the same 40px
-/// by the path that has always existed.
 const VW_LEAVES: &str = "
 page { display: flex; flex-direction: column; width: 400px; height: 600px; }
 .group { display: flex; flex-direction: column; width: 300px; }
 .leaf { display: flex; height: 2px; width: 10vw; }
 ";
 
-/// The five shapes `first_layout` compares.
 const FIRST_LAYOUT_SHAPES: [&str; 5] = [
     "px_leaves_in_containers",
     "cqw_leaves_in_containers",
@@ -199,7 +170,6 @@ const FIRST_LAYOUT_SHAPES: [&str; 5] = [
     "vw_leaves",
 ];
 
-/// The three a resize compares: the same page, the leaf unit apart.
 const RESIZE_SHAPES: [&str; 3] = ["px_leaves", "cqw_leaves", "mixed_leaves"];
 
 fn shape_css(shape: &str) -> &'static str {
@@ -213,40 +183,28 @@ fn shape_css(shape: &str) -> &'static str {
     }
 }
 
-/// Whether the shape gives each group's last leaf the class that reads the
-/// container. The settled-width check runs on that leaf, so a mixed shape is
-/// checked against the reader's value rather than a px one.
 fn has_reader_leaf(shape: &str) -> bool {
     shape.starts_with("mixed")
 }
 
-/// The width a leaf must end one settled `layout()` at — what makes each
-/// shape the case it is named for, checked where it costs nothing.
 fn settled_leaf_width(shape: &str) -> f32 {
     match shape {
         "px_leaves_in_containers" | "px_leaves" => 10.0,
-        // 10cqw of the 300px container, after the pass that resolved it
-        // against the 400px viewport fallback.
         "cqw_leaves_in_containers"
         | "cqw_leaves"
         | "mixed_leaves_in_containers"
         | "mixed_leaves" => 30.0,
-        // 10cqw of a container whose content box is the viewport, and 10vw of
-        // the same viewport.
         "cqw_leaves_root_container" | "vw_leaves" => 40.0,
         other => panic!("no page shape named {other}"),
     }
 }
 
-/// One benchmark's document: the groups a resize writes to, and one leaf the
-/// builder checks the shape against.
 struct Page {
     doc: Document<()>,
     groups: Vec<NodeId>,
     leaf: NodeId,
 }
 
-/// A built but never flushed document.
 fn page(shape: &str) -> Page {
     let mut doc = Document::new(device(), "page", ());
     doc.add_stylesheet(shape_css(shape), StylesheetOrigin::Author);
@@ -275,13 +233,6 @@ fn page(shape: &str) -> Page {
     }
 }
 
-/// The same page with the first `layout()` — and, where the shape has one,
-/// its container-unit loop — already paid for.
-///
-/// This is also where each shape is checked to resolve the width it was
-/// written to resolve: input building is not timed, so a benchmark that
-/// stopped measuring the case it names fails here rather than reporting a
-/// cheaper number.
 fn laid_out_page(shape: &str) -> Page {
     let mut page = page(shape);
     page.doc.layout();
@@ -299,12 +250,8 @@ fn laid_out_page(shape: &str) -> Page {
     page
 }
 
-/// The first layout of a fresh document: the flush, the layout, and whatever
-/// further passes the shape's containers owe.
 #[divan::bench(args = FIRST_LAYOUT_SHAPES)]
 fn first_layout(bencher: divan::Bencher, shape: &str) {
-    // The measured body cannot check its own result without timing the check,
-    // so one page is built and settled here instead.
     drop(laid_out_page(shape));
     bencher
         .with_inputs(|| page(shape))
@@ -315,8 +262,6 @@ fn first_layout(bencher: divan::Bencher, shape: &str) {
         });
 }
 
-/// Resizing every query container on a laid-out page: one inline style per
-/// group, then one `layout()`.
 #[divan::bench(args = RESIZE_SHAPES)]
 fn container_resize(bencher: divan::Bencher, shape: &str) {
     bencher
@@ -331,9 +276,6 @@ fn container_resize(bencher: divan::Bencher, shape: &str) {
         });
 }
 
-/// Resizing the viewport on a laid-out page. No container moves, so this is
-/// the document-wide recascade with container units in it against the same
-/// recascade without.
 #[divan::bench(args = RESIZE_SHAPES)]
 fn viewport_resize(bencher: divan::Bencher, shape: &str) {
     bencher

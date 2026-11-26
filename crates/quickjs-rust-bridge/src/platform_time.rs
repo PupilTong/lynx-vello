@@ -47,13 +47,11 @@ fn utc_minus_local_minutes(local_minus_utc_seconds: i32) -> i32 {
     -local_minus_utc_seconds / 60
 }
 
-/// Returns whole milliseconds since the Unix epoch for `QuickJS` `Date.now()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn qjs_rust_epoch_time_milliseconds() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-/// Returns a non-zero initial state for `QuickJS` `Math.random()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn qjs_rust_random_seed() -> u64 {
     getrandom::u64().map_or_else(
@@ -65,13 +63,6 @@ pub extern "C" fn qjs_rust_random_seed() -> u64 {
     )
 }
 
-/// Returns UTC-minus-local in whole minutes for the supplied Unix timestamp.
-///
-/// `chrono::Local` uses the platform time-zone database on native targets and
-/// the host JavaScript `Date` implementation on browser Wasm. Chrono's date
-/// range is slightly narrower than ECMAScript's, so queries in the remaining
-/// valid ECMAScript fringe are shifted by whole Gregorian 400-year cycles into
-/// Chrono's nearest same-side window, preserving their calendar and DST phase.
 #[unsafe(no_mangle)]
 pub extern "C" fn qjs_rust_timezone_offset_minutes(epoch_milliseconds: i64) -> i32 {
     let Some(datetime) = timezone_query_datetime(epoch_milliseconds) else {

@@ -33,7 +33,6 @@ fn dirty_leaf_style(width: f32) -> TestStyle {
     }
 }
 
-/// A deep flex tree with an optional strict-containment boundary.
 struct Fixture {
     tree: TestTree,
     root: TestId,
@@ -220,15 +219,6 @@ fn uncontained_boundary_stopped_control(bencher: divan::Bencher<'_, '_>) {
         .bench_local_refs(Fixture::run_boundary_stopped);
 }
 
-/// A virtualized list between two frames: one row on screen has a dirty leaf,
-/// and every row below the window skips its contents.
-///
-/// The list itself is the re-layout root — a row is no boundary, its height
-/// follows its content — so the pass asks all `LIST_ROWS` rows for their box.
-/// A skipped row answers from its cache like any other row, which is what
-/// `skipped_rows` and `plain_rows_control` are here to keep true: the two
-/// should cost the same, where a skipped row that re-resolved its own box
-/// model per pass made the skipping list the more expensive of the two.
 const LIST_ROWS: usize = 512;
 const LIST_VISIBLE_ROWS: usize = 8;
 
@@ -294,9 +284,6 @@ impl RowList {
         self.wide = !self.wide;
         let width = if self.wide { 24.0 } else { 16.0 };
         self.tree.source_node_mut(self.dirty_leaf).style = dirty_leaf_style(width);
-        // What the host's boundary-stopped walk would clear: the leaf, its
-        // row, and the list the row's height reaches. Every other row keeps
-        // the cache it was committed with.
         for id in [self.dirty_leaf, self.dirty_row, self.list] {
             self.tree.clear_layout_cache(id);
         }

@@ -43,8 +43,6 @@ fn decode_large_style_info(bencher: divan::Bencher<'_, '_>) {
     );
 }
 
-/// The whole parse a page boot runs: the decode, the `StyleInfo` lowering
-/// and every body's registration text.
 fn bench_page_source(bencher: divan::Bencher<'_, '_>, bytes: &'static [u8]) {
     let url = url::Url::parse("https://example.com/card/main.web.bundle").unwrap();
     bencher
@@ -76,9 +74,6 @@ fn page_source_large_script(bencher: divan::Bencher<'_, '_>) {
     bench_page_source(bencher, fixtures::fixture("react-svg").page);
 }
 
-/// What a deferred page leaves on the boot path: the section-table scan,
-/// with the decode moved to the background
-/// (`PageSource::defer`, `DeferredPage::register_in_background`).
 fn bench_defer(bencher: divan::Bencher<'_, '_>, bytes: &'static [u8]) {
     let url = url::Url::parse("https://example.com/card/main.web.bundle").unwrap();
     bencher

@@ -59,24 +59,16 @@ use terminus::link::stylo::values::computed::{ColorPropertyValue, Display};
 use super::test_support::{child, display, element_under, style_of, with_config};
 use super::{LynxDocument, PageConfig};
 
-/// Solid em squares, so a run's advance is its glyph count times its font size.
 const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// The attribute a `raw-text` carries its run in, and the one a compiled
-/// `ReactLynx` card writes a static string child into.
 const TEXT_ATTRIBUTE: &str = "text";
 
-/// The picture every `x-text` fixture draws, at its fixture-relative path.
 const IMAGE_SRC: &str = "/tests/fixtures/resources/inline-image.png";
 
-/// A phone-shaped document shaping every generic family with Ahem, so a
-/// fixture's unstyled `font-family` measures as exactly as a named one.
 fn ahem_document() -> LynxDocument {
     ahem_document_with(PageConfig::default())
 }
 
-/// The same document, built with the page configuration a card's bundle
-/// holds.
 fn ahem_document_with(config: PageConfig) -> LynxDocument {
     let mut document = with_config(config);
     assert_eq!(
@@ -87,8 +79,6 @@ fn ahem_document_with(config: PageConfig) -> LynxDocument {
     document
 }
 
-/// One computed longhand, as CSSOM serializes it — what a fixture's
-/// `toHaveCSS(property, value)` reads.
 fn computed(document: &LynxDocument, element: NodeId, property: &str) -> String {
     let id = PropertyId::parse_enabled_for_all_content(property)
         .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -99,42 +89,32 @@ fn computed(document: &LynxDocument, element: NodeId, property: &str) -> String 
     style_of(document, element).computed_value_to_string(declaration)
 }
 
-/// A literal text node, the way a fixture's markup writes one between tags.
 fn literal(document: &mut LynxDocument, parent: NodeId, content: &str) {
     let node = document.create_text_node(content, ());
     document.append_child(parent, node);
 }
 
-/// What `__CreateRawText` compiles to: a carrier whose `text` attribute is the
-/// run, attached where the string stood.
 fn raw_text(document: &mut LynxDocument, parent: NodeId, content: &str) -> NodeId {
     let carrier = element_under(document, parent, "raw-text", "");
     document.set_attribute(carrier, TEXT_ATTRIBUTE, content);
     carrier
 }
 
-/// An `image` carrying the fixture's source, so the box is a replaced one.
 fn image(document: &mut LynxDocument, parent: NodeId, style: &str) -> NodeId {
     let element = element_under(document, parent, "image", style);
     document.set_attribute(element, "src", IMAGE_SRC);
     element
 }
 
-/// Writes a paragraph-limit attribute the way the runtime does: the DOM write
-/// alone, which is what raises the `text` component's reaction and with it the
-/// presentational hint the attribute reflects into.
 fn set_limit(document: &mut LynxDocument, element: NodeId, name: &str, value: &str) {
     document.set_attribute(element, name, value);
 }
 
-/// The measured size of the paragraph `id` establishes — the block's ink, not
-/// its box.
 fn ink(document: &LynxDocument, id: NodeId) -> (f32, f32) {
     let size = document.text_block_size(id).expect("a laid-out paragraph");
     (size.width, size.height)
 }
 
-/// `id`'s border box as `(x, y, width, height)`, in its parent's coordinates.
 fn frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32, f32) {
     let layout = document.rounded_layout(id).expect("a laid-out box");
     (
@@ -145,35 +125,16 @@ fn frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32, f32) {
     )
 }
 
-/// `id`'s border box without its vertical placement, for the cases whose claim
-/// is an atom's advance and size rather than where its line puts it.
 fn horizontal_frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32) {
     let (x, _, width, height) = frame(document, id);
     (x, width, height)
 }
 
-/// The same shape as [`horizontal_frame`], for a box a case does not yet know
-/// exists: `None` where nothing was laid out. A test whose claim is that a box
-/// appears at all states it as an equality against `Some(..)`, so it fails on
-/// its own assertion instead of unwinding inside a helper.
 fn placement(document: &LynxDocument, id: NodeId) -> Option<(f32, f32, f32)> {
     let layout = document.rounded_layout(id)?;
     Some((layout.location.x, layout.size.width, layout.size.height))
 }
 
-/// Replicates `x-text/text-attribute-text`
-/// (`web-elements/tests/fixtures/x-text/text-attribute-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:135`): a `text` attribute written
-/// on a `text` element is that paragraph's inline content, and the element's
-/// whitespace-only child contributes nothing after collapsing.
-///
-/// This is the dominant `ReactLynx` path, not a corner: the compiler collapses a
-/// static string child into `__SetAttribute(textEl, "text", …)`, so most text
-/// cards reach the engine this way and render blank until it is implemented.
-/// Held only from `d19cbea2` (#227) on: before it only `raw-text` reflected a
-/// `text` attribute into a run, so a `text` element's own attribute was inert
-/// and the block measured zero. #227 renders `text[text] { content: attr(text) }`
-/// from the element's primary computed style.
 #[test]
 fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
     let mut document = ahem_document();
@@ -189,31 +150,6 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
     );
 }
 
-/// Replicates `x-text/view-in-text`
-/// (`web-elements/tests/fixtures/x-text/view-in-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:140`): a block-level `view` child
-/// of a `text` is reified as one atomic inline box that keeps its own specified
-/// size and runs its own container algorithm over its children, independently
-/// of line breaking.
-///
-/// Geometry only — the fixture's backgrounds and borders are paint, and
-/// `crates/terminus`'s pixel tests own them. The fixture selects the view's vertical
-/// stacking with `--lynx-display: linear` and no toggle; here the `text > view`
-/// UA rule computes the child to `flex`, so the replica writes the column
-/// direction the toggle was selecting.
-///
-/// Two things the fixture carries are deliberately left out. Its markup indents
-/// the `x-view`, and that surrounding whitespace is dropped here so the atom's
-/// advance is the atom's own and not the module-level leading-space divergence.
-/// And the line's own height is not asserted: this case's claim is the atom's
-/// advance, and the CSS 2.2 §10.8.1 line box parley 0.13 builds around a
-/// baseline-aligned box is pinned by `crates/seldon/tests/text_block.rs`.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
     let mut document = ahem_document();
@@ -258,23 +194,6 @@ fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
     );
 }
 
-/// Replicates `x-text/nested-view-in-text`
-/// (`web-elements/tests/fixtures/x-text/nested-view-in-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:144`): container nesting inside the
-/// atomic inline box a `view` child forms — the inner container sizes itself
-/// from its own children, and none of that re-enters the parent's line
-/// breaking, because the atom is measured once at max-content.
-///
-/// As in `a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own`,
-/// the fixture's indentation around the `x-view` is dropped so the atom's
-/// advance carries no leading-space divergence, and the line's own height is
-/// left out as there.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the_line() {
     const BOX: &str = "width: 50px; height: 20px; border: 1px solid red";
@@ -321,24 +240,6 @@ fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the
     );
 }
 
-/// Replicates `x-text/inline-text`
-/// (`web-elements/tests/fixtures/x-text/inline-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:148`): a `text` nested directly
-/// inside a `text` is an inline run in the parent's paragraph, not a nested
-/// block — it inherits inherited properties, overrides its own colour, shares
-/// the line box, and the whitespace between the parent's literal text and the
-/// child collapses to exactly one space.
-///
-/// The colour half of the screenshot diff is a per-run paint claim that
-/// `crates/terminus`'s pixel tests own; here it is asserted as computed style. The
-/// collapse claim is pinned against a control written without that whitespace,
-/// which is one square narrower.
-///
-/// The collapse claim is the browser's and does not hold for a `<text>`,
-/// which keeps the markup's newlines and indentation verbatim as native Lynx
-/// does: the paragraph is four lines, not one. So this replica is a DEVIATION;
-/// `a_nested_text_run_keeps_the_markup_s_newlines_in_a_text` asserts what the
-/// engine renders for the same tree, the run and colour claims included.
 #[test]
 #[ignore = "DEVIATION, not a missing feature: this engine follows native \
             Lynx, by the user's ruling of 2026-10-16. A `<text>` does no CSS \
@@ -387,13 +288,6 @@ fn a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour() {
     );
 }
 
-/// The native half of `x-text/inline-text`
-/// (`a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour`):
-/// the same tree in a `<text>` keeps its text verbatim. The markup
-/// `"\n    I am bold\n    "`, the nested `"and red"` and `"\n  "` lay out as
-/// four lines — an empty one, `"    I am bold"` (13 squares, 312), the
-/// indentation plus the nested run, and the closing indentation — while the
-/// nested run still overrides only its own colour and inherits the weight.
 #[test]
 fn a_nested_text_run_keeps_the_markup_s_newlines_in_a_text() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
@@ -424,16 +318,6 @@ fn a_nested_text_run_keeps_the_markup_s_newlines_in_a_text() {
     );
 }
 
-/// Replicates `x-text/inline-text-with-lynx-wrapper`
-/// (`web-elements/tests/fixtures/x-text/inline-text-with-lynx-wrapper.html`,
-/// `web-elements/tests/web-elements.spec.ts:153`): a transparent wrapper
-/// between a `text` and its nested inline `text` creates neither a box nor a
-/// break in the inline formatting context.
-///
-/// The fixture is a lynx-stack authoring bug — despite its name it contains no
-/// `lynx-wrapper` and is byte-identical to `inline-text.html` — so the replica
-/// asserts the case the name intends, against the unwrapped tree as its
-/// control.
 #[test]
 fn a_wrapper_between_a_text_and_its_nested_run_changes_nothing() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
@@ -466,21 +350,6 @@ fn a_wrapper_between_a_text_and_its_nested_run_changes_nothing() {
     );
 }
 
-/// Replicates `x-text/text-in-text`
-/// (`web-elements/tests/fixtures/x-text/text-in-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:159`): one paragraph, two
-/// differently-coloured runs sharing a line box, the parent's weight carrying
-/// into the child.
-///
-/// The fixture's body is the markup `inline-text.html` also carries; it stays
-/// its own replica because it is its own golden in lynx-stack. It is pinned
-/// from the other direction: splitting content into a nested run is
-/// geometrically invisible, so the paragraph measures what the same characters
-/// measure as one undivided run.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn splitting_a_paragraph_into_two_runs_leaves_its_line_geometry_untouched() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
@@ -510,12 +379,6 @@ fn splitting_a_paragraph_into_two_runs_leaves_its_line_geometry_untouched() {
     );
 }
 
-/// Replicates `x-text/text-in-text-fault-torrent`
-/// (`web-elements/tests/fixtures/x-text/text-in-text-fault-torrent.html`,
-/// `web-elements/tests/web-elements.spec.ts:163`): a `text-maxline` declared on
-/// an *inline* nested `text` is malformed input, and must not clip, hide or
-/// re-box that run — clamping is a property of the block that establishes the
-/// paragraph.
 #[test]
 fn a_maxline_on_a_nested_inline_run_neither_clips_nor_re_boxes_it() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
@@ -543,21 +406,6 @@ fn a_maxline_on_a_nested_inline_run_neither_clips_nor_re_boxes_it() {
     assert_eq!(display(&document, limited), display(&document, plain));
 }
 
-/// Replicates `x-text/text-baseline-alignment`
-/// (`web-elements/tests/fixtures/x-text/text-baseline-alignment.html`,
-/// `web-elements/tests/web-elements.spec.ts:167`): four arrangements at once —
-/// two sibling `text` blocks stack in a linear container, are placed by the
-/// container's own rules in a flex row, and two runs of different font-size
-/// inside one paragraph sit on a common baseline.
-///
-/// The shared baseline is asserted through the line box it produces: two runs
-/// hanging from one baseline give the larger run's ascent plus the larger run's
-/// descent, which for Ahem is exactly the larger font size — where two stacked
-/// baselines would cost the sum of the two.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
     let mut document = ahem_document();
@@ -602,27 +450,6 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
     );
 }
 
-/// Replicates `x-text/inline-image`
-/// (`web-elements/tests/fixtures/x-text/inline-image.html`,
-/// `web-elements/tests/web-elements.spec.ts:171`): an `image` child of a `text`
-/// is an atomic inline-level replaced box that takes its specified used size —
-/// 22x22, whatever the 162x162 file's intrinsic size is — and advances the line
-/// by that width after the collapsed space.
-///
-/// Geometry only; whether the bitmap is drawn is paint, and `crates/terminus` owns
-/// it. The fixture's four-CJK run becomes four Ahem em squares, which carry the
-/// same one-glyph-per-em advance and are deterministic here. The line's own
-/// height is left out: this case's claim is the used size and the advance.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
     let mut document = ahem_document();
@@ -645,29 +472,6 @@ fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
     );
 }
 
-/// Replicates `x-text/inline-image-with-lynx-wrapper`
-/// (`web-elements/tests/fixtures/x-text/inline-image-with-lynx-wrapper.html`,
-/// `web-elements/tests/web-elements.spec.ts:183`): an inline replaced `image`
-/// reached through a transparent wrapper still forms one atomic inline box, in
-/// the same place the unwrapped one occupies.
-///
-/// The fixture is a lynx-stack authoring bug — byte-identical to
-/// `inline-image.html`, with no wrapper in it — so the replica asserts the case
-/// the name intends, against the unwrapped tree as its control. Worth recording
-/// that the paragraph half already holds for a different reason than in
-/// web-core: there is no `text > wrapper > image` UA rule, and the wrapped image
-/// simply escapes `text > * { display: none }` because the combinator stops
-/// matching.
-/// Held from the `inline-truncation` wiring on: `place_and_hide` used to hide
-/// every consumed child's whole subtree, which zeroed the atom under a
-/// `display: contents` wrapper and left the wrapper's own slot unwritten, so
-/// the rounding walk pruned there (`crates/seldon/src/compute/mod.rs`'s
-/// `round_layout_inner`). A consumed element holding a placed atom now keeps
-/// an empty layout of its own instead.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
     let mut document = ahem_document();
@@ -701,38 +505,6 @@ fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
     );
 }
 
-/// Replicates `x-text/inline-image-padding-and-margin`
-/// (`web-elements/tests/fixtures/x-text/inline-image-padding-and-margin.html`,
-/// `web-elements/tests/web-elements.spec.ts:189`): what an atomic inline
-/// replaced box contributes to the line's advance — `margin-left` adds 50px of
-/// outer advance before the box, and `padding-left` adds nothing at all.
-///
-/// The asymmetry is web-core's, not generic CSS's. `x-text > x-image` is
-/// `display: contents !important` (`x-text.css:69-82`), so the authored element
-/// generates no box; the box on the line is the shadow `::part(img)`, and
-/// `x-text.css:120-135` forwards `width`, `height`, `border`, `border-radius`,
-/// `background-color`, `vertical-align`, `object-fit`, `flex`, `align-self` and
-/// `margin` into it — `padding` is not on that list. The only `padding:
-/// inherit` anywhere in web-elements is `x-image[auto-size]::part(img)`
-/// (`XImage/x-image.css:56-61`), and this fixture sets no `auto-size`. So the
-/// golden's two paragraphs advance by the same 22px box and differ only by the
-/// margin's 50px.
-///
-/// Geometry only: the bitmap and where it sits inside its box are paint.
-///
-/// Both halves were gaps until the atom-placement pass. The margin now reaches
-/// the line because phase 2 of `compute_text_block_layout` hands the paragraph
-/// the atom's *margin* box rather than its border box
-/// (`crates/terminus/src/layout/text_block.rs`'s `margin_box`), and the padding no
-/// longer reaches a box at all because the UA sheet gives an `image` that is
-/// inline content of a paragraph `padding: 0 !important`
-/// (`crates/bobcat-core/src/main/tree/text.rs`'s `UA_RULES`) — the cascade
-/// spelling of web-core erasing the host element and rebuilding the box out of
-/// a property list `padding` is not on.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not() {
     let mut document = ahem_document();
@@ -782,12 +554,6 @@ fn an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not(
     );
 }
 
-/// Replicates `x-text/text-inline-no-whitespace`
-/// (`web-elements/tests/fixtures/x-text/text-inline-no-whitespace.html`,
-/// `web-elements/tests/web-elements.spec.ts:234`): three adjacent runs written
-/// with no whitespace between the tags shape as one uninterrupted line — a
-/// nested inline `text` introduces neither a space, a box edge, nor a break
-/// opportunity of its own.
 #[test]
 fn adjacent_runs_written_without_whitespace_shape_as_one_uninterrupted_line() {
     let mut document = ahem_document();
@@ -805,18 +571,6 @@ fn adjacent_runs_written_without_whitespace_shape_as_one_uninterrupted_line() {
     );
 }
 
-/// Replicates `x-text/text-is-block-element`
-/// (`web-elements/tests/fixtures/x-text/text-is-block-element.html`,
-/// `web-elements/tests/web-elements.spec.ts:239`): a `text` is a block-level
-/// box, so two siblings written with no whitespace between their tags still
-/// occupy separate lines, and a source newline plus indentation inside one
-/// collapses to a single space.
-///
-/// The collapse half is the browser's and does not hold for a `<text>`,
-/// which keeps the newline as a forced break and the indentation as spaces,
-/// as native Lynx does. So this replica is a DEVIATION;
-/// `adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines`
-/// asserts what the engine renders, the block half included.
 #[test]
 #[ignore = "DEVIATION, not a missing feature: this engine follows native \
             Lynx, by the user's ruling of 2026-10-16. A `<text>` does no CSS \
@@ -855,12 +609,6 @@ fn adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines() 
     );
 }
 
-/// The native half of `x-text/text-is-block-element`
-/// (`adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines`):
-/// in a `<text>` the source newline is a forced break and the six spaces of
-/// indentation after it stay, so `"Hello,\n      web!"` is `"Hello,"` over
-/// `"      web!"` — ten squares wide, two lines tall — and the sibling block
-/// still follows it down.
 #[test]
 fn adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines() {
     let mut document = ahem_document();
@@ -883,25 +631,6 @@ fn adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines() {
     );
 }
 
-/// Replicates `x-text/view-flex-in-text`
-/// (`web-elements/tests/fixtures/x-text/view-flex-in-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:352`): a `view` child of a `text`
-/// that selects flex layout becomes an atomic inline box whose shrink-to-fit
-/// width — three 50x20 border-box items with 1px borders and 2px margins, so
-/// 162 — feeds the line's advance, placed after the preceding run rather than
-/// breaking the paragraph.
-///
-/// Geometry only; the borders and backgrounds the golden shows are paint. The
-/// paragraph carries an explicit width because the fixture's viewport is wider
-/// than this document's phone. The line's own height is left out, as in the
-/// other atom replicas: this case's claim is the shrink-to-fit width and the
-/// line the atom stays on.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
     let mut document = ahem_document();
@@ -936,25 +665,6 @@ fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
     );
 }
 
-/// Replicates `x-text/raw-text`
-/// (`web-elements/tests/fixtures/x-text/raw-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:392`): a `raw-text` child
-/// contributes its `text` attribute as a plain run in the parent paragraph,
-/// adds no box of its own, and sits in source order alongside an atomic inline
-/// `image`.
-///
-/// The fixture's four-CJK payload becomes four Ahem em squares; the claim is
-/// the carrier's transparency and the source order, not the script.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
     let mut document = ahem_document();
@@ -980,30 +690,6 @@ fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
     );
 }
 
-/// Replicates `x-text/raw-text-with-lynx-wrapper`
-/// (`web-elements/tests/fixtures/x-text/raw-text-with-lynx-wrapper.html`,
-/// `web-elements/tests/web-elements.spec.ts:399`): a transparent wrapper
-/// between a `text` and a `raw-text` is invisible to the inline formatting
-/// context — the wrapped carrier still contributes its run in source order
-/// ahead of the atomic inline `image`, adding neither a box, a break
-/// opportunity, nor extra whitespace.
-///
-/// This is the one of the three "with-lynx-wrapper" fixtures that actually
-/// contains the wrapper.
-///
-/// Every geometric claim here is relative to the unwrapped control, which is
-/// what "the wrapper changes nothing" means. The fixture's other half — that
-/// the `x-image` really is a 22x22 box on that line — is
-/// `the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line`, so that a
-/// passing control comparison can never stand in for it: while both atoms were
-/// zero-size a control comparison held over two invisible boxes.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc). The wrapped tree's
-/// indentation sits inside the wrapper in the markup, and a browser collapses
-/// it with its neighbours into the one space before the image; a card carries
-/// none inside the wrapper.
 #[test]
 fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
     let mut document = ahem_document();
@@ -1029,22 +715,6 @@ fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
     assert_eq!(frame(&document, through), frame(&document, direct));
 }
 
-/// The absolute half of `x-text/raw-text-with-lynx-wrapper`
-/// (`web-elements/tests/fixtures/x-text/raw-text-with-lynx-wrapper.html`,
-/// `web-elements/tests/web-elements.spec.ts:399`): the golden shows the
-/// `x-image` beside the wrapped carrier as a 22x22 picture on the line, which
-/// no comparison against the unwrapped control can establish — two boxes that
-/// are both invisible compare equal.
-///
-/// Split out of `a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing`
-/// so that the transparency claim and the claim that the wrapped fixture draws
-/// anything at all are answered separately.
-/// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
-/// atom with `LayoutInput::measure`, which writes no box, and copied that
-/// unwritten zero size into the placed layout. #227 needed committed geometry
-/// for atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:596-603`).
 #[test]
 fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
     let mut document = ahem_document();
@@ -1067,33 +737,6 @@ fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
     );
 }
 
-/// Replicates `x-text/text-no-maxline-do-not-show-inline-truncation`
-/// (`web-elements/tests/fixtures/x-text/text-no-maxline-do-not-show-inline-truncation.html`,
-/// `web-elements/tests/web-elements.spec.ts:244`): truncation content is
-/// content only while the block is in the overflowing-maxline state. With no
-/// `text-maxline` the block is never in it, so the `inline-truncation` subtree
-/// is skipped rather than clipped — no width, no line box, no trailing
-/// whitespace — which the replica pins against the same paragraph written
-/// without the child.
-///
-/// On its own this test cannot tell the two reasons for that emptiness apart,
-/// and it would keep passing if the whole custom-truncation feature were
-/// deleted. web-core skips the subtree because the block is not in the
-/// overflowing-maxline state: `inline-truncation` starts at `display: none`
-/// (`XText/x-text.css:45-49`) and `XTextTruncation` lifts it with
-/// `x-show-inline-truncation` once a clamp is found to overflow
-/// (`XText/XTextTruncation.ts:194-204`, `x-text.css:96-100`). This engine
-/// reaches the same rendering without a state on the element: a `text`'s own
-/// `inline-truncation` child is always a text scope, and the paragraph engine
-/// decides whether to lay its content in
-/// (`TextBlock::truncation_visible`). So the assertion below is about the
-/// paragraph's measure rather than about a `display` toggle. Its positive
-/// twin, `truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows`,
-/// declares a `text-maxline` the same paragraph overflows.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
     const PARAGRAPH: &str = "width: 200px; font-size: 16px";
@@ -1133,41 +776,8 @@ fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
     );
 }
 
-/// The style every custom-truncation replica below is written in: a 200px
-/// measure at 16px, breaking between characters, so a line holds exactly twelve
-/// em squares and a cut point is an exact number of them.
 const CLAMPED: &str = "width: 200px; font-size: 16px; word-break: break-all";
 
-/// The positive twin of
-/// `truncation_content_is_skipped_entirely_when_no_maxline_is_declared`
-/// (`web-elements/tests/fixtures/x-text/text-no-maxline-do-not-show-inline-truncation.html`,
-/// `web-elements/tests/web-elements.spec.ts:244`), and the tree-layer carrier
-/// of the custom-truncation gap: the same paragraph with a `text-maxline` it
-/// overflows, where web-core lays the `inline-truncation` content in at the
-/// clamp.
-///
-/// web-core reaches that through a state rather than a fixed rule.
-/// `inline-truncation` is `display: none` to begin with
-/// (`XText/x-text.css:45-49`); `XTextTruncation` sets `x-show-inline-truncation`
-/// on the host once the clamp is found to overflow
-/// (`XText/XTextTruncation.ts:194-204`), which switches the subtree to
-/// `display: inline-flex` (`x-text.css:96-100`). The same pass moves the cut:
-/// the last visible line's kept end walks back from `end - 1` until the
-/// discarded tail is at least as wide as the truncation content
-/// (`XTextTruncation.ts:205-232`), and the content is laid in there with no
-/// dots beside it — `::part(inner-box)::after` is emptied out for a block that
-/// has an `inline-truncation` child (`x-text.css:196-201`).
-///
-/// The numbers follow from that. Twelve em squares fill the 200px measure at
-/// 16px; the truncation content is one 32x22 image, two squares wide. One
-/// square is not enough to cover it and two are exactly enough, so the cut
-/// retreats by two and the image takes the 160..192 they vacated.
-///
-/// The fixture's indentation is dropped, as in the atomic-inline replicas:
-/// this case's claim is an absolute placement, and the module-level
-/// leading-space divergence would move it. The clamped line's own *height* is
-/// left out as the inline-image replicas leave it out: this case's claim is
-/// where the content is laid in.
 #[test]
 fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
     let mut document = ahem_document();
@@ -1203,26 +813,6 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
     );
 }
 
-/// Replicates `x-text/text-maxline-with-custom-truncation`
-/// (`web-elements/tests/fixtures/x-text/text-maxline-with-custom-truncation.html`,
-/// `web-elements/tests/web-elements.spec.ts:226`) at the tree layer: five
-/// paragraphs holding the same run and the same `inline-truncation` child, the
-/// first with no `text-maxline` and the rest clamped to 1, 2, 4 and 6 lines.
-/// The unclamped one never shows the content; each clamped one shows it at the
-/// end of its last visible line, inside the block's width, with no dots.
-///
-/// The fixture reaches its line structure with `word-break: break-all` over a
-/// run of mixed sizes and letter-spacings; the replica keeps the break-all and
-/// makes every unit one Ahem em square, so a line is twelve squares and the
-/// retreat is countable. The freed-unit arithmetic over the fixture's *own*
-/// mixed runs is not re-derived here — `crates/seldon`'s replica of this same
-/// fixture owns it. What this layer adds is the wiring: whether an
-/// `inline-truncation` written in the tree reaches the paragraph at all.
-///
-/// Each clamped block measures the full 192 that an unclamped line measures:
-/// the two squares the retreat freed are exactly the two the 32px content
-/// occupies. Three dots beside it would have to come out of a further retreat,
-/// and the golden shows none.
 #[test]
 fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
     let mut document = ahem_document();
@@ -1292,25 +882,6 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
     );
 }
 
-/// The whole `inline-truncation` path through the real UA sheet and the real
-/// attribute reflection, on a paragraph whose *clamp line* is its widest — so
-/// the marker's own advance is what the block's ink reports.
-///
-/// The three paragraphs share a 100px measure at 20px and the run
-/// `aa bbbbb ccccc ddddd eeeee`, which breaks to a 40px first line and a 100px
-/// second. Under `text-maxline="2"`:
-///
-/// - with a marker, the cut retreats the two-unit minimum off the second line and lays the marker's
-///   one square in, so the line is three kept squares plus it — 80;
-/// - with no marker the second line keeps all five squares — 100, which is also what the paragraph
-///   measures with nothing to clamp;
-/// - and a paragraph that fits inside the clamp is identical to the same paragraph with no marker
-///   written in it at all.
-///
-/// A second `inline-truncation` child is written into the first block on
-/// purpose: web-core honours only the first (`XTextTruncation.ts` queries
-/// `:scope > inline-truncation` and takes `[0]`), and a second one that leaked
-/// into the content flow would add a square to the measure.
 #[test]
 fn a_maxline_clamp_lays_its_first_inline_truncation_child_in_at_the_cut() {
     const MEASURE: &str = "width: 100px; font-size: 20px";
@@ -1355,30 +926,6 @@ fn a_maxline_clamp_lays_its_first_inline_truncation_child_in_at_the_cut() {
     );
 }
 
-/// Replicates `x-text/truncation-first-element-is-image`
-/// (`web-elements/tests/fixtures/x-text/truncation-first-element-is-image.html`,
-/// `web-elements/tests/web-elements.spec.ts:385`) at the tree layer: the first
-/// unit of the run is a replaced box rather than text, and the truncation
-/// content is itself a run plus a replaced box. The leading image survives at
-/// the head of line 1 while the retreat consumes only the tail of the last
-/// visible line, and both halves of the truncation content land inside the
-/// block's width.
-///
-/// The fixture's CJK run becomes Ahem em squares under `word-break: break-all`,
-/// which breaks between units the way the CJK run does, and its 更多 label
-/// becomes a two-square run at the same 14px and the same declared 22px
-/// `line-height`. That declaration matters since the parley 0.12 upgrade,
-/// whose CSS 2.2 §10.8.1 line boxes give each span its own box: inherited at
-/// 32px, the 14px label's half-leading would reach 3px further below the
-/// baseline than the 24px run's and grow the clamp line to 35. One thing the
-/// fixture carries is left out: the leading image's 4px `margin-right`,
-/// because an atom's margin never reaching the line is a separate filed gap
-/// (`a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin`).
-///
-/// Numbers: a 300px measure at 24px, so line 1 holds the 32px image and eleven
-/// squares and the lines under it hold twelve. The truncation content is 40
-/// wide — two 14px squares and a 12x12 icon — so the retreat gives up two 24px
-/// units of line 3, and the content occupies 240..280 of it.
 #[test]
 fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
     let mut document = ahem_document();
@@ -1429,18 +976,6 @@ fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
     );
 }
 
-/// Replicates `x-text/text-maxline-with-padding`
-/// (`web-elements/tests/fixtures/x-text/text-maxline-with-padding.html`,
-/// `web-elements/tests/web-elements.spec.ts:252`): line clamping composes with
-/// the box model — the block is border-box sized, so padding narrows the inline
-/// measure before line breaking, the clamp counts lines in that narrowed
-/// measure, and the bottom padding still sits below the last line.
-///
-/// Geometry only, and padding is exactly what this case is about: whether the
-/// clipped remainder is painted over that padding belongs to `crates/terminus`. The
-/// fixture reaches its four lines with `word-break: break-all` over one long
-/// string; the replica reaches them with spaced words, so the break points are
-/// the ones every engine agrees on and the measure is what is under test.
 #[test]
 fn padding_narrows_the_measure_a_maxline_clamp_counts_lines_in() {
     let mut document = ahem_document();
@@ -1470,30 +1005,6 @@ fn padding_narrows_the_measure_a_maxline_clamp_counts_lines_in() {
     );
 }
 
-/// Replicates `x-text/text-maxline-1-instrict-size`
-/// (`web-elements/tests/fixtures/x-text/text-maxline-1-instrict-size.html`,
-/// `web-elements/tests/web-elements.spec.ts:340`): `text-maxline="1"` caps the
-/// block's max inline size to the parent's available content width, even where
-/// the block is a cross-axis-centred column flex item whose max-content size is
-/// far wider. Without the cap the block sizes to max-content and paints outside
-/// its 88px parent.
-///
-/// The fixture's ten CJK glyphs become ten Ahem em squares, which carry the
-/// same per-glyph advance.
-///
-/// This does not hold here, and the cause is a ruling rather than an unbuilt
-/// feature. The user ruled on 2026-09-15 that `text-maxline="1"` follows
-/// native Lynx, where it is a one-line clamp of the paragraph as it normally
-/// wraps: Android builds the `StaticLayout` at the available width and calls
-/// `setMaxLines(1)` (`shouldBeSingleLine()`, lynx's
-/// `.../behavior/shadow/text/TextRenderer.java:181-184,231-245`), and iOS
-/// gives a container of the same size a `maximumNumberOfLines`
-/// (`.../ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`).
-/// Neither forces `white-space: nowrap` and neither caps the box at what the
-/// parent offers, so web-core's `x-text[text-maxline="1"]`
-/// nowrap/`-webkit-fill-available` pair (`x-text.css:216-241`) is not
-/// replicated: the block wraps first and keeps the one line the clamp allows,
-/// ending up as wide as that line — 80 rather than 88.
 #[test]
 #[ignore = "DEVIATION, not a missing feature: this engine follows native \
             Lynx, by the user's ruling of 2026-09-15. `text-maxline=\"1\"` is \
@@ -1529,31 +1040,6 @@ fn a_single_line_clamp_caps_the_block_to_its_parent_s_available_width() {
     );
 }
 
-/// Replicates `x-text/text-maxlength-with-raw-text`
-/// (`web-elements/tests/fixtures/x-text/text-maxlength-with-raw-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:406`): a `raw-text` is transparent
-/// to the character-index run — its payload joins the parent block's run
-/// directly, so `text-maxlength="5"` cuts inside the payload rather than at the
-/// carrier's boundary. The transparency is the fixture's claim, and it holds.
-///
-/// Where the cut's marker is concerned this engine deliberately diverges from
-/// *both* references. web-core renders `12345...`: the marker is unconditional
-/// there — `x-text[text-maxlength]::part(inner-box)::after` carries
-/// `content: "..."` outright (`x-text.css:191-194`), and `text-overflow` is
-/// consulted for neither truncation attribute (it appears nowhere in
-/// `XTextTruncation.ts`, which observes only `text-maxlength`, `text-maxline`
-/// and `tail-color-convert`). Native Lynx appends it unconditionally too, and
-/// says so verbatim — "Ellipsis will be appended disregarding the overflowing
-/// mode." (Android `TextRenderer.java:126-135`). This engine instead gates the
-/// marker on `text-overflow: ellipsis`
-/// (`crates/seldon/src/text/block/truncate.rs:135`), which the initial value
-/// `clip` and the Lynx UA sheet's silence leave unset here, so the fixture
-/// renders `12345` bare. That gating is the intended behavior under the
-/// 2026-09-14 ruling — a Lynx-vello-specific behavior matching neither
-/// reference, recorded rather than normalised away.
-///
-/// `a_maxlength_cut_shows_the_tail_once_text_overflow_is_ellipsis` is the same
-/// fixture with the gate opened, and is what reproduces web-core's `12345...`.
 #[test]
 fn a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five() {
     let mut document = ahem_document();
@@ -1582,16 +1068,6 @@ fn a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five() {
     );
 }
 
-/// The gated-open counterpart of
-/// `a_maxlength_cut_inside_a_raw_text_payload_lands_bare_at_the_kept_five`: the
-/// same fixture with `text-overflow: ellipsis` declared, which is the one state
-/// in which this engine emits the marker
-/// (`crates/seldon/src/text/block/truncate.rs:135`).
-///
-/// This is what web-core renders for the fixture *unconditionally*, and pinning
-/// it here keeps the marker machinery covered: without this test a regression
-/// that stopped emitting markers at all would read as the ruled behavior
-/// everywhere and go unnoticed.
 #[test]
 fn a_maxlength_cut_shows_the_tail_once_text_overflow_is_ellipsis() {
     let mut document = ahem_document();
@@ -1619,15 +1095,6 @@ fn a_maxlength_cut_shows_the_tail_once_text_overflow_is_ellipsis() {
     );
 }
 
-/// Replicates `x-text/text-maxline-with-raw-text`
-/// (`web-elements/tests/fixtures/x-text/text-maxline-with-raw-text.html`,
-/// `web-elements/tests/web-elements.spec.ts:413`): `raw-text` is transparent to
-/// inline layout and to line clamping, so the flattened run — and therefore the
-/// clamp point — is identical to the same content authored as bare text nodes.
-///
-/// A carrier additionally inherits `white-space-collapse: preserve-breaks`,
-/// which is inert for these payloads and is exactly why it has to be flattened
-/// rather than treated as an atomic inline box.
 #[test]
 fn wrapping_every_string_in_a_raw_text_changes_neither_the_runs_nor_the_clamp() {
     const PARAGRAPH: &str = "width: 300px; font-size: 14px";
@@ -1671,23 +1138,6 @@ fn wrapping_every_string_in_a_raw_text_changes_neither_the_runs_nor_the_clamp() 
     assert_eq!(frame(&document, carried).3, frame(&document, bare).3);
 }
 
-/// Replicates `x-text/text-sizing-in-flex-container`
-/// (`web-elements/tests/fixtures/x-text/text-sizing-in-flex-container.html`,
-/// `web-elements/tests/web-elements.spec.ts:258`): a text block used as a flex
-/// item in a centred row sizes to the max-content width of its run — it neither
-/// stretches to the container nor wraps — and its trailing whitespace adds no
-/// advance.
-///
-/// The fixture's six CJK glyphs become six Ahem em squares. The button's
-/// background and radius are paint. `rounded_layout` snaps the centred item's
-/// half-pixel cross offset to the device grid, which is why the y is 12 and not
-/// the 11.5 the unrounded box carries.
-///
-/// The fixture's markup indentation is written the way a compiled card
-/// carries it — what the browser's collapsing leaves of it, as literal text —
-/// because a `<text>` keeps its text verbatim (module doc). The trailing
-/// space that collapsing leaves still hangs, as native Lynx hangs trailing
-/// whitespace.
 #[test]
 fn a_text_block_as_a_flex_item_sizes_to_its_run_and_is_centred_not_stretched() {
     let mut document = ahem_document();
@@ -1720,26 +1170,6 @@ fn a_text_block_as_a_flex_item_sizes_to_its_run_and_is_centred_not_stretched() {
     );
 }
 
-/// Replicates `text/nest-text`
-/// (`web-tests/dist/basic-element-text-nest-text/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2584`): a block `text` holding a
-/// nested inline `text` of a different colour and a long trailing run, clamped
-/// to one line.
-///
-/// `ellipsize-mode="tail"` is written for fidelity and is inert here — the
-/// engine reflects `text-maxline` and `text-maxlength` alone
-/// (`crates/bobcat-core/src/main/tree/text.rs:26-31`) — and it asks for nothing
-/// web-core does not already do, tail being its only behaviour. The clamp
-/// marker itself is not observable through this crate's surface, since a full
-/// clamped line measures the same width with or without it; the marker is
-/// pinned in `crates/seldon`.
-///
-/// This is the card's style half, which holds today. Its geometric half — that
-/// a one-line clamp does not wrap at all in web-core, so the kept line runs to
-/// the width the parent offers instead of stopping at the last word boundary
-/// that fit — is
-/// `a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word`,
-/// split out so that a passing colour claim can never stand in for it.
 #[test]
 fn a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight() {
     let mut document = ahem_document();
@@ -1772,34 +1202,6 @@ fn a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight() {
     );
 }
 
-/// The geometric half of `text/nest-text`
-/// (`web-tests/dist/basic-element-text-nest-text/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2584`): what `text-maxline="1"` does
-/// to the block's own measure before any marker is drawn.
-///
-/// web-core's single-line clamp is not "wrap, then keep line one". The
-/// stylesheet puts `white-space: nowrap` (with `text-overflow: ellipsis`) on
-/// `::part(inner-box)` for `text-maxline="1"` (`x-text.css:216-230`) and
-/// `max-width: -webkit-fill-available` on the host (`x-text.css:232-237`), so
-/// the paragraph never breaks: the one line runs to the width the parent
-/// offers — the page's 393 here — and is ellipsized at that edge.
-///
-/// This engine's is, and that is a ruling rather than an unbuilt feature. The
-/// user ruled on 2026-09-15 that `text-maxline="1"` follows native Lynx,
-/// which clamps the paragraph as it normally wraps to one line — Android's
-/// `StaticLayout` is built at the available width and told `setMaxLines(1)`
-/// (`shouldBeSingleLine()`, lynx's
-/// `.../behavior/shadow/text/TextRenderer.java:181-184,231-245`), iOS gives a
-/// container of the same size a `maximumNumberOfLines`
-/// (`.../ios/lynx/shadow_node/text/LynxTextRenderer.m:1009-1031`) — so the
-/// measure stops at the last word boundary that fit and web-core's
-/// nowrap/fill-available pair is not replicated.
-///
-/// Split out of `a_one_line_clamp_keeps_the_nested_run_s_colour_and_the_parent_s_weight`
-/// so that the card's style claim, which holds, stays in CI while this
-/// geometric half carries the divergence. The box cap is the same one
-/// `a_single_line_clamp_caps_the_block_to_its_parent_s_available_width` names
-/// from the other side.
 #[test]
 #[ignore = "DEVIATION, not a missing feature: this engine follows native \
             Lynx, by the user's ruling of 2026-09-15. `text-maxline=\"1\"` is \
@@ -1824,12 +1226,6 @@ fn a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word() {
     set_limit(&mut document, text, "text-maxline", "1");
     document.layout();
 
-    // `ink` is the shaped paragraph, so the expectation is glyph-quantised:
-    // Ahem's 24px em square fits 16 whole units in the 393 the page offers, and
-    // 393 itself is unreachable on this surface. 384 is what distinguishes a
-    // line that ran to the edge and was ellipsized from today's word-boundary
-    // break. The 393 cap itself is a box property, asserted through `frame` by
-    // `a_single_line_clamp_caps_the_block_to_its_parent_s_available_width`.
     assert_eq!(
         ink(&document, text).0,
         384.0,
@@ -1838,47 +1234,6 @@ fn a_one_line_clamp_fills_the_available_width_instead_of_breaking_at_a_word() {
     );
 }
 
-/// Replicates `text/baseline`
-/// (`web-tests/dist/basic-element-text-baseline/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2590`): the compiled `ReactLynx` form of
-/// the baseline case — two sibling block `text` elements whose runs arrive as
-/// `text` attributes, then one `text` holding two inline runs whose strings
-/// arrive as `raw-text` children.
-///
-/// Both spellings appear in one card because the compiler picks between them by
-/// whether the string is a static child or a nested element's content. The
-/// replica keeps both; the same baseline claim written with literal text is
-/// `runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not`.
-///
-/// The two attribute blocks do not stack: the card writes
-/// `__SetInlineStyles(l, "display:flex;")` on the `view` that holds them, so
-/// they are flex items in a row and sit side by side. They do **not** get their
-/// max-content widths, and nothing in the card's own numbers survives
-/// unshrunk — the card's viewport is a phone, the same 393px this document
-/// carries (`playwright-fixtures/src/playwright.common.ts:60-66`: Pixel 5 for
-/// chromium, iPhone 12 Pro for webkit), and the card's outer `view` is a flex
-/// row holding two 310px groups. Resolving that by CSS flexbox 9.7:
-///
-/// - The outer row is 393 and its two groups have equal 310px shrink factors, so each loses half
-///   the 227px deficit: 196.5.
-/// - Inside the attribute group, `hello world` (220) and `111` (90) shrink in proportion to their
-///   bases, and neither has a floor to freeze at: `web-elements`' common block gives `x-text`
-///   `min-width: 0` (`common-css/linear.css`), and so does this UA sheet. `hello world` loses 113.5
-///   x 220/310 and lands at 139.45, which this engine rounds to 139; `111` lands at 57.05.
-/// - `hello world` at 139.45 keeps `hello` on line one and `world` on line two, so its paragraph
-///   ink is 100 wide and two 20px lines tall. `111` at 57.05 fits one 30px glyph per line, so it
-///   breaks into three lines: ink 30 x 90.
-/// - The inline group is 196.5 too, and its paragraph's two runs are written back to back with no
-///   whitespace, so `world111` is one unbreakable 190px unit: `hello` on line one, `world111` on
-///   line two, ink 190 x (20 + 30).
-///
-/// The baseline claim the case exists for is the last line of that paragraph:
-/// a 20px run and a 30px run hang from one baseline, so the line is the larger
-/// run's 30px em box rather than the sum of the two.
-///
-/// Held only from `d19cbea2` (#227) on. Before it a `text` attribute on a
-/// `text` element was inert — only `raw-text` reflected one — so both attribute
-/// blocks measured zero and none of this was reachable.
 #[test]
 fn the_compiled_baseline_card_rows_its_blocks_and_shares_one_run_baseline() {
     let mut document = ahem_document();
@@ -1919,18 +1274,6 @@ fn the_compiled_baseline_card_rows_its_blocks_and_shares_one_run_baseline() {
     );
 }
 
-/// Replicates `text/nest-image`
-/// (`web-tests/dist/basic-element-text-nest-image/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2611`): an `image` nested in a `text`
-/// as an atomic inline box — a fixed 22x22 used size with a 10px left margin,
-/// placed straight after the run, with no collapsed space between them because
-/// the compiled card appends the two children back to back.
-///
-/// The asset is a 162x162 PNG drawn at 22x22, and the used size wins: an
-/// `image` box is CSS-sized, never bitmap-sized. Whether the bitmap is drawn is
-/// paint. The margin reaches the line from the atom-placement pass on: phase 2
-/// of `compute_text_block_layout` hands the paragraph the atom's margin box,
-/// and placement steps the border box back in by the same margin.
 #[test]
 fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
     let mut document = ahem_document();
@@ -1956,27 +1299,6 @@ fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
     );
 }
 
-/// Replicates `text/nest-view`
-/// (`web-tests/dist/basic-element-text-nest-view/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2617`): a padded, bordered, rounded
-/// `view` nested in a `text` as an atomic inline box, holding a `text` of its
-/// own, with raw strings flowing before and after it.
-///
-/// Geometry only: the border, its radius and the inner run's gradient fill are
-/// paint. The paragraph carries an explicit width because the card's viewport
-/// is wider than this document's phone, and the width is what preserves the
-/// fixture's single line.
-///
-/// The atom's vertical placement in the line is left out, as in the other
-/// atomic-inline replicas: this case's claim is the advance and the shared
-/// line, and the CSS 2.2 §10.8.1 placement parley 0.13 gives a baseline-aligned
-/// box is pinned by `crates/seldon/tests/text_block.rs`.
-///
-/// Held only from `d19cbea2` (#227) on: before it an atom's subtree was only
-/// ever measured, so a text block nested inside an atom committed no paragraph
-/// at all and the inner run measured zero. The inner `text` carries its run as
-/// a `text` attribute, which the same commit made live — see
-/// `a_text_attribute_on_a_text_element_carries_the_paragraph_s_run`.
 #[test]
 fn a_padded_view_nested_in_a_text_is_an_atom_the_surrounding_runs_flow_around() {
     let mut document = ahem_document();
@@ -2024,15 +1346,6 @@ fn a_padded_view_nested_in_a_text_is_an_atom_the_surrounding_runs_flow_around() 
     );
 }
 
-/// Replicates `text/with-new-line`
-/// (`web-tests/dist/basic-element-text-with-new-line/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2636`): a literal `\n` inside a
-/// `raw-text` child of a `text` forces a hard line break — Lynx text does not
-/// collapse it the way HTML's `white-space: normal` would.
-///
-/// This is the compiled shape of a *dynamic* string child: it becomes
-/// `__CreateRawText`. A static one becomes a `text` attribute instead, which
-/// `a_text_attribute_on_a_text_element_carries_the_paragraph_s_run` covers.
 #[test]
 fn a_literal_newline_in_a_dynamic_string_child_breaks_the_line() {
     let mut document = ahem_document();
@@ -2047,20 +1360,6 @@ fn a_literal_newline_in_a_dynamic_string_child_breaks_the_line() {
     );
 }
 
-/// Replicates `text/maxline`
-/// (`web-tests/dist/basic-element-text-maxline/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2718`): three `text` blocks carrying
-/// the same wrapping paragraph at `text-maxline` 1, 2 and unset, stacked in a
-/// column.
-///
-/// The default tail marker is unconditional in web-core: for `text-maxline >= 2`
-/// the stylesheet sets `-webkit-line-clamp`, and for `text-maxline == 1` it
-/// declares `text-overflow: ellipsis; white-space: nowrap` on the inner box
-/// itself (`x-text.css:207-241`). Neither consults the author's `text-overflow`.
-/// Held only from `d19cbea2` (#227) on: before it only `raw-text` reflected a
-/// `text` attribute into a run, so a `text` element's own attribute was inert
-/// and the block measured zero. #227 renders `text[text] { content: attr(text) }`
-/// from the element's primary computed style.
 #[test]
 fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
     const PARA: &str = "The layout of the text component is different from that of the view \
@@ -2103,25 +1402,6 @@ fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
     );
 }
 
-/// Replicates `text/display-none`
-/// (`web-tests/dist/basic-element-text-display-none/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2742`): `display: none` on a block
-/// `text` and on an inline run inside one — both leave layout entirely, and the
-/// card renders nothing at all.
-///
-/// The card's first pair carries its strings as `text` attributes; the replica
-/// writes them as the `raw-text` the dynamic path compiles to, so that lifting
-/// the declaration is a real control. The attribute spelling itself is pinned
-/// by `a_text_attribute_on_a_text_element_carries_the_paragraph_s_run`.
-///
-/// Both engines fix a text's inline-ness, but at different layers: native
-/// rewrites the tag outright (`TextElement::ConvertToInlineElement`,
-/// `lynx/core/renderer/dom/fiber/text_element.cc:196-205`), while web-core
-/// spells it as ordinary author-origin CSS (`x-text { display: flex }`,
-/// `x-text.css:7-13`, with no `!important`), so the card's inline
-/// `display: none` outranks it there. This engine fixes it by the element's
-/// kind and writes no `display` for a text, so the declaration the card
-/// writes hides a text here as well.
 #[test]
 fn display_none_removes_a_text_block_and_an_inline_run_alike() {
     let mut document = ahem_document();
@@ -2186,20 +1466,6 @@ fn display_none_removes_a_text_block_and_an_inline_run_alike() {
     );
 }
 
-/// Replicates `text/color`
-/// (`web-tests/dist/basic-element-text-color/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2881`): two equal-specificity class
-/// rules on one `text`, where the later one in the sheet wins both the
-/// `font-size` and a gradient `color` over a solid one — the class attribute's
-/// own order decides nothing.
-///
-/// The card writes its string as a `text` attribute on the `text`; the replica
-/// writes the same string as the `raw-text` the
-/// dynamic path compiles to, so the golden's shaped half — ten glyphs at the
-/// winning rule's 80px, not its 16px — is a real claim rather than a computed
-/// style read over an empty paragraph. Ahem's em square makes those ten glyphs
-/// 800px wide, so the paragraph carries the explicit width that keeps the
-/// golden's single line.
 #[test]
 fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
     let mut document = ahem_document();
@@ -2231,28 +1497,6 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
     );
 }
 
-/// Replicates `reactlynx/basic-color-not-inherit`
-/// (`web-core-e2e/tests/reactlynx/basic-color-not-inherit/index.jsx`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:1401`): a `view` with `color: red`
-/// does not pass that colour into a `text` child, which resolves to the black
-/// initial value.
-///
-/// The original asserts `toHaveCSS('color', 'rgb(0, 0, 0)')` on the text. The
-/// mechanism is web-core's own: web-elements' `x-text { color: initial }`
-/// (`x-text.css:12`) stops the browser's inheritance at the text root, and the
-/// UA `text { color: initial }` here ([`super::text::UA_RULES`]) is that
-/// declaration. The card is built without `enableCSSInheritance`, and since
-/// lynx-stack #3907 (`8d0b358bf`) that is a condition of the result under
-/// web-core too: with the switch on, web-core's
-/// `[lynx-enable-css-inheritance="true"]` rule overrides the reset for a `text`
-/// inside a `view`, and so does this engine's
-/// ([`super::text::CSS_INHERITANCE_RULES`]; the `config-css-inheritance`
-/// replicas below).
-///
-/// The card writes the string as a `text` attribute on the `text`; the replica
-/// writes it as the `raw-text` the dynamic path
-/// compiles to, so the colour being asserted is the colour of a paragraph that
-/// really holds a run.
 #[test]
 fn a_text_child_does_not_inherit_its_view_parent_s_colour() {
     let mut document = ahem_document();
@@ -2278,8 +1522,6 @@ fn a_text_child_does_not_inherit_its_view_parent_s_colour() {
     );
 }
 
-/// `web-core-e2e/tests/reactlynx/config-css-inheritance-true/index.css`, as
-/// the card writes it.
 const INHERITANCE_CARD_CSS: &str = "
 .typography {
   color: red;
@@ -2311,30 +1553,15 @@ const INHERITANCE_CARD_CSS: &str = "
 }
 ";
 
-/// The card's two gradients, as this engine's `color` serializes them.
-/// web-core lowers a gradient `color` to transparent glyphs over a clipped
-/// `background-image`, so its spec reads these out of `background-image`
-/// beside `color: rgba(0, 0, 0, 0)` and `background-clip: text`; here the
-/// gradient is the computed `color` itself, and those three assertions are
-/// this one.
 const RED_TO_BLUE: &str = "linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))";
 const GREEN_TO_BLUE: &str = "linear-gradient(rgb(0, 128, 0), rgb(0, 0, 255))";
 
-/// The three page configurations the fixture is built with: its
-/// `config-css-inheritance-true`, `-false` and `-default` cards, which share
-/// one `index.jsx`. Each is the card's name, the switch as the card's
-/// `rspeedy.config.ts` sets it, and whether the spec expects inheritance. The
-/// last sets none, which here is [`PageConfig::default`]; how a bundle's
-/// config string becomes the switch is `bobcat-source`'s to test
-/// (`web_bundle_css_inheritance_follows_the_page_config_string`).
 const INHERITANCE_CONFIGS: [(&str, Option<bool>, bool); 3] = [
     ("true", Some(true), true),
     ("false", Some(false), false),
     ("default", None, false),
 ];
 
-/// The elements of `config-css-inheritance-true/index.jsx` its spec reads,
-/// under the names the card's `id` attributes give them.
 struct InheritanceCard {
     document: LynxDocument,
     solid_parent: NodeId,
@@ -2347,7 +1574,6 @@ struct InheritanceCard {
     own_gradient: NodeId,
 }
 
-/// A `text` holding one run, with `class` when the card gives it one.
 fn card_text(document: &mut LynxDocument, parent: NodeId, class: &str, content: &str) -> NodeId {
     let text = element_under(document, parent, "text", "");
     if !class.is_empty() {
@@ -2357,7 +1583,6 @@ fn card_text(document: &mut LynxDocument, parent: NodeId, class: &str, content: 
     text
 }
 
-/// A `view` with the card's class on it.
 fn card_view(document: &mut LynxDocument, parent: NodeId, class: &str) -> NodeId {
     let view = element_under(document, parent, "view", "");
     if !class.is_empty() {
@@ -2366,10 +1591,6 @@ fn card_view(document: &mut LynxDocument, parent: NodeId, class: &str) -> NodeId
     view
 }
 
-/// Builds `config-css-inheritance-true/index.jsx`'s tree, less the `#update`
-/// button — the replica adds the `updated` class the button's handler sets —
-/// over a page config whose `enableCSSInheritance` is `switch`, or the default
-/// config for a card that sets none, and lays it out.
 fn inheritance_card(switch: Option<bool>) -> InheritanceCard {
     let mut config = PageConfig::default();
     if let Some(enabled) = switch {
@@ -2422,23 +1643,6 @@ fn inheritance_card(switch: Option<bool>) -> InheritanceCard {
     }
 }
 
-/// Replicates `reactlynx/config-css-inheritance-{true,false,default}`
-/// (`web-core-e2e/tests/reactlynx/config-css-inheritance-true/index.jsx`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:98-223`, lynx-stack #3907), the
-/// solid case: `#solid-text`, a `text` directly inside a `view` whose class
-/// sets every property web-core's inheritance rule lists.
-///
-/// With the switch on, the original asserts the eleven values below on the
-/// text, one `toHaveCSS` each. With it off or omitted it asserts the colour
-/// alone, `rgb(0, 0, 0)`.
-///
-/// The second half is this engine's own claim, and the reason
-/// [`super::text::CSS_INHERITANCE_RULES`] writes two declarations where
-/// web-core writes fourteen: with the switch off, nine of the eleven already
-/// reach the text, because they are inherited properties and nothing resets
-/// them at a text root — in this sheet or in web-elements'. Only `color`,
-/// which the text block resets, and `text-decoration-line`, which is not
-/// inherited, change with the switch.
 #[test]
 fn css_inheritance_gives_the_text_inside_a_view_the_view_s_typography() {
     const INHERITED_EITHER_WAY: [(&str, &str); 9] = [
@@ -2477,14 +1681,6 @@ fn css_inheritance_gives_the_text_inside_a_view_the_view_s_typography() {
     }
 }
 
-/// The same fixture's wrapper case: `#wrapped-text` and `#wrapped-gradient`,
-/// each a `text` inside a `wrapper` inside a `view`.
-///
-/// With the switch on the original asserts the red and the underline on the
-/// first and the gradient on the second; off or omitted, black and no
-/// gradient. The underline is what the rule's `view > wrapper` selector is
-/// for: `text-decoration` is not inherited, so the wrapper has to hold the
-/// view's value for the text to inherit it from.
 #[test]
 fn css_inheritance_reaches_a_text_through_a_wrapper() {
     for (setting, switch, enabled) in INHERITANCE_CONFIGS {
@@ -2513,13 +1709,6 @@ fn css_inheritance_reaches_a_text_through_a_wrapper() {
     }
 }
 
-/// The same fixture's nested case: `#nested-text`, a `text` inside the `text`
-/// that is inside the view.
-///
-/// The original asserts red with the switch on and black otherwise. The inner
-/// text is outside the switch's rule; it inherits from the outer one by the
-/// text block's own `text > text { color: inherit }`, which holds under every
-/// configuration, so its colour is whatever the outer text's is.
 #[test]
 fn css_inheritance_reaches_a_nested_text_through_its_parent_text() {
     for (setting, switch, enabled) in INHERITANCE_CONFIGS {
@@ -2537,17 +1726,6 @@ fn css_inheritance_reaches_a_nested_text_through_its_parent_text() {
     }
 }
 
-/// The same fixture's gradient case: `#gradient-text`, a `text` directly
-/// inside a `view` whose `color` is a gradient.
-///
-/// With the switch on the original asserts `color: rgba(0, 0, 0, 0)`,
-/// `background-image: linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))` and
-/// `background-clip: text` on the text and on its `inner-box` part — web-core's
-/// lowering of a gradient colour, which is why its rule also inherits
-/// `--lynx-text-bg-color` and both `background-clip` spellings. Here the
-/// gradient is the `color` value, so `color: inherit` alone inherits it, and
-/// the paragraph's run is painted with it. Off or omitted, the original
-/// asserts black and `background-image: none`.
 #[test]
 fn css_inheritance_inherits_a_view_s_gradient_colour() {
     for (setting, switch, enabled) in INHERITANCE_CONFIGS {
@@ -2569,15 +1747,6 @@ fn css_inheritance_inherits_a_view_s_gradient_colour() {
     }
 }
 
-/// The same fixture's override case: `#override-text`, a `text` inside the
-/// gradient view with a class of its own setting `color`, `font-size` and
-/// `text-decoration`.
-///
-/// The original asserts the text's own values under all three configurations
-/// — green, `background-image: none`, `background-clip: border-box`, `18px`,
-/// no decoration line. web-core gets there by keeping its rule's specificity
-/// under every authored selector; here the rule is user-agent origin, which
-/// every authored declaration outranks.
 #[test]
 fn an_authored_text_style_outranks_css_inheritance() {
     for (setting, switch, _) in INHERITANCE_CONFIGS {
@@ -2590,13 +1759,6 @@ fn an_authored_text_style_outranks_css_inheritance() {
     }
 }
 
-/// The same fixture's last static case: `#own-gradient`, a `text` with a
-/// gradient class of its own inside a view with a solid colour.
-///
-/// The original asserts the text's own gradient under all three
-/// configurations. With the switch on, the rule's value for it would be the
-/// view's red, so the gradient is the authored declaration outranking the
-/// rule.
 #[test]
 fn a_text_s_own_gradient_outranks_css_inheritance() {
     for (setting, switch, _) in INHERITANCE_CONFIGS {
@@ -2610,15 +1772,6 @@ fn a_text_s_own_gradient_outranks_css_inheritance() {
     }
 }
 
-/// The same fixture's update case: tapping `#update` adds the `updated` class
-/// to `#solid-parent`, which changes the view's `color` to a gradient and its
-/// `font-size` to `30px`.
-///
-/// With the switch on the original asserts both on `#solid-text` afterwards —
-/// `font-size: 30px`, and the gradient through web-core's lowering. Off or
-/// omitted it asserts the text is still black with no background image. The
-/// text's own style has not changed in either case: what is asserted is that
-/// the parent's class change restyles the child whose values inherit from it.
 #[test]
 fn css_inheritance_follows_a_change_of_the_view_s_style() {
     for (setting, switch, enabled) in INHERITANCE_CONFIGS {
@@ -2660,11 +1813,6 @@ fn css_inheritance_follows_a_change_of_the_view_s_style() {
     }
 }
 
-/// `text-decoration` is the one property of the rule that is not inherited
-/// by default, so a change of the view's value restyles the text only
-/// because the text's declaration is an explicit `inherit`. The fixture's
-/// update changes `color` and `font-size` alone; this is the same update for
-/// the remaining declaration, directly and through a wrapper.
 #[test]
 fn css_inheritance_follows_a_change_of_the_view_s_text_decoration() {
     let mut document = ahem_document_with(PageConfig {
@@ -2700,15 +1848,6 @@ fn css_inheritance_follows_a_change_of_the_view_s_text_decoration() {
     }
 }
 
-/// The scope of the switch is web-core's selector list and nothing wider:
-/// `x-view > x-text`, `x-view > lynx-wrapper`, `x-view > lynx-wrapper >
-/// x-text` (`web-core/css/in_shadow.css`). A `text` whose parent is any other
-/// container keeps the text block's reset with the switch on, and so does one
-/// behind two wrappers, whose own wrapper is not a view's child.
-///
-/// The fixture has no case for this; the claim is the rule's selector, read
-/// against the tags web-core maps to something other than `x-view` — `page`
-/// is its `div[part="page"]`, and a blur view is `x-blur-view`.
 #[test]
 fn css_inheritance_is_scoped_to_a_view_s_own_text_and_wrapper() {
     let mut document = ahem_document_with(PageConfig {
@@ -2746,12 +1885,6 @@ fn css_inheritance_is_scoped_to_a_view_s_own_text_and_wrapper() {
     }
 }
 
-/// The rule is user-agent origin, so an authored declaration outranks it
-/// whatever its selector's specificity — a bare type selector included, which
-/// is lower than the rule's own `view > text` — and so does an inline style.
-/// web-core reaches the same order by specificity: it extends every authored
-/// selector with `:not([l-e-name])`, which alone equals its rule's one
-/// attribute selector.
 #[test]
 fn every_authored_declaration_outranks_css_inheritance() {
     let mut document = ahem_document_with(PageConfig {

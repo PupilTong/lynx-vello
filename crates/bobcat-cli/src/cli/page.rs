@@ -17,7 +17,6 @@ use url::Url;
 
 use crate::cli::CliError;
 
-/// The disk tier the runner keeps under the user's cache directory.
 const DISK_CACHE_BUDGET: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -46,16 +45,10 @@ impl Program {
         })
     }
 
-    /// The sources of this program's view, reporting `screen` as its
-    /// `SystemInfo`, its text in `locale`'s language.
     pub(crate) fn sources(&self, screen: ScreenMetrics, locale: &str) -> ViewSources {
         self.source.view_sources(screen, locale)
     }
 
-    /// Builds this embedder's resource system and registers the script and
-    /// author CSS extracted from the input. Relative resource references use
-    /// the input URL as their base; everything else is fetched and decoded by
-    /// `bobcat-resources`.
     pub(crate) fn resources(&self, wakeup: impl Fn() + Send + Sync + 'static) -> Resources {
         self.resources_with(
             DiskCacheConfig::at_default_location(DISK_CACHE_BUDGET).as_ref(),
@@ -72,8 +65,6 @@ impl Program {
         let resources = Resources::with_platform(
             ResourcesConfig {
                 base_url: Some(self.source.input_url().clone()),
-                // Lazy bundles: a `lynx.fetchBundle` installs its sections
-                // through this, and without one every fetch fails.
                 container_installer: Some(std::sync::Arc::new(bobcat_source::BundleInstaller)),
                 ..ResourcesConfig::default()
             },
@@ -97,9 +88,6 @@ mod tests {
         Url::parse("file:///tmp/card.lynx.xml").expect("test URL")
     }
 
-    /// The extracted sources reach the reference resource system under their
-    /// private memory URLs, and the input URL is the base for the rest: the
-    /// fetcher's and the view's alike.
     #[test]
     fn the_program_registers_its_sources_with_the_resource_system() {
         let program = Program::from_bytes(
@@ -110,7 +98,6 @@ mod tests {
         .expect("valid XML program");
         let resources = program.resources_with(None, || {});
         assert_eq!(resources.base_url(), Some(input_url()));
-        // The view resolves against the base the fetcher was given.
         let screen = ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
         assert_eq!(
             Some(program.sources(screen, "en-US").base_url),

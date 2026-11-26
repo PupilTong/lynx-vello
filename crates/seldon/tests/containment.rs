@@ -27,21 +27,15 @@ fn size_contained(mut style: TestStyle, width: f32, height: f32) -> TestStyle {
     style
 }
 
-/// `contain: inline-size` — single-axis size containment, which in this
-/// horizontal-writing-mode engine is the width.
 fn inline_size_contained(mut style: TestStyle, width: Option<f32>) -> TestStyle {
     style.containment = Contain::INLINE_SIZE;
     if let Some(width) = width {
         style.contain_intrinsic_width = contain_intrinsic_px(width);
     }
-    // Deliberately set: an uncontained axis must not read it.
     style.contain_intrinsic_height = contain_intrinsic_px(7.0);
     style
 }
 
-/// The same containment reached through css-contain-3 instead: a size query
-/// container is contained because it is a query container, with no `contain`
-/// of its own.
 fn query_container(mut style: TestStyle, container_type: ContainerType) -> TestStyle {
     style.container_type = container_type;
     style
@@ -340,8 +334,6 @@ fn two_baseline_child(tree: &mut TestTree) -> TestId {
     tree.push_baseline_leaf(style, Size::new(40.0, 20.0), Some(6.0), Some(16.0))
 }
 
-/// Layout containment suppresses both baseline sets wherever a container
-/// exports them (css-contain-2 §3.2).
 #[test]
 fn layout_containment_suppresses_the_exported_last_baseline() {
     let mut tree = TestTree::default();
@@ -367,9 +359,6 @@ fn layout_containment_suppresses_the_exported_last_baseline() {
     );
 }
 
-/// Starlight's `linear` and `relative` have no last baseline (native Lynx
-/// aligns by none), so they export none: a `last baseline` parent
-/// synthesizes one from their border boxes.
 #[test]
 fn lynx_layouts_export_no_last_baseline() {
     let mut tree = TestTree::default();
@@ -512,9 +501,6 @@ fn skipped_to_normal_transition_lays_children_out_again() {
     assert_size(tree.layout(child).size, Size::new(30.0, 20.0));
 }
 
-/// A skipped box's size is an ordinary cached answer: it reads no child, so a
-/// host that has not invalidated it gets the answer it stored, exactly as it
-/// would from any algorithm.
 #[test]
 fn a_skipped_box_serves_its_size_from_the_cache() {
     let mut tree = TestTree::default();
@@ -524,8 +510,6 @@ fn a_skipped_box_serves_its_size_from_the_cache() {
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     assert_size(output.size, Size::new(40.0, 24.0));
 
-    // The style moves under the engine with no invalidation behind it — the
-    // one thing a cache is allowed not to notice.
     tree.source_node_mut(container).style = skipped_style(90.0, 50.0);
     let cached = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     assert_size(cached.size, Size::new(40.0, 24.0));
@@ -535,14 +519,6 @@ fn a_skipped_box_serves_its_size_from_the_cache() {
     assert_size(recomputed.size, Size::new(90.0, 50.0));
 }
 
-/// And the other half is *not* cached: the box tree can change under a cache
-/// hit, so every committing call hides the contents again.
-///
-/// The child here arrives with a box of its own and nothing invalidates the
-/// container, which is the shape a host produces whenever it does not treat
-/// every subtree edit as an invalidation of the box above it. Serving the
-/// hide from the cache would leave that box live under a skipped ancestor,
-/// where no algorithm will ever revisit it.
 #[test]
 fn a_cache_served_skipped_box_still_hides_a_child_added_under_it() {
     let mut tree = TestTree::default();
@@ -578,7 +554,6 @@ fn flex_inline_size_containment_substitutes_only_the_width() {
 
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
 
-    // The width is the substitute; the height is still the children's.
     assert_size(output.size, Size::new(50.0, 100.0));
     assert_size(tree.layout(child).size, Size::new(200.0, 100.0));
 }
@@ -598,8 +573,6 @@ fn flex_inline_size_containment_without_an_intrinsic_width_is_zero_wide() {
 
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
 
-    // "as if it had no contents", and no `contain-intrinsic-width` to stand in
-    // for them.
     assert_size(output.size, Size::new(0.0, 100.0));
     assert_size(tree.layout(child).size, Size::new(200.0, 100.0));
 }
@@ -619,7 +592,6 @@ fn a_size_query_container_is_contained_by_its_container_type_alone() {
         ..TestStyle::default()
     };
 
-    // `container-type: inline-size` contains the width and nothing else.
     let (tree, container) = build(query_container(
         intrinsic.clone(),
         ContainerType::INLINE_SIZE,
@@ -627,7 +599,6 @@ fn a_size_query_container_is_contained_by_its_container_type_alone() {
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     assert_size(output.size, Size::new(50.0, 100.0));
 
-    // `container-type: size` is `contain: size`.
     let (tree, container) = build(query_container(intrinsic.clone(), ContainerType::SIZE));
     let by_container_type = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     let (tree, container) = build(size_contained(TestStyle::default(), 50.0, 30.0));
@@ -635,7 +606,6 @@ fn a_size_query_container_is_contained_by_its_container_type_alone() {
     assert_size(by_container_type.size, Size::new(50.0, 30.0));
     assert_size(by_container_type.size, by_contain.size);
 
-    // `container-type: normal` contains nothing: the children size the box.
     let (tree, container) = build(query_container(intrinsic, ContainerType::NORMAL));
     let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
     assert_size(output.size, Size::new(200.0, 100.0));
@@ -696,8 +666,6 @@ fn leaf_inline_size_containment_measures_the_contents_into_the_contained_width()
     let leaf = tree.push_measured_leaf(
         inline_size_contained(TestStyle::default(), Some(50.0)),
         |input| {
-            // The contents lay out into the substituted width, and what they
-            // make of it is the height.
             LeafMetrics::new(Size::new(
                 999.0,
                 input.known_dimensions.width.unwrap() * 2.0,
@@ -714,9 +682,6 @@ fn leaf_inline_size_containment_measures_the_contents_into_the_contained_width()
 #[test]
 fn leaf_block_size_containment_substitutes_the_height_and_drops_the_baseline() {
     let mut tree = TestTree::default();
-    // `block-size` is internal to the fork's grammar — no keyword produces it
-    // on its own — but the bit is per-axis, so the engine answers it the same
-    // way it answers `inline-size` with the axes exchanged.
     let style = TestStyle {
         containment: Contain::BLOCK_SIZE,
         contain_intrinsic_height: contain_intrinsic_px(30.0),

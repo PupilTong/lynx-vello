@@ -89,31 +89,19 @@ use crate::page::{
 use crate::web::style_info::{self, AlignedSection};
 use crate::web::{DecodeError, Sections};
 
-/// What a [`ContainerInstaller`] registers through, over this crate's
-/// stylesheet type.
 pub(crate) type Registrar = vant::registry::Registrar<PreparsedStyleSheet>;
 
-/// The Lepus chunk a container's entry is.
 pub(crate) const ROOT: &str = "root";
-/// The section name a lazy container's MTS body carries, and the suffix
-/// `native::decode` sorts a main-thread source by.
 const MAIN_THREAD_SECTION: &str = "main-thread";
 const MAIN_THREAD_SUFFIX: &str = "__main-thread";
 const SCRIPT_MEDIA_TYPE: &str = "text/javascript; charset=utf-8";
 
-/// One decoded container: every body and stylesheet it carries, at the URL
-/// each answers under, and what a view booting it as a page is built from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContainerSources {
     url: Url,
     target: BundleTarget,
-    /// Every script body, ordered by URL, as the text registered for it.
     scripts: Vec<(Url, Arc<str>)>,
-    /// One named stylesheet per CSS custom section, ordered by URL: an entry
-    /// of the `CustomSectionsStyleInfo` section, a legacy `encoding: "CSS"`
-    /// JSON section, or a `.lynx.bundle`'s CSS custom section.
     style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
-    /// The container's own `StyleInfo`, lowered, when it holds any rule.
     style_info: Option<(Url, Arc<PreparsedStyleSheet>)>,
     entry: Option<Url>,
     background_entry: Option<Url>,
@@ -121,16 +109,6 @@ pub struct ContainerSources {
 }
 
 impl ContainerSources {
-    /// Decodes one container's bytes, sniffing which of the two encodings
-    /// they are. The entry is the Lepus chunk named `root`; a container
-    /// without one — a lazy bundle, a native external module — has no entry.
-    ///
-    /// # Errors
-    ///
-    /// [`SourceError::NotAContainer`] for Lynx XML, which is a page rather
-    /// than a container of sections; a decode error for bytes that are not a
-    /// container; [`SourceError::OpaqueContainerUrl`] and
-    /// [`SourceError::ConflictingSection`] as the module documentation says.
     pub fn from_bytes(url: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
         if looks_like_lynx_xml(bytes) {
             return Err(SourceError::NotAContainer(diagnostic_url(url)));
@@ -141,15 +119,6 @@ impl ContainerSources {
         Self::from_web_bundle(url, bytes)
     }
 
-    /// Decodes a source-based `.lynx.bundle` whose entry is the main-thread
-    /// module named `entry` rather than `root`: native external modules carry
-    /// no `root`, and nothing guesses one. That chunk is registered under its
-    /// own name and, as the entry, at `P/root.js` too.
-    ///
-    /// # Errors
-    ///
-    /// [`SourceError::MissingNativeEntry`] when no Lepus chunk is named
-    /// `entry`, and every error [`Self::from_bytes`] has.
     pub fn from_native_bundle(url: &Url, bytes: &[u8], entry: &str) -> Result<Self, SourceError> {
         Self::from_template(
             url,
@@ -159,10 +128,6 @@ impl ContainerSources {
         )
     }
 
-    /// A `.web.bundle`, read where it lies: every body is copied once, into
-    /// the text registered for it, and each `StyleInfo` is validated and
-    /// lowered in its archived form, with no owned rule tree built for it.
-    /// It fails exactly where [`crate::web::decode`] fails.
     fn from_web_bundle(url: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
         let error = |source| SourceError::DecodeWebBundle {
             input: diagnostic_url(url),
@@ -206,8 +171,6 @@ impl ContainerSources {
         Self::from_parts(url, parts, BundleTarget::Web, None)
     }
 
-    /// A container from a decoded template: a `.lynx.bundle`'s, or one a
-    /// test built.
     pub(crate) fn from_template(
         url: &Url,
         template: &crate::web::WebTemplate,
@@ -264,8 +227,6 @@ impl ContainerSources {
         for (name, body) in &parts.lepus_code {
             scripts.insert(named_chunk_url(url, name), lepus_source(name, body))?;
         }
-        // A native entry named explicitly is the entry at `root.js` as well
-        // as the chunk under its own name.
         if let Some(name) = entry_name.filter(|name| *name != ROOT) {
             scripts.insert(
                 named_chunk_url(url, ROOT),
@@ -274,8 +235,6 @@ impl ContainerSources {
         }
         if let Some(serde_json::Value::Object(sections)) = parts.custom_sections {
             for (name, section) in sections {
-                // A section whose content is not a string carries no body — a
-                // named stylesheet's is an object — and so is no script.
                 if let Some(content) = section.get("content").and_then(serde_json::Value::as_str) {
                     scripts.insert(
                         named_chunk_url(url, name),
@@ -287,15 +246,6 @@ impl ContainerSources {
         for (path, body) in &parts.manifest {
             scripts.insert(bundle_path_url(url, path), body_source(target, path, body))?;
         }
-        // A `.web.bundle` with no entry was assembled from custom sections,
-        // and the web encoder keeps none of them as one: it routes each
-        // section that is neither CSS nor bytecode into the manifest as
-        // `/<name>` (`WebEncodePlugin.routeSections`). Whoever asks for such a
-        // section asks for it by name, `lynx.loadScript(name, {bundleName})`,
-        // so each manifest path that is a bare name — one segment, no
-        // extension — answers at its section URL as well, the two URLs a
-        // `.lynx.bundle`'s section has. A path with an extension is a file the
-        // manifest carries (`/answer.js`), never a section's name.
         if target == BundleTarget::Web && entry_name.is_none() {
             for (path, body) in &parts.manifest {
                 let name = bare(path);
@@ -305,10 +255,6 @@ impl ContainerSources {
             }
         }
         let entry = entry_name.map(|_| named_chunk_url(url, ROOT));
-        // Every container a view or a `<frame>` can boot has a BTS boot, so
-        // whoever boots it connects a BTS to an entry that exists: a card with
-        // no manifest gets one that registers the container and loads
-        // nothing.
         let background_entry = if entry.is_some() {
             let boot = background_boot_url(url);
             scripts.insert(
@@ -351,78 +297,51 @@ impl ContainerSources {
         })
     }
 
-    /// The container's own URL, `U`, which everything here hangs under.
     #[must_use]
     pub const fn url(&self) -> &Url {
         &self.url
     }
 
-    /// Which compiler built the container, and so the shape of its BTS bodies.
     #[must_use]
     pub const fn target(&self) -> BundleTarget {
         self.target
     }
 
-    /// The entry a view booting this container imports, `P/root.js S`, or
-    /// `None` for a container with no `root`.
     #[must_use]
     pub const fn entry(&self) -> Option<&Url> {
         self.entry.as_ref()
     }
 
-    /// The BTS boot script, `U#background-thread`, for a container with an
-    /// entry.
     #[must_use]
     pub const fn background_entry(&self) -> Option<&Url> {
         self.background_entry.as_ref()
     }
 
-    /// The container's own `StyleInfo`, `P/style-info.css S`, when it holds
-    /// any rule. A page lists it as its view's author sheet; nothing else asks
-    /// for it.
     #[must_use]
     pub fn style_info(&self) -> Option<&Url> {
         self.style_info.as_ref().map(|(url, _)| url)
     }
 
-    /// Page policy decoded from the container's configuration. Only a page's
-    /// is read: a lazy container's is ignored, page policy being the page's.
     #[must_use]
     pub const fn config(&self) -> PageConfig {
         self.config
     }
 
-    /// Every script body, ordered by URL, as the text registered for it.
     #[must_use]
     pub fn scripts(&self) -> &[(Url, Arc<str>)] {
         &self.scripts
     }
 
-    /// Every named stylesheet, ordered by URL. The container's own
-    /// `StyleInfo` is not among them: see [`Self::style_info`].
     #[must_use]
     pub fn style_sheets(&self) -> &[(Url, Arc<PreparsedStyleSheet>)] {
         &self.style_sheets
     }
 
-    /// Registers every script, named stylesheet and the `StyleInfo` with an
-    /// embedder-owned resource system, each replacing an earlier registration
-    /// of its URL.
-    ///
-    /// Every URL was derived from an already-parsed [`Url`], so registration
-    /// cannot fail URL validation.
     pub fn register_with(&self, resources: &impl Register<PreparsedStyleSheet>) {
         self.register(resources)
             .expect("a container's registration URLs are derived from a parsed URL");
     }
 
-    /// Registers the same set through a [`ContainerInstaller`]'s
-    /// [`Registrar`](vant::registry::Registrar).
-    ///
-    /// # Errors
-    ///
-    /// What the registrar answers, which for URLs derived from a parsed
-    /// [`Url`] is nothing.
     pub fn register_through(&self, registrar: &Registrar) -> Result<(), RegisterError> {
         self.register(registrar)
     }
@@ -441,8 +360,6 @@ impl ContainerSources {
         Ok(())
     }
 
-    /// The one list both `register_*` drain: the scripts, then the named
-    /// stylesheets, then the container's own `StyleInfo`.
     fn registrations(&self) -> impl Iterator<Item = Registration<'_>> {
         self.scripts
             .iter()
@@ -467,21 +384,15 @@ fn borrowed(map: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
         .collect()
 }
 
-/// What a container is registered from, whichever decoder read it: its
-/// bodies borrowed, its stylesheets already lowered.
 struct Parts<'t> {
     lepus_code: BTreeMap<&'t str, &'t str>,
     manifest: BTreeMap<&'t str, &'t str>,
     custom_sections: Option<&'t serde_json::Value>,
     config: PageConfig,
-    /// The container's own `StyleInfo`, lowered.
     style_info: Option<PreparsedStyleSheet>,
-    /// The named stylesheets, by section name.
     style_sheets: BTreeMap<String, Arc<PreparsedStyleSheet>>,
 }
 
-/// A script's text as the bytes registered for it, shared rather than
-/// copied: the registry and this container hold one buffer.
 fn script_bytes(source: &Arc<str>) -> Bytes {
     struct Text(Arc<str>);
     impl AsRef<[u8]> for Text {
@@ -492,8 +403,6 @@ fn script_bytes(source: &Arc<str>) -> Bytes {
     Bytes::from_owner(Text(Arc::clone(source)))
 }
 
-/// The script set being collected: one text per URL, an equal text for an
-/// equal URL deduplicated, a different one refused.
 struct Scripts<'a> {
     container: &'a Url,
     scripts: BTreeMap<Url, Arc<str>>,
@@ -507,7 +416,6 @@ impl<'a> Scripts<'a> {
         }
     }
 
-    /// `source` is copied into the set once, borrowed or not.
     fn insert<'s>(&mut self, url: Url, source: impl Into<Cow<'s, str>>) -> Result<(), SourceError> {
         let source = source.into();
         match self.scripts.get(&url) {
@@ -539,8 +447,6 @@ fn decode_native(url: &Url, bytes: &[u8]) -> Result<crate::web::WebTemplate, Sou
     })
 }
 
-/// A name with one leading `/` stripped, which is how either spelling of a
-/// rooted name reaches one URL and one shape.
 fn bare(name: &str) -> &str {
     name.strip_prefix('/').unwrap_or(name)
 }
@@ -549,11 +455,6 @@ fn is_main_thread(name: &str) -> bool {
     name == MAIN_THREAD_SECTION || name.ends_with(MAIN_THREAD_SUFFIX)
 }
 
-/// One Lepus chunk as the source registered for it: the entry's module for
-/// `root`, a main-thread section's for `main-thread`/`*__main-thread`, and
-/// otherwise the chunk verbatim, because the realm compiles a named chunk as
-/// a function body whose parameters are the bindings `MTS_CHUNK_PREAMBLE`
-/// gives the entry — so an `import` could not appear in it anyway.
 fn lepus_source<'b>(name: &str, body: &'b str) -> Cow<'b, str> {
     let name = bare(name);
     if name == ROOT {
@@ -565,13 +466,6 @@ fn lepus_source<'b>(name: &str, body: &'b str) -> Cow<'b, str> {
     }
 }
 
-/// One custom section or manifest body as the source registered for it,
-/// chosen by its name:
-///
-/// - a **`main-thread`** body is an MTS body ([`main_thread_source`]);
-/// - a **`.json`** body is a value, registered verbatim, its own URL telling the loader to parse
-///   it;
-/// - everything else is a BTS body, through [`bts_module_source`].
 fn body_source<'b>(target: BundleTarget, name: &str, body: &'b str) -> Cow<'b, str> {
     let name = bare(name);
     if is_main_thread(name) {
@@ -583,12 +477,6 @@ fn body_source<'b>(target: BundleTarget, name: &str, body: &'b str) -> Cow<'b, s
     }
 }
 
-/// An MTS section: the bindings a card's entry has, which
-/// [`mts_entry_source`] puts in front of a page's root, and `export default`
-/// in front of the body, because a `.lynx.bundle`'s body is one expression
-/// and what `ReactLynx` calls is that expression's value
-/// (`lynx.loadScript('main-thread', …)(entry)`). One physical line, so the
-/// body keeps its line numbering.
 fn main_thread_source(body: &str) -> String {
     const EXPORT: &str = "export default ";
     let mut source = String::with_capacity(MTS_CHUNK_PREAMBLE.len() + EXPORT.len() + body.len());
@@ -598,8 +486,6 @@ fn main_thread_source(body: &str) -> String {
     source
 }
 
-/// A name the loader would read as JSON: its path's extension and nothing
-/// else, as in `bobcat-core`'s own `kind_of`.
 #[expect(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "a URL path is case-sensitive, as is Node's own extension match"
@@ -608,10 +494,6 @@ fn json_path(name: &str) -> bool {
     name.ends_with(".json")
 }
 
-/// `tail` under the container URL's path, one trailing `/` of that path
-/// dropped, the `?#` suffix kept. `Url::set_path` escapes what a path cannot
-/// hold, a `?` or `#` among it, exactly as the realm's URL parser escapes the
-/// string `section-url.ts` writes.
 fn under(container: &Url, tail: &str) -> Url {
     let mut url = container.clone();
     let path = container.path();
@@ -622,54 +504,34 @@ fn under(container: &Url, tail: &str) -> Url {
     url
 }
 
-/// One name as `form_urlencoded` encodes it, a space as `%20`.
 fn encoded(name: &str) -> String {
     url::form_urlencoded::byte_serialize(name.as_bytes())
         .collect::<String>()
         .replace('+', "%20")
 }
 
-/// `P/<encoded name>.js S`: a Lepus chunk or a custom section, one leading
-/// `/` stripped first — `sectionURL` in `section-url.ts`.
 pub(crate) fn named_chunk_url(container: &Url, name: &str) -> Url {
     under(container, &format!("{}.js", encoded(bare(name))))
 }
 
-/// `P/<path> S`: a manifest path as the path it is, one leading `/` stripped
-/// and no `.js` appended — `bundlePathURL` in `section-url.ts`.
 fn bundle_path_url(container: &Url, path: &str) -> Url {
     under(container, bare(path))
 }
 
-/// `P/custom_section/<encoded key>.css S`: a named stylesheet, so the
-/// compiler's `CSS` section is `custom_section/CSS.css` — `styleSheetURL` in
-/// `section-url.ts`.
 fn named_style_url(container: &Url, key: &str) -> Url {
     under(container, &format!("custom_section/{}.css", encoded(key)))
 }
 
-/// `P/style-info.css S`: the container's own `StyleInfo` —
-/// `bundleStyleSheetURL` in `section-url.ts`.
 pub(crate) fn bundle_style_url(container: &Url) -> Url {
     under(container, "style-info.css")
 }
 
-/// `U#background-thread`: the BTS boot script, the container URL with its
-/// fragment replaced — `backgroundThreadURL` in `section-url.ts`.
 pub(crate) fn background_boot_url(container: &Url) -> Url {
     let mut url = container.clone();
     url.set_fragment(Some("background-thread"));
     url
 }
 
-/// The one [`ContainerInstaller`] every embedder that decodes Lynx containers
-/// installs: [`ContainerSources::from_bytes`], registered.
-///
-/// It **sniffs first**, because a plain fetch carries anything: only bytes
-/// that open with a native or a web container's magic are decoded, and
-/// anything else — XML, an image, a script — leaves the fetch alone by
-/// answering `Ok(false)`. What fails a fetch is the narrow case of a
-/// container that would not decode or register.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BundleInstaller;
 
@@ -734,14 +596,11 @@ mod tests {
             )
     }
 
-    /// The table `packages/bobcat-element/test/section-url.test.ts` pins, row
-    /// for row: the two halves agree only while the rule does.
     #[test]
     fn the_container_url_rule_is_the_realms_own() {
         let bundle = url(BUNDLE);
         let at = |suffix: &str| format!("{BUNDLE}{suffix}");
         let with = |suffix: &str| url(&at(suffix));
-        // A section is an encoded `.js` file under the container.
         assert_eq!(
             named_chunk_url(&bundle, "background").as_str(),
             at("/background.js")
@@ -764,7 +623,6 @@ mod tests {
         );
         assert_eq!(named_chunk_url(&with("/"), "root").as_str(), at("/root.js"));
 
-        // A manifest path is the path it is under the container.
         assert_eq!(
             bundle_path_url(&bundle, "/app-service.js").as_str(),
             at("/app-service.js")
@@ -797,7 +655,6 @@ mod tests {
             "a `?` or `#` inside the path stays in the path"
         );
 
-        // A named stylesheet is under `custom_section/`.
         assert_eq!(
             named_style_url(&bundle, "CSS").as_str(),
             at("/custom_section/CSS.css")
@@ -807,7 +664,6 @@ mod tests {
             at("/custom_section/A%20%26%2F%E4%B8%AD.css#entry")
         );
 
-        // The container's own StyleInfo is `style-info.css`.
         assert_eq!(bundle_style_url(&bundle).as_str(), at("/style-info.css"));
         assert_eq!(
             bundle_style_url(&with("?rev=1")).as_str(),
@@ -818,7 +674,6 @@ mod tests {
             at("/style-info.css#f")
         );
 
-        // The BTS boot script is the container itself, at another fragment.
         assert_eq!(
             background_boot_url(&with("?rev=1#f")).as_str(),
             at("?rev=1#background-thread")
@@ -837,8 +692,6 @@ mod tests {
         );
     }
 
-    /// The root is the entry, as the module a page boots: the entry's own
-    /// preamble and the body, and no `export default` — whoever fetched it.
     #[test]
     fn a_root_is_the_entry_module_and_names_the_boot() {
         let sources = ContainerSources::from_template(
@@ -875,14 +728,6 @@ mod tests {
         );
     }
 
-    /// A `.web.bundle` assembled from custom sections — a lazy bundle on the
-    /// `lynx.fetchBundle` path — carries its background section as the
-    /// manifest path `/background`, because the web encoder routes every
-    /// section that is neither CSS nor bytecode there
-    /// (`@lynx-js/template-webpack-plugin`, `WebEncodePlugin.routeSections`).
-    /// The background thread asks for it as the section it was:
-    /// `lynx.loadScript('background', {bundleName})`, `P/background.js`. So
-    /// it answers at both URLs, as a `.lynx.bundle`'s section does.
     #[test]
     fn a_web_container_without_root_answers_its_routed_sections_by_name() {
         let sources = ContainerSources::from_template(
@@ -911,8 +756,6 @@ mod tests {
         );
     }
 
-    /// A web page has a `root`, and its manifest paths are the paths they
-    /// are: `/app-service.js` is not also a section named `app-service.js`.
     #[test]
     fn a_web_page_answers_its_manifest_paths_only_as_paths() {
         let sources = ContainerSources::from_template(
@@ -933,8 +776,6 @@ mod tests {
         );
     }
 
-    /// No `root`, no entry and no boot, whatever else the container carries:
-    /// a sole `*__main-thread` chunk is never guessed to be the entry.
     #[test]
     fn a_container_without_root_has_no_entry() {
         let sources = ContainerSources::from_template(
@@ -959,9 +800,6 @@ mod tests {
         );
     }
 
-    /// A native entry named explicitly is registered twice: under its own
-    /// name, in the main-thread section's shape, and as the entry at
-    /// `root.js`.
     #[test]
     fn an_explicit_native_entry_is_aliased_to_root() {
         let sources = ContainerSources::from_template(
@@ -987,8 +825,6 @@ mod tests {
             script(&sources, &format!("{BUNDLE}/card__main-thread.js")),
             main_thread_source("boot();")
         );
-        // No manifest still boots a BTS: one that registers the container
-        // and loads nothing.
         assert_eq!(
             sources.background_entry().map(Url::as_str),
             Some(format!("{BUNDLE}#background-thread").as_str())
@@ -1008,9 +844,6 @@ mod tests {
         assert!(matches!(missing, SourceError::MissingNativeEntry { .. }));
     }
 
-    /// A manifest path hangs under the container as the path it is, while a
-    /// custom section of the same name is a `.js` file beside it: a native
-    /// container's one body reaches both.
     #[test]
     fn a_manifest_path_is_the_path_it_is() {
         let sources = ContainerSources::from_template(
@@ -1052,8 +885,6 @@ mod tests {
         );
     }
 
-    /// The MTS body is the entry's own binding list plus `export default`, and
-    /// all of it is one physical line, so the body keeps its line numbering.
     #[test]
     fn a_main_thread_body_is_the_mts_preamble_and_a_default_export() {
         let source = body_source(BundleTarget::Lynx, "/main-thread", "(function (e) {})");
@@ -1100,8 +931,6 @@ mod tests {
         }
     }
 
-    /// One URL, one text: an equal text deduplicates, a different one refuses
-    /// the whole container, and so does a stylesheet URL a script reaches.
     #[test]
     fn two_texts_at_one_url_conflict() {
         let same = ContainerSources::from_template(
@@ -1155,7 +984,6 @@ mod tests {
         );
     }
 
-    /// A URL that cannot be a base has no path to hang a section under.
     #[test]
     fn an_opaque_container_url_is_refused() {
         let error = ContainerSources::from_template(
@@ -1171,8 +999,6 @@ mod tests {
         );
     }
 
-    /// Lynx XML is a page, not a container: a direct caller is told so rather
-    /// than getting a decoder's bad-magic error.
     #[test]
     fn lynx_xml_is_not_a_container() {
         let error = ContainerSources::from_bytes(&url("app:///page.xml"), b"<view></view>")
@@ -1180,16 +1006,11 @@ mod tests {
         assert!(matches!(error, SourceError::NotAContainer(_)));
     }
 
-    /// What the installer decodes at all: a plain fetch carries anything, so
-    /// only the two container magics are its business, and everything else is
-    /// a fetch it leaves alone.
     #[test]
     fn only_a_container_magic_is_installed() {
-        // The two little-endian magics `web::decode` checks, as bytes.
         assert!(looks_like_web_bundle(b"SDRAWROF\0\0\0\0"));
         assert!(!looks_like_web_bundle(b"SDRA"));
         assert!(!looks_like_web_bundle(b"<view></view>"));
-        // An image, a script and a page are all ordinary fetches.
         for bytes in [
             b"\x89PNG\r\n\x1a\n".as_slice(),
             b"export default 1;\n".as_slice(),
@@ -1199,8 +1020,6 @@ mod tests {
         }
     }
 
-    /// What the owned decode registers for `bytes`: the reference the
-    /// borrowed, archived path is held to.
     fn decoded(url: &Url, bytes: &[u8]) -> Result<ContainerSources, String> {
         let template = crate::web::decode(bytes).map_err(|source| {
             SourceError::DecodeWebBundle {
@@ -1213,8 +1032,6 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    /// Reading a `.web.bundle` where it lies registers exactly what the owned
-    /// decode of it registers, for every bundle the fixtures compile.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_web_bundle_read_in_place_registers_what_its_decode_registers() {
@@ -1230,9 +1047,6 @@ mod tests {
         }
     }
 
-    /// It fails where the owned decode fails, with the same error — up to
-    /// the addresses rkyv names, which are its copy's — for every truncation
-    /// and a spread of single-byte corruptions of real bundles.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_damaged_web_bundle_fails_as_its_decode_fails() {

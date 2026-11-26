@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Stable resource failure details shared by every operation.
 #[derive(Clone, Debug, Error)]
 #[error("{kind:?} during {phase:?}: {message}")]
 pub struct ResourceError {
@@ -63,8 +62,6 @@ pub enum RetryAdvice {
     After(Duration),
 }
 
-/// A failure before it has a resource to belong to: everything but the
-/// locator, which the caller that has it adds.
 #[derive(Clone, Debug)]
 pub struct Failure {
     pub kind: ResourceErrorKind,
@@ -94,7 +91,6 @@ impl Failure {
         self
     }
 
-    /// The protocol error for this failure, naming `locator`.
     #[must_use]
     pub fn into_error(self, locator: Option<Arc<str>>) -> ResourceError {
         ResourceError {

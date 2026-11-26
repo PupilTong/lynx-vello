@@ -35,9 +35,6 @@ impl Harness {
         self.doc.dom.build_paint_order()
     }
 
-    /// The on-screen origin of `id`'s box: the baked (unscrolled) transform
-    /// mapped through its space at the document's live offsets — exactly
-    /// what composition and hit testing see.
     fn origin(&mut self, id: NodeId) -> Point2D<f32> {
         let frame = self.paint();
         let item = frame
@@ -189,10 +186,6 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
     let pinned = h.el(scroller, "view.pinned");
 
-    // Routing hits the pinned box, and the scroll chain a router would start
-    // there follows the containing-block chain — page-anchored, so it finds
-    // no scroller. That divergence from DOM ancestry is what keeps a wheel
-    // over the pinned box from moving the content it covers.
     assert_eq!(
         h.route(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0))),
         Some(pinned)
@@ -209,7 +202,6 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     );
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
 
-    // Over the content the chain starts inside the scroller and consumes.
     assert_eq!(
         h.route(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0))),
         Some(rows[0])
@@ -294,8 +286,6 @@ fn overflow_hidden_clips_without_answering_a_gesture() {
     let clipper = h.el(root, "view.clipper");
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(clipper, "view.row")).collect();
 
-    // `hidden` is a scroll container that answers no user gesture: the chain
-    // a router would start under the wheel finds no user-scrollable box.
     assert_eq!(
         h.route(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0))),
         Some(rows[0])
@@ -384,9 +374,6 @@ fn a_routed_chain_scroll_drives_paint_and_hit_testing_end_to_end() {
     let scroller = h.el(root, "view.scroller");
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
 
-    // The runtime's router turns a 70px touch drag into a 62px chain scroll
-    // (its 8px slop subtracted); the document's half is routing, the chain,
-    // the repaint, and hit testing through the scrolled frame.
     let target = h
         .route(InputEvent::pointer(
             Point2D::new(50.0, 90.0),
@@ -435,10 +422,6 @@ const BORDERED_SCROLLER: &str = "page { display: flex; width: 800px; height: 600
      .fit { height: 75px; }
      .over { height: 78px; }";
 
-/// css-overflow-3 §3.3: the scrolling area is at the least the scroll
-/// container's own padding box, so an empty bordered scroller has no scroll
-/// range at all — its far border is outside the area, not scrollable
-/// content.
 #[test]
 fn an_empty_bordered_scroller_has_a_scrolling_area_the_size_of_its_scrollport() {
     let mut h = Harness::new(BORDERED_SCROLLER);
@@ -460,18 +443,13 @@ fn an_empty_bordered_scroller_has_a_scrolling_area_the_size_of_its_scrollport() 
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
 }
 
-/// A child that ends exactly at the padding edge adds nothing to the
-/// scrolling area; one that ends past it by less than the far border's width
-/// adds exactly that overhang.
 #[test]
 fn a_child_ending_at_the_padding_edge_adds_no_scroll_range() {
     let mut h = Harness::new(BORDERED_SCROLLER);
     let root = h.root();
     let fitted = h.el(root, "view.scroller");
-    // Content origin 15 + 75 = 90, the padding edge of the 100px box.
     h.el(fitted, "view.row.fit");
     let overflowing = h.el(root, "view.scroller");
-    // 15 + 78 = 93: 3px past the padding edge, inside the 10px border.
     h.el(overflowing, "view.row.over");
     h.doc.dom.layout();
 
@@ -498,10 +476,6 @@ fn a_child_ending_at_the_padding_edge_adds_no_scroll_range() {
     );
 }
 
-/// A script-facing instant scroll that moves its container is recorded for
-/// the host's `scroll`/`scrollend`, once per container however often it
-/// moves before the host takes them; one that moves nothing, and a smooth
-/// one (the painter's to move), record nothing.
 #[test]
 fn an_instant_scroll_that_moves_its_container_is_recorded_once_for_the_host() {
     let mut h = Harness::new(BORDERED_SCROLLER);
@@ -539,7 +513,6 @@ fn an_instant_scroll_that_moves_its_container_is_recorded_once_for_the_host() {
     );
     assert!(h.doc.dom.take_instant_scrolls().is_empty(), "taken once");
 
-    // The document's own write, as an adopted painter offset, is not one.
     h.doc.dom.scroll_to(scroller, Vector2D::new(0.0, 5.0));
     assert!(!h.doc.dom.has_instant_scrolls());
 }

@@ -21,15 +21,9 @@ const PAGE: &str = "page { display: flex; align-items: flex-start; width: 400px;
 const SPIN: &str = "@keyframes spin { from { transform: rotate(0deg); }
                                       to { transform: rotate(360deg); } }";
 
-/// The same turn, with a `fill` keyframe that changes nothing drawn: the
-/// export refuses a curve that animates anything but `transform` and
-/// `opacity`, so the main thread runs it.
 const SPIN_ON_MAIN: &str = "@keyframes spin { from { transform: rotate(0deg); fill: red; }
                                               to { transform: rotate(360deg); fill: red; } }";
 
-/// A page whose `svg` root, `markup`, sits under `parent` (the document
-/// element when `None`), styled by `css`; the clock started at 0 and
-/// ticked to 0.25, so every animation runs, and committed.
 fn page(css: &str, markup: &str, parent: Option<&str>) -> (Doc, NodeId) {
     let mut doc = Doc::with_css(&format!("{NAMESPACE} {PAGE} {css}"));
     doc.dom.add_svg_user_agent_stylesheet();
@@ -41,8 +35,6 @@ fn page(css: &str, markup: &str, parent: Option<&str>) -> (Doc, NodeId) {
         XmlMarkup::parse(markup.as_bytes(), Some(XmlNamespace::Svg)).expect("the markup parses");
     let root = doc.dom.append_svg_markup(parent, &markup, || ());
     doc.dom.commit();
-    // The flush created the animations; the tick at 0 starts them on the
-    // timeline's origin, and the one at 0.25 runs them.
     doc.dom.advance_animations(0.0);
     let tick = doc.dom.advance_animations(0.25);
     assert!(tick.needs_next_frame, "the fixture animates");
@@ -57,7 +49,6 @@ fn by_id(doc: &Doc, id: &str) -> NodeId {
         .expect("an element with that id")
 }
 
-/// The slot index of `node`'s curve in `frame`.
 fn slot_of(frame: &CommittedFrame, node: NodeId) -> u32 {
     let index = frame
         .animation_slots()
@@ -67,8 +58,6 @@ fn slot_of(frame: &CommittedFrame, node: NodeId) -> u32 {
     u32::try_from(index).expect("few slots")
 }
 
-/// The kinds on the space path of `node`'s recorded items, innermost
-/// first; every item of one element composes in the same space.
 fn path_of(frame: &CommittedFrame, node: NodeId) -> Vec<SpaceKind> {
     let spaces: Vec<_> = frame
         .order
@@ -82,8 +71,6 @@ fn path_of(frame: &CommittedFrame, node: NodeId) -> Vec<SpaceKind> {
     crate::visual::space::path(frame.order.spaces(), spaces[0]).collect()
 }
 
-/// Where each recorded item lands at `now` with every scroller at
-/// `offset`: its world matrix under its space's sampled map, by element.
 fn placed(frame: &CommittedFrame, now: f64, offset: Vector2D<f32>) -> Vec<(NodeId, Affine)> {
     let offset_of = |_: &ScrollSlot| Some(offset);
     let animations = frame.order.sample_animations(Some(now), &offset_of);
@@ -115,8 +102,6 @@ fn same(a: Affine, b: Affine, tolerance: f64) -> bool {
         .all(|(a, b)| (a - b).abs() <= tolerance)
 }
 
-/// The composed frame's fills and layer alphas, in order: what a drawing
-/// at one instant is compared by.
 fn drawn(list: &DisplayList) -> (Vec<Affine>, Vec<f32>) {
     let mut fills = Vec::new();
     let mut alphas = Vec::new();
@@ -130,16 +115,12 @@ fn drawn(list: &DisplayList) -> (Vec<Affine>, Vec<f32>) {
     (fills, alphas)
 }
 
-/// `frame` composed at `now` with every scroller at `offset`.
 fn composed(frame: &CommittedFrame, now: f64, offset: Vector2D<f32>) -> DisplayList {
     let mut list = DisplayList::new();
     frame.compose_into(&mut list, &[], &[], &[], &|_| Some(offset), Some(now));
     list
 }
 
-/// What the main thread draws at `now`: a page built from `css` (with the
-/// keyframes `main` in place of the exported ones) and `markup`, ticked to
-/// `now`, its scrollers scrolled to `offset`, and committed.
 fn on_main(
     css: &str,
     main: &str,
@@ -164,10 +145,6 @@ fn on_main(
     composed(&frame, now, offset)
 }
 
-/// Asserts that the compositor's drawing of `css` (with the exported
-/// keyframes `exported`) at each of `times` is the main thread's drawing
-/// at that instant: every fill's transform within `TOLERANCE` device px
-/// per coefficient, every layer alpha within 1e-4.
 fn assert_draws_as_main(
     (css, exported, main): (&str, &str, &str),
     markup: &str,
@@ -175,9 +152,6 @@ fn assert_draws_as_main(
     times: &[f64],
     offset: Vector2D<f32>,
 ) {
-    /// The frame's matrices are f32: a coefficient of a few hundred px
-    /// carries about 3e-5 of rounding on each side, and the compositor's
-    /// delta one more product.
     const TOLERANCE: f64 = 1e-3;
     let (mut doc, _) = page(&format!("{css} {exported}"), markup, parent);
     let frame = doc.dom.commit();
@@ -225,7 +199,6 @@ fn a_spinning_group_runs_in_the_painter() {
         "a sibling of the group does not move with it"
     );
 
-    // Two instants: the group's items move, the sibling does not.
     let zero = Vector2D::zero();
     let (early, late) = (placed(&frame, 0.4, zero), placed(&frame, 0.7, zero));
     for ((node, early), (_, late)) in early.iter().zip(&late) {
@@ -233,14 +206,10 @@ fn a_spinning_group_runs_in_the_painter() {
         assert_eq!(moved, *node != c, "{node:?}");
     }
 
-    // While the main thread does not tick, nothing records.
     let mut recorded = doc.dom.svg_records(root);
     doc.dom.commit();
     assert_eq!(doc.dom.svg_records(root), recorded, "no tick, no record");
 
-    // A tick the main thread runs all the same restyles the group: the root
-    // records again, and the next commit exports the curve again over the
-    // new recording.
     for now in [0.5, 0.75, 1.5] {
         doc.dom.advance_animations(now);
         let frame = doc.dom.commit();
@@ -259,9 +228,6 @@ fn a_spinning_group_runs_in_the_painter() {
     }
 }
 
-/// About the viewport's centre (a `view-box` reference), so the turn keeps
-/// every shape inside the root: one the destination clip hides is culled by
-/// a commit and kept by the compositor, which draws it clipped.
 #[test]
 fn a_spinning_group_draws_as_the_main_thread_does() {
     let css = "svg|g.spin { transform-origin: 50px 50px; animation: spin 1s linear infinite; }";
@@ -274,8 +240,6 @@ fn a_spinning_group_draws_as_the_main_thread_does() {
     );
 }
 
-/// `transform-box: fill-box` with `transform-origin: center` turns the
-/// shape about its own centre.
 #[test]
 fn a_fill_box_turn_keeps_the_centre_of_the_shape() {
     let css = "svg|rect.spin { transform-box: fill-box; transform-origin: center;
@@ -286,8 +250,6 @@ fn a_fill_box_turn_keeps_the_centre_of_the_shape() {
     let frame = doc.dom.commit();
     let rect = by_id(&doc, "r");
     slot_of(&frame, rect);
-    // The item's matrix places its ink rectangle, whose origin is the
-    // rect's own (no stroke): its centre is (20, 5) in it.
     let centre = |now: f64| {
         let (_, matrix) = placed(&frame, now, Vector2D::zero())
             .into_iter()
@@ -318,8 +280,6 @@ const FADE_ON_MAIN: &str = "@keyframes fade { from { opacity: 1; fill: red; }
                                               50% { opacity: 1; fill: red; }
                                               to { opacity: 0; fill: red; } }";
 
-/// An opacity curve on a shape and on a group, committed while both are
-/// still at 1: each records a layer at alpha 1 that the curve fades.
 #[test]
 fn an_opacity_curve_fades_the_layer_recorded_at_one() {
     let css = "svg|rect.fade, svg|g.fade { animation: fade 1s linear infinite; }";
@@ -375,8 +335,6 @@ fn an_opacity_curve_fades_the_layer_recorded_at_one() {
     );
 }
 
-/// An animation the export refuses keeps the main-thread path: frames are
-/// asked of the main thread, and every tick records the root again.
 #[test]
 fn a_refused_export_records_the_root_each_tick() {
     let css = format!("{SPIN_ON_MAIN} svg|g.spin {{ animation: spin 1s linear infinite; }}");
@@ -394,8 +352,6 @@ fn a_refused_export_records_the_root_each_tick() {
     }
 }
 
-/// A turning group inside a turning group: two slots, the inner's space
-/// inside the outer's, composed as the main thread draws them.
 #[test]
 fn nested_turns_compose_inner_inside_outer() {
     let css = "svg|g.spin { animation: spin 1s linear infinite; }
@@ -424,8 +380,6 @@ fn nested_turns_compose_inner_inside_outer() {
     );
 }
 
-/// A turning group in a root inside a scroller: the animation space is
-/// inside the scroller's, so the turn applies before the scroll.
 #[test]
 fn a_turn_inside_a_scroller_composes_inside_the_scroll() {
     let css = ".scroller { display: flex; align-items: flex-start; width: 200px; height: 100px;
@@ -457,9 +411,6 @@ fn a_turn_inside_a_scroller_composes_inside_the_scroll() {
     );
 }
 
-/// A `use` instance is an element of its own in the `use`'s shadow root,
-/// with its own animation set: drawn once, it gets a slot of its own, as
-/// does the drawn original it was cloned from.
 #[test]
 fn a_use_instance_and_its_original_each_get_a_slot() {
     let css = "svg|g.spin { transform-origin: 20px 20px; animation: spin 1s linear infinite; }";

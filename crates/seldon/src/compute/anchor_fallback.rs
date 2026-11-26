@@ -17,7 +17,6 @@ use crate::geometry::{Edges, Point, Rect, Size};
 use crate::style::CoreStyle;
 use crate::tree::{AnchorOutcome, Layout, LayoutGoal, LayoutTree, RequestedAxis};
 
-/// One option laid out, with the facts the outcome reports.
 struct Tried {
     placed: Placed,
     default_anchor_missing: bool,
@@ -25,10 +24,6 @@ struct Tried {
     carried_edges: Edges<bool>,
 }
 
-/// Lays `node` out with position option `option`: the host's cascaded
-/// option style (§6.5.2 "apply a position option"), which for option `0` is
-/// its own style. `base` is the box's own style and `base_uses` whether it
-/// uses anchor positioning.
 #[allow(
     clippy::too_many_arguments,
     reason = "absolute_layout's inputs plus the option"
@@ -76,7 +71,6 @@ where
             placed,
             default_anchor_missing: false,
             compensates: Size::new(false, false),
-            // No default anchor: no shift to carry anything by.
             carried_edges: Edges {
                 left: false,
                 right: false,
@@ -104,8 +98,6 @@ where
     }
 }
 
-/// The inset-modified containing block size option `option` yields for
-/// §6.2's sort, without laying the box out.
 #[allow(
     clippy::too_many_arguments,
     reason = "absolute_layout's inputs plus the option and its memo"
@@ -133,19 +125,11 @@ fn option_sort_size<T: LayoutTree>(
         memo,
     )
     .map_or_else(
-        // No anchor positioning in this option: its containing block is the
-        // handed-over one and its insets are its own.
         || imcb_size_auto_zero(containing_block.size, style.inset()),
         |geometry| geometry.sort_size(),
     )
 }
 
-/// The absolute pass of a box that uses anchor positioning or has position
-/// options, with what `absolute_layout` already read: its own style `base`,
-/// the length `count` of its position options list (`0` when the style
-/// lists no `position-try-fallbacks`) and whether `base` uses anchor
-/// positioning (`base_uses`). Out of line and cold: the absolute pass of
-/// every other box never reaches it.
 #[allow(
     clippy::too_many_lines,
     reason = "§6.5's determination in its order, threading one memo"
@@ -173,9 +157,6 @@ where
 {
     let has_options = count > 1;
     let mut memo = AnchorMemo::default();
-    // §6.5: "Let current styles be the current used styles of abspos, as
-    // derived from the computed base style (which might be the result of
-    // earlier fallback)" — the last successful option, else the base style.
     let current = if has_options {
         tree.last_successful_option(state, node)
             .filter(|&option| option < count)
@@ -187,8 +168,6 @@ where
         content_independent,
     } = goal
     else {
-        // A measurement (a static position) decides nothing: it lays the
-        // box out with the current option and reports no outcome.
         return lay_out_option(
             tree,
             state,
@@ -204,8 +183,6 @@ where
         .placed
         .layout;
     };
-    // Which option a box with options is committed with depends on its own
-    // size, so its input is not stable under a change of its content.
     let commit = LayoutGoal::Commit {
         content_independent: if has_options {
             Size::new(false, false)
@@ -225,16 +202,10 @@ where
         commit,
         &mut memo,
     );
-    // §6.5: "When a positioned box … overflows its inset-modified
-    // containing block, and has more than one position option in its
-    // position options list, it determines position fallback styles".
     if !has_options || tried.placed.fits() {
         return report(tree, state, node, containing_block, current, tried);
     }
 
-    // §6.2: with `position-try-order` other than `normal`, "Stably sort the
-    // position options list according to this size, with the largest coming
-    // first."
     let mut order: SmallVec<[usize; 8]> = (0..count).collect();
     let try_order = base.position_try_order();
     if !try_order.is_normal() {
@@ -252,7 +223,6 @@ where
                     &mut memo,
                 );
                 match try_order {
-                    // No `writing-mode`: the block axis is vertical.
                     PositionTryOrder::MostHeight | PositionTryOrder::MostBlockSize => size.height,
                     PositionTryOrder::MostWidth
                     | PositionTryOrder::MostInlineSize
@@ -263,10 +233,6 @@ where
         order.sort_by(|&a, &b| keys[b].total_cmp(&keys[a]));
     }
 
-    // "For each option in the position options list: If option is currently
-    // abspos's last successful position option, continue." The current
-    // option — the last successful one, or the base style the loop would
-    // otherwise try again — was just laid out and overflowed.
     for option in order {
         if option == current {
             continue;
@@ -283,9 +249,6 @@ where
             LayoutGoal::Measure(RequestedAxis::Both),
             &mut memo,
         );
-        // "If cb rect was negative-size in either axis and corrected into
-        // zero-size, continue. … If el rect is not fully contained within cb
-        // rect, continue. Return adjusted styles".
         if measure.placed.fits() {
             let chosen = lay_out_option(
                 tree,
@@ -302,12 +265,9 @@ where
             return report(tree, state, node, containing_block, option, chosen);
         }
     }
-    // "Assert: The previous step finished without finding a position option
-    // that avoids overflow. Return current styles." Its commit stands.
     report(tree, state, node, containing_block, current, tried)
 }
 
-/// Hands the host the outcome of a committed option and returns its layout.
 fn report<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -322,8 +282,6 @@ fn report<T: LayoutTree>(
         node,
         AnchorOutcome {
             chosen,
-            // §6.6 `no-overflow`: after the determination, the margin box
-            // still overflows (every option did, or the box has none).
             overflows: !tried.placed.fits(),
             default_anchor_missing: tried.default_anchor_missing,
             compensates: tried.compensates,

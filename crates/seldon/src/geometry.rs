@@ -1,8 +1,5 @@
 //! Plain-old-data geometry vocabulary shared by every protocol surface.
 
-/// A 2D point (or any per-axis pair — see
-/// [`CoreStyle::overflow`](crate::style::CoreStyle::overflow), which uses
-/// `Point<Overflow>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Point<T> {
@@ -33,8 +30,6 @@ impl Point<Option<f32>> {
     pub const NONE: Self = Self { x: None, y: None };
 }
 
-/// A 2D size (or any per-axis pair of constraints — `Size<Option<f32>>`,
-/// `Size<AvailableSpace>`, `Size<Dimension>` all appear in the protocol).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Size<T> {
@@ -105,7 +100,6 @@ impl Size<Option<f32>> {
     }
 }
 
-/// Per-edge values for box surrounds: margin, padding, border, inset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Edges<T> {
@@ -171,7 +165,6 @@ impl Edges<f32> {
     }
 }
 
-/// A `start`/`end` pair along one axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Line<T> {
@@ -186,7 +179,6 @@ impl<T> Line<T> {
     }
 }
 
-/// An axis-aligned rectangle: an origin and a size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Rect<T> {
@@ -202,7 +194,6 @@ impl<T> Rect<T> {
 }
 
 impl Rect<f32> {
-    /// The rectangle moved by `offset`.
     #[inline]
     #[must_use]
     pub fn translate(self, offset: Point<f32>) -> Self {
@@ -212,8 +203,6 @@ impl Rect<f32> {
         }
     }
 
-    /// Whether `other` lies inside this rectangle, edges included, with
-    /// `tolerance` of slack on every side.
     #[inline]
     #[must_use]
     pub fn contains_rect(&self, other: &Self, tolerance: f32) -> bool {

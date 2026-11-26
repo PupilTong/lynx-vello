@@ -10,7 +10,6 @@ use crate::render::picture::PictureKey;
 use crate::test_common::Doc;
 use crate::tree::document::NodeId;
 
-/// A document with HTML's elements defined and one canvas in it.
 fn canvas() -> (Doc, NodeId) {
     let mut doc = Doc::new();
     doc.dom.define_html_elements();
@@ -18,7 +17,6 @@ fn canvas() -> (Doc, NodeId) {
     (doc, canvas)
 }
 
-/// Commits a transparent `width` × `height` surface to `frames`.
 fn commit(frames: &CanvasFrames, width: u32, height: u32) -> Committed {
     Surface::new(width, height)
         .expect("a side the device takes")
@@ -42,9 +40,6 @@ fn width_and_height_parse_as_non_negative_integers() {
     assert_eq!(parse_non_negative_integer("99999999999"), None);
 }
 
-/// A new canvas is replaced, presents a picture of its own at 300 × 150,
-/// and in mode none follows its attributes, falling back to the default
-/// for one that does not parse.
 #[test]
 fn a_canvas_in_mode_none_takes_its_natural_size_from_its_attributes() {
     let (mut doc, canvas) = canvas();
@@ -61,8 +56,6 @@ fn a_canvas_in_mode_none_takes_its_natural_size_from_its_attributes() {
     assert_eq!(natural(&doc, canvas), natural_size(300, 150));
 }
 
-/// `transferControlToOffscreen()` succeeds once, with the attributes' size,
-/// and then throws; a node that is no canvas throws too.
 #[test]
 fn transfer_control_to_offscreen_succeeds_once() {
     let (mut doc, canvas) = canvas();
@@ -89,9 +82,6 @@ fn transfer_control_to_offscreen_succeeds_once() {
     );
 }
 
-/// A placeholder ignores its attributes; its natural size follows a bitmap
-/// of a new size once the document applies it, and one resize is owed
-/// however many commits precede it.
 #[test]
 fn a_placeholders_natural_size_follows_its_committed_bitmaps() {
     let (mut doc, canvas) = canvas();
@@ -133,7 +123,6 @@ fn a_placeholders_natural_size_follows_its_committed_bitmaps() {
     assert!(again.wake, "described since the last wake");
 }
 
-/// Once the element is freed its commits go nowhere and owe nothing.
 #[test]
 fn a_freed_canvas_takes_no_commits() {
     let (mut doc, canvas) = canvas();

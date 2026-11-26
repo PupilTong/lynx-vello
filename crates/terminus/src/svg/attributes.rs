@@ -10,21 +10,12 @@ use super::gradient::plain;
 use crate::kurbo::Affine;
 use crate::render::image::{AspectAlign, AspectRatio};
 
-/// `node`'s `href`, or its `xlink:href` when it has no `href`: SVG 2
-/// ("Deprecated `XLink` URL reference attributes") gives `href`
-/// precedence. Every reader of an SVG element's reference goes through it.
 pub(super) fn href<T>(node: &crate::tree::node::Node<T>) -> Option<&str> {
     plain(node, "href").or_else(|| plain(node, "xlink:href"))
 }
 
-/// The default object size of CSS Images 3, in CSS px.
 const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
 
-/// A root `width` or `height` that is an absolute length, in px: a bare
-/// number, or a number in one of the CSS absolute units (`px`; `in` = 96 px,
-/// `cm` = 96/2.54 px, `mm` = 96/25.4 px, `pt` = 4/3 px, `pc` = 16 px),
-/// finite and positive. Anything else, `em`, `ex` and `%` included, counts
-/// as absent.
 pub(super) fn absolute_length(value: &str) -> Option<f32> {
     const UNITS: [(&str, f32); 6] = [
         ("px", 1.0),
@@ -46,25 +37,12 @@ pub(super) fn absolute_length(value: &str) -> Option<f32> {
         .filter(|length| length.is_finite() && *length > 0.0)
 }
 
-/// A `viewBox` with a positive, finite width and height.
 pub(super) fn view_box(value: &str) -> Option<svgtypes::ViewBox> {
     svgtypes::ViewBox::from_str(value)
         .ok()
         .filter(|v| v.w.is_finite() && v.h.is_finite() && v.w > 0.0 && v.h > 0.0)
 }
 
-/// The natural size and viewport of a document from its root's absolute
-/// `width` and `height` and its `viewBox` size.
-///
-/// The natural size is CSS Images 3 default sizing: both absolute → that
-/// size; one absolute plus a `viewBox` → the other axis from the `viewBox`
-/// ratio; a `viewBox` only → the largest size with its ratio that fits
-/// 300×150; neither → 300×150; one absolute and no `viewBox` → that axis
-/// with 300 or 150 for the other. Rounded to whole px, at least 1.
-///
-/// The viewport, the rectangle the items are drawn in, is the `viewBox`
-/// size when there is one; otherwise the authored size when both axes are
-/// authored, else the rounded natural size.
 pub(super) fn vector_sizes(
     width: Option<f32>,
     height: Option<f32>,
@@ -114,7 +92,6 @@ pub(super) fn vector_sizes(
     (rounded, viewport)
 }
 
-/// A `preserveAspectRatio` value; an unparsable one is the default.
 pub(super) fn aspect_ratio(value: &str) -> AspectRatio {
     use svgtypes::Align;
     let Ok(parsed) = svgtypes::AspectRatio::from_str(value) else {
@@ -138,8 +115,6 @@ pub(super) fn aspect_ratio(value: &str) -> AspectRatio {
     }
 }
 
-/// The transform that maps `view_box` onto a `width`×`height` viewport
-/// under `aspect` (SVG 2 §8.6).
 pub(super) fn view_box_transform(
     view_box: svgtypes::ViewBox,
     aspect: AspectRatio,
@@ -163,7 +138,6 @@ pub(super) fn view_box_transform(
     Affine::translate((tx, ty)) * Affine::scale(scale) * origin
 }
 
-/// The viewport percentages resolve against.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Viewport {
     pub(super) width: f64,
@@ -171,14 +145,11 @@ pub(super) struct Viewport {
 }
 
 impl Viewport {
-    /// The reference for a length that is neither horizontal nor vertical
-    /// (`r`, `stroke-width`): SVG's normalised diagonal.
     pub(super) fn diagonal(self) -> f64 {
         f64::midpoint(self.width * self.width, self.height * self.height).sqrt()
     }
 }
 
-/// Which axis a length is measured along, for percentages.
 #[derive(Clone, Copy)]
 pub(super) enum Axis {
     Horizontal,
@@ -186,8 +157,6 @@ pub(super) enum Axis {
     Diagonal,
 }
 
-/// `length` in user units: absolute units at 96 px per inch, `em`/`ex`
-/// of `font_size`, a percentage of `viewport` along `axis`.
 pub(super) fn resolve_length(
     length: Length,
     font_size: f64,
@@ -215,8 +184,6 @@ pub(super) fn resolve_length(
     }
 }
 
-/// Parses `value` as one length and resolves it; `None` for a value that
-/// is not a length.
 pub(super) fn parse_length(
     value: &str,
     font_size: f64,
@@ -229,8 +196,6 @@ pub(super) fn parse_length(
         .filter(|length| length.is_finite())
 }
 
-/// The first length of a list attribute (`x="10 20 30"` reads `10`), the
-/// documented subset for `text` positions.
 pub(super) fn parse_first_length(
     value: &str,
     font_size: f64,
@@ -244,8 +209,6 @@ pub(super) fn parse_first_length(
         .filter(|length| length.is_finite())
 }
 
-/// A `<number>` or `<percentage>` clamped to the unit interval, as every
-/// opacity is.
 pub(super) fn parse_opacity(value: &str) -> Option<f32> {
     let length = Length::from_str(value.trim()).ok()?;
     let number = match length.unit {
@@ -261,15 +224,10 @@ pub(super) fn parse_opacity(value: &str) -> Option<f32> {
     Some(opacity)
 }
 
-/// A `transform` list folded into one affine, in SVG's order (the first
-/// function applies last to a point). An invalid list is the identity.
 pub(super) fn transform(value: &str) -> Affine {
     transform_list(value).unwrap_or(Affine::IDENTITY)
 }
 
-/// [`transform`], `None` for an invalid list. Also what an SVG element's
-/// `transform` attribute is reflected into the CSS `transform` property
-/// with ([`crate::svg::presentation`]).
 pub(super) fn transform_list(value: &str) -> Option<Affine> {
     let mut affine = Affine::IDENTITY;
     for token in svgtypes::TransformListParser::from(value) {

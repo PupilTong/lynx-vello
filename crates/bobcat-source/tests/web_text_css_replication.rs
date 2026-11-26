@@ -126,35 +126,21 @@ use bobcat_source::web::style_info::{
 use bobcat_source::web::{SectionLabel, decode};
 use url::Url;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
-// ---------------------------------------------------------------------------
-// Building a `StyleInfo` the way the lynx-stack encoder would
-// ---------------------------------------------------------------------------
-
-/// A declaration whose value arrived as a single token of `token_type`.
 fn one_token(property: &str, token_type: u8, value: &str) -> ParsedDeclaration {
     tokenized(property, &[(token_type, value)])
 }
 
-/// A declaration whose value is a bare identifier (`red`, `X`, `important`).
 fn ident(property: &str, value: &str) -> ParsedDeclaration {
     one_token(property, token_types::IDENT_TOKEN, value)
 }
 
-/// A declaration whose value is a dimension (`14px`, `10rpx`, `50vh`).
 fn dimension(property: &str, value: &str) -> ParsedDeclaration {
     one_token(property, token_types::DIMENSION_TOKEN, value)
 }
 
-/// A declaration whose value is a bare `url()` with a quoted argument.
-///
-/// `@lynx-js/css-serializer` single-quotes every `url()` it re-emits, and a
-/// quoted `url()` tokenizes as `<function-token>` `<string-token>` `)` — never
-/// as a `<url-token>` (`css_tokenizer/tokenize.rs:56-83`).
 fn quoted_url(property: &str, path: &str) -> ParsedDeclaration {
     tokenized(
         property,
@@ -166,9 +152,6 @@ fn quoted_url(property: &str, path: &str) -> ParsedDeclaration {
     )
 }
 
-/// A declaration whose value is `var(--name)` with no fallback, the form
-/// `restoreCSSVarPlaceholders` produces from `{{--name}}` when the encoder
-/// recorded no default (`encodeCSS.ts:16-22`).
 fn var_no_fallback(property: &str, name: &str) -> ParsedDeclaration {
     tokenized(
         property,
@@ -180,12 +163,6 @@ fn var_no_fallback(property: &str, name: &str) -> ParsedDeclaration {
     )
 }
 
-/// A declaration that keeps the value's original token split.
-///
-/// The split is load-bearing: `!important` rides the wire as ordinary value
-/// tokens rather than as the `is_important` flag, and it is the token *types*
-/// — a `!` delim followed by the `important` ident — that let the decoder tell
-/// the marker apart from a value that merely ends in that word.
 fn tokenized(property: &str, tokens: &[(u8, &str)]) -> ParsedDeclaration {
     ParsedDeclaration {
         property: CssProperty::from_name(property),
@@ -226,8 +203,6 @@ fn style_rule(
     }
 }
 
-/// A font-face rule: an empty prelude by construction, descriptors in the
-/// declaration block.
 fn font_face_rule(declarations: Vec<ParsedDeclaration>) -> Rule {
     Rule {
         kind: RuleKind::FontFace,
@@ -239,8 +214,6 @@ fn font_face_rule(declarations: Vec<ParsedDeclaration>) -> Rule {
     }
 }
 
-/// A keyframes rule: the animation name is a lone `UnknownText` prelude
-/// component and each block is a child rule keyed by its own selector text.
 fn keyframes_rule(name: &str, blocks: Vec<(&str, Vec<ParsedDeclaration>)>) -> Rule {
     Rule {
         kind: RuleKind::Keyframes,
@@ -259,8 +232,6 @@ fn keyframes_rule(name: &str, blocks: Vec<(&str, Vec<ParsedDeclaration>)>) -> Ru
     }
 }
 
-/// A one-fragment `StyleInfo` under `css_id` 0, the shape every bundle built
-/// with `enableRemoveCSSScope` has.
 fn style_info(rules: Vec<Rule>) -> StyleInfo {
     style_info_at(0, rules)
 }
@@ -280,19 +251,6 @@ fn style_info_at(css_id: i32, rules: Vec<Rule>) -> StyleInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Expected rules, in the terms `lower_style` reads a decoded rule in
-// ---------------------------------------------------------------------------
-
-/// One decoded rule, read through the production accessors
-/// `lower_style::convert_rule` reads it through.
-///
-/// The shape mirrors `PreparsedRule`, one variant per `RuleKind`, with two
-/// deliberate differences: a selector list stays a list rather than a joined
-/// string, and a descriptor block stays a list of descriptors rather than
-/// joined text, because those two joins are what this file can no longer
-/// observe (see the module doc). Nothing here formats CSS — each string is the
-/// return value of one production call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Lowerable {
     Style {
@@ -308,9 +266,6 @@ enum Lowerable {
     },
 }
 
-/// A declaration as `lower_style::declarations` builds a `PreparsedDeclaration`
-/// from it: the property name, and the `(value, important)` pair
-/// `ParsedDeclaration::value_and_importance` recovers from the value tokens.
 type Declaration = (String, String, bool);
 
 fn declaration(property: &str, value: &str) -> Declaration {
@@ -347,10 +302,6 @@ fn expect_keyframes(name: &str, blocks: Vec<(&str, Vec<Declaration>)>) -> Lowera
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wrapping it in a bundle and reading it back out
-// ---------------------------------------------------------------------------
-
 fn push_section(bytes: &mut Vec<u8>, label: SectionLabel, content: &[u8]) {
     bytes.extend_from_slice(&(label as u32).to_le_bytes());
     bytes
@@ -358,10 +309,6 @@ fn push_section(bytes: &mut Vec<u8>, label: SectionLabel, content: &[u8]) {
     bytes.extend_from_slice(content);
 }
 
-/// A minimal `.web.bundle` carrying `style_info`.
-///
-/// The `LepusCode` section is present only because a card without a
-/// `lepusCode.root` entry is not a page; the tests here never run it.
 fn bundle(style_info: &StyleInfo) -> Vec<u8> {
     let mut lepus = Vec::new();
     lepus.extend_from_slice(&1u32.to_le_bytes());
@@ -387,8 +334,6 @@ fn bundle(style_info: &StyleInfo) -> Vec<u8> {
     bytes
 }
 
-/// Round-trips `style_info` through the real bundle decoder, rkyv validation
-/// included.
 fn decoded(style_info: &StyleInfo) -> StyleInfo {
     decode(&bundle(style_info))
         .expect("the bundle decodes")
@@ -400,13 +345,6 @@ fn fragment(style_info: &StyleInfo, css_id: i32) -> &[Rule] {
     &style_info.css_id_to_style_sheet[&css_id].rules
 }
 
-/// A rule's declaration block, in source order, read the way
-/// `lower_style::declarations` reads it (`lower_style.rs:302-320`).
-///
-/// `value_and_importance` rather than `value_text` on purpose: the wire leaves
-/// `is_important` false and appends the marker to the value tokens, and
-/// splitting it back out is the only computation the lowering performs per
-/// declaration.
 fn declarations(rule: &Rule) -> Vec<Declaration> {
     rule.declaration_block
         .declarations
@@ -418,12 +356,6 @@ fn declarations(rule: &Rule) -> Vec<Declaration> {
         .collect()
 }
 
-/// A font-face rule's descriptors, read the way `lower_style::descriptor_text`
-/// reads them (`lower_style.rs:322-338`).
-///
-/// A descriptor keeps a trailing `!important` in its text — that is what makes
-/// stylo reject the descriptor, as a browser does — so this is
-/// `write_value_text`, not `value_and_importance`.
 fn descriptors(rule: &Rule) -> Vec<(String, String)> {
     assert_eq!(rule.kind, RuleKind::FontFace, "descriptors of a font-face");
     rule.declaration_block
@@ -437,9 +369,6 @@ fn descriptors(rule: &Rule) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A prelude's selectors, each through `Selector::write_css_string` — the
-/// production call `lower_style::selector_text` makes once per selector
-/// (`lower_style.rs:237-269`).
 fn selectors(prelude: &RulePrelude) -> Vec<String> {
     prelude
         .selectors
@@ -448,14 +377,11 @@ fn selectors(prelude: &RulePrelude) -> Vec<String> {
         .collect()
 }
 
-/// The card a bundle carrying `style_info` becomes.
 fn page_source(style_info: &StyleInfo) -> PageSource {
     let url = Url::parse("bobcat-test://card/app.web.bundle").expect("a valid URL");
     PageSource::from_bytes(&url, &bundle(style_info)).expect("the card decodes")
 }
 
-/// Every rule of fragment `css_id`, after a real bundle round trip, read
-/// through the accessors `lower_style::convert_rule` reads them through.
 fn lowerable_rules(style_info: &StyleInfo, css_id: i32) -> Vec<Lowerable> {
     fragment(&decoded(style_info), css_id)
         .iter()
@@ -489,23 +415,6 @@ fn lowerable(rule: &Rule) -> Lowerable {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The engine-side seam
-// ---------------------------------------------------------------------------
-
-/// The author stylesheet URL a card carrying `style_info` hands its view, and
-/// `None` when the lowering produced no rules at all.
-///
-/// `PageSource::from_bytes` runs the production lowering — `web::decode` ->
-/// `lower_style::to_preparsed_style_sheet` -> the `!sheet.is_empty()` filter at
-/// `page.rs:266` — and `register_with` installs the result in an
-/// embedder-owned `Resources` under this URL, which is what `bobcat-core` asks
-/// for at view startup. The `unregister` below is the proof the registration
-/// actually landed there.
-///
-/// The sheet's *contents* are not readable from this crate; see the module
-/// doc. What this reports is that the card lowered to a non-empty sheet and
-/// that the sheet reached the resource system under the advertised URL.
 fn registered_style_sheet(style_info: &StyleInfo) -> Option<String> {
     let card = page_source(style_info);
     let resources = Resources::new(
@@ -532,24 +441,6 @@ fn registered_style_sheet(style_info: &StyleInfo) -> Option<String> {
     url
 }
 
-// ---------------------------------------------------------------------------
-// Cases
-// ---------------------------------------------------------------------------
-
-/// Replicates `web-core/encode/raw-style-info-font-face-rule` (inline fixture,
-/// `packages/web-platform/web-core/tests/encode.spec.ts:42`): the `StyleInfo`
-/// format has a dedicated font-face rule kind, and a `font-family` descriptor
-/// pushed under it survives the container.
-///
-/// Upstream stops at "the encoded buffer is non-empty". The decoder's
-/// equivalent claim is that the rule reaches the engine, so this follows it to
-/// the descriptor `lower_style::descriptor_text` reads, and on to the sheet
-/// registration the view is handed.
-///
-/// The fixture's `cssId` is 1, not 0, which upstream is incidental and here is
-/// not: a non-zero fragment id is component-scoped CSS. A `@font-face` rule
-/// stays global in such a fragment, as web-core emits it verbatim, so it
-/// still reaches the engine.
 #[test]
 fn raw_style_info_carries_a_font_face_rule_kind() {
     let info = style_info_at(
@@ -567,19 +458,6 @@ fn raw_style_info_carries_a_font_face_rule_kind() {
     );
 }
 
-/// Replicates `web-core/encode/encode-css-font-face-rule` (inline fixture,
-/// `packages/web-platform/web-core/tests/encode.spec.ts:80`): `@font-face`
-/// survives the CSS-string path into `StyleInfo`, rather than being dropped the
-/// way `@media`, `@supports` and `@layer` are.
-///
-/// That last half is structural rather than assertable: `RuleKind` has exactly
-/// three variants — `Style`, `Keyframes`, `FontFace` — so a conditional group
-/// rule has no representation on this wire to begin with, and `encodeCSS`
-/// simply skips those node types (`encodeCSS.ts:47-165`).
-///
-/// The `src` descriptor rides in the token split web-core's tokenizer actually
-/// produces for a quoted `url()`, because a descriptor value is only faithful
-/// if reassembling those tokens reproduces the authored text.
 #[test]
 fn font_face_with_a_src_url_survives_the_bundle() {
     let info = style_info(vec![font_face_rule(vec![
@@ -597,28 +475,6 @@ fn font_face_with_a_src_url_survives_the_bundle() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// Replicates `web-core/encode/font-family-at-rule-snapshot` (inline fixture,
-/// `packages/web-platform/web-core/tests/encode.spec.ts:329`): the exact
-/// content of a decoded `@font-face` rule — both descriptors, in source order,
-/// with their quoting untouched.
-///
-/// The upstream snapshot is `@font-face{font-family:"MyFont";src:url('myfont.woff');}`.
-/// Its asymmetric quoting is not a decoder normalisation: `@lynx-js/css-serializer`
-/// re-emits the `url()` single-quoted before the value ever reaches the wire
-/// (verified by running the authored CSS through
-/// `packages/tools/css-serializer`), so the decoder's job is to leave both
-/// forms exactly as they arrived. `lower_style::descriptor_text` is this
-/// engine's `get_font_face_content`; its per-descriptor value text is what is
-/// asserted, descriptor by descriptor. The `name:value;` joining that turns
-/// those into the snapshot's inner text is not observable from this crate (see
-/// the module doc), so what this pins is the two halves that joining reads,
-/// and their order. Upstream's separate output channel collapses into the one
-/// sheet here.
-///
-/// The stylo half of the assignment — `DescriptorId::FontFamily == "MyFont"`
-/// and `DescriptorId::Src` naming `myfont.woff`, through the `font_face_descriptor`
-/// helper at `crates/terminus/tests/at_rules.rs:49` — is *not* asserted here and has
-/// no case in that file today.
 #[test]
 fn font_face_descriptors_decode_in_authored_order_and_form() {
     let info = style_info(vec![font_face_rule(vec![
@@ -637,23 +493,6 @@ fn font_face_descriptors_decode_in_authored_order_and_form() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// Replicates `web-core/encode/font-face-preserves-css-var-fallback` (inline
-/// fixture, `packages/web-platform/web-core/tests/encode.spec.ts:345`): a
-/// `var()` with a fallback used as an `@font-face` descriptor value reaches the
-/// engine verbatim — neither flattened to its fallback nor left as the
-/// `{{--font-family}}` interchange placeholder — and the space after the
-/// top-level comma survives with it.
-///
-/// Upstream this is one of exactly two fixtures that catch a `restoreCSSVarValue`
-/// regression in the `FontFaceRule` branch; the equivalent obligation on this side
-/// is that neither the decoder nor `descriptor_text` renormalises the text.
-///
-/// What stylo then makes of that descriptor is the other end of the same case,
-/// pinned by `font_face_descriptors_do_not_substitute_var` in
-/// `crates/terminus/tests/at_rules.rs`: css-variables-1 §3 limits `var()`
-/// substitution to property values inside a declaration block, so the
-/// descriptor carrying one is dropped while its siblings parse. That is the
-/// browser's behaviour too, so it is the reference — not a gap.
 #[test]
 fn font_face_var_fallback_decodes_verbatim() {
     let info = style_info(vec![font_face_rule(vec![
@@ -681,21 +520,6 @@ fn font_face_var_fallback_decodes_verbatim() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// Replicates `web-core/encode/preserve-css-var-fallback-for-color` (inline
-/// fixture, `packages/web-platform/web-core/tests/encode.spec.ts:202`): a
-/// `var()` fallback on `color` reaches the engine with its number forms and
-/// whitespace exactly as authored — the alpha stays `.6` rather than being
-/// rewritten to `0.6`, the fallback's inner spaces stay absent, and the one
-/// space after the top-level comma stays present.
-///
-/// The upstream assertion is on the decoded style content; the counterpart here
-/// is the declaration value `lower_style` hands the engine, which is what stylo
-/// parses.
-///
-/// The assignment's primary assertion for this row — that with
-/// `--Text-TextQuaternary` unset the computed colour *is* `rgba(22,24,35,0.6)`
-/// — belongs in `crates/terminus/tests/custom_properties.rs`; `bobcat-source` cannot
-/// depend on `terminus`, and no computed value is asserted in this file.
 #[test]
 fn color_var_fallback_decodes_verbatim() {
     let info = style_info(vec![style_rule(
@@ -734,23 +558,6 @@ fn color_var_fallback_decodes_verbatim() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// Replicates `web-core/encode/non-ascii-css-content-string` (inline fixture,
-/// `packages/web-platform/web-core/tests/encode.spec.ts:465`): UTF-8 text
-/// inside a CSS string survives the container byte for byte, and the fixture's
-/// whole selector — class, attribute selector and `:before` — comes back
-/// unchanged.
-///
-/// `:before` really is a pseudo-*class* component on this wire: `encodeCSS`
-/// takes csstree's node type verbatim, and csstree parses the single-colon form
-/// as `PseudoClassSelector` (`encodeCSS.ts:126-133`), which is why the upstream
-/// snapshot shows one colon while `::before` in the `selectors` corpus entry
-/// keeps two.
-///
-/// The upstream snapshot also pins `[[data-status="complete"]]` and a
-/// `:not([l-e-name])` suffix; both are rewrites web-core's browser decoder adds
-/// and neither exists here. `content:` is itself inert in this engine — no
-/// generated-content boxes are produced — so what this pins is value fidelity,
-/// not rendering.
 #[test]
 fn non_ascii_content_string_decodes_byte_exactly() {
     let info = style_info(vec![style_rule(
@@ -779,25 +586,6 @@ fn non_ascii_content_string_decodes_byte_exactly() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// Replicates `web-core/encode-style-path/byte-for-byte-fingerprints` (inline
-/// corpus, `packages/web-platform/web-core/tests/encode-style-path.spec.ts:62`):
-/// the seven text- and font-relevant members of the encoder's stability corpus.
-///
-/// Upstream the assertion is a sha256 pin on the bytes a JavaScript build step
-/// emits, which has no counterpart in an engine that never emits them. What
-/// ports is the corpus itself, read as decode inputs: each stylesheet must reach
-/// the engine as the rules it went in as. `fontFace` and `fontFaceVar` are the
-/// two entries that exist upstream only to catch a dropped `restoreCSSVarValue`
-/// in the font-face branch, so a `var()` inside a descriptor is what they check
-/// here too.
-///
-/// Three shapes below are the encoder's rather than the author's, and were
-/// derived by running each stylesheet through `@lynx-js/css-serializer`: the
-/// corpus writes `{{--fw}}` and `{{--c}}` and the encoder rewrites both to
-/// `var(...)`; `url(a.woff2)` is re-emitted single-quoted; and `:root`'s custom
-/// property is pushed *after* its ordinary declarations. Combinators come back
-/// spaced (`.b > .c`) because the wire stores each one as its own component
-/// with no surrounding text; the selector is the same selector.
 #[test]
 fn encoder_corpus_stylesheets_decode_to_their_rules() {
     let corpus = text_and_font_corpus();
@@ -809,9 +597,6 @@ fn encoder_corpus_stylesheets_decode_to_their_rules() {
         );
     }
 
-    // The corpus `important` entry only earns its place if the marker is
-    // recovered rather than carried into a value parser: the wire leaves
-    // `is_important` false and appends the marker to the value tokens instead.
     let important = decoded(&corpus[1].1);
     let width = &fragment(&important, 0)[0].declaration_block.declarations[0];
     assert!(!width.is_important, "the wire flag stays false");
@@ -822,8 +607,6 @@ fn encoder_corpus_stylesheets_decode_to_their_rules() {
     );
 }
 
-/// Each corpus stylesheet as the wire carries it, paired with the rules it must
-/// reach the engine as.
 #[expect(
     clippy::too_many_lines,
     reason = "one literal entry per corpus stylesheet; splitting the table hides the corpus"
@@ -831,7 +614,6 @@ fn encoder_corpus_stylesheets_decode_to_their_rules() {
 fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
     vec![
         (
-            // ':root{--accent:#f00;font-size:14px}.t{color:var(--accent)}'
             "variables",
             style_info(vec![
                 style_rule(
@@ -858,7 +640,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             ],
         ),
         (
-            // '.a{width:100vw !important;height:50vh;font-size:10rpx}'
             "important",
             style_info(vec![style_rule(
                 &[(SimpleSelectorKind::Class, "a")],
@@ -886,7 +667,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             )],
         ),
         (
-            // '@font-face{font-family:X;src:url(a.woff2)}'
             "fontFace",
             style_info(vec![font_face_rule(vec![
                 ident("font-family", "X"),
@@ -898,7 +678,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             ])],
         ),
         (
-            // '@font-face{font-family:X;src:url(a.woff2);font-weight:{{--fw}}}'
             "fontFaceVar",
             style_info(vec![font_face_rule(vec![
                 ident("font-family", "X"),
@@ -912,7 +691,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             ])],
         ),
         (
-            // '@keyframes k{from{color:{{--c}}}to{color:blue}}'
             "keyframesVar",
             style_info(vec![keyframes_rule(
                 "k",
@@ -930,7 +708,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             )],
         ),
         (
-            // '.a{color:red;padding:1rem}'
             "plain",
             style_info(vec![style_rule(
                 &[(SimpleSelectorKind::Class, "a")],
@@ -942,13 +719,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
             )],
         ),
         (
-            // '.a .b>.c+.d~.e{color:red}#id[data-x="1"]:hover::before{color:blue}
-            //  *{margin:0}div{padding:0}'
-            //
-            // `*` arrives as a Type component whose value is `*`: csstree
-            // parses it as a TypeSelector, and `encodeCSS` forwards that node
-            // type verbatim, so the wire's UniversalSelector kind is never
-            // produced by this encoder.
             "selectors",
             style_info(vec![
                 style_rule(
@@ -996,24 +766,6 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
     ]
 }
 
-/// Replicates `web-core/xml-to-web-bundle/keyframes-and-font-face-survive`
-/// (inline fixture,
-/// `packages/web-platform/web-core/tests/xml-to-web-bundle.spec.ts:373`):
-/// `@keyframes` and `@font-face` are the two group at-rule kinds a Lynx card can
-/// carry, and a card declaring both loses nothing.
-///
-/// Upstream the card is a Vanilla-Lynx-XML envelope *compiled to a bundle*, and
-/// the assertion reads the decoded `StyleInfo` back out of that bundle — so the
-/// faithful port is the bundle path, with both group kinds side by side in one
-/// fragment. Taking the raw Lynx-XML path instead would test nothing: there a
-/// `<style>` body is stored unparsed as `PageStyleSheet::Text`
-/// (`crates/bobcat-source/src/page.rs`, `from_lynx_xml`) and never becomes
-/// rules. Upstream's `expect(discarded).toStrictEqual([])` has no counterpart
-/// on either path: `PageSource` reports no discarded rules.
-///
-/// The web's two decoded channels — `css` and `fontFace` — collapse into one
-/// sheet here, so the "separate channel" half of the upstream assertion is
-/// dropped; what remains is that both rules survive with their contents.
 #[test]
 fn a_card_carries_keyframes_and_font_face() {
     let info = style_info(vec![
@@ -1052,10 +804,6 @@ fn a_card_carries_keyframes_and_font_face() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// A scroll-animations-1 range keyframe selector (`entry 0%`) as web-core's
-/// encoder writes it — one `UnknownText` component holding the authored
-/// text — survives the bundle round trip and the lowering unchanged, so the
-/// engine's keyframe-selector parser sees it as written.
 #[test]
 fn a_range_keyframe_selector_survives_the_bundle() {
     let info = style_info(vec![keyframes_rule(
@@ -1085,15 +833,6 @@ fn a_range_keyframe_selector_survives_the_bundle() {
     assert!(registered_style_sheet(&info).is_some());
 }
 
-/// The Lynx XML envelope the upstream fixture is written in, kept as its own
-/// case so that dropping it from
-/// [`a_card_carries_keyframes_and_font_face`] loses no coverage.
-///
-/// Here a `<style>` body is author CSS text handed to the engine's own CSS
-/// parser rather than pre-tokenized, so the only claim available at this layer
-/// is that the section is carried across the envelope byte for byte and
-/// registered as a sheet. It says nothing about either at-rule surviving
-/// lowering — that is the bundle case's job.
 #[test]
 fn a_lynx_xml_envelope_carries_its_style_section_verbatim() {
     const STYLE: &str = "@keyframes spin{from{opacity:0}to{opacity:1}}\

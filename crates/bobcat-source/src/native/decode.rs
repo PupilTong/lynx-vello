@@ -25,10 +25,6 @@ const CUSTOM_CSS: i32 = 2;
 
 const VALUE_RECURSION_LIMIT: usize = 128;
 
-// QuickJS bytecode emitted by the current native encoder for an empty MTS
-// program. Source-based external bundles still carry this inert root section;
-// accepting only the exact empty program avoids silently discarding real MTS
-// code that cannot be decompiled.
 const EMPTY_ROOT_LEPUS_INLINE_DEBUG: &[u8] = &[
     1, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0, 0, 194, 40, 94, 1, 12, 0, 0,
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
@@ -37,10 +33,6 @@ const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG: &[u8] = &[
     9, 204, 1, 176, 202, 1, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0,
     0, 194, 40, 94, 1, 0,
 ];
-// tasm 0.0.53 emits a shorter empty external-debug program with a new header.
-// Verified by encoding an external source-only
-// bundle with no lepusCode at engineVersion 4.1.0; this is still an exact
-// inert-program fingerprint, not permission to skip executable bytecode.
 const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53: &[u8] = &[
     9, 204, 1, 176, 202, 3, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 0, 194, 40, 94,
     1, 0,
@@ -305,10 +297,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
     })
 }
 
-/// Each named CSS section as a sheet of its own, the shape the web encoder's
-/// `CustomSectionsStyleInfo` section carries: the fragment and the fragments
-/// it reaches, flattened unscoped into css id 0. The fragments also stay in
-/// the bundle's `style_info`, where they always were.
 fn named_style_infos(
     style_info: &crate::web::StyleInfo,
     named_css: BTreeMap<String, i32>,
@@ -389,8 +377,6 @@ fn build_web_config(
     target_version: &str,
     app_type: &str,
 ) -> Map<String, JsonValue> {
-    // Native's config decoder accepts this switch only as a JSON boolean.
-    // Preserve that decision before the web wire erases the value's type.
     for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
         if let Some(value) = page_config.get_mut(key) {
             *value = JsonValue::Bool(value.as_bool().unwrap_or(false));
@@ -759,8 +745,6 @@ fn decode_custom_content(
                     header.name
                 )));
             };
-            // Keep the native section name as well as its legacy script-map
-            // adaptation: loadScript addresses custom sections directly.
             custom_sections.insert(header.name.clone(), serde_json::json!({"content": source}));
             if header.name.ends_with("__main-thread") {
                 if lepus_code.insert(header.name.clone(), source).is_some() {

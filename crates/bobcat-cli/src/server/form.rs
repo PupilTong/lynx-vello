@@ -39,7 +39,6 @@ pub(super) struct ScreenshotForm {
     pub(super) timeout: Duration,
 }
 
-/// Original request inputs archived alongside the screenshot, before URL downloads.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ScreenshotParameters {

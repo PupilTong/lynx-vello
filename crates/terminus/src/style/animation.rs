@@ -131,19 +131,10 @@ use crate::style::timeline::ScrollTimelines;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::{ANIMATES_OPACITY, ANIMATES_TRANSFORM, Node};
 
-/// What one [`Document::advance_animations`] call did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnimationTick {
-    /// An animation is still live and the caller owes it another frame. False
-    /// once every animation has finished, been canceled, or paused.
     pub needs_next_frame: bool,
-    /// How many elements were re-cascaded. Zero means the retained scene is
-    /// still current and this frame can be skipped.
     pub restyled: usize,
-    /// An animated element produced relayout damage, or a transform
-    /// animation starting or ending moved the containing block of its
-    /// element's positioned descendants, so the next `layout()` will do real
-    /// work. False on every other tick of a purely visual animation.
     pub relayout: bool,
 }
 
@@ -151,10 +142,6 @@ fn is_cancelled(animation: &impl Cancellable) -> bool {
     animation.is_cancelled()
 }
 
-/// Whether one animation or transition has been cancelled.
-///
-/// Stylo's `Animation` and `Transition` carry the same `state` field but share
-/// no trait, so the two loops that ask this question need one of their own.
 trait Cancellable {
     fn is_cancelled(&self) -> bool;
 }
@@ -171,9 +158,6 @@ impl Cancellable for Transition {
     }
 }
 
-/// The longhands whose animation acts as `will-change` naming a composite
-/// property, and the [`crate::tree::node::StylingData::animates`] bit each
-/// sets. The individual transforms are storage-only in the fork's grammar.
 const COMPOSITES: [(LonghandId, u8); 5] = [
     (LonghandId::Opacity, ANIMATES_OPACITY),
     (LonghandId::Transform, ANIMATES_TRANSFORM),
@@ -182,13 +166,6 @@ const COMPOSITES: [(LonghandId, u8); 5] = [
     (LonghandId::Scale, ANIMATES_TRANSFORM),
 ];
 
-/// web-animations-1 "Side effects of animation": whether a CSS animation is
-/// *current* or *in effect*. Stylo runs every animation at a positive
-/// playback rate, so its before phase (`Pending`, a delay included) and a
-/// pause are current; a finished one stays in effect only while its fill
-/// holds the last keyframe. A progress-driven animation is current exactly
-/// while its timeline is active (`timeline_active`): on an inactive one it
-/// is idle, as in Blink.
 pub(crate) fn animation_has_side_effects(
     animation: &Animation,
     timeline_active: impl FnOnce() -> bool,
@@ -206,7 +183,6 @@ pub(crate) fn animation_has_side_effects(
     }
 }
 
-/// The same for a CSS transition, which fills nothing once it finishes.
 fn transition_has_side_effects(transition: &Transition) -> bool {
     matches!(
         transition.state,
@@ -221,77 +197,36 @@ fn composite_bit(property: PropertyDeclarationId<'_>) -> u8 {
         .map_or(0, |(_, bit)| *bit)
 }
 
-/// What one step of Stylo's animation state machine produced.
 #[derive(Default)]
 struct Stepped {
-    /// The elements whose animated values may have moved, for the
-    /// animation-only traversal to re-cascade.
     hinted: Vec<NodeId>,
-    /// Whether any animation or transition changed state — started, iterated
-    /// or ended. The committed frame describes those states as well as the
-    /// styles they produce, so a step that moved one owes the next frame a
-    /// commit even if no style changed with it.
     moved: bool,
-    /// Whether an animation or transition finished, which ends its
-    /// contribution or its side effects.
     finished: bool,
 }
 
-/// Which of the two passes over the timeline a step is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pass {
-    /// A frame: anchors fresh starts and re-cascades everything that moves.
     Tick,
-    /// A job's start ([`Document::sync_animation_clock`]): moves the clock
-    /// and the states only. A fresh `Pending` start is carried rather than
-    /// anchored, so the next frame still anchors it at that frame.
     Sync,
 }
 
-/// One animation or transition the driver has already anchored to the
-/// timeline and which was still `Pending` when the last tick ended, waiting
-/// out its delay.
-///
-/// Stylo's own `is_new` field answers a different question:
-/// `Animation::update_from_other` assigns the whole animation over, so a
-/// restyle of the element sets `is_new` again and a delayed animation on an
-/// element that restyles every frame would be pushed forward forever. The
-/// identity below survives that, because a restyle keeps both the name and the
-/// transitioned property.
 #[derive(PartialEq, Eq, Hash)]
 struct AnchoredAnimation {
-    /// The map key the animation lives under, so an element and one of its
-    /// pseudo-elements running the same animation name stay distinct.
     set: AnimationSetKey,
     what: AnchoredKind,
 }
 
-/// Which animation of a set [`AnchoredAnimation`] names.
 #[derive(PartialEq, Eq, Hash)]
 enum AnchoredKind {
-    /// A `@keyframes` animation, by its `animation-name`.
     Keyframes(Atom),
-    /// A transition, by the property it animates — the same identity Stylo
-    /// matches a replacement transition against.
     Transition(OwnedPropertyDeclarationId),
 }
 
-/// One element's share of a tick: the instant, the interval, whether the
-/// element is frozen, and the anchoring bookkeeping the two loops share.
-///
-/// Split out of [`Document::step_animation_states`] only so the animation and
-/// transition loops — the same five decisions over two Stylo types that share
-/// no trait — read side by side.
 struct Step<'a> {
     now: f64,
     shift: f64,
-    /// css-contain-2 §4: this element is in a skipped subtree, so nothing is
-    /// promoted, iterated or ended for it.
     skipped: bool,
-    /// Whether this element's start times take [`Self::shift`] whatever their
-    /// state, which is what holds a frozen animation's progress still.
     carry: bool,
-    /// Which pass this is: a sync anchors no fresh `Pending` start.
     pass: Pass,
     finished: bool,
     anchored: &'a FxHashSet<AnchoredAnimation>,
@@ -299,35 +234,18 @@ struct Step<'a> {
 }
 
 impl Step<'_> {
-    /// Whether a `Pending` animation or transition takes the interval now,
-    /// `fresh` when this tick is the first to see it.
-    ///
-    /// Carry and anchor are exclusive by construction: the shift lands once,
-    /// from whichever of the two claims it, so an animation created inside a
-    /// skipped subtree is not pushed forward twice on the tick that reveals
-    /// it.
     const fn shifts_pending(&self, fresh: bool) -> bool {
         self.carry || fresh
     }
 
-    /// Whether this tick settles an animation's start on an element that is
-    /// not frozen: it anchors a `fresh` `Pending` one, or carries the starts
-    /// of an element revealed since the last tick. A curve exports only
-    /// settled starts, so the step owes the next frame a commit.
     const fn settles(&self, fresh: bool) -> bool {
         !self.skipped && (fresh || self.carry)
     }
 
-    /// Whether this step leaves a `Pending` start as it found it apart from
-    /// the shift: a fresh one under [`Pass::Sync`], which the next frame
-    /// anchors.
     const fn defers(&self, fresh: bool) -> bool {
         fresh && matches!(self.pass, Pass::Sync)
     }
 
-    /// Advances one element's `@keyframes` animations, collecting the ones
-    /// that finished with a fill mode that keeps their last value. Answers
-    /// whether any of them changed state.
     fn animations(
         &mut self,
         id: NodeId,
@@ -381,8 +299,6 @@ impl Step<'_> {
         moved
     }
 
-    /// The same for one element's transitions, which have no iteration and no
-    /// fill mode to hold.
     fn transitions(&mut self, key: &AnimationSetKey, transitions: &mut [Transition]) -> bool {
         let mut moved = false;
         for transition in transitions {
@@ -424,76 +340,28 @@ impl Step<'_> {
     }
 }
 
-/// The document's animation timeline: Stylo's animation state, the last time
-/// it was sampled at, and whether anything is still moving.
 #[derive(Default)]
 pub(crate) struct AnimationDriver {
     sets: DocumentAnimationSet,
     now: f64,
     active: bool,
-    /// Whether any element that owns animation state sits in a skipped
-    /// subtree, so its animations are frozen (css-contain-2 §4, module docs).
-    ///
-    /// Kept beside [`Self::active`] rather than folded into it because the two
-    /// answer different questions: a frozen animation demands no frame of its
-    /// own — that is the whole point — and yet its start times still have to
-    /// be carried every time the timeline moves.
     frozen: bool,
-    /// The elements whose animations were frozen when the last tick ended.
-    ///
-    /// A tick carries the start times of every element in here *or* frozen as
-    /// of the tick itself, which is what makes the interval a reveal happened
-    /// in count as frozen rather than as elapsed. See the module docs: the
-    /// reveal is noticed between two ticks and the interval containing it may
-    /// be an arbitrarily long unticked stretch.
     carried: FxHashSet<NodeId>,
-    /// The set the previous tick's [`Self::carried`] is rebuilt into, so a
-    /// page with a frozen animation ticks without allocating.
     carried_spare: FxHashSet<NodeId>,
-    /// Ancestors marked with the animation-only dirty-descendants bit by the
-    /// last tick, kept so the same tick can clear exactly what it set. Stylo
-    /// only ever sets that bit on ancestors of a hinted element, so this is a
-    /// superset of what the traversal touches.
     marked: Vec<NodeId>,
-    /// Elements currently carrying the `may_have_animations` bit, so the bit
-    /// can be cleared again when their last animation goes away.
     flagged: Vec<NodeId>,
-    /// The animations and transitions that were already anchored to the
-    /// timeline and still `Pending` at the end of the last tick, so the next
-    /// tick shifts the ones it has never seen and leaves these alone.
-    ///
-    /// A set rather than a list: a page of staggered delays holds one entry per
-    /// waiting animation for its whole delay, and every tick asks about each of
-    /// them, which over a list is one pass per animation per frame.
     anchored: FxHashSet<AnchoredAnimation>,
-    /// The set the previous tick's [`Self::anchored`] is rebuilt into, kept so
-    /// a tick of a page with a delayed animation allocates nothing.
     anchored_spare: FxHashSet<AnchoredAnimation>,
-    /// Animations that have finished but whose fill mode keeps their last
-    /// value in the cascade.
-    ///
-    /// Stylo drops every finished animation from its map on the next restyle
-    /// (`process_animations_for_style`), which would take the held value with
-    /// it. A browser keeps a filling animation contributing until it is
-    /// cancelled or replaced, so the driver puts them back after each
-    /// traversal.
     held: Vec<(NodeId, Animation)>,
-    /// Elements whose states a [`Document::sync_animation_clock`] moved
-    /// without re-cascading them, which the next tick re-cascades.
     owed: FxHashSet<NodeId>,
-    /// The progress-driven animations' timelines; see [`crate::style::timeline`].
     pub(crate) timelines: ScrollTimelines,
 }
 
 impl AnimationDriver {
-    /// The handle a [`SharedStyleContext`] takes. Cloning shares the same
-    /// `Arc<RwLock<..>>`, which is how the state survives a flush.
     pub(crate) fn context_handle(&self) -> DocumentAnimationSet {
         self.sets.clone()
     }
 
-    /// Whether the pending `@keyframes` animation `name` of set `set` is
-    /// anchored to the timeline, so the next tick leaves its start alone.
     pub(crate) fn keyframes_anchored(&self, set: &AnimationSetKey, name: &Atom) -> bool {
         self.anchored.contains(&AnchoredAnimation {
             set: set.clone(),
@@ -501,8 +369,6 @@ impl AnimationDriver {
         })
     }
 
-    /// Whether the pending transition of `property` in set `set` is anchored
-    /// to the timeline, so the next tick leaves its start alone.
     pub(crate) fn transition_anchored(
         &self,
         set: &AnimationSetKey,
@@ -514,13 +380,10 @@ impl AnimationDriver {
         })
     }
 
-    /// Whether the next tick carries `id`'s start times: it was frozen when
-    /// the last tick ended.
     pub(crate) fn carries(&self, id: NodeId) -> bool {
         self.carried.contains(&id)
     }
 
-    /// The time the animations were last sampled at, in seconds.
     pub(crate) const fn now(&self) -> f64 {
         self.now
     }
@@ -529,33 +392,14 @@ impl AnimationDriver {
         self.active
     }
 
-    /// Whether a tick still has work even with nothing active: something is
-    /// frozen right now, or something was frozen when the last tick ended and
-    /// its start times have not been carried across the interval since.
-    ///
-    /// Both terms matter. The first is what keeps a frozen animation's
-    /// progress from drifting while an unrelated animation keeps the host
-    /// ticking; the second is what lets the tick after a reveal carry the
-    /// interval the reveal happened in, however long the host left it.
     pub(crate) fn has_frozen_animations(&self) -> bool {
         self.frozen || !self.carried.is_empty()
     }
 
-    /// Whether the document holds no animation state and no timeline
-    /// definition at all — the check that keeps removal and unlinking free on
-    /// a page that never animates.
     pub(crate) fn is_empty(&self) -> bool {
         self.sets.sets.read().is_empty() && !self.timelines.has_definers()
     }
 
-    /// Drops every animation belonging to the given nodes.
-    ///
-    /// Two callers need this. Unlinking an element cancels its animations, the
-    /// same as a browser restarting them when a node is moved; and freeing an
-    /// arena slot must not hand a dead element's animations to whatever reuses
-    /// the slot, because [`stylo::dom::OpaqueNode`] carries the bare slot with
-    /// the generation stripped and `DocumentAnimationSet` reaps nothing on its
-    /// own.
     pub(crate) fn forget(&mut self, ids: &[NodeId]) {
         if ids.is_empty() {
             return;
@@ -577,12 +421,6 @@ impl AnimationDriver {
         if sets.len() == before {
             return;
         }
-        // This can retire the last animation in the document, and nothing
-        // guarantees a style flush follows to notice. Deliberately blind to
-        // freezing, which needs the tree this half of the driver cannot
-        // reach: the answer is conservative in the safe direction, and
-        // `Document::refresh_animation_activity` corrects it before the next
-        // frame is published.
         self.active = sets
             .values()
             .any(stylo::servo::animation::ElementAnimationSet::needs_animation_ticks);
@@ -590,39 +428,16 @@ impl AnimationDriver {
 }
 
 impl<T: Sync> Document<T> {
-    /// The timeline's current instant, in seconds: the reading of the last
-    /// [`Self::advance_animations`] or [`Self::sync_animation_clock`], which
-    /// is what a style flush starts and retargets animations at.
     #[must_use]
     pub fn animation_clock(&self) -> f64 {
         self.animations().now()
     }
 
-    /// Whether any animation or transition still needs frames.
-    ///
-    /// Animations frozen by css-contain-2 §4 — the ones in a subtree whose
-    /// contents are skipped — do not count: they advance no timeline, so a
-    /// page whose only animations are frozen is idle and the host stops
-    /// ticking it. See the module docs.
     #[must_use]
     pub fn has_active_animations(&self) -> bool {
         self.animations().is_active() || self.animated_images_run()
     }
 
-    /// css-contain-2 §4: whether this element is part of some ancestor's
-    /// **skipped contents**, which is what freezes its animations.
-    ///
-    /// The spec skips an element's *contents* — "the flat tree descendants of
-    /// the element, including both text and elements" — so the box that skips
-    /// is itself not skipped and its own animations run as normal. Hence the
-    /// walk starts at the flat parent.
-    ///
-    /// The predicate is `crate::layout::skips_contents`, the one layout and
-    /// the paint build ask, so `content-visibility: hidden` and a non-relevant
-    /// `content-visibility: auto` box freeze by exactly the rule they skip by,
-    /// and the answer moves in the same rendering update the skipping does.
-    /// The walk is per *animated* element and costs a page with no animation
-    /// state nothing at all, because nothing asks.
     pub(crate) fn in_skipped_subtree(&self, id: NodeId) -> bool {
         let mut current = self.get(id).and_then(Node::flat_parent_id);
         while let Some(ancestor) = current {
@@ -640,25 +455,6 @@ impl<T: Sync> Document<T> {
         false
     }
 
-    /// Re-reads which animations demand frames and which are frozen, and
-    /// answers the former — and, given the frame about to be published,
-    /// whether anything ticking is *not* covered by one of its exported
-    /// curves: those elements still need per-frame ticks on this thread, so
-    /// the presenting side keeps sending frame posts. Both answers come from
-    /// one pass over the set map.
-    ///
-    /// Two things move this answer without a tick: a style flush, which is
-    /// where animations start, stop and gain or lose a skipping ancestor; and
-    /// the `content-visibility: auto` relevance pass inside
-    /// [`Document::render`], which reveals or skips subtrees with no style
-    /// change at all. So the render asks again once its frame is final, which
-    /// is what makes a reveal start its animations in the very commit that
-    /// revealed them.
-    ///
-    /// Every exported element has exactly one set, found by key, so counting
-    /// the covered sets answers without scanning the slots per set. A slot is
-    /// never inside a skipped subtree — the build does not descend into one —
-    /// so a covered set is never a frozen one.
     pub(crate) fn refresh_animation_activity(
         &mut self,
         frame: Option<&crate::visual::PaintOrder>,
@@ -699,59 +495,14 @@ impl<T: Sync> Document<T> {
         (active, needs_main_ticks)
     }
 
-    /// Advances every live animation and transition to `now` — seconds on a
-    /// monotonic timeline whose epoch is the caller's choice — and re-cascades
-    /// the elements that moved.
-    ///
-    /// Safe to call every frame: with nothing animating it reads one bool.
-    /// Time never runs backwards; a `now` behind the last sample is clamped
-    /// forward rather than rewinding the timeline.
-    ///
-    /// The interval between this sample and the last one is also what anchors
-    /// an animation created since the last one (see the module docs), which is
-    /// why the previous reading is read before it is overwritten. The inactive
-    /// path records the reading without stepping anything: a flush that creates
-    /// an animation makes the timeline active through
-    /// `Document::sync_animation_state`, so the first tick that can see a new
-    /// animation always takes the path below, with `previous` at the time the
-    /// animation was created.
-    ///
-    /// A document with nothing active but something *frozen* takes the path
-    /// below too, and for the same reason the anchoring exists: a frozen
-    /// animation's start times have to be carried by whatever interval the
-    /// timeline moved, or its progress would drift while it was meant to be
-    /// standing still. That step promotes, iterates, ends and hints nothing,
-    /// so it leaves the timeline exactly as idle as it found it.
     pub fn advance_animations(&mut self, now: f64) -> AnimationTick {
         let mut tick = self.step_timeline(now, Pass::Tick);
-        // SVG images with animations tick on this clock
-        // (`crate::svg::image`). One test on a page without one.
         if !self.animated_images.is_empty() {
             self.advance_animated_images(now, &mut tick);
         }
         tick
     }
 
-    /// Moves the timeline to `now` at the start of a job, before any script
-    /// or flush in it runs, so a restyle inside the job — a transition
-    /// retargeted or reversed, `animation-play-state` paused, any
-    /// `animation-*` change — computes from the current instant rather than
-    /// from the last frame this thread ticked. HTML's order: animations are
-    /// updated before the style change events of a task.
-    ///
-    /// The cheap half of [`Self::advance_animations`]: the clock moves (never
-    /// back), and every live animation and transition is promoted at an
-    /// anchored start, iterated and ended, but nothing is re-cascaded and
-    /// nothing is committed. Elements a flush then restyles cascade at `now`;
-    /// the others keep their committed values, and the next tick re-cascades
-    /// the ones whose state moved. A fresh `Pending` start is carried, not
-    /// anchored, so the next frame anchors it as before.
-    ///
-    /// One exception: a step that ends an animation or transition runs the
-    /// tick's re-cascade for the elements whose state moved, because an end
-    /// changes what a commit shows — the side effects go, and the element
-    /// has no curve any more — and a commit in this job would otherwise
-    /// publish the ended state over the cascade of an earlier instant.
     pub fn sync_animation_clock(&mut self, now: f64) {
         let _ = self.step_timeline(now, Pass::Sync);
     }
@@ -785,14 +536,6 @@ impl<T: Sync> Document<T> {
         hinted.extend(owed);
         if hinted.is_empty() {
             let relayout = self.sync_animation_state();
-            // If the timeline was active on entry and this step ended it, the
-            // idle fact must reach the next committed frame even though no
-            // style moved — the frame's animation flag is itself visual
-            // state, and a stale `true` would keep the compositor asking
-            // for animation ticks forever. The entry state is what makes that
-            // a transition rather than a standing condition: a tick that only
-            // carries frozen animations finds the timeline idle on both sides
-            // and must not republish a frame for it, every frame, forever.
             if moved || (was_active && !self.animations().is_active()) {
                 self.note_visual_mutation();
             }
@@ -804,38 +547,15 @@ impl<T: Sync> Document<T> {
 
         let root = self.hint_animated_elements(&hinted);
         let mut tick = self.recascade_animated_elements(root);
-        // The traversal runs `process_animations` again, which prunes finished
-        // animations, so what the timeline owns is only settled afterwards.
         tick.relayout |= self.sync_animation_state();
         tick.needs_next_frame = self.animations().is_active();
-        // A restyle is a visual change; so is the timeline going idle, whose
-        // flag rides the committed frame (see above). So is a state change on
-        // its own: the exported curves the frame carries are read off these
-        // states, and an animation promoted to running is one the next frame
-        // can hand to the compositor even when its first sample happens to
-        // equal the style already committed.
         if tick.restyled > 0 || moved || (was_active && !tick.needs_next_frame) {
             self.note_visual_mutation();
         }
         tick
     }
 
-    /// Re-reads Stylo's animation map: which elements own animation state,
-    /// which composite properties each animates (the node's `animates`
-    /// bits), and whether anything still needs frames. Answers whether the
-    /// next `layout()` has work: a transform bit flip moved a containing
-    /// block, or the cancelled elements' re-cascade relayouts.
-    ///
-    /// Both the style flush and the tick mutate the map through Stylo, which
-    /// reports neither, so the bookkeeping is rebuilt from the map itself.
-    /// Whether an element's animations are *frozen* is the one question this
-    /// pass does not answer itself: it goes through
-    /// [`Document::refresh_animation_activity`] below, so freezing and the
-    /// render's own re-ask read one rule.
     pub(crate) fn sync_animation_state(&mut self) -> bool {
-        // The cancelled elements' re-cascade can start a transition from the
-        // value the animation left, and prunes the finished animations a fill
-        // holds, so everything below reads the map after it.
         let cancelled = self.drop_cancelled_animations();
         let mut relayout = !cancelled.is_empty() && self.recascade_cancelled_animations(&cancelled);
 
@@ -845,7 +565,6 @@ impl<T: Sync> Document<T> {
         let mut progress_driven =
             std::mem::take(&mut self.animations_mut().timelines.progress_driven);
         progress_driven.clear();
-        // Elements whose `animates` bits changed, with the bits that did.
         let mut flipped = Vec::new();
         {
             let mut sets = handle.sets.write();
@@ -876,8 +595,6 @@ impl<T: Sync> Document<T> {
                 }
             }
             sets.retain(|_, set| !set.is_empty());
-            // An element whose set Stylo dropped since the last sync
-            // animates nothing; the loop above never saw it.
             for &id in &self.animations().flagged {
                 let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(id.arena_key()));
                 if !sets.contains_key(&key)
@@ -893,14 +610,9 @@ impl<T: Sync> Document<T> {
         self.animations_mut().held = held;
         self.animations_mut().timelines.progress_driven = progress_driven;
         if !flipped.is_empty() {
-            // Either bit moves the stacking context and group the paint build
-            // gives the element.
             self.note_visual_mutation();
         }
         for (id, changed) in flipped {
-            // `will-change: transform` makes the element the containing block
-            // of its absolute and fixed descendants. Only an animation's start
-            // or end gets here, never a frame.
             if changed & ANIMATES_TRANSFORM != 0 {
                 relayout |= self.invalidate_containing_block(id);
             }
@@ -924,9 +636,6 @@ impl<T: Sync> Document<T> {
         relayout
     }
 
-    /// Puts the held animations back, then drops every cancelled animation
-    /// and transition from the map, answering the elements that had one. The
-    /// held ones go back first so that a cancelled one stops filling.
     fn drop_cancelled_animations(&mut self) -> Vec<NodeId> {
         let handle = self.animations().context_handle();
         let mut held = std::mem::take(&mut self.animations_mut().held);
@@ -952,13 +661,6 @@ impl<T: Sync> Document<T> {
         cancelled
     }
 
-    /// The [`ANIMATES_OPACITY`] and [`ANIMATES_TRANSFORM`] bits of `node`'s
-    /// own set: the composite properties its animations and transitions
-    /// animate while they have side effects. A keyframes animation's
-    /// properties are those it has keyframes for, `Animation::animating_properties`,
-    /// the set the composite export reads: a property only ignored range
-    /// keyframes declare is not one of them, and placing or ignoring them
-    /// (`Document::resolve_timelines`) re-syncs the bits.
     fn animates(&self, node: &Node<T>, set: &ElementAnimationSet) -> u8 {
         let timelines = &self.animations().timelines;
         let animations = set
@@ -979,18 +681,6 @@ impl<T: Sync> Document<T> {
             })
     }
 
-    /// Re-cascades elements whose animations a restyle just cancelled.
-    ///
-    /// Stylo cancels an animation the new style no longer names inside
-    /// `ElementAnimationSet::update_animations_for_new_style`, which — unlike
-    /// the two sibling cancel paths next to it — does not mark the set dirty,
-    /// so `process_animations` never replaces the element's `Animations`
-    /// cascade origin. The element is left holding the value the animation had
-    /// when it was cancelled, for as long as nothing else restyles it. A
-    /// browser drops straight back to the un-animated style, so the driver
-    /// replaces that origin itself: the animation is out of the map by now, so
-    /// `TElement::animation_rule` answers `None` and the origin goes away.
-    /// Answers whether that produced relayout damage.
     fn recascade_cancelled_animations(&mut self, cancelled: &[NodeId]) -> bool {
         let root = self.hint_animated_elements(cancelled);
         let tick = self.recascade_animated_elements(root);
@@ -1000,15 +690,6 @@ impl<T: Sync> Document<T> {
         tick.relayout
     }
 
-    /// Puts back the finished-but-filling animations Stylo's restyle removed,
-    /// and drops the ones a restyle cancelled or whose element is gone.
-    ///
-    /// `animation-fill-mode: forwards` means the last keyframe keeps applying
-    /// after the animation ends, which is a statement about the cascade, not
-    /// about the frame it ended on: it holds until the animation is cancelled
-    /// or replaced. Stylo's `process_animations_for_style` retains only
-    /// unfinished animations, so without this the held value survives exactly
-    /// until the next restyle of that element.
     fn restore_held_animations(
         &self,
         held: &mut Vec<(NodeId, Animation)>,
@@ -1019,8 +700,6 @@ impl<T: Sync> Document<T> {
                 return false;
             }
             let key = AnimationSetKey::new_for_non_pseudo(OpaqueNode(id.arena_key()));
-            // A restyle whose `animation-name` no longer names this animation
-            // cancels it, and a cancelled animation stops filling.
             sets.get(&key).is_none_or(|set| {
                 !set.animations.iter().any(|live| {
                     live.name == animation.name && live.state == AnimationState::Canceled
@@ -1040,30 +719,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Advances Stylo's animation state machine to `now` and returns the
-    /// elements whose animated values may have moved.
-    ///
-    /// Stylo itself never writes [`AnimationState::Running`] outside
-    /// `Animation::update_from_other`, and `iterate_to` refuses to advance an
-    /// animation that is still `Pending`, so both the start promotion and the
-    /// iteration belong to the driver. `iterate_to` takes every iteration a
-    /// stalled frame skipped at once, by the arithmetic an exported curve's
-    /// sampler repeats.
-    ///
-    /// `shift` is how far the timeline moved to reach `now`. Every `Pending`
-    /// animation the driver has not anchored yet starts at this frame, so it
-    /// carries that interval before the promotion below considers it.
-    ///
-    /// `shift` is also what freezes an element whose contents are skipped
-    /// (css-contain-2 §4, module docs): carrying *every* one of its start
-    /// times by the interval holds `now - started_at` still, which is the
-    /// animation's progress, and the step then promotes, iterates, ends and
-    /// hints nothing for it. An element carries when it is frozen now or was
-    /// frozen when the last tick ended — the second term is what makes the
-    /// interval a reveal happened in count as frozen, and it is the only one
-    /// that survives the host having stopped ticking a fully frozen page.
-    /// Carry and anchor are exclusive by construction: a `Pending` animation
-    /// takes `shift` once, from whichever of the two claims it.
     fn step_animation_states(&mut self, now: f64, shift: f64, pass: Pass) -> Stepped {
         let handle = self.animations().context_handle();
         let mut anchored = std::mem::take(&mut self.animations_mut().anchored);
@@ -1080,7 +735,6 @@ impl<T: Sync> Document<T> {
         let mut sets = handle.sets.write();
         sets.retain(|key, set| {
             let Some(id) = arenas.id_at_arena_key(key.node.0) else {
-                // The element was freed without a lifecycle hook reaching us.
                 return false;
             };
             let skipped = document.in_skipped_subtree(id);
@@ -1088,9 +742,6 @@ impl<T: Sync> Document<T> {
                 now,
                 shift,
                 skipped,
-                // Carrying is what freezes: it applies while the element is
-                // skipped, and once more on the tick that finds it revealed,
-                // for the interval the reveal happened somewhere inside.
                 carry: skipped || was_frozen.contains(&id),
                 pass,
                 finished: false,
@@ -1108,11 +759,6 @@ impl<T: Sync> Document<T> {
             if set.is_empty() {
                 return false;
             }
-            // A frozen element is deliberately not hinted: its sampled values
-            // cannot have moved, and re-cascading it every frame is exactly
-            // the work skipping contents exists to avoid.
-            // A sync hints only what moved: the rest re-cascades at the next
-            // tick as it would have.
             let ticks = pass == Pass::Tick && set.needs_animation_ticks();
             if !skipped && (ticks || moved) {
                 stepped.hinted.push(id);
@@ -1131,13 +777,6 @@ impl<T: Sync> Document<T> {
         stepped
     }
 
-    /// Marks each animated element for an animation-only restyle and opens the
-    /// path the traversal descends. Returns the traversal root.
-    ///
-    /// Stylo propagates no hint of its own during an animation-only traversal
-    /// (`RestyleHint::propagate` returns empty and strips the animation bits),
-    /// so descent is driven purely by the animation-only dirty-descendants
-    /// bit, which the caller has to open from the root down.
     pub(super) fn hint_animated_elements(&mut self, hinted: &[NodeId]) -> NodeId {
         for &id in hinted {
             let Some(node) = self.arenas_mut().get_mut(id) else {
@@ -1170,14 +809,10 @@ impl<T: Sync> Document<T> {
         self.document_element().id()
     }
 
-    /// Runs the animation-only traversal and harvests what it changed.
     pub(super) fn recascade_animated_elements(&mut self, root: NodeId) -> AnimationTick {
         let now = self.animations().now();
         let animations = self.animations().context_handle();
         let phase = self.begin_flush_phase();
-        // An animation-only traversal never looks at snapshots — `pre_traverse`
-        // skips invalidation under the flag — and must not consume the pending
-        // ones, which belong to the next normal flush.
         let snapshots = SnapshotMap::new();
         let traversed = {
             let root_ref = self
@@ -1190,8 +825,6 @@ impl<T: Sync> Document<T> {
                 options: StyleSystemOptions::default(),
                 guards: guards.guards(),
                 current_time_for_animations: now,
-                // Deliberately not `FinalAnimationTraversal`: that flag wipes
-                // `ElementData::damage` before the harvest can read it.
                 traversal_flags: TraversalFlags::AnimationOnly,
                 snapshot_map: &snapshots,
                 animations,
@@ -1204,9 +837,6 @@ impl<T: Sync> Document<T> {
             );
             if token.should_traverse() {
                 let _thread_state = LayoutThreadStateGuard::enter();
-                // Sequential: an animation touches a handful of elements, and
-                // on Wasm worker zero of the Stylo pool is the Render
-                // Worker — the thread that paints — which is not this one.
                 Some(Node::id(driver::traverse_dom(&traversal, token, None)))
             } else {
                 None
@@ -1233,15 +863,6 @@ impl<T: Sync> Document<T> {
         self.animations_mut().marked = marked;
     }
 
-    /// Collects the damage an animation-only traversal produced.
-    ///
-    /// Mirrors the normal post-flush harvest with two deltas: descent follows
-    /// the animation-only dirty-descendants bit rather than the normal one, so
-    /// a pending non-animation restyle keeps its bits for the next real flush;
-    /// and only damage is cleared, never the restyle hint, for the same
-    /// reason. Descent through changed styles is what carries an inherited
-    /// animated property — Stylo hands the subtree a recascade hint and the
-    /// walk has to follow it.
     fn harvest_animation_damage(&mut self, root: NodeId) -> AnimationTick {
         let mut tick = AnimationTick::default();
         let mut containing_blocks = Vec::new();
@@ -1259,9 +880,6 @@ impl<T: Sync> Document<T> {
                         data.clear_restyle_flags_and_damage();
                         damage
                     });
-                    // Reads the primary style after the clear above, which is
-                    // sound only because clearing restyle state touches the
-                    // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
                     let anchor_restyle = refresh.changed.then(|| {
                         node.layout_computed_style()
@@ -1298,7 +916,6 @@ impl<T: Sync> Document<T> {
                 }
                 (harvested, refresh, svg)
             };
-            // As in the style harvest: before the damage test.
             self.note_box_restyle(
                 current,
                 refresh,
@@ -1308,11 +925,7 @@ impl<T: Sync> Document<T> {
                 continue;
             };
             tick.restyled += 1;
-            // As in the style harvest: an animated SVG element redraws its
-            // `svg` root (`svg::present`), and one below the root has no box.
             let boxless = svg && self.note_svg_restyle(current);
-            // An animated `filter` or `perspective` leaving or reaching
-            // `none` flips the role as a class change does.
             if refresh.containing_block_changed {
                 containing_blocks.push(current);
             }
@@ -1328,11 +941,9 @@ impl<T: Sync> Document<T> {
             &anchor_restyled,
             crate::layout::anchors::RestyleSource::Animation,
         );
-        // An animated value a `::backdrop` inherits reaches it here.
         let backdrops = self.restyle_backdrops();
         tick.restyled += backdrops.restyled;
         tick.relayout |= backdrops.relayout;
-        // And one an anonymous box inherits from its container.
         tick.relayout |= self.rebuild_anonymous_boxes();
         tick
     }
@@ -1357,8 +968,6 @@ mod tests {
         @keyframes recolor { from { background-color: red; }
                              to { background-color: blue; } }";
 
-    /// A `.card` running `inline`, created by a flush and started on the
-    /// timeline's origin by the tick at 0.
     fn animated_card(inline: &str) -> (Doc, NodeId) {
         let mut doc = Doc::with_css(SIDE_EFFECTS);
         let root = doc.root;
@@ -1368,15 +977,11 @@ mod tests {
         (doc, card)
     }
 
-    /// `(animates_opacity, animates_transform)`.
     fn animates(doc: &Doc, id: NodeId) -> (bool, bool) {
         let node = doc.dom.get(id).expect("the card is live");
         (node.animates_opacity(), node.animates_transform())
     }
 
-    /// web-animations-1 "Side effects of animation": the bits hold while an
-    /// animation is current (its delay, a pause, while it runs) or in effect
-    /// (a forwards fill), and name only what its `@keyframes` animate.
     #[test]
     fn the_animates_bits_follow_current_and_in_effect_animations() {
         for (inline, at, expected) in [
@@ -1402,8 +1007,6 @@ mod tests {
         }
     }
 
-    /// A canceled animation and a finished transition leave no bits; a
-    /// pending or running transition sets them.
     #[test]
     fn cancellation_and_transitions_move_the_animates_bits() {
         let (mut doc, card) = animated_card("animation: slide 10s linear");
@@ -1425,7 +1028,6 @@ mod tests {
         assert_eq!(animates(&doc, card), (false, false), "finished");
     }
 
-    /// Unlinking cancels the animations and clears the bits with them.
     #[test]
     fn unlinking_clears_the_animates_bits() {
         let (mut doc, card) = animated_card("animation: fade 10s linear");
@@ -1434,7 +1036,6 @@ mod tests {
         assert_eq!(animates(&doc, card), (false, false));
     }
 
-    /// Whether the next `layout()` does a pass.
     fn needs_layout(doc: &Doc) -> bool {
         let viewport = doc.dom.viewport_size();
         doc.dom.layout_needs_pass(
@@ -1443,11 +1044,6 @@ mod tests {
         )
     }
 
-    /// The transform bit moves the containing block of the card's fixed
-    /// child, so its start and end each invalidate that child once; no frame
-    /// between them does. Adding the class changes `animation-*` longhands,
-    /// which relayout the card by themselves, so the start reads the child's
-    /// cache rather than whether a pass is due.
     #[test]
     fn a_transform_bit_flip_relayouts_once_not_per_frame() {
         let mut doc = Doc::with_css(&format!(
@@ -1486,10 +1082,6 @@ mod tests {
         assert_eq!(animates(&doc, card), (false, false));
     }
 
-    /// With no absolute or fixed descendant no containing block moves, so a
-    /// transform transition or animation relayouts nothing at its start or
-    /// end, whatever its bit does. The card's own transform keeps the style
-    /// from relayouting on its own.
     #[test]
     fn a_transform_bit_flip_without_positioned_descendants_relayouts_nothing() {
         let css = format!(
@@ -1532,10 +1124,6 @@ mod tests {
         );
     }
 
-    /// Cancelling an animation re-cascades its element once more, and that
-    /// cascade can start a transition from the animated value. The bits and
-    /// the timeline read the map after it, so the transition's side effects
-    /// land in the same flush.
     #[test]
     fn a_transition_the_cancel_recascade_starts_sets_the_bits_at_once() {
         for (base, animation, expected) in [
@@ -1558,8 +1146,6 @@ mod tests {
             ));
             let root = doc.root;
             let card = doc.el(root, "view.card");
-            // Pending until the first tick, the animation holds its first
-            // keyframe, which the cancelling flush transitions from.
             doc.set_inline(card, &format!("{base}; {animation}"));
             doc.flush();
             doc.set_inline(card, base);
@@ -1572,12 +1158,10 @@ mod tests {
         }
     }
 
-    /// The card's `transform` as its committed style holds it.
     fn transform_of(doc: &Doc, id: NodeId) -> String {
         format!("{:?}", doc.style(id).get_box().transform)
     }
 
-    /// The first animation of `id`'s set: its state and its start.
     fn first_animation(doc: &Doc, id: NodeId) -> (AnimationState, f64) {
         let handle = doc.dom.animations().context_handle();
         let sets = handle.sets.read();
@@ -1586,9 +1170,6 @@ mod tests {
         (animation.state.clone(), animation.started_at)
     }
 
-    /// A job's clock sync moves the timeline and the states — through an
-    /// iteration boundary, here — but re-cascades nothing and owes no
-    /// commit; the next tick re-cascades what moved.
     #[test]
     fn a_clock_sync_steps_states_without_a_recascade() {
         let (mut doc, card) = animated_card("animation: slide 1s linear 3");
@@ -1622,10 +1203,6 @@ mod tests {
         assert_ne!(transform_of(&doc, card), committed);
     }
 
-    /// A sync leaves the next tick owing what it would have owed without
-    /// it: a sync that iterates an animation onto a sample equal to the
-    /// committed one moves its state, and the tick that follows commits for
-    /// that move although its own step moves nothing and no style changes.
     #[test]
     fn a_tick_after_a_clock_sync_owes_the_commit_the_sync_deferred() {
         for synced in [false, true] {
@@ -1646,8 +1223,6 @@ mod tests {
         }
     }
 
-    /// The timeline never runs backwards, idle or not: a frame post older
-    /// than the clock a job synced to leaves the clock where it was.
     #[test]
     fn an_idle_tick_behind_a_sync_keeps_the_clock() {
         let (mut doc, _) = animated_card("");
@@ -1656,9 +1231,6 @@ mod tests {
         assert_eq!(doc.dom.animation_clock(), 1.012);
     }
 
-    /// A sync that ends an animation flips its bits, so the commit it owes
-    /// must not show the ended state over an earlier instant's cascade: the
-    /// ended element is re-cascaded at once.
     #[test]
     fn a_clock_sync_that_ends_an_animation_recascades_it() {
         let (mut doc, card) = animated_card("animation: slide 1s linear");
@@ -1673,8 +1245,6 @@ mod tests {
         assert!(!doc.dom.has_active_animations());
     }
 
-    /// A fresh pending start is carried by a sync, not anchored: the next
-    /// tick still anchors it at that tick's reading.
     #[test]
     fn a_clock_sync_leaves_a_fresh_start_to_the_next_tick() {
         let (mut doc, card) = animated_card("");
@@ -1697,9 +1267,6 @@ mod tests {
         );
     }
 
-    /// The finishing tick must republish even when the final style equals the
-    /// previous one: the committed frame's animation flag is what keeps the
-    /// compositor asking for ticks, and a stale `true` would never end.
     #[test]
     fn an_animation_ending_without_a_restyle_still_invalidates_the_frame() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -1715,9 +1282,6 @@ mod tests {
             "the animation armed at the flush"
         );
 
-        // The flush arms the animation; the first tick is what starts it, so
-        // the sample below is ten seconds into a 0.1s animation, not ten
-        // seconds after a flush that happened at an unticked zero.
         document.advance_animations(0.0);
         let tick = document.advance_animations(10.0);
         assert!(!tick.needs_next_frame, "the animation is over");

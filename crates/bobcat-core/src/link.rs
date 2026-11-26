@@ -56,40 +56,18 @@ use crate::performance::PipelineRegistry;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport, WorkerFonts};
 
-/// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
 
-/// A realm's source requests, frame demand and diagnostics sent to its view's
-/// host. Unlike `ViewOutbox`, this carries no main-thread publication state and
-/// can travel to a worker. Completions are cancelled with that worker's
-/// lifetime.
 #[derive(Clone)]
 pub(crate) struct HostOutbox {
     notices: mpsc::UnboundedSender<ViewNotice>,
     requester: Arc<dyn EventRequester>,
     token: CancellationToken,
-    /// The view fetcher's own answer to "has this been fetched already?",
-    /// which is the one thing a realm asks the host *without* a message. It
-    /// rides here because a Worker realm needs it too, and it is `Send +
-    /// Sync` for the same reason.
     probe: Option<FetchProbe>,
-    /// The view's [`ViewSources::base_url`](crate::ViewSources::base_url),
-    /// which a synchronous load's URL is resolved against before it is
-    /// requested. The same for every realm of the view, a Worker's included.
     base: Arc<Url>,
-    /// The view's pipeline registry, which every realm of the view writes
-    /// its `lynx.performance` marks into: a worker's realm reaches it
-    /// through this outbox, as it reaches the fetch probe.
     registry: Arc<PipelineRegistry>,
-    /// The view's native module ES modules, which a worker realm of the view
-    /// completes an import of `lynx:<name>` from. It rides here because a
-    /// worker's outbox is what travels to the worker thread.
     native_esms: Arc<NativeModuleEsms>,
-    /// The view's store of canvases handed from one realm to another
-    /// (`canvasDetach`/`canvasAttach`). It rides here because every realm
-    /// of the view, a worker's included, opens its canvas table over it.
     canvas_hand_over: Arc<CanvasHandOver>,
-    /// The view's fonts, which a worker realm's canvas text shapes with.
     worker_fonts: Arc<WorkerFonts>,
 }
 
@@ -115,53 +93,41 @@ impl HostOutbox {
         }
     }
 
-    /// This outbox with the view's native module ES modules.
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
     }
 
-    /// This outbox with the view's canvas hand-over store.
     pub(crate) fn with_canvas_hand_over(mut self, store: Arc<CanvasHandOver>) -> Self {
         self.canvas_hand_over = store;
         self
     }
 
-    /// The view's canvas hand-over store.
     pub(crate) const fn canvas_hand_over(&self) -> &Arc<CanvasHandOver> {
         &self.canvas_hand_over
     }
 
-    /// This outbox with the view's fonts.
     pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
         self.worker_fonts = worker_fonts;
         self
     }
 
-    /// The view's fonts, for a worker realm's canvas text.
     pub(crate) const fn worker_fonts(&self) -> &Arc<WorkerFonts> {
         &self.worker_fonts
     }
 
-    /// The view's native module ES modules.
     pub(crate) fn native_esms(&self) -> &NativeModuleEsms {
         &self.native_esms
     }
 
-    /// The view's pipeline registry.
     pub(crate) const fn registry(&self) -> &Arc<PipelineRegistry> {
         &self.registry
     }
 
-    /// Wakes the embedder's thread for a turn that has something to report
-    /// without a notice of its own: a performance entry this thread
-    /// completed, which `LynxView::pump` takes from the registry.
     pub(crate) fn wake(&self) {
         self.requester.request_event();
     }
 
-    /// `url` resolved against the view's base by URL rules, in its WHATWG
-    /// serialization. An absolute URL resolves to itself.
     pub(crate) fn resolve(&self, url: &str) -> Result<String, String> {
         self.base
             .join(url)
@@ -169,19 +135,10 @@ impl HostOutbox {
             .map_err(|error| format!("cannot resolve `{url}` against `{}`: {error}", self.base))
     }
 
-    /// Whether this view's fetcher can answer "already fetched" at all, and
-    /// how. `None` is a host that gave no probe: every fetch is a request.
     pub(crate) const fn fetch_probe(&self) -> Option<&FetchProbe> {
         self.probe.as_ref()
     }
 
-    /// The end signal of whatever holds this outbox: the view's for MTS, the
-    /// Worker's own for a worker.
-    ///
-    /// It is the arm that ends a job parked on a synchronous wait. A view's is
-    /// cancelled by the embedder's release, from the embedder's own thread; a
-    /// Worker's by its own message consumer — a task, which a wait goes on
-    /// running — reading the in-band `Terminate` that queued behind the wait.
     pub(crate) const fn token(&self) -> &CancellationToken {
         &self.token
     }
@@ -214,102 +171,39 @@ impl HostOutbox {
     }
 }
 
-/// Embedder and painter → the view's task: every fact the document must see.
-///
-/// There is no attach, no shutdown and no source completion among them:
-/// attaching is the group's own inbox, the goodbye is this channel closing,
-/// and a source answers the one-shot that was minted with its request.
 pub(crate) enum ToMain {
-    /// Global events accepted after the host observes MTS boot retain FIFO order.
     PageUpdate(PageUpdate),
     DispatchEvent {
         target: NodeId,
         name: &'static str,
         payload: InputEventPayload,
-        /// For a `click` alone: the node the release routed to. The event
-        /// is dispatched at the nearest common inclusive ancestor of
-        /// `target` and this one, which only this side's tree can answer.
         release: Option<NodeId>,
     },
     Vsync(f64),
-    /// One editing command for the focused editing host, from
-    /// [`LynxView::edit`](crate::LynxView::edit): an input method's
-    /// composition, a commit, a selection change. Counted and ordered with
-    /// the painter's routed input, so a frame post sent after it is
-    /// acknowledged only once it has been applied. Main dispatches the
-    /// events it owes (`beforeinput`, `input`, `composition*`) around the
-    /// change, which no listener can stop.
     Edit(terminus::link::editing::Command),
-    /// Where the view's typed text comes from, from
-    /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source):
-    /// what a `keydown`'s editing default action does from the next key on.
-    /// Counted and ordered like [`Self::Edit`].
     TextInputSource(crate::editing::TextInputSource),
-    /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
-    /// a frame post, or both. Queued once per take, however many passes the
-    /// painter posts meanwhile.
     Posted,
-    /// The host's image reports: completed or failed loads, and documents
-    /// handed over as their bytes for the engine to parse. No variant can
-    /// carry pixels (encoded document bytes and a parsed tree are not
-    /// pixels), which is what makes "`ImageData` never crosses a channel" a
-    /// property of the type.
     ImageEvents(Vec<terminus::link::ImageEvent>),
-    /// An embedder's native module answering one function argument of one
-    /// call the MTS realm made, sent by a
-    /// [`ModuleCallback`](crate::native_module::ModuleCallback) as it drops:
-    /// the call the realm numbered, which argument it was, and the JSON array
-    /// text to spread — or `None`, which releases the function uninvoked.
-    /// What [`WorkerMessage::ModuleCallback`] is for a worker realm.
-    ///
-    /// The one command sent outside the seat's [`CommandSender`], and so the
-    /// one a frame post's fence does not count, on either side.
     ModuleCallback {
         call: u64,
         index: u32,
         arguments: Option<String>,
     },
-    /// A placeholder canvas committed a frame of a new size: main applies
-    /// the committed sizes (`terminus`'s `update_placeholders`). Sent by a
-    /// [`CanvasPresenter`](crate::paint::canvas_pictures::CanvasPresenter) on any thread,
-    /// outside the seat's [`CommandSender`] like [`Self::ModuleCallback`],
-    /// at most once until main has applied it; it carries no pixels.
     CanvasResized,
-    /// A monitor was turned on, or changed, by one of `LynxView`'s
-    /// monitor setters: start the view's task that serves it, for as long
-    /// as that configuration is the monitor's current one.
     StartMonitorTask(crate::performance::MonitorTask),
-    /// A `<frame>` card's load completed: its `pipeline.loadBundle` entry
-    /// as Lynx's JSON text (`json`), written on the embedder's thread by
-    /// `LynxView::pump`, for the card's realm (`card`) to dispatch at its
-    /// page as Lynx's `loadmetrics` component event, which the frame's
-    /// `bindloadmetrics` hears. A card whose realm is gone drops it.
     FrameLoadMetrics {
         card: crate::performance::OpenerId,
         json: String,
     },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
-    /// The one command that is not the realm's: it spawns a task of the view
-    /// that panics on its first poll, and behind it one that answers this
-    /// channel with what the view's end latch said when it was next polled.
-    /// The page takes it before it enters the realm, so the panic reaches a
-    /// sibling and the owner the way any other task's does.
     #[cfg(test)]
     Trap(std::sync::mpsc::Sender<bool>),
 }
 
-/// Everything one routed event carries beside its type and target: what the
-/// router decided the event carries, in `terminus`'s one description of it, and
-/// when it happened. Nothing here is encoded: the main thread lends the
-/// detail to the Rust walk as it is and encodes it into the realm's numbers
-/// at that boundary alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InputEventPayload {
     pub(crate) detail: terminus::link::event::EventDetail,
-    /// The event's `timestamp`: milliseconds on the view's own timeline,
-    /// taken from the reading of the pass that decided the event — an
-    /// input's arrival, or the gesture tick's `now`.
     pub(crate) timestamp: f64,
 }
 
@@ -330,12 +224,7 @@ pub(crate) enum PageUpdate {
     },
 }
 
-/// The view's task → the embedder, drained by `LynxView::pump`.
-///
-/// Only what a host must act on rides here. Everything the painter merely
-/// reads is [`Published`] instead.
 pub(crate) enum ViewNotice {
-    /// The painter can notify this worker without entering the MTS realm.
     WorkerCreated {
         key: WorkerKey,
         messages: mpsc::WeakUnboundedSender<WorkerMessage>,
@@ -345,93 +234,39 @@ pub(crate) enum ViewNotice {
         pending: bool,
     },
     Engine(EngineEvent),
-    /// A hint to the same resource fetcher, with no result retained by core.
     PreloadSource(SourceRequest),
-    /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
-    /// Documents the page handed over as markup (`<svg content>`), each
-    /// under the synthetic source the document filed it as, with its bytes
-    /// and kind, for the store to parse and report like a fetched document
-    /// (`ResourceFetcher::request_document`).
     RequestDocuments(Vec<terminus::link::DocumentRequest>),
-    /// What the owners of `Id` pictures asked of the store that plays them,
-    /// in order: an `<image>`'s animated `src` starting, one of its four
-    /// controls, or its end (`ResourceFetcher::request_playback`).
     Playback(Vec<terminus::link::PlaybackRequest>),
-    /// One source — a stylesheet, an imported module or a worker script —
-    /// and the right to answer it. Whoever holds the receiving end
-    /// is the destination, which is why the host never learns which.
     RequestSource {
         request: SourceRequest,
         completion: SourceCompletion,
     },
-    /// The focused editing host's state changed since the last one sent
-    /// ([`terminus::link::Document::text_input_state`]): the value, the selection, the
-    /// composition, the geometry of the commit that showed them, or the
-    /// focus itself (a default state is "nothing editable is focused").
-    /// Sent from a page's epilogue after its commit, at most once per
-    /// entry; `LynxView::pump` hands it on as
-    /// [`EngineEvent::TextInputStateChanged`].
     TextInputState(Box<terminus::link::editing::TextInputState>),
-    /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
-    /// for the embedder's own module of that name to serve.
-    ///
-    /// Raw fields rather than a built
-    /// [`ModuleCall`](crate::native_module::ModuleCall): a callback answers
-    /// through the calling realm's own channel, and the view already holds
-    /// the handle on it — its command sender for the MTS realm, the handle it
-    /// registered from [`ViewNotice::WorkerCreated`] for a worker — so the
-    /// call is assembled where that handle is, in `LynxView::pump`, rather
-    /// than carrying a second copy of it across. A view that has failed or
-    /// been released assembles nothing, which leaves the realm's functions
-    /// released the way a dropped [`SourceCompletion`] answers its request
-    /// with nothing.
     NativeModuleCall {
-        /// The realm that made the call, as [`ViewNotice::ScriptFrameDemand`]
-        /// names one: `None` for the MTS realm, the worker's key for a
-        /// worker.
         caller: Option<WorkerKey>,
         call: u64,
         module: String,
         method: String,
         arguments: String,
-        /// The indices of the arguments that were functions, in order.
         callbacks: Vec<u32>,
     },
 }
 
-/// What a view publishes and an observer reads: the latest of each, never a
-/// history of any.
 #[derive(Clone, Default)]
 pub(crate) struct Published {
-    /// The newest committed frame, and only ever the newest.
     pub(crate) frame: Option<Arc<CommittedFrame>>,
-    /// The event names the realm currently has a listener for anywhere in
-    /// the document. Rebuilt whenever a name's registration count crosses
-    /// zero — its first registration added or its last removed — which is
-    /// rare enough that the whole set is cheaper than a protocol for the
-    /// difference.
     pub(crate) listeners: Arc<FxHashSet<Arc<str>>>,
-    /// The newest frame post the view has serviced.
     pub(crate) begin_frame_serviced: u64,
 }
 
 impl Published {
-    /// The commit a frame came from, which is the whole of what makes one
-    /// frame different from another. The presenting painter compares the
-    /// frames it adopts itself; this is the far end's reading in tests.
     #[cfg(test)]
     pub(crate) fn commit(&self) -> Option<u64> {
         self.frame.as_ref().map(|frame| frame.commit_id())
     }
 }
 
-/// Every document fact the gesture router asks for is in the snapshot the
-/// painter has adopted, so the snapshot *is* the router's host.
-///
-/// One pass therefore answers out of one state: the frame the pass hit-tested
-/// against is the frame a latched scroller is looked up in, and the listener
-/// names are the ones that pass adopted.
 impl RouterHost for Published {
     fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
         let frame = self.frame.as_ref()?;
@@ -450,26 +285,14 @@ impl RouterHost for Published {
     }
 }
 
-/// The painter's frame request: its clock reading, the sequence number
-/// main acknowledges once the frame it implies is committed, and the
-/// command FIFO position it stands at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FramePost {
     pub(crate) now: f64,
     pub(crate) seq: u64,
-    /// How many commands the seat's [`CommandSender`] had sent before the
-    /// post ([`CommandSender::sent`]). Main applies the frame only once it
-    /// has applied that many, so the acknowledgement implies every command
-    /// that sender sent ahead of it — even when the marker that carries the
-    /// post is older than some of them. A [`ToMain::ModuleCallback`] is in
-    /// neither count, so the acknowledgement does not imply one sent ahead
-    /// of the post.
     pub(crate) fence: u64,
 }
 
 impl FramePost {
-    /// Two posts main has not applied, as one: the latest clock, the
-    /// greatest sequence and the greatest fence.
     #[must_use]
     pub(crate) fn merge(self, later: Self) -> Self {
         Self {
@@ -480,18 +303,9 @@ impl FramePost {
     }
 }
 
-/// The painter's state as main adopts it: the latest per scroll container,
-/// one coalesced frame post, and the painter's clock.
-///
-/// The painter posts from its own thread and never waits for main; main
-/// takes the whole of it when it services the [`ToMain::Posted`] marker the
-/// first post since the last take sent. Neither side holds the lock across
-/// a wait or a send, and main's side is one swap, because the painter posts
-/// while it holds a swap-chain image.
 #[derive(Default)]
 pub(crate) struct ScrollMailbox {
     posted: Mutex<Posted>,
-    /// The painter's latest clock reading, as `f64` bits.
     clock: AtomicU64,
 }
 
@@ -499,14 +313,10 @@ pub(crate) struct ScrollMailbox {
 struct Posted {
     scrolled: FxHashMap<NodeId, ScrollEntry>,
     frame: Option<FramePost>,
-    /// A marker is in the command FIFO and has not been taken.
     armed: bool,
 }
 
 impl ScrollMailbox {
-    /// Merges one pass's posts: an entry overwrites its container's, keeping
-    /// an untaken `rest`, and frame posts coalesce ([`FramePost::merge`]). `true` when the caller
-    /// must send the marker — the first post since the last take.
     pub(crate) fn post(
         &self,
         entries: impl IntoIterator<Item = (NodeId, ScrollEntry)>,
@@ -530,10 +340,6 @@ impl ScrollMailbox {
         !std::mem::replace(&mut posted.armed, true)
     }
 
-    /// Takes everything posted since the last take: the entries swap into
-    /// `spare`, which must be empty and keeps its capacity for the next
-    /// take, and the frame post comes back. The next post sends a marker
-    /// again.
     pub(crate) fn take(&self, spare: &mut FxHashMap<NodeId, ScrollEntry>) -> Option<FramePost> {
         debug_assert!(spare.is_empty(), "the last take was spent");
         let mut posted = lock(&self.posted);
@@ -542,13 +348,10 @@ impl ScrollMailbox {
         posted.frame.take()
     }
 
-    /// Records the painter's clock reading, in seconds.
     pub(crate) fn set_clock(&self, now: f64) {
         self.clock.store(now.to_bits(), Ordering::Relaxed);
     }
 
-    /// The painter's latest clock reading, in seconds on the view's timeline:
-    /// zero before any painter drew.
     pub(crate) fn clock(&self) -> f64 {
         f64::from_bits(self.clock.load(Ordering::Relaxed))
     }
@@ -560,19 +363,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|error| panic!("a view's scroll mailbox is poisoned: {error}"))
 }
 
-/// The command FIFO's sending end, counting what it sends: the count at a
-/// frame post is that post's [`FramePost::fence`].
-///
-/// Every sender of a view's commands — the painter, the view's own host
-/// calls — sends through the seat's one instance, on the embedder's thread.
-///
-/// One command is sent outside it and is in no count: a native module's
-/// answer to the MTS realm, [`ToMain::ModuleCallback`]. A
-/// [`ModuleCallback`](crate::native_module::ModuleCallback) sends it as it
-/// drops, on whichever thread that is, through the weak sender
-/// [`Self::uncounted`] hands out. [`Self::sent`] does not count it and
-/// neither does the page's count of applied commands, so a frame post
-/// neither waits for one nor is applied earlier because of one.
 pub(crate) struct CommandSender {
     sender: mpsc::UnboundedSender<ToMain>,
     sent: Cell<u64>,
@@ -586,15 +376,11 @@ impl CommandSender {
         }
     }
 
-    /// Queues `command` behind everything sent before it. Counted whether
-    /// or not the view's task still reads: a closed channel has no main to
-    /// fence.
     pub(crate) fn send(&self, command: ToMain) -> Result<(), mpsc::error::SendError<ToMain>> {
         self.sent.set(self.sent.get() + 1);
         self.sender.send(command)
     }
 
-    /// How many commands have been sent.
     pub(crate) fn sent(&self) -> u64 {
         self.sent.get()
     }
@@ -603,29 +389,19 @@ impl CommandSender {
         self.sender.is_closed()
     }
 
-    /// The same channel, held weakly and outside the count, for the one
-    /// command that is sent that way: [`ToMain::ModuleCallback`]. Any other
-    /// command sent through it would be counted by main and not by
-    /// [`Self::sent`].
     pub(crate) fn uncounted(&self) -> mpsc::WeakUnboundedSender<ToMain> {
         self.sender.downgrade()
     }
 }
 
-/// Host-side script demand contributing to the painter's existing frame request.
-/// Worker addresses are weak so a requested frame cannot keep a worker alive.
 #[derive(Default)]
 pub(crate) struct FrameDemand {
     main: bool,
     workers: FxHashMap<WorkerKey, (mpsc::WeakUnboundedSender<WorkerMessage>, bool)>,
-    /// The view's pipeline registry, whose JS blocking monitor decides
-    /// whether a message sent to a worker from here carries its enqueue
-    /// instant. `None` for a table no view built, which stamps nothing.
     registry: Option<Arc<PipelineRegistry>>,
 }
 
 impl FrameDemand {
-    /// The table of a view whose registry is `registry`.
     pub(crate) fn new(registry: Arc<PipelineRegistry>) -> Self {
         Self {
             registry: Some(registry),
@@ -641,15 +417,6 @@ impl FrameDemand {
         self.workers.insert(key, (messages, false));
     }
 
-    /// The channel a native module's answer to a call `caller` made goes
-    /// back through: `main`, the view's command sender, held weakly, for the
-    /// MTS realm, and the registered handle on a worker's inbox for that
-    /// worker. `None` is a worker this view never heard of — every
-    /// `WorkerCreated` precedes that worker's own traffic on the one notice
-    /// FIFO — or one whose entry a frame demand has already swept.
-    ///
-    /// The MTS realm's handle is [`CommandSender::uncounted`]: the answer is
-    /// a command of the view's FIFO that a frame post's fence does not count.
     pub(crate) fn reply(
         &self,
         caller: Option<WorkerKey>,
@@ -681,10 +448,6 @@ impl FrameDemand {
         self.main || self.workers.values().any(|(_, pending)| *pending)
     }
 
-    /// Tells the worker `key` that performance entries it observes are
-    /// ready to be taken (`WorkerMessage::PerformanceReady`), through the
-    /// handle `WorkerCreated` registered. A worker this view no longer
-    /// holds is told nothing.
     pub(crate) fn notify_performance(&self, key: WorkerKey) {
         if let Some((messages, _)) = self.workers.get(&key)
             && let Some(messages) = messages.upgrade()
@@ -715,104 +478,30 @@ impl FrameDemand {
     }
 }
 
-/// The non-owning seat one painter takes on one view: the two things a painter
-/// reaches a live view through, released together.
-///
-/// The view holds the only `Rc`, and [`crate::Painter::attach`] is the only
-/// place a view's seat is downgraded (`Painter::detached` builds a seat of its
-/// own for the tests that play a view by hand) — so whether a view already has
-/// an interactive painter is the weak count of this, rather than a flag
-/// somebody has to remember to clear. The painter's `Weak` failing to upgrade
-/// is the view being gone, which is a fact the painter reads rather than one it
-/// is told.
-///
-/// The field order is the release order: the goodbye — closing the view's
-/// command channel, which is what ends its task — precedes giving up the
-/// view's share of the host's resource system.
-///
-/// `P` is the platform frame type of the host's store
-/// ([`FrameImages::PlatformFrame`]).
 pub(crate) struct ViewSeat<P = std::convert::Infallible> {
     pub(crate) frame_demand: RefCell<FrameDemand>,
-    /// The view's own strong sender. Closing it is the goodbye that ends the
-    /// view's task, which is why the seat dies with the view rather than with
-    /// whatever a painter is holding.
     pub(crate) commands: CommandSender,
-    /// The device metrics an attached painter names, which is the one thing
-    /// that crosses to the view outside the command FIFO.
-    ///
-    /// A watch rather than a command because of what waits on it: a
-    /// `__FlushElementTree` before any painter has bound parks the job it
-    /// runs in, and while a job is parked no other job runs — so a command
-    /// carrying the metrics could never be applied. This is polled by the
-    /// wait itself. `None` is a view no painter has bound yet; every write
-    /// after the first is an ordinary resize.
     pub(crate) metrics: watch::Sender<Option<Viewport>>,
-    /// The host's resource system, as the painter reads a commit's pixels out
-    /// of it. A clone of the view's own handle, so the store is released when
-    /// the view drops both — seat first, by declaration order there.
     pub(crate) images: Rc<dyn FrameImages<PlatformFrame = P>>,
-    /// The view's placeholder canvases, which the painter answers ahead of
-    /// `images`. Main holds a clone of its own, in the view's
-    /// [`ViewOutbox`].
     pub(crate) canvases: Arc<CanvasPictures>,
-    /// Where the painter posts its scroll offsets, its frame requests and its
-    /// clock. Main holds a clone of its own: the seat never leaves this
-    /// thread.
     pub(crate) scroll: Arc<ScrollMailbox>,
-    /// The view's pipeline registry, which the painter tells what it
-    /// presented and when ([`PipelineRegistry::note_presented`]).
     pub(crate) registry: Arc<PipelineRegistry>,
 }
 
-/// The view task's sending end: what the runtime, the tree and the listener
-/// index publish through.
-///
-/// One erased wakeup per group rather than a type parameter threaded through
-/// every main-side type: a group's views paint on the thread that created the
-/// group, so they wake one event loop, and one virtual call per wake is what
-/// that costs.
 #[derive(Clone)]
 pub(crate) struct ViewOutbox {
     notices: mpsc::UnboundedSender<ViewNotice>,
-    /// `Rc` because the sender is the task's and every host closure that
-    /// publishes holds a clone of this whole outbox.
     frames: Rc<watch::Sender<Published>>,
     requester: Arc<dyn EventRequester>,
-    /// This view's end signal, minted by `create_lynx_view` and cancelled by
-    /// the embedder's release, by a fatal lifecycle event, or by the view's
-    /// own owner as it exits. Every source completion this outbox hands out
-    /// carries a clone, which is what lets a host read cancellation without
-    /// waiting for a turn.
     token: CancellationToken,
-    /// This view's fetcher's `fetch_probe`, taken on the embedder's thread at
-    /// construction and handed to every realm of the view.
     probe: Option<FetchProbe>,
-    /// This view's fetcher's `style_sheet_probe`, taken with `probe` and read
-    /// by the MTS realm alone: a Worker has no `__LoadStyleSheet`, so it is
-    /// not part of a [`HostOutbox`].
     style_sheet_probe: Option<StyleSheetProbe>,
-    /// This view's base URL, parsed on the embedder's thread at construction
-    /// and handed to every realm of the view.
     base: Arc<Url>,
-    /// This view's pipeline registry, made by `create_lynx_view` and shared
-    /// with every realm of the view, its workers' through
-    /// [`HostOutbox::registry`].
     registry: Arc<PipelineRegistry>,
-    /// This view's native module ES modules, read by `create_lynx_view` and
-    /// handed to every [`HostOutbox`] the view makes, a worker's included.
     native_esms: Arc<NativeModuleEsms>,
-    /// This view's fonts, handed to every [`HostOutbox`] the view makes.
     worker_fonts: Arc<WorkerFonts>,
-    /// This view's placeholder canvases, made by `create_lynx_view` and
-    /// shared with its seat.
     canvases: Arc<CanvasPictures>,
-    /// This view's command channel, held weakly and outside the seat's
-    /// count: what a canvas presenter sends [`ToMain::CanvasResized`] on.
-    /// `None` for an outbox no view built.
     main: Option<mpsc::WeakUnboundedSender<ToMain>>,
-    /// This view's store of canvases handed from one realm to another, made
-    /// with the outbox and handed to every [`HostOutbox`] it makes.
     canvas_hand_over: Arc<CanvasHandOver>,
 }
 
@@ -848,23 +537,16 @@ impl ViewOutbox {
         }
     }
 
-    /// This outbox with the view's native module ES modules, which every
-    /// [`HostOutbox`] it makes carries.
     pub(crate) fn with_native_esms(mut self, native_esms: Arc<NativeModuleEsms>) -> Self {
         self.native_esms = native_esms;
         self
     }
 
-    /// This outbox with the view's fonts, which every [`HostOutbox`] it
-    /// makes carries.
     pub(crate) fn with_worker_fonts(mut self, worker_fonts: Arc<WorkerFonts>) -> Self {
         self.worker_fonts = worker_fonts;
         self
     }
 
-    /// This outbox with the view's placeholder canvases, which its seat
-    /// shares, and the weak handle on the view's command channel a canvas
-    /// presenter sends on.
     pub(crate) fn with_canvases(
         mut self,
         canvases: Arc<CanvasPictures>,
@@ -875,38 +557,30 @@ impl ViewOutbox {
         self
     }
 
-    /// This view's placeholder canvases.
     pub(crate) const fn canvases(&self) -> &Arc<CanvasPictures> {
         &self.canvases
     }
 
-    /// The weak handle on this view's command channel.
     pub(crate) const fn main(&self) -> Option<&mpsc::WeakUnboundedSender<ToMain>> {
         self.main.as_ref()
     }
 
-    /// What wakes the embedder's thread: see [`Self::wake`].
     pub(crate) const fn requester(&self) -> &Arc<dyn EventRequester> {
         &self.requester
     }
 
-    /// This view's pipeline registry.
     pub(crate) const fn registry(&self) -> &Arc<PipelineRegistry> {
         &self.registry
     }
 
-    /// Wakes the embedder's thread: see [`HostOutbox::wake`].
     pub(crate) fn wake(&self) {
         self.requester.request_event();
     }
 
-    /// Whether this view's fetcher can say a stylesheet is held without
-    /// loading it, and how. `None` is a host that gave no probe.
     pub(crate) const fn style_sheet_probe(&self) -> Option<&StyleSheetProbe> {
         self.style_sheet_probe.as_ref()
     }
 
-    /// This view's end signal. Workers have separate cancellation scopes.
     pub(crate) const fn token(&self) -> &CancellationToken {
         &self.token
     }
@@ -925,10 +599,6 @@ impl ViewOutbox {
         .with_worker_fonts(Arc::clone(&self.worker_fonts))
     }
 
-    /// Announces one notice, then wakes the thread that paints.
-    ///
-    /// Enqueue before requesting a host turn, so that turn's pump observes
-    /// the notice.
     pub(crate) fn notify(&self, notice: ViewNotice) {
         if self.notices.send(notice).is_ok() {
             self.requester.request_event();
@@ -939,11 +609,6 @@ impl ViewOutbox {
         self.notify(ViewNotice::Engine(event));
     }
 
-    /// Asks the host for one source, handing back the answer's receiving end.
-    ///
-    /// The receiver is the destination and the only one: a module's answer
-    /// goes to the task awaiting it. A worker asks through its own
-    /// [`HostOutbox`], its script included.
     pub(crate) fn request_source(&self, request: SourceRequest) -> SourceAnswer {
         let (completion, answer) = SourceCompletion::new(self.token.clone());
         self.notify(ViewNotice::RequestSource {
@@ -953,7 +618,6 @@ impl ViewOutbox {
         answer
     }
 
-    /// Publishes the newest committed frame.
     pub(crate) fn publish_frame(&self, frame: Arc<CommittedFrame>) {
         self.frames.send_modify(|published| {
             published.frame = Some(frame);
@@ -961,15 +625,6 @@ impl ViewOutbox {
         self.requester.request_event();
     }
 
-    /// Tells the painter whether `name` is routed: adds it to the painter's
-    /// listener-name set when the main thread starts wanting it routed, and
-    /// takes it out when the main thread stops — a realm registration or a
-    /// live component element wants it (`DocumentSlot`'s `routes` in
-    /// `main::runtime`).
-    ///
-    /// No wakeup. Nothing a host does depends on it — the painter reads the
-    /// set at the start of its next routing pass, which is a turn the host
-    /// was taking anyway.
     pub(crate) fn set_name_routed(&self, name: Arc<str>, routed: bool) {
         self.frames.send_modify(|published| {
             let mut names = published.listeners.as_ref().clone();
@@ -989,32 +644,17 @@ impl ViewOutbox {
         self.requester.request_event();
     }
 
-    /// Whether this view is over. A mutex read on the token, so it is asked
-    /// where a turn would otherwise be waited for — never inside an entry,
-    /// which reads the thread-local latch instead.
     pub(crate) fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }
 }
 
-/// What a view publishes, as a reader that is not a painter sees it.
-///
-/// One adopted snapshot plus the watch it came from, which is exactly what
-/// the published listener names are read through. The crate's benchmarks and the tests
-/// that drive a document in place hold one; a painter keeps the two halves
-/// apart instead, because its snapshot has to outlive the view it detached
-/// from.
 pub(crate) struct ViewObserver {
     frames: watch::Receiver<Published>,
     published: Published,
 }
 
 impl ViewObserver {
-    /// Adopts the newest published state, and says whether it had moved.
-    ///
-    /// Never `Receiver::has_changed()`: that reports an error once the sender
-    /// is gone, and what a view published before its task ended is still the
-    /// last true answer.
     fn adopt(&mut self) -> bool {
         let latest = self.frames.borrow_and_update();
         let changed = latest.has_changed();
@@ -1032,30 +672,23 @@ impl ViewObserver {
         self.published.listeners.contains(name)
     }
 
-    /// Every listener name the view has published, for a test that asserts
-    /// the whole set rather than one membership.
     #[cfg(test)]
     pub(crate) fn listener_names(&self) -> Vec<Arc<str>> {
         self.published.listeners.iter().cloned().collect()
     }
 
-    /// The commit the newest published frame came from, for a test that is
-    /// itself the far end of the view it is watching.
     #[cfg(test)]
     pub(crate) fn commit(&mut self) -> Option<u64> {
         self.sync();
         self.published.commit()
     }
 
-    /// The newest published frame itself, for a test that asserts what it was
-    /// committed at rather than only that it exists.
     #[cfg(test)]
     pub(crate) fn frame(&mut self) -> Option<Arc<CommittedFrame>> {
         self.sync();
         self.published.frame.clone()
     }
 
-    /// The newest frame post the view has acknowledged.
     #[cfg(test)]
     pub(crate) fn begin_frame_serviced(&mut self) -> u64 {
         self.sync();
@@ -1063,13 +696,7 @@ impl ViewObserver {
     }
 }
 
-/// The far end of one view's link, for a caller that is itself that end: the
-/// crate's benchmarks, and the tests that drive a document in place rather
-/// than over a group's thread.
 pub(crate) struct DetachedView {
-    /// Held even where nothing reads it: a closed notice channel would make
-    /// the outbox's sends fail, which is not the shape a caller playing the
-    /// host is standing in for.
     #[cfg_attr(
         not(test),
         allow(
@@ -1079,9 +706,6 @@ pub(crate) struct DetachedView {
     )]
     pub(crate) notices: mpsc::UnboundedReceiver<ViewNotice>,
     pub(crate) published: ViewObserver,
-    /// The end signal every completion this view hands out carries. A caller
-    /// playing the host is the one that cancels it, since there is no
-    /// `LynxView` here to be dropped.
     #[cfg_attr(
         not(test),
         allow(
@@ -1092,21 +716,14 @@ pub(crate) struct DetachedView {
     pub(crate) token: CancellationToken,
 }
 
-/// The base URL of a view with no `ViewSources`: `app:///`.
-///
-/// What a detached outbox resolves synchronous loads against. The URLs its
-/// callers load are under `app:///` or `bench:///`, or are absolute already.
 pub(crate) fn detached_base() -> Arc<Url> {
     Arc::new(Url::parse("app:///").expect("`app:///` is an absolute URL"))
 }
 
-/// One view's publishing end and the far end that reads it, with no thread
-/// between them.
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
     detached_outbox_probing_style_sheets(requester, None)
 }
 
-/// [`detached_outbox`], with a stylesheet probe standing in for a fetcher's.
 pub(crate) fn detached_outbox_probing_style_sheets(
     requester: Arc<dyn EventRequester>,
     style_sheet_probe: Option<StyleSheetProbe>,
@@ -1115,8 +732,6 @@ pub(crate) fn detached_outbox_probing_style_sheets(
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
     (
-        // No fetch probe: a detached view has no fetcher, so every fetch is
-        // a request and none settles synchronously.
         ViewOutbox::new(
             notices,
             frames,
@@ -1141,12 +756,6 @@ pub(crate) fn detached_outbox_probing_style_sheets(
 #[cfg(test)]
 pub(crate) use deadline::block_on_deadline;
 
-/// A blocking wait with a deadline, for the crate's tests alone.
-///
-/// No host entry point blocks its thread on `bobcat-main`: an offscreen
-/// host's wait for a frame is its own loop over
-/// [`crate::Painter::frame_serviced`], in which it also takes the view's
-/// turn. A test that plays one end of a channel by hand has no such loop.
 #[cfg(test)]
 mod deadline {
     use std::future::Future;
@@ -1157,14 +766,6 @@ mod deadline {
 
     use crate::clock::ClockInstant;
 
-    /// Polls `future` on this thread until it is ready or `deadline` passes.
-    ///
-    /// It parks rather than spins, and it takes the clock explicitly because
-    /// `std::time` is not available on every target this engine runs on.
-    ///
-    /// The future is polled *unconstrained*: tokio's cooperative budget would
-    /// otherwise stop yielding to it after a few hundred ready polls, and
-    /// there is no runtime here to hand the budget back.
     pub(crate) fn block_on_deadline<F: Future>(
         future: F,
         deadline: ClockInstant,

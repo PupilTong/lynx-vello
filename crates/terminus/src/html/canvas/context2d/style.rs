@@ -14,8 +14,6 @@ use crate::peniko::{
 };
 use crate::render::canvas::SurfaceImage;
 
-/// Declares a keyword enum with its IDL names: `from_name` answers `None`
-/// for a string the attribute ignores.
 macro_rules! keywords {
     ($(#[$meta:meta])* $name:ident { $($variant:ident = $text:literal,)+ }) => {
         $(#[$meta])*
@@ -25,7 +23,6 @@ macro_rules! keywords {
         }
 
         impl $name {
-            /// The value the IDL string names.
             #[must_use]
             pub fn from_name(name: &str) -> Option<Self> {
                 match name {
@@ -34,7 +31,6 @@ macro_rules! keywords {
                 }
             }
 
-            /// The IDL string the getter returns.
             #[must_use]
             pub fn name(self) -> &'static str {
                 match self {
@@ -46,7 +42,6 @@ macro_rules! keywords {
 }
 
 keywords!(
-    /// `globalCompositeOperation`.
     CompositeOp {
         SourceOver = "source-over",
         SourceIn = "source-in",
@@ -78,7 +73,6 @@ keywords!(
 );
 
 keywords!(
-    /// `lineCap`.
     LineCap {
         Butt = "butt",
         Round = "round",
@@ -87,7 +81,6 @@ keywords!(
 );
 
 keywords!(
-    /// `lineJoin`.
     LineJoin {
         Round = "round",
         Bevel = "bevel",
@@ -96,7 +89,6 @@ keywords!(
 );
 
 keywords!(
-    /// `CanvasFillRule`.
     FillRule {
         NonZero = "nonzero",
         EvenOdd = "evenodd",
@@ -104,7 +96,6 @@ keywords!(
 );
 
 keywords!(
-    /// `textAlign`.
     TextAlign {
         Start = "start",
         End = "end",
@@ -115,7 +106,6 @@ keywords!(
 );
 
 keywords!(
-    /// `textBaseline`.
     TextBaseline {
         Top = "top",
         Hanging = "hanging",
@@ -127,8 +117,6 @@ keywords!(
 );
 
 keywords!(
-    /// `direction`. A canvas with no element to inherit from treats
-    /// `inherit` as `ltr`.
     Direction {
         Ltr = "ltr",
         Rtl = "rtl",
@@ -137,7 +125,6 @@ keywords!(
 );
 
 keywords!(
-    /// `imageSmoothingQuality`.
     SmoothingQuality {
         Low = "low",
         Medium = "medium",
@@ -146,8 +133,6 @@ keywords!(
 );
 
 keywords!(
-    /// A pattern's repetition. `createPattern` also takes the empty string
-    /// (and `null`) for `repeat`.
     Repetition {
         Repeat = "repeat",
         RepeatX = "repeat-x",
@@ -201,8 +186,6 @@ impl From<FillRule> for Fill {
 }
 
 impl Repetition {
-    /// The repetition `createPattern`'s string names; the empty string is
-    /// `repeat`.
     #[must_use]
     pub fn from_pattern_name(name: &str) -> Option<Self> {
         if name.is_empty() {
@@ -213,7 +196,6 @@ impl Repetition {
     }
 }
 
-/// `fillStyle` or `strokeStyle`.
 #[derive(Clone, Debug)]
 pub enum Style {
     Color(Color),
@@ -227,21 +209,16 @@ impl Default for Style {
     }
 }
 
-/// A `CanvasGradient`. Clones share one gradient: a stop added through any
-/// of them shows in every draw that starts after it.
 #[derive(Clone, Debug)]
 pub struct Gradient(Arc<Mutex<GradientData>>);
 
 #[derive(Debug)]
 struct GradientData {
     gradient: crate::peniko::Gradient,
-    /// The geometry is degenerate: the gradient paints nothing whatever its
-    /// stops.
     paints_nothing: bool,
 }
 
 impl Gradient {
-    /// `createLinearGradient`. `Type` for a non-finite argument.
     #[expect(clippy::float_cmp, reason = "the standard's equality is exact")]
     pub fn linear(x0: f64, y0: f64, x1: f64, y1: f64) -> Result<Self, CanvasError> {
         finite(&[x0, y0, x1, y1])?;
@@ -249,8 +226,6 @@ impl Gradient {
         Ok(Self::new(gradient, x0 == x1 && y0 == y1))
     }
 
-    /// `createRadialGradient`: the cone between two circles. `Type` for a
-    /// non-finite argument, `IndexSize` for a negative radius.
     #[expect(clippy::float_cmp, reason = "the standard's equality is exact")]
     pub fn radial(
         x0: f64,
@@ -270,13 +245,8 @@ impl Gradient {
         Ok(Self::new(gradient, x0 == x1 && y0 == y1 && r0 == r1))
     }
 
-    /// `createConicGradient`: stops around `(x, y)` clockwise from
-    /// `start_angle` radians off the positive x axis. `Type` for a non-finite
-    /// argument.
     pub fn conic(start_angle: f64, x: f64, y: f64) -> Result<Self, CanvasError> {
         finite(&[start_angle, x, y])?;
-        // vello measures the angle in [0, 2π); repeating the ramp makes a
-        // start angle anywhere wrap the same way.
         let start = start_angle.rem_euclid(TAU);
         #[expect(clippy::cast_possible_truncation, reason = "peniko angles are f32")]
         let mut gradient =
@@ -286,8 +256,6 @@ impl Gradient {
     }
 
     fn new(mut gradient: crate::peniko::Gradient, paints_nothing: bool) -> Self {
-        // HTML "fill and stroke styles": stops interpolate in unpremultiplied
-        // RGBA.
         gradient.interpolation_alpha_space = InterpolationAlphaSpace::Unpremultiplied;
         Self(Arc::new(Mutex::new(GradientData {
             gradient,
@@ -295,8 +263,6 @@ impl Gradient {
         })))
     }
 
-    /// `addColorStop`. `Type` for a non-finite offset, `IndexSize` for one
-    /// outside 0..=1. Stops at one offset keep the order they were added in.
     pub fn add_color_stop(&self, offset: f64, color: Color) -> Result<(), CanvasError> {
         stop_offset(offset)?;
         #[expect(clippy::cast_possible_truncation, reason = "peniko offsets are f32")]
@@ -314,24 +280,17 @@ impl Gradient {
         Ok(())
     }
 
-    /// `addColorStop` given a string, as HTML defines it: `Type` for a
-    /// non-finite offset and `IndexSize` for one outside 0..=1, both
-    /// checked before the color, then `Syntax` when `css` is not a CSS
-    /// `<color>`.
     pub fn add_color_stop_css(&self, offset: f64, css: &str) -> Result<(), CanvasError> {
         stop_offset(offset)?;
         let color = parse_color(css).ok_or(CanvasError::Syntax)?;
         self.add_color_stop(offset, color)
     }
 
-    /// Whether `other` is a clone of this gradient.
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// The paint as of now, its alpha scaled by `alpha`; `None` when it
-    /// paints transparent black everywhere.
     fn paint(&self, alpha: f32) -> Option<display_list::Paint> {
         let data = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if data.paints_nothing || data.gradient.stops.is_empty() {
@@ -342,8 +301,6 @@ impl Gradient {
     }
 }
 
-/// A `CanvasPattern`. Clones share one pattern: `set_transform` through any
-/// of them shows in every draw that starts after it.
 #[derive(Clone, Debug)]
 pub struct Pattern(Arc<Mutex<PatternData>>);
 
@@ -355,10 +312,6 @@ struct PatternData {
 }
 
 impl Pattern {
-    /// `createPattern`. `InvalidState` for an image with no pixels. A
-    /// canvas's current pixels
-    /// ([`OffscreenCanvas::image`](crate::html::canvas::OffscreenCanvas::image)) are copied as they
-    /// are now.
     pub fn new(image: Image, repetition: Repetition) -> Result<Self, CanvasError> {
         if image.is_empty() {
             return Err(CanvasError::InvalidState);
@@ -370,8 +323,6 @@ impl Pattern {
         }))))
     }
 
-    /// `setTransform(matrix)`, the matrix as `[a, b, c, d, e, f]`. `Type`
-    /// for a non-finite entry.
     pub fn set_transform(&self, matrix: [f64; 6]) -> Result<(), CanvasError> {
         finite(&matrix)?;
         self.0
@@ -390,11 +341,6 @@ impl Pattern {
     }
 }
 
-/// What one draw paints with: the brush, the transform from paint space to
-/// canvas space, and the region outside which the paint is transparent
-/// (a pattern that does not repeat on an axis), in canvas space; with the
-/// texture the brush samples, kept until the draw is replayed, and the
-/// canvas texture it reads as it is at replay.
 #[derive(Debug)]
 pub(crate) struct Paint {
     pub(crate) brush: display_list::Paint,
@@ -405,7 +351,6 @@ pub(crate) struct Paint {
 }
 
 impl Paint {
-    /// A paint of `brush` in canvas space.
     fn plain(brush: display_list::Paint, transform: Affine) -> Self {
         Self {
             brush,
@@ -416,16 +361,12 @@ impl Paint {
         }
     }
 
-    /// The brush's transform relative to a shape under `geometry`, which
-    /// is invertible; `None` for the identity.
     pub(crate) fn brush_transform(&self, geometry: Affine) -> Option<Affine> {
         let transform = geometry.inverse() * self.transform;
         (transform != Affine::IDENTITY).then_some(transform)
     }
 }
 
-/// The sampler options `imageSmoothingEnabled` and `imageSmoothingQuality`
-/// select.
 pub(crate) fn image_quality(smoothing: bool, quality: SmoothingQuality) -> ImageQuality {
     match (smoothing, quality) {
         (false, _) => ImageQuality::Low,
@@ -435,8 +376,6 @@ pub(crate) fn image_quality(smoothing: bool, quality: SmoothingQuality) -> Image
 }
 
 impl Style {
-    /// The paint for one draw under the current transform `ctm`, or `None`
-    /// when the style paints transparent black everywhere.
     pub(crate) fn paint(
         &self,
         ctm: Affine,
@@ -490,9 +429,6 @@ impl Style {
     }
 }
 
-/// The region in canvas space a pattern repeating only on `repetition`'s
-/// axes covers: one tile row, column or the tile itself. `None` when the
-/// transform is singular, which paints nothing.
 fn pattern_bounds(
     repetition: Repetition,
     tile: Rect,
@@ -502,8 +438,6 @@ fn pattern_bounds(
     if transform.determinant() == 0.0 {
         return None;
     }
-    // The canvas in pattern space bounds how far a repeating axis needs to
-    // reach.
     let reach = transform
         .inverse()
         .transform_rect_bbox(canvas)
@@ -519,8 +453,6 @@ fn pattern_bounds(
     Some(path)
 }
 
-/// `addColorStop`'s offset check: `Type` for a non-finite offset,
-/// `IndexSize` for one outside 0..=1.
 fn stop_offset(offset: f64) -> Result<(), CanvasError> {
     finite(&[offset])?;
     if (0.0..=1.0).contains(&offset) {
@@ -538,7 +470,6 @@ pub(crate) fn finite(values: &[f64]) -> Result<(), CanvasError> {
     }
 }
 
-/// The canvas-space rectangle `[0, w] × [0, h]`.
 pub(crate) fn canvas_rect(width: u32, height: u32) -> Rect {
     Rect::from_origin_size(Point::ZERO, (f64::from(width), f64::from(height)))
 }

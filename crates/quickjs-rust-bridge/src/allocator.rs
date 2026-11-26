@@ -62,14 +62,12 @@ unsafe fn allocate(requested_size: usize, zeroed: bool) -> *mut c_void {
     }
 }
 
-/// Allocates C storage through Rust's process global allocator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qjs_rust_malloc(size: usize) -> *mut c_void {
     // SAFETY: the helper returns an owned C allocation or null.
     unsafe { allocate(size, false) }
 }
 
-/// Allocates zeroed C storage through Rust's process global allocator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qjs_rust_calloc(count: usize, size: usize) -> *mut c_void {
     let Some(total) = count.checked_mul(size) else {
@@ -79,7 +77,6 @@ pub unsafe extern "C" fn qjs_rust_calloc(count: usize, size: usize) -> *mut c_vo
     unsafe { allocate(total, true) }
 }
 
-/// Resizes C storage through Rust's process global allocator.
 #[unsafe(no_mangle)]
 #[allow(
     clippy::cast_ptr_alignment,
@@ -126,7 +123,6 @@ pub unsafe extern "C" fn qjs_rust_realloc(pointer: *mut c_void, size: usize) -> 
     }
 }
 
-/// Frees C storage through Rust's process global allocator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qjs_rust_free(pointer: *mut c_void) {
     if pointer.is_null() {
@@ -146,7 +142,6 @@ pub unsafe extern "C" fn qjs_rust_free(pointer: *mut c_void) {
     unsafe { dealloc(header.cast(), layout) };
 }
 
-/// Returns the payload size tracked for a C allocation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qjs_rust_malloc_usable_size(pointer: *const c_void) -> usize {
     if pointer.is_null() {
@@ -156,15 +151,6 @@ pub unsafe extern "C" fn qjs_rust_malloc_usable_size(pointer: *const c_void) -> 
     unsafe { (*allocation_header(pointer.cast_mut())).requested_size }
 }
 
-/// Frees the `Box<[u8]>` a host function returned as an `ArrayBuffer`'s
-/// storage: `QuickJS`'s free function for such a buffer, and what `shim.c`
-/// calls when the buffer could not be made. `opaque` is the box's length,
-/// which `shim.c` stored there; the runtime is not needed.
-///
-/// A null `pointer` is nothing to free. `QuickJS` passes one when it finalizes
-/// a buffer that was detached or transferred: `js_array_buffer_finalizer`
-/// calls the free function with whatever `data` holds, which detaching set
-/// to null after the storage was freed or moved to the new buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qjs_rust_bytes_free(
     _runtime: *mut c_void,

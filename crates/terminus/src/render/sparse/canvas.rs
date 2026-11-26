@@ -32,16 +32,11 @@ use crate::render::gpu::SharedGpu;
 use crate::render::image::ImageDescriptor;
 use crate::render::picture::PictureId;
 
-/// The next lease owner's name, from the counter a target's name in the
-/// bitmaps' pins comes from: what a placeholder canvas's link holds its
-/// picture's texture under ([`SharedRaster::copy_to_picture`]).
 pub(crate) fn next_owner() -> u64 {
     next_target()
 }
 
 impl Replay {
-    /// How many glyph outlines glifo's cache holds, for a test: read from
-    /// its `Debug` output, the one place glifo shows the count.
     #[cfg(test)]
     pub(crate) fn cached_outlines(&self) -> usize {
         let debug = format!("{:?}", self.glyphs);
@@ -57,17 +52,10 @@ impl Replay {
 }
 
 impl SharedRaster {
-    /// Ends every lease `owner` holds.
     pub(crate) fn end_leases(&self, owner: u64) {
         self.bitmaps().end_leases(owner);
     }
 
-    /// Copies `source`, `width` × `height`, into `picture`'s own texture as
-    /// its frame `generation`, which `descriptor` names, and leases that
-    /// texture to `owner`; the copy is submitted before this returns. The
-    /// texture is rewritten in place under its one id when it is the size
-    /// of the last frame, and replaced under the same id when it is not, as
-    /// [`Self::write_picture`] does.
     pub(crate) fn copy_to_picture(
         &self,
         gpu: &SharedGpu,
@@ -131,23 +119,10 @@ impl SharedRaster {
     }
 }
 
-/// A list replayed into a scene by [`encode`], on a thread that may hold no
-/// device: the CPU half of a render, which [`Submitter::submit`] finishes
-/// on the device's thread.
-///
-/// A bitmap the list draws is drawn in the scene as an external texture
-/// under an id reserved for this scene, one per upload the bitmap table
-/// keys, and resolved through the bitmap table only at the submit, which
-/// binds the upload's texture under that id. A texture paint is drawn under
-/// its own id, which the submit's caller binds.
 pub(crate) struct Encoded {
     scene: Scene,
-    /// Whether the target is cleared to transparent black before the
-    /// render, rather than kept and drawn over.
     clear: bool,
-    /// Each bitmap the scene draws: the id it is drawn under, and the bitmap.
     bitmaps: Vec<(TextureId, ImageRef)>,
-    /// The texture ids the scene draws, each once.
     textures: Vec<u64>,
 }
 
@@ -162,31 +137,15 @@ impl std::fmt::Debug for Encoded {
 }
 
 impl Encoded {
-    /// The texture ids the scene draws, each once: every one needs a
-    /// binding at the submit.
     pub(crate) fn textures(&self) -> &[u64] {
         &self.textures
     }
 
-    /// The scene, for the next [`encode`] to reuse its buffers.
     pub(crate) fn into_scene(self) -> Scene {
         self.scene
     }
 }
 
-/// The CPU half of a render, with no device: `list` replayed into `scene`,
-/// reset to a `width` × `height` target that is cleared to transparent
-/// black first when `clear` is set, or kept and drawn over, as
-/// [`super::SparseBackend::render`] replays it. A texture paint whose id
-/// `drawable` refuses draws nothing, as one with no texture bound does
-/// there. Neither needs the base colour fill a page target's render draws
-/// under a blend at the root, which only a visible clear colour needs.
-///
-/// What a render decides about a bitmap without a device is decided here:
-/// one with a side longer than any texture, or whose pixels are fewer bytes
-/// than it needs, draws nothing, as it does there. Whether an upload is
-/// resident, and whether lent pixels are still alive, is decided at the
-/// submit.
 pub(crate) fn encode(
     mut scene: Scene,
     kept: &mut Replay,
@@ -208,8 +167,6 @@ pub(crate) fn encode(
             bitmap: &mut |paint| {
                 let image = &paint.image;
                 if image.picture.is_none() {
-                    // No upload keyed on these pixels can exist: none is
-                    // made of a bitmap that cannot be converted.
                     let descriptor = &image.descriptor;
                     if descriptor.width > longest || descriptor.height > longest {
                         return Err(Missing::Unreadable);
@@ -223,9 +180,6 @@ pub(crate) fn encode(
                     bitmaps.push((id, image.clone()));
                     id
                 });
-                // Whether the upload is opaque is not known here; the flag
-                // only lets `vello_gpu` route opaque strips to its depth
-                // pass, which no render here enables (`depth_view: None`).
                 Ok(Image {
                     image: ImageSource::external_texture(id, TextureRegion::Full, true),
                     sampler: paint.sampler,
@@ -250,33 +204,14 @@ pub(crate) fn encode(
     }
 }
 
-/// A 1 × 1 transparent black texture: what a submit binds under an id whose
-/// texture it cannot find.
-///
-/// In `vello_gpu` a draw composites by source-over into the layer it is in
-/// (a blend mode is a layer's, never a draw's), so a draw sampling only
-/// transparent black leaves that layer's pixels as they are, as no draw
-/// does. What it still changes is the bounding box the scene recorded for
-/// each layer around it, which was fixed at the encode either way: a
-/// non-destructive blend layer then blends a transparent source over its
-/// backdrop, which leaves the backdrop, and a destructive one composites
-/// over its whole clip region whatever it holds
-/// (`schedule_child_layer`, `vello_gpu` `schedule/mod.rs`).
 pub(crate) fn transparent_view(device: &wgpu::Device) -> wgpu::TextureView {
-    // wgpu zero-fills a texture before its first use.
     bitmap_texture(device, 1, 1, BITMAP_USAGE).create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// The device side of a target whose scenes are encoded elsewhere
-/// ([`encode`]): its name in the bitmaps' pins and its count of renders, as
-/// a [`super::SparseBackend`] keeps them.
 pub(crate) struct Submitter {
     gpu: Arc<SharedGpu>,
     target: u64,
     generation: u64,
-    /// The textures [`super::Bitmaps::hit`] lists for a render: where a submit
-    /// finds each upload's texture, which it binds under the id the
-    /// encoded scene reserved for the bitmap.
     scratch: Vec<(TextureId, wgpu::TextureView)>,
 }
 
@@ -289,7 +224,6 @@ impl std::fmt::Debug for Submitter {
 }
 
 impl Submitter {
-    /// A target on `gpu` that has rendered nothing yet.
     pub(crate) fn new(gpu: &Arc<SharedGpu>) -> Self {
         Self {
             gpu: Arc::clone(gpu),
@@ -299,20 +233,10 @@ impl Submitter {
         }
     }
 
-    /// The stack this target renders on.
     pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
         &self.gpu
     }
 
-    /// The GPU half of the render `encoded` began: each bitmap it draws
-    /// resolved through the bitmap table — a hit, or the pixels converted
-    /// and uploaded — and bound under the id the scene draws it by, with
-    /// `sources` bound under theirs, then the scene rendered into `view`
-    /// under the renderer lock and submitted ([`SharedRaster`]).
-    ///
-    /// `sources` binds every id of [`Encoded::textures`]. A bitmap with no
-    /// upload whose pixels are gone or unreadable is bound as transparent
-    /// black ([`transparent_view`]), which draws as nothing does.
     pub(crate) fn submit(
         &mut self,
         encoded: &Encoded,
@@ -343,9 +267,6 @@ impl Submitter {
         };
         let mut transparent = None;
         for (id, image) in &encoded.bitmaps {
-            // The image drawing the upload names it by the upload's own id,
-            // under which the render's first draw of it lists its texture
-            // in `drawing.textures`.
             let upload = shared
                 .bitmap(device, queue, image, ImageSampler::new(), &mut drawing)
                 .ok()
@@ -378,7 +299,6 @@ impl Submitter {
 }
 
 impl Drop for Submitter {
-    /// Gives up this target's pins, as [`super::SparseBackend`]'s drop does.
     fn drop(&mut self) {
         self.gpu.raster.bitmaps().targets.remove(&self.target);
     }

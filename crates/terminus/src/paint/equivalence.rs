@@ -22,9 +22,6 @@
 
 use crate::paint::display_list::DisplayList;
 
-/// Panics unless `a` and `b` record the same drawing.
-///
-/// The panic message names the first item that disagrees.
 #[track_caller]
 pub(crate) fn assert_scenes_identical(a: &DisplayList, b: &DisplayList) {
     if let Err(difference) = compare_scenes(a, b) {
@@ -32,8 +29,6 @@ pub(crate) fn assert_scenes_identical(a: &DisplayList, b: &DisplayList) {
     }
 }
 
-/// Describes the first difference between two lists, or `Ok` when they
-/// record the same drawing.
 pub(crate) fn compare_scenes(a: &DisplayList, b: &DisplayList) -> Result<(), String> {
     a.compare(b)
 }

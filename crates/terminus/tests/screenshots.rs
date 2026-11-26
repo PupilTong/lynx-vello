@@ -95,11 +95,6 @@ fn object_fit_matrix_matches_reference() {
 
     let images = prime_radiant::TestImages::new();
     let root = doc.root;
-    // No `set_natural_size` anywhere: every box below is sized purely by the
-    // dimensions the store reports when its load completes, which each box is
-    // presented at once its URL settles. That is the whole point of the
-    // golden — it fails if the intrinsic size does not travel from the store
-    // through the registry into layout.
     let mut presented = Vec::new();
     for (class, (width, height, rgba)) in cells {
         let node = doc.el_tag(root, "img", class);
@@ -108,8 +103,6 @@ fn object_fit_matrix_matches_reference() {
         presented.push((node, source));
     }
 
-    // The natural size now arrives from the store's own load report, through
-    // the same request/report loop the painter runs.
     let presented: Vec<_> = presented
         .iter()
         .map(|(node, source)| (*node, source.as_str()))
@@ -146,13 +139,6 @@ fn decode_checker(width: u32, height: u32) -> Checker {
     (width, height, rgba)
 }
 
-/// CSS Grid Level 3 `display: grid-lanes`: three `minmax(0, 1fr)` lanes, a
-/// 15px gutter in both axes, `fit-tolerance: 0` so every item lands in the
-/// strictly shortest lane, and one `grid-column: 1 / -1` item that spans them
-/// all and leaves them level behind it.
-///
-/// Solid fills only: the subject is where the boxes land, and a colour per
-/// item is what makes a lane, a gutter and the full-span reset legible.
 const LANES_FRAGMENT: &str = r#"
 <div style="display: grid-lanes; width: 300px; height: 400px; gap: 15px; fit-tolerance: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); background-color: #e5e7eb">
   <div style="height: 60px; background-color: #2563eb"></div>
@@ -177,10 +163,6 @@ fn grid_lanes_waterfall_matches_reference() {
     screenshot::assert_golden(&["grid-lanes-waterfall"], &actual);
 }
 
-/// A scroller holding two `z-index` columns beside a `z-index: 2` bar that
-/// is its DOM sibling. The scroller's own `z-index` is the only difference
-/// between the two goldens below; both scroll it 40px, so each column shows
-/// its scrolled position and the scrollport's cut.
 const SCROLL_STACKING_CSS: &str = "
     page { display: flex; position: relative; width: 240px; height: 200px;
            background-color: #e5e7eb; }
@@ -215,8 +197,6 @@ fn capture_scroll_stacking(test: &str, scroller_class: &str) -> prime_radiant::I
     screenshot::capture_prebuilt_document(test, &mut doc.dom, &terminus::link::NoImages)
 }
 
-/// `z-index: auto`: the scroller is no stacking context, so its columns sort
-/// against the bar in the page's context — A (1) under the bar, B (3) over it.
 #[test]
 fn scroll_container_without_z_index_interleaves_its_content_with_a_sibling() {
     let actual = capture_scroll_stacking(
@@ -226,8 +206,6 @@ fn scroll_container_without_z_index_interleaves_its_content_with_a_sibling() {
     screenshot::assert_golden(&["scroll-stacking", "z-index-auto"], &actual);
 }
 
-/// `z-index: 0`: the scroller is a stacking context at level 0, so both
-/// columns stay inside it and the bar (2) covers them both.
 #[test]
 fn scroll_container_with_z_index_zero_keeps_its_content_below_a_sibling() {
     let actual = capture_scroll_stacking(
@@ -237,12 +215,6 @@ fn scroll_container_with_z_index_zero_keeps_its_content_below_a_sibling() {
     screenshot::assert_golden(&["scroll-stacking", "z-index-zero"], &actual);
 }
 
-/// A modal top-layer element and its default `::backdrop` over a page whose
-/// `z-index: 100` box would cover anything in the root stacking context
-/// (web-elements' `basic-z-index.html`: the top layer beats any `z-index`).
-/// The dialog sits inside a faded, clipped, translated ancestor, none of
-/// which reaches it; the backdrop tints the whole viewport, the
-/// `z-index: 100` box included, and the dialog paints over it untinted.
 const TOP_LAYER_CSS: &str = "
     page { display: flex; position: relative; width: 240px; height: 200px;
            background-color: #e5e7eb; }
@@ -258,8 +230,6 @@ const TOP_LAYER_CSS: &str = "
              background-color: #14b8a6; }
 ";
 
-/// What bobcat-core's UA sheet gives every `::backdrop` (HTML's
-/// `dialog::backdrop` tint included).
 const TOP_LAYER_UA: &str = "
     ::backdrop { display: flex; position: fixed; inset: 0; }
     dialog::backdrop { background-color: rgba(0, 0, 0, 0.1); }
@@ -284,11 +254,6 @@ fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
     screenshot::assert_golden(&["top-layer", "modal-backdrop"], &actual);
 }
 
-/// The Explorer border/background/shadow example: the top edge must continue
-/// around its lone rounded corner, and the shadow must follow that same shape.
-/// Styles come from `@lynx-example/css@74e8136`, `border_background_shadow`.
-/// The reference was captured with Chrome 154.0.8037.99 at device scale 1;
-/// fixed positioning replaces viewport-dependent centering for this comparison.
 #[test]
 fn rounded_box_showcase_matches_browser() {
     let mut doc = paint_common::Doc::with_css_sized("", 220.0, 220.0);
@@ -311,8 +276,6 @@ fn rounded_box_showcase_matches_browser() {
         "/tests/screenshots/rounded-box-browser"
     ))
     .with_artifacts_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/artifacts"))
-    // CSS permits different dash/dot phasing. The two geometric assertions
-    // below are independent of that allowance and of the stored reference.
     .with_options(prime_radiant::CompareOptions::default().with_max_diff_pixels(150));
     assert!(
         !references.is_updating(),
@@ -351,8 +314,6 @@ fn rounded_box_showcase_matches_browser() {
     );
 }
 
-/// Separate controls for elliptical/mixed radii, inward and outward blur,
-/// spread, zero blur, asymmetric border widths, and nested filter composition.
 #[test]
 fn rounded_box_matrix_matches_reference() {
     let subjects = [
@@ -384,10 +345,6 @@ fn rounded_box_matrix_matches_reference() {
     screenshot::assert_golden(&["rounded-box-matrix"], &actual);
 }
 
-/// The cells of the live-picture golden: each draws the one picture through
-/// another of the geometries every image draw has — `object-fit`, a rounded
-/// clip, a blur — so the golden shows a picture an element owns is drawn
-/// through the same image draw a URL is.
 const LIVE_PICTURE_CSS: &str = "
     img { position: absolute; width: 96px; height: 72px; background-color: #e5e7eb; }
     .c0 { left: 12px; } .c1 { left: 120px; } .c2 { left: 228px; }
@@ -400,8 +357,6 @@ const LIVE_PICTURE_CSS: &str = "
     .blurred { filter: blur(3px); }
 ";
 
-/// A store holding one picture an element owns, through the slot a
-/// producer publishes into.
 struct OneSlot {
     picture: terminus::link::PictureId,
     slot: terminus::link::PictureSlot,
@@ -426,13 +381,11 @@ impl terminus::link::FrameImages for OneSlot {
             .flatten()
     }
 
-    /// The test publishes before every adoption, so nothing is wanted.
     fn want(&self, _picture: &terminus::link::PictureKey, _hint: terminus::link::ImageSizeHint) {}
 
     fn retain(&self, _drawn: &[terminus::link::PictureKey]) {}
 }
 
-/// The checker [`decode_checker`] draws, as a frame.
 fn checker_frame(width: u32, height: u32) -> terminus::link::peniko::ImageData {
     let (width, height, rgba) = decode_checker(width, height);
     terminus::link::peniko::ImageData {
@@ -444,11 +397,6 @@ fn checker_frame(width: u32, height: u32) -> terminus::link::peniko::ImageData {
     }
 }
 
-/// A picture an element owns, drawn by the presenting painter from a test
-/// producer's frames. The first frame is drawn with the commit; the second,
-/// of twice the size and its quadrants mirrored, is published with no
-/// commit, and the next adoption draws it in every cell, the blurred ones
-/// baked again.
 #[test]
 fn live_picture_frames_match_reference() {
     use terminus::link::painter::{DrawTarget, GesturePolicy, Painter};

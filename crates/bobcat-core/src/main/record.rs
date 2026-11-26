@@ -11,9 +11,6 @@
 
 use std::fmt::Write as _;
 
-/// Appends one `<units>:<text>` field, the runtime's `take_record_field`'s
-/// inverse; the count is in UTF-16 code units because
-/// `String.prototype.slice` consumes it.
 pub(crate) fn write_record_field(record: &mut String, text: &str) {
     let units: usize = text.chars().map(char::len_utf16).sum();
     write!(record, "{units}:").expect("writing to a String cannot fail");

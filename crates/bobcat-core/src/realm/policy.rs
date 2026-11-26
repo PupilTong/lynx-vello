@@ -94,47 +94,26 @@ use crate::script::ScriptError;
 use crate::threads::{panic_message, platform_script_error};
 use crate::view::EngineEvent;
 
-/// Where a failure the engine reports happened, which is what a realm kind's
-/// table reads a [`Row`] by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scene {
-    /// The realm, the MTS entry or the engine's own startup code could not be
-    /// made ready.
     Open,
-    /// The MTS entry's evaluation threw, or a worker's load of its root
-    /// module failed in its boot job.
     Boot,
-    /// Completing a module a load was waiting for: an import, or a worker's
-    /// own script.
     Module,
-    /// Handing a future its outcome.
     Future,
-    /// A timer callback.
     Timer,
-    /// Delivering an event to the realm.
     Listener,
-    /// Running the realm's animation-frame callbacks.
     Frame,
-    /// A call the host made into the realm.
     HostCall,
-    /// What a `ShadowRealm` child of the realm left unhandled — or the realm
-    /// itself, beside its children, after the epilogue ran their jobs.
     ShadowRealm,
 }
 
-/// One row of a realm kind's table: what a failure is reported as.
 pub(crate) struct Row<E> {
-    /// The event the failure becomes.
     pub(crate) event: fn(ScriptError) -> E,
-    /// Whether reporting it ends the owner.
     pub(crate) ends: bool,
-    /// What the failure's message is prefixed with, as `<context>: <message>`.
-    /// `None` where the caller has already named what failed.
     pub(crate) context: Option<&'static str>,
 }
 
 impl<E> Row<E> {
-    /// The event `error` is reported as under this row.
     pub(crate) fn event_for(&self, error: ScriptError) -> E {
         (self.event)(match self.context {
             Some(context) => context_of(context, error),
@@ -142,16 +121,11 @@ impl<E> Row<E> {
         })
     }
 
-    /// The event a panic is reported as under this row: the panic's own
-    /// message, after the row's context.
     pub(crate) fn event_for_panic(&self, payload: &(dyn Any + Send)) -> E {
         self.event_for(platform_script_error(panic_message(payload).to_owned()))
     }
 }
 
-/// Reports `error`, a failure in `scene`, as `owner`'s table says: through
-/// [`owner::terminal`], and so once and ending the owner, where the row ends
-/// it, and straight to where the owner's reports go otherwise.
 pub(crate) fn report<O: RealmOwner>(owner: &Rc<O>, scene: Scene, error: ScriptError) {
     let row = O::row(scene);
     let event = row.event_for(error);
@@ -162,11 +136,6 @@ pub(crate) fn report<O: RealmOwner>(owner: &Rc<O>, scene: Scene, error: ScriptEr
     }
 }
 
-/// The MTS table: what a failure in a view's main-thread realm is reported as.
-///
-/// What could not be made ready fails the view's startup and ends it. Every
-/// other failure is the app's: reported, and the view goes on. The Open row's
-/// event carries a `LynxViewError`, into which a script's error converts.
 pub(crate) fn main_thread(scene: Scene) -> Row<EngineEvent> {
     let (event, ends, context): (fn(ScriptError) -> EngineEvent, _, _) = match scene {
         Scene::Open => (|error| EngineEvent::StartupFailed(error.into()), true, None),
@@ -192,9 +161,6 @@ pub(crate) fn main_thread(scene: Scene) -> Row<EngineEvent> {
     }
 }
 
-/// The MTS table's Disposal row: a failure of the JavaScript disposal the
-/// page runs once the view has ended, which is a listener's failure. It ends
-/// nothing, because the view it would end is already over.
 pub(crate) fn main_thread_disposal() -> Row<EngineEvent> {
     Row {
         event: EngineEvent::ListenerFailed,
@@ -203,12 +169,6 @@ pub(crate) fn main_thread_disposal() -> Row<EngineEvent> {
     }
 }
 
-/// The MTS table's Panic row: the engine panicked while it served the view,
-/// which ends it.
-///
-/// Under `panic = "abort"` the panic hook reports the panic with this row's
-/// event and a message of its own, worded from the hook's detail, because
-/// nothing unwinds and there is no payload to read.
 pub(crate) fn main_thread_panic() -> Row<EngineEvent> {
     Row {
         event: EngineEvent::from_panic,
@@ -217,15 +177,6 @@ pub(crate) fn main_thread_panic() -> Row<EngineEvent> {
     }
 }
 
-/// The worker table: what a failure in a worker's realm, the BTS's included,
-/// is reported as, to the realm that created it.
-///
-/// A worker whose realm could not be made ready is over, which is `Failed`.
-/// Anything its realm threw after that is `Errored`: HTML reports an uncaught
-/// exception at the worker and then at its parent and leaves both running. A
-/// script that could not be loaded is `Errored` too, because the load rejects
-/// in the realm, where HTML never runs a worker whose script fetch failed
-/// (`docs/tracking/deviations.md`).
 pub(crate) fn worker(scene: Scene) -> Row<WorkerPayload> {
     let context = match scene {
         Scene::Open => {
@@ -251,11 +202,6 @@ pub(crate) fn worker(scene: Scene) -> Row<WorkerPayload> {
     }
 }
 
-/// The worker table's Panic row: a worker nothing will be heard from again,
-/// which is `Failed`.
-///
-/// Under `panic = "abort"` the panic hook reports the thread's panic with
-/// this row's event and a message of its own, as [`main_thread_panic`] says.
 pub(crate) fn worker_panic() -> Row<WorkerPayload> {
     Row {
         event: WorkerPayload::Failed,
@@ -264,8 +210,6 @@ pub(crate) fn worker_panic() -> Row<WorkerPayload> {
     }
 }
 
-/// Prefixes a failure with what the host was doing, in the format
-/// `MainThreadError` gives the errors that reach an embedder through a view.
 pub(crate) fn context_of(context: &str, mut error: ScriptError) -> ScriptError {
     error.message = Arc::from(format!("{context}: {}", error.message));
     error
@@ -282,8 +226,6 @@ mod tests {
         platform_script_error(MESSAGE.to_owned())
     }
 
-    /// What one row is expected to be: its name, the row, whether an event is
-    /// the variant it reports as, whether it ends the owner, and its context.
     type Expected<E> = (
         &'static str,
         Row<E>,
@@ -292,7 +234,6 @@ mod tests {
         Option<&'static str>,
     );
 
-    /// Every row of the MTS table, as it is expected to be.
     fn main_thread_rows() -> [Expected<EngineEvent>; 11] {
         let startup_failed: fn(&EngineEvent) -> bool =
             |event| matches!(event, EngineEvent::StartupFailed(LynxViewError::Script(_)));
@@ -378,7 +319,6 @@ mod tests {
         ]
     }
 
-    /// Every row of the worker table, as it is expected to be.
     fn worker_rows() -> [Expected<WorkerPayload>; 10] {
         let failed: fn(&WorkerPayload) -> bool = |event| matches!(event, WorkerPayload::Failed(_));
         let errored: fn(&WorkerPayload) -> bool =
@@ -451,8 +391,6 @@ mod tests {
         ]
     }
 
-    /// The message a report carries, which is the context and then the
-    /// failure's own message, or the failure's own alone.
     fn expected_message(context: Option<&str>) -> String {
         context.map_or_else(
             || MESSAGE.to_owned(),
@@ -486,9 +424,6 @@ mod tests {
         }
     }
 
-    /// `LynxView::pump` ends a view on exactly the events `is_fatal` names,
-    /// and the page ends its own side on exactly the rows that end it: the
-    /// two must name the same rows.
     #[test]
     fn a_main_thread_row_ends_the_view_exactly_when_its_event_is_fatal() {
         for (name, row, ..) in main_thread_rows() {
@@ -518,8 +453,6 @@ mod tests {
         }
     }
 
-    /// A panic reads as the Panic row's context and then what the panic said,
-    /// on both threads.
     #[test]
     fn a_panic_is_worded_by_its_row() {
         let EngineEvent::Panicked(error) = main_thread_panic().event_for_panic(&"boom") else {

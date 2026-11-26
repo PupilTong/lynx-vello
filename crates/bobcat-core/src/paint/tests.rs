@@ -14,7 +14,6 @@ use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup};
 
-/// A phone-shaped document, for the tests that publish a real frame.
 fn document() -> LynxDocument {
     new_document(
         Viewport::new(393.0, 727.0),
@@ -26,8 +25,6 @@ fn document() -> LynxDocument {
     )
 }
 
-/// A painter with every seam built but no view task: the view's whole side of
-/// its link is handed back so a test can play it.
 fn detached() -> (Painter, FarEnd) {
     detached_waking(Arc::new(NoWakeup))
 }
@@ -114,9 +111,6 @@ fn frame_size_rejects_unbounded_targets() {
     assert!(error.to_string().contains("16384"));
 }
 
-/// One poll applies every kind of thing that reaches the painting side — a
-/// name being routed, a frame post acknowledgement, and the redraw a new frame
-/// asks for — and applies each of them exactly once.
 #[test]
 fn one_poll_adopts_every_kind_of_published_state() {
     let (mut painter, main) = detached();
@@ -136,9 +130,6 @@ fn one_poll_adopts_every_kind_of_published_state() {
     assert!(!painter.take_redraw(), "and the request is taken once");
 }
 
-/// Frames do not queue: the published state holds one, so a painter that
-/// polls after several commits sees the newest and never the ones it slept
-/// through.
 #[test]
 fn the_published_state_keeps_only_the_newest_commit() {
     let (mut painter, main) = detached();
@@ -160,13 +151,6 @@ fn the_published_state_keeps_only_the_newest_commit() {
     );
 }
 
-/// The last frame a view published is still the frame to draw once its task
-/// has ended: a closed channel is not an empty one.
-///
-/// What the painter had to have done first is read that commit's pixels,
-/// which is what adopting one is — the poll below the publish. Afterwards
-/// nothing of the view is needed: the frame, its bitmaps and everything
-/// composed from them are the painter's.
 #[test]
 fn a_frame_published_before_the_task_ended_is_still_adopted() {
     let (mut painter, main) = detached();
@@ -190,13 +174,6 @@ fn a_frame_published_before_the_task_ended_is_still_adopted() {
     );
 }
 
-/// A commit and the pixels it draws are adopted together, so a commit whose
-/// pixels can no longer be read is not adopted at all.
-///
-/// The store is the view's and goes when the view does. A frame indexes that
-/// store's bitmaps by draw order, so taking the newer frame over the older
-/// one's table would draw the older commit's images — the painter keeps the
-/// last commit it did read, whole, instead.
 #[test]
 fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
     let (mut painter, main) = detached();
@@ -215,8 +192,6 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
         first.commit_id()
     );
 
-    // Published, and then the view released before the painter took a turn:
-    // the frame is still on the watch, but nothing can answer for its images.
     main.outbox.publish_frame(Arc::clone(&second));
     drop(main);
     painter.poll_link();
@@ -234,7 +209,6 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
     );
 }
 
-/// A tap's detail, as the router decides one: a touch pointer's position.
 fn tap_detail() -> EventDetail {
     EventDetail::Pointer {
         position: terminus::link::Point2D::new(1.0, 1.0),
@@ -245,10 +219,6 @@ fn tap_detail() -> EventDetail {
     }
 }
 
-/// An emit decision costs one name-table lookup and stops there unless a
-/// listener exists; when it crosses, it crosses as plain data — the
-/// target id, not a path. Liveness is the main thread's to check at
-/// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
@@ -256,7 +226,6 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     use super::TAP_EVENT;
 
     let (mut painter, mut main) = detached();
-    // The permanent page element's packed handle, as script would name it.
     let target = terminus::link::NodeId::from_bits(2).expect("a well-formed packed handle");
     let emit = |painter: &mut Painter| {
         let mut decisions = InputDecisions::new();
@@ -284,9 +253,6 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         "a listener on another name sends nothing"
     );
 
-    // An update that has not been polled for yet is not yet visible: the
-    // snapshot moves at pass boundaries, which is the one pass of
-    // staleness this design accepts in exchange for the lock.
     main.outbox.set_name_routed(Arc::from(TAP_EVENT), true);
     emit(&mut painter);
     assert!(
@@ -311,13 +277,9 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     };
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
-    // The decision's own facts, as values: nothing is encoded on this side.
     assert_eq!(payload.detail, tap_detail());
-    // The pass's clock reading, in milliseconds.
     assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
-    // And the name stops being routed: the main thread publishes the last
-    // removal, and from the next poll nothing crosses.
     main.outbox.set_name_routed(Arc::from(TAP_EVENT), false);
     painter.poll_link();
     emit(&mut painter);
@@ -327,9 +289,6 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     );
 }
 
-/// The two payloads a plain pointer event does not have — the wheel delta and
-/// the touch points — cross as the values the router decided, in the order it
-/// decided them. The realm is the side that gives them a shape.
 #[test]
 fn a_wheel_delta_and_touch_points_cross_as_values() {
     use terminus::link::event::{
@@ -403,12 +362,6 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
 
-/// A poll adopts whatever arrived, in order, and stops at the last of
-/// it — never blocking on a main thread that may be mid-registration.
-///
-/// The ordering matters because the two route changes for one name are a
-/// pair: a name registered and unregistered between two passes must leave
-/// the snapshot without it, not with it.
 #[test]
 fn a_poll_adopts_arrived_route_changes_in_order_and_does_not_block() {
     let (mut painter, main) = detached();
@@ -432,8 +385,6 @@ fn a_poll_adopts_arrived_route_changes_in_order_and_does_not_block() {
         "the other name stays routed"
     );
 
-    // The main thread going away is not an unregistration: what it
-    // published last is still the last true answer.
     drop(main);
     painter.poll_link();
     assert!(
@@ -442,9 +393,6 @@ fn a_poll_adopts_arrived_route_changes_in_order_and_does_not_block() {
     );
 }
 
-/// A scroll decision with no published frame has no geometry to consume
-/// against, so it evaporates entirely: no intent, nothing posted, no
-/// marker.
 #[test]
 fn a_scroll_decision_sends_no_command() {
     use terminus::link::painter::{InputDecision, InputDecisions};
@@ -466,8 +414,6 @@ fn a_scroll_decision_sends_no_command() {
     assert!(!painter.scroll_intents().has_live_offsets());
 }
 
-/// A requester that records every wake, so a test can wait on the host
-/// loop actually being asked to run.
 struct WakeSignal(flume::Sender<()>);
 
 impl EventRequester for WakeSignal {
@@ -476,12 +422,6 @@ impl EventRequester for WakeSignal {
     }
 }
 
-/// A painter with nowhere to present owes the display nothing, whatever else
-/// is true of it.
-///
-/// The rule that keeps a host from waiting on a frame clock for a view that
-/// has no display to keep up with: an offscreen painter's frames are asked
-/// for through `post_frame`, and one with no target at all has none to give.
 #[test]
 fn a_painter_that_presents_to_no_window_owes_no_frame() {
     let (painter, _main) = detached();
@@ -496,13 +436,6 @@ fn a_painter_that_presents_to_no_window_owes_no_frame() {
     );
 }
 
-/// A frame the painter asks of itself wakes nothing.
-///
-/// Every caller of `refresh` is the painter, on the host's own thread and
-/// inside the host's own call, so the turn that host is already in is what
-/// answers it. A wake there would post into the loop that is running — a
-/// turn that finds nothing, asks for another, and never stops. Only the main
-/// thread's publish wakes.
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = flume::unbounded();
@@ -523,9 +456,6 @@ fn a_self_directed_frame_request_wakes_nobody() {
     assert!(wakes.try_recv().is_err(), "and it wakes exactly once");
 }
 
-/// Boot's final flush is a commit: by the time `ScriptFinished` is
-/// pumped, a frame is published and the document — owned by the view's own
-/// task — answers probes.
 #[test]
 fn a_booted_view_commits_and_publishes() {
     let (wake_sender, wake_receiver) = flume::unbounded();
@@ -541,10 +471,6 @@ fn a_booted_view_commits_and_publishes() {
     )
     .create(Arc::new(WakeSignal(wake_sender)));
 
-    // One wakeup carries either kind of engine work: the boot commit's
-    // frame or a lifecycle event. The law under test is the ordering —
-    // whichever wakeup carries the event, `pump` observes it right then,
-    // with nothing polled for and nothing slept on.
     let deadline = Instant::now() + Duration::from_secs(30);
     let finished = loop {
         wake_receiver
@@ -589,17 +515,6 @@ fn a_booted_view_commits_and_publishes() {
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
-/// A refused render clears the painter's record, so nothing is skipped against
-/// it and nothing is read out of it afterwards.
-///
-/// The rule that keeps the one record from outliving the render that made it:
-/// an offscreen target gives its texture up when a render fails partway, so a
-/// record still naming that frame would skip the next render of the same commit
-/// and then hand a reader pixels that are not there. The record is cleared on
-/// any refusal, whatever the target still holds.
-///
-/// The refusal is a zero-sized target, which is the one render failure a test
-/// can ask for without a broken GPU.
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn a_failed_render_leaves_the_painter_holding_no_frame() {
@@ -630,9 +545,6 @@ fn a_failed_render_leaves_the_painter_holding_no_frame() {
         .expect_err("a zero-sized target is refused");
     assert!(matches!(error, EngineError::Gpu(_)), "{error}");
 
-    // Detached and back at a size the GPU accepts: there is no frame to
-    // re-render now, so what the capture answers is purely what the painter's
-    // record says.
     engine.painter.detach();
     engine.painter.set_frame_size(size);
     let error = engine
@@ -644,14 +556,10 @@ fn a_failed_render_leaves_the_painter_holding_no_frame() {
     );
 }
 
-/// Two painters, each observing a view of its own and nothing between them.
 fn two_painters() -> [(Painter, FarEnd); 2] {
     [detached(), detached()]
 }
 
-/// The property the old addressed FIFO had to buy with a per-view buffer:
-/// one view's turn neither consumes nor delays anything belonging to
-/// another, whatever order the two published in.
 #[test]
 fn a_views_published_state_is_independent_of_a_siblings() {
     let [(mut first, first_end), (mut second, second_end)] = two_painters();
@@ -662,14 +570,10 @@ fn a_views_published_state_is_independent_of_a_siblings() {
         .request_source(SourceRequest::Module("app:///second.js".into()));
     first_end.outbox.publish_frame(document().commit());
 
-    // The first painter's poll sees exactly its own view's frame, and none of
-    // the sibling's listener names.
     first.poll_link();
     assert!(first.published_frame().is_some());
     assert!(!first.published.listeners.contains("tap"));
 
-    // The sibling's is still there afterwards, and still there once the last
-    // sender on its side is gone.
     drop(first_end);
     drop(second_end);
     second.poll_link();
@@ -680,10 +584,6 @@ fn a_views_published_state_is_independent_of_a_siblings() {
     );
 }
 
-/// What a host's own wait reads between posting a frame and drawing it:
-/// whether the view has serviced the post, answered at once either way. It is
-/// `true` as well when nothing will ever service it — nothing was posted, or
-/// the view has gone — so that wait is never one on a view that is not there.
 #[test]
 fn a_posted_frame_reads_as_serviced_once_acknowledged_or_once_nothing_will() {
     let (mut painter, end) = detached();
@@ -734,9 +634,6 @@ fn a_posted_frame_reads_as_serviced_once_acknowledged_or_once_nothing_will() {
     );
 }
 
-/// An offscreen wait is this painter's own: nothing another view acknowledges
-/// can satisfy it, and a view that has gone ends it rather than letting it
-/// wait out its whole deadline.
 #[test]
 fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view() {
     let [(mut first, first_end), (_second, second_end)] = two_painters();
@@ -761,9 +658,6 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
         "and its own satisfies it without blocking"
     );
 
-    // A frame post nobody will service: the view is gone, so nothing will
-    // acknowledge it, and waiting the ten seconds out would be ten seconds of
-    // a host's own thread.
     drop(first_end);
     let started = Instant::now();
     assert!(!first.wait_begin_frame(seq + 1, Duration::from_secs(10)));
@@ -777,8 +671,6 @@ fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view()
     );
 }
 
-/// A frame over one 200px column scroller of 1000px content at the origin,
-/// its style extended by `css`, and the scroller.
 fn scrolling_frame(css: &str) -> (Arc<terminus::link::CommittedFrame>, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
@@ -798,7 +690,6 @@ fn scrolling_frame(css: &str) -> (Arc<terminus::link::CommittedFrame>, terminus:
     (frame, scroller)
 }
 
-/// A detached painter that has adopted [`scrolling_frame`], at clock 0.
 fn scrolling(css: &str) -> (Painter, FarEnd, terminus::link::NodeId) {
     let (mut painter, main) = detached();
     let (frame, scroller) = scrolling_frame(css);
@@ -817,14 +708,12 @@ fn touch(painter: &mut Painter, phase: terminus::link::input::PointerPhase, y: f
     ));
 }
 
-/// How many markers the FIFO holds; anything else in it fails.
 fn markers(main: &mut FarEnd) -> usize {
     std::iter::from_fn(|| main.commands.try_recv().ok())
         .map(|command| assert!(matches!(command, ToMain::Posted), "only markers"))
         .count()
 }
 
-/// What main takes at a marker.
 fn take(
     main: &FarEnd,
 ) -> (
@@ -836,9 +725,6 @@ fn take(
     (spare.into_iter().collect(), frame)
 }
 
-/// A drag posts its container once and sends one marker; however many steps
-/// follow before main takes, the entry is overwritten and no second marker
-/// queues. A take re-arms it.
 #[test]
 fn a_drag_queues_one_marker_until_main_takes() {
     use terminus::link::input::PointerPhase::{Down, Move};
@@ -878,7 +764,6 @@ fn a_drag_queues_one_marker_until_main_takes() {
     assert_eq!(markers(&mut main), 1, "the take re-armed the marker");
 }
 
-/// A drag let go without a fling comes to rest where it stands.
 #[test]
 fn a_drag_released_without_a_fling_posts_its_rest() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -887,7 +772,6 @@ fn a_drag_released_without_a_fling_posts_its_rest() {
     touch(&mut painter, Down, 150.0);
     touch(&mut painter, Move, 120.0);
     let _ = take(&main);
-    // Every step at one clock reading: no velocity to fling with.
     touch(&mut painter, Up, 120.0);
     let (entries, _) = take(&main);
     let offset = painter
@@ -902,7 +786,6 @@ fn a_drag_released_without_a_fling_posts_its_rest() {
     );
 }
 
-/// A fling posts its steps without a rest, and its last one with it.
 #[test]
 fn a_spent_fling_posts_its_rest() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -947,12 +830,6 @@ fn a_spent_fling_posts_its_rest() {
     panic!("the fling never came to rest");
 }
 
-/// A fling in flight posts its reach: how much farther its curve carries the
-/// container at the velocity it has now, clamped to the range — so the
-/// offset plus the reach of every post is where the fling comes to rest. A
-/// fling short of the end lands inside the range, one strong enough to pass
-/// it reaches exactly `max_offset` (800 here). The post that carries the
-/// rest posts no reach.
 #[test]
 #[allow(
     clippy::float_cmp,
@@ -1004,8 +881,6 @@ fn a_fling_posts_its_remaining_travel_as_its_reach() {
         );
         for entry in &posts {
             assert_eq!(entry.reach.x, 0.0, "nothing moves on x");
-            // The step that meets the end stands on it with nowhere left to
-            // go; the rest follows it in a post of its own.
             assert!(
                 entry.reach.y > 0.0 || entry.offset.y == 800.0,
                 "a forward fling reaches ahead"
@@ -1029,8 +904,6 @@ fn a_fling_posts_its_remaining_travel_as_its_reach() {
     }
 }
 
-/// A wheel step carries the container no farther than where it puts it:
-/// its post reaches nowhere.
 #[test]
 fn a_wheel_step_posts_no_reach() {
     let (mut painter, main, scroller) = scrolling("");
@@ -1044,8 +917,6 @@ fn a_wheel_step_posts_no_reach() {
     assert_eq!(entry.reach, terminus::link::Vector2D::zero());
 }
 
-/// A `contain-bounce` stretch is the painter's alone: what it posts is the
-/// edge the stretch stands past.
 #[test]
 fn a_stretched_offset_posts_clamped() {
     use terminus::link::input::PointerPhase::{Down, Move};
@@ -1062,14 +933,6 @@ fn a_stretched_offset_posts_clamped() {
     assert_eq!(entries[0].1.offset, terminus::link::Vector2D::zero());
 }
 
-/// An `overscroll-behavior: circular` offset is posted modulo the period
-/// (1000 here: `max_offset` 800 plus the 200px scrollport) and unclamped,
-/// since the document admits the whole period on such an axis. Wheeled to
-/// 800, a drag of 108px (100 after the 8px slop) puts the live offset at
-/// 900 — the scrollport straddles the seam, and main is told 900, past
-/// `max_offset`. A second drag of 158px (150 after the slop) puts it at
-/// 1050, past the seam, and main is told 50. A bounded axis still posts
-/// clamped (`a_stretched_offset_posts_clamped`).
 #[test]
 fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -1094,8 +957,6 @@ fn a_wrapped_offset_posts_through_the_seam_unclamped() {
         terminus::link::Vector2D::new(0.0, 900.0),
         "across the seam, as the screen shows it"
     );
-    // Let go at one clock reading, so without velocity: at rest where it
-    // stands.
     touch(&mut painter, Up, 82.0);
     let (entries, _) = take(&main);
     assert_eq!(
@@ -1121,13 +982,6 @@ fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     );
 }
 
-/// A smooth request on a circular axis glides along the shorter arc of the
-/// circle (period 1000: `max_offset` 800 plus the 200px scrollport), across
-/// the seam when that is shorter. Standing at 900, a request to 50 runs
-/// forward through 1000, 150px, rather than back 850px, and rests at 50;
-/// standing at 50, a request to 900 runs back through 0, 150px, and rests
-/// at 900. Each glide moves one way only, so the live offset never leaves
-/// the arc between its start and its target.
 #[test]
 fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
     for (from, to, arc) in [
@@ -1152,8 +1006,6 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
         painter.poll_link();
         painter.clock_mut().pin(0.0);
 
-        // Stand at `from`: an instant request, which the painter carries out
-        // when it adopts the frame.
         document.scroll_to_with(
             scroller,
             terminus::link::Vector2D::new(0.0, from),
@@ -1221,16 +1073,6 @@ fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
     }
 }
 
-/// A rebase brings a circular axis's live offset back into its period and
-/// moves the drag's origin by the same whole period, so the release still
-/// settles from where the drag found the container. Five 200px cards that
-/// each snap `mandatory` with `scroll-snap-stop: always`, in a 200px
-/// scroller: `max_offset` 800, period 1000. A drag back from 0 by 142px
-/// (150 less the 8px slop) stands at −142; a commit landing under the
-/// finger normalizes it to 858 and the origin from 0 to 1000. Released,
-/// the nearest position is the last card, 800, and no stop lies between
-/// 1000 and 858 — an origin left at 0 would instead find the stop at 200
-/// between 0 and 858, and glide the wrong way round.
 #[test]
 fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -1297,9 +1139,6 @@ fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
     );
 }
 
-/// css-scroll-anchoring-1 on the painting side: a commit that anchored the
-/// container the finger holds moves the held offset and its drag origin by
-/// the shift, and the posts after it name the shift the painter applied.
 #[test]
 fn an_anchoring_shift_moves_the_held_offset_and_its_drag_origin() {
     use terminus::link::input::PointerPhase::{Down, Move};
@@ -1333,7 +1172,6 @@ fn an_anchoring_shift_moves_the_held_offset_and_its_drag_origin() {
         .expect("the drag moved the scroller");
     let origin: Vec<_> = painter.scroll_intents().drag_origins(scroller).collect();
 
-    // The document adopts the drag, then lays out a taller first row.
     document.scroll_to(scroller, held);
     document.set_inline_style(rows[0], "flex-shrink:0;width:200px;height:150px");
     let frame = document.commit();
@@ -1342,8 +1180,6 @@ fn an_anchoring_shift_moves_the_held_offset_and_its_drag_origin() {
     main.outbox.publish_frame(Arc::clone(&frame));
     painter.poll_link();
     painter.scroll_intents_mut().rebase(&frame, 0.0);
-    // No live offset of its own is the committed one, where the document's
-    // adoption plus the shift put it.
     let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
     assert_eq!(slot.offset, held + shift);
     assert_eq!(
@@ -1374,9 +1210,6 @@ fn an_anchoring_shift_moves_the_held_offset_and_its_drag_origin() {
     );
 }
 
-/// Frame posts coalesce to the latest clock and the greatest sequence, and
-/// every post answers its own sequence number whether or not it sent the
-/// marker.
 #[test]
 fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
     let (mut painter, mut main) = detached();
@@ -1401,8 +1234,6 @@ fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
     assert_eq!(markers(&mut main), 1, "the take re-armed the marker");
 }
 
-/// A tap decided in the same pass as a scroll step reaches main behind the
-/// marker, so its listener never sees a document older than its pass.
 #[test]
 fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
@@ -1437,10 +1268,6 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     );
 }
 
-/// The animation frame callbacks run after the scroll state of their pass:
-/// HTML's scroll steps before `requestAnimationFrame`. In `post_frame`'s order —
-/// an offset moves, then the vsync is delivered — the vsync's own send
-/// publishes the move ahead of it.
 #[test]
 fn a_vsync_follows_the_marker_of_its_pass() {
     use terminus::link::painter::{InputDecision, InputDecisions};
@@ -1465,9 +1292,6 @@ fn a_vsync_follows_the_marker_of_its_pass() {
     );
 }
 
-/// A frame post that rides a marker already queued is fenced behind the
-/// commands sent after that marker: main applies it only once it has
-/// applied them, so the acknowledgement implies the tap below.
 #[test]
 fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     use terminus::link::painter::{EmitEvent, InputDecision, InputDecisions};
@@ -1509,9 +1333,6 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     );
 }
 
-/// Posts that land before one take merge to the latest clock and the
-/// greatest sequence and fence, whatever order they arrive in: a painter
-/// reattached behind an untaken post restarts below its sequence.
 #[test]
 fn a_frame_post_merge_keeps_the_greatest_sequence() {
     let mailbox = ScrollMailbox::default();
@@ -1541,8 +1362,6 @@ fn a_frame_post_merge_keeps_the_greatest_sequence() {
     );
 }
 
-/// An untaken `rest` survives the posts that follow it: a drag let go and
-/// touched again before main takes still reports where it came to rest.
 #[test]
 fn an_untaken_rest_survives_a_later_post() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -1568,9 +1387,6 @@ fn an_untaken_rest_survives_a_later_post() {
     assert_eq!(entries[0].1.rest, Some(released), "and the untaken rest");
 }
 
-/// A commit that grows the content under a bounce back lands the stretched
-/// offset in range, which ends the bounce back without a step: the offset
-/// the document held clamped is posted again, at rest.
 #[test]
 fn a_bounce_back_a_commit_ends_posts_its_rest() {
     let mut document = document();
@@ -1590,7 +1406,6 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
     painter.poll_link();
     let frame = painter.frame().cloned().expect("a frame is adopted");
 
-    // Stretched 40px past the end, and let go: the bounce back starts.
     let stretched = terminus::link::Vector2D::new(0.0, 840.0);
     painter.scroll_intents_mut().write(scroller, stretched);
     painter.scroll_intents_mut().start_bounce_backs(&frame, 0.0);
@@ -1628,10 +1443,6 @@ fn a_bounce_back_a_commit_ends_posts_its_rest() {
     );
 }
 
-/// A smooth request's glide posts each step naming the request, with the
-/// remaining distance to its target as its reach, and its landing at rest;
-/// a post made before the painter saw the request names none, which is what
-/// lets main drop it.
 #[test]
 fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     let mut document = document();
@@ -1650,7 +1461,6 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     painter.poll_link();
     painter.clock_mut().pin(0.0);
 
-    // A wheel before the request: its post names no request.
     painter.dispatch_input(terminus::link::input::InputEvent::wheel(
         terminus::link::Point2D::new(100.0, 100.0),
         terminus::link::Vector2D::new(0.0, 30.0),
@@ -1718,10 +1528,6 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     panic!("the glide never came to rest");
 }
 
-/// A 200px column scroller of five pages in a document of its own, each
-/// page as tall as the scrollport and snapping at its start, the scroller
-/// carrying `css`: positions 0, 200, 400, 600 and 800, and one scrollport
-/// apart at any other height.
 fn paged(css: &str) -> (LynxDocument, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
@@ -1739,7 +1545,6 @@ fn paged(css: &str) -> (LynxDocument, terminus::link::NodeId) {
     (document, scroller)
 }
 
-/// [`paged`]'s scroller style at `height` px.
 fn paged_style(css: &str, height: u32) -> String {
     format!(
         "display:flex;flex-direction:column;overflow:scroll;width:200px;height:{height}px;\
@@ -1747,8 +1552,6 @@ fn paged_style(css: &str, height: u32) -> String {
     )
 }
 
-/// Publishes the document's newest commit and brings the painter onto it,
-/// as a display frame does.
 fn adopt(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument) {
     main.outbox.publish_frame(document.commit());
     painter.poll_link();
@@ -1756,7 +1559,6 @@ fn adopt(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument) {
     painter.scroll_intents_mut().rebase(&frame, 0.0);
 }
 
-/// Where the painter shows `node`: its live offset, else the committed one.
 fn shown(painter: &Painter, node: terminus::link::NodeId) -> terminus::link::Vector2D<f32> {
     painter
         .scroll_intents()
@@ -1774,14 +1576,6 @@ fn wheel(painter: &mut Painter, dy: f32) {
     ));
 }
 
-/// css-scroll-snap-1 §4.1.3 on the painter's own offset. Two wheel ticks
-/// put the scroller on its third page, 400, which main never adopts here:
-/// the document still stands at 0, so nothing in the commit says where the
-/// painter is. At 300px the third page is at 600, and the painter moves
-/// there at once — the position nearest 400 would have been the second
-/// page's 300 — and posts it at rest. Two more commits adopted with no
-/// rebase between them are followed from the frame the offset stands on:
-/// the third page at 250px is 500.
 #[test]
 fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     let (mut document, scroller) = paged("");
@@ -1794,7 +1588,6 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
         shown(&painter, scroller),
         terminus::link::Vector2D::new(0.0, 400.0)
     );
-    // The wheel gesture's quiet interval ends: the container is at rest.
     let frame = painter.frame().cloned().expect("a frame is adopted");
     painter.scroll_intents_mut().tick(&frame, 1.0);
     let _ = take(&main);
@@ -1837,10 +1630,6 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     );
 }
 
-/// The same when main had adopted the painter's offset: the document
-/// re-snaps its own in the commit, and the painter, following its own
-/// reading of the frame it stood on, arrives at the offset the slot
-/// carries.
 #[test]
 fn a_resized_scroller_agrees_with_the_document_that_followed_it() {
     let (mut document, scroller) = paged("");
@@ -1860,10 +1649,6 @@ fn a_resized_scroller_agrees_with_the_document_that_followed_it() {
     assert_eq!(shown(&painter, scroller), slot.offset);
 }
 
-/// A circular axis: six ticks from the first of five pages stand on the
-/// second page's next copy, 1200 on a period of 1000. At 300px the period
-/// is 1500 and the second page is at 300; the offset left where it was
-/// would read 1200 there, the fifth page.
 #[test]
 fn a_resized_circular_scroller_stays_on_the_page_the_painter_showed() {
     let circular = "overscroll-behavior:circular";
@@ -1887,13 +1672,6 @@ fn a_resized_circular_scroller_stays_on_the_page_the_painter_showed() {
     );
 }
 
-/// `proximity`, where the two rules differ. A container at rest on the
-/// third page's position, 400, follows the page to 600 at 300px, though
-/// 600 is two proximity ranges from where it stood: the range decides
-/// whether a container snaps, not whether a snapped one stays snapped. One
-/// at rest on no position — 750, more than a range from 600 and from 900 —
-/// follows nothing, and at 320px, more than a range from 640 and from 960,
-/// it keeps its offset, where `mandatory` would have taken it to 640.
 #[test]
 fn a_proximity_scroller_follows_its_area_only_when_it_stood_on_one() {
     let proximity = "scroll-snap-type:y proximity";
@@ -1918,13 +1696,6 @@ fn a_proximity_scroller_follows_its_area_only_when_it_stood_on_one() {
     assert_eq!(shown(&painter, scroller), between);
 }
 
-/// A commit moves no container a drag holds or a glide is moving, whatever
-/// it stands on. The drag brings the scroller back onto the third page's
-/// position, 400, and holds it there: the resize, which would carry a
-/// scroller at rest to 600, leaves it under the finger. Let go, it glides
-/// from there toward a position of the new frame, and a second resize
-/// landing mid-glide leaves the glide its offset too. It comes to rest on a
-/// position of the last frame.
 #[test]
 fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -1973,8 +1744,6 @@ fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
     );
 }
 
-/// A document holding one 200px column scroller of `content` px at the
-/// origin, with the scroller and its filler: a range of `content - 200`.
 fn auto_scrolled(content: u32) -> (LynxDocument, terminus::link::NodeId, terminus::link::NodeId) {
     let mut document = document();
     let root = document.document_element().id();
@@ -1994,8 +1763,6 @@ fn filler_style(content: u32) -> String {
     format!("flex-shrink:0;width:200px;height:{content}px")
 }
 
-/// Ticks the scroll intents over the painter's adopted frame `count` times,
-/// `hz` to the second, from `from`, and returns the clock it ended on.
 fn tick_at(painter: &mut Painter, from: f64, hz: f64, count: u32) -> f64 {
     let frame = painter.frame().cloned().expect("a frame is adopted");
     let mut now = from;
@@ -2006,9 +1773,6 @@ fn tick_at(painter: &mut Painter, from: f64, hz: f64, count: u32) -> f64 {
     now
 }
 
-/// An auto-scroll moves its axis at its rate on the painter's clock, posts
-/// each step naming the change that started it, and ends on the edge it
-/// was to stop at, posted at rest; a container with none owes no frame.
 #[test]
 fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
     let (mut document, scroller, _) = auto_scrolled(1000);
@@ -2048,8 +1812,6 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
         "posted at once, unmoved, naming the change"
     );
 
-    // The first tick is where the travel counts from; thirty more at 60 Hz
-    // are half a second, 300px.
     let now = tick_at(&mut painter, 0.0, 60.0, 31);
     let offset = shown(&painter, scroller).y;
     assert!((offset - 300.0).abs() < 0.01, "got {offset}");
@@ -2073,7 +1835,6 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
         Some(terminus::link::Vector2D::new(0.0, 800.0))
     );
 
-    // Back the other way, to the start edge.
     document.auto_scroll(scroller, -1200.0, false, true);
     adopt(&mut painter, &main, &mut document);
     tick_at(&mut painter, now, 60.0, 60);
@@ -2081,17 +1842,10 @@ fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
     assert!(!painter.scroll_intents().has_auto_scroll(scroller));
 }
 
-/// A write is at least [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`] after the last
-/// and at least one physical pixel: a 120 Hz display writes every second
-/// frame, a slow rate once per pixel, and neither loses any travel.
-///
-/// [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`]: terminus::link::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS
 #[test]
 fn an_auto_scroll_writes_no_more_often_than_its_interval_and_a_pixel() {
     use terminus::link::painter::AUTO_SCROLL_MIN_INTERVAL_SECONDS;
 
-    // The frame rates below sit on either side of the interval: a 120 Hz
-    // frame is shorter than it and two are not, while a 60 Hz frame is not.
     const {
         assert!(1.0 / 120.0 < AUTO_SCROLL_MIN_INTERVAL_SECONDS);
         assert!(AUTO_SCROLL_MIN_INTERVAL_SECONDS <= 2.0 / 120.0);
@@ -2123,34 +1877,24 @@ fn an_auto_scroll_writes_no_more_often_than_its_interval_and_a_pixel() {
         (written, last)
     };
 
-    // One second at 120 Hz: the first tick starts the count, and every
-    // second one after it writes 10px.
     let (written, offset) = writes(600.0, 120.0, 121);
     assert_eq!(written, 60);
     assert!((offset - 600.0).abs() < 0.01, "got {offset}");
 
-    // One second at 60 Hz: every tick writes.
     let (written, offset) = writes(600.0, 60.0, 61);
     assert_eq!(written, 60);
     assert!((offset - 600.0).abs() < 0.01, "got {offset}");
 
-    // Two seconds at 6px a second: one write per pixel, not per frame.
     let (written, offset) = writes(6.0, 60.0, 121);
     assert!((11..=12).contains(&written), "got {written}");
     assert!((offset - 12.0).abs() < 1.01, "got {offset}");
 }
 
-/// Without `stop_at_edge` an auto-scroll stays at its edge, at rest and
-/// owing no frame, and goes on when a commit brings a longer range, from
-/// that commit and not from the time it waited. The instant scroll made in
-/// the same turn arrives with it, and the auto-scroll starts from there.
 #[test]
 fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     let (mut document, scroller, filler) = auto_scrolled(1000);
     let (mut painter, main) = detached();
     adopt(&mut painter, &main, &mut document);
-    // A wheel first, so the painter holds an offset of its own that the
-    // document's instant scroll has to replace.
     wheel(&mut painter, 30.0);
     let _ = take(&main);
 
@@ -2190,7 +1934,6 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
         "at rest on the edge"
     );
 
-    // Ten seconds later the content grows by 200px.
     document.set_inline_style(filler, &filler_style(1200));
     adopt(&mut painter, &main, &mut document);
     let grown = painter.frame().cloned().expect("the new frame is adopted");
@@ -2206,9 +1949,6 @@ fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
     assert!((offset - 860.0).abs() < 0.01, "got {offset}");
 }
 
-/// A drag has the container while it holds it: the auto-scroll adds nothing
-/// and owes no frame, and after the release it goes on from where the
-/// finger left the container, the hold not travelled.
 #[test]
 fn an_auto_scroll_yields_to_a_drag_and_goes_on_after_it() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -2235,7 +1975,6 @@ fn an_auto_scroll_yields_to_a_drag_and_goes_on_after_it() {
     let now = tick_at(&mut painter, now, 60.0, 120);
     assert_eq!(shown(&painter, scroller), held, "under the finger");
 
-    // Every step at one clock reading: no velocity to fling with.
     painter.clock_mut().pin(now);
     touch(&mut painter, Up, 120.0);
     assert!(!painter.scroll_intents().is_held(scroller));
@@ -2251,9 +1990,6 @@ fn an_auto_scroll_yields_to_a_drag_and_goes_on_after_it() {
     assert!((offset - held.y - 60.0).abs() < 0.01, "got {offset}");
 }
 
-/// A scroll request moves an auto-scrolling container and does not end its
-/// auto-scroll: a smooth one glides first and the auto-scroll goes on from
-/// its landing. Only a change with no rate ends it, where it stands.
 #[test]
 fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
     let (mut document, scroller, _) = auto_scrolled(2000);
@@ -2269,7 +2005,6 @@ fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
         terminus::link::Vector2D::new(0.0, 500.0),
         terminus::link::scroll::ScrollBehavior::Smooth,
     );
-    // Adopted at the clock the ticks run on, so the glide starts there.
     main.outbox.publish_frame(document.commit());
     painter.poll_link();
     let frame = painter.frame().cloned().expect("a frame is adopted");
@@ -2317,8 +2052,6 @@ fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
     assert_eq!(shown(&painter, scroller), stopped);
 }
 
-/// An auto-scrolling container is no container at rest: a commit does not
-/// snap it, and the at-rest rule applies once the auto-scroll has ended.
 #[test]
 fn a_commit_does_not_snap_an_auto_scrolling_container() {
     let (mut document, scroller) = paged("");
@@ -2343,9 +2076,6 @@ fn a_commit_does_not_snap_an_auto_scrolling_container() {
     );
 }
 
-/// A request that yields to a pointer is not carried out while a drag holds
-/// its container, and is posted as handled all the same; once the finger is
-/// off, the next one is carried out like any other request.
 #[test]
 fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     use terminus::link::input::PointerPhase::{Down, Move, Up};
@@ -2397,7 +2127,6 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
         );
     }
 
-    // Every step at one clock reading: no velocity to fling with.
     touch(&mut painter, Up, 120.0);
     assert!(!painter.scroll_intents().is_held(scroller));
     assert!(document.scroll_to_yielding(
@@ -2420,8 +2149,6 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     assert!(painter.scroll_intents().is_gliding(scroller), "and glides");
 }
 
-/// [`adopt`] at clock reading `now`: the frame's requests are carried out
-/// as of then.
 fn adopt_at(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument, now: f64) {
     main.outbox.publish_frame(document.commit());
     painter.poll_link();
@@ -2429,13 +2156,6 @@ fn adopt_at(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument, n
     painter.scroll_intents_mut().rebase(&frame, now);
 }
 
-/// A smooth request for the position the container is already gliding to
-/// leaves the glide as it is: the container stands where one request alone
-/// would have it, rather than starting over from rest with every request —
-/// which an `x-swiper` autoplay with a short `interval` makes at every
-/// frame until the turn lands, and which would leave the swiper creeping
-/// toward the next item and never arriving. The repeated request is still
-/// posted as handled.
 #[test]
 fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
     use terminus::link::scroll::ScrollBehavior::Smooth;
@@ -2485,11 +2205,6 @@ fn a_repeated_smooth_request_to_where_the_container_glides_keeps_the_glide() {
     assert_eq!(run(true), (midway, once));
 }
 
-/// A wheel step posts its container moving, not at rest: the wheel gesture
-/// ends only once [`terminus::link::painter::WHEEL_REST_SECONDS`] pass with no
-/// further step, and a step inside that interval restarts it. The quiet
-/// interval owes frames while it runs, and the tick that ends it posts the
-/// container at rest.
 #[test]
 fn a_wheel_rests_only_after_a_quiet_interval() {
     use terminus::link::painter::WHEEL_REST_SECONDS;
@@ -2521,7 +2236,6 @@ fn a_wheel_rests_only_after_a_quiet_interval() {
 
     wheel(&mut painter, 0.06);
     assert_eq!(rest_of(&main), Some(None));
-    // 0.1 s after the first step but not after the second: still moving.
     tick(&mut painter, 0.1);
     assert_eq!(rest_of(&main), None, "nothing changed, nothing posted");
 
@@ -2534,17 +2248,9 @@ fn a_wheel_rests_only_after_a_quiet_interval() {
     assert!(!painter.is_animating());
 }
 
-/// The store contract the painter's per-commit pixels rest on, asked through
-/// `terminus::link::FrameImages` as the painter asks it. Here rather than beside
-/// the painter's image table in `terminus`, whose own unit-test build sees
-/// `prime-radiant`'s store implement a second copy of that trait.
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod frame_images {
 
-    /// Decision: one bitmap, reused. Every describe of one source must hand
-    /// back a clone sharing the *same* `Blob`, because `Blob::id()` is what
-    /// the rasterizer keys its bitmap uploads on — two ids for one image
-    /// would be two GPU uploads and two textures.
     #[test]
     fn every_describe_of_one_image_keeps_the_same_buffer_identity() {
         use terminus::link::FrameImages as _;
@@ -2578,10 +2284,6 @@ mod frame_images {
         );
     }
 
-    /// The release contract as the painter relies on it: a store that keeps
-    /// what it answers ignores a release and describes with the pixels; one
-    /// that drops released pixels describes the bitmap by its descriptor
-    /// alone afterwards, and a want restores it into a new blob.
     #[test]
     fn a_released_source_is_described_without_pixels_until_a_want_restores_it() {
         use terminus::link::{FrameImages as _, ImageSizeHint};
@@ -2629,8 +2331,6 @@ mod frame_images {
         assert!(images.holds_pixels(source));
     }
 
-    /// A source the host carries no pixels for is described as nothing
-    /// rather than standing in for another image.
     #[test]
     fn an_unpublished_source_is_described_as_nothing() {
         use terminus::link::FrameImages as _;

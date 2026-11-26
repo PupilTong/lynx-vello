@@ -57,8 +57,6 @@ extern "C" {
     fn console_info(value: &JsValue);
 }
 
-/// The language a page's text is in until the host names another
-/// ([`BobcatRenderer::set_locale`]): every view names one.
 const DEFAULT_LOCALE: &str = "en-US";
 const POINTER_DEVICE_MOUSE: u8 = 0;
 const POINTER_DEVICE_TOUCH: u8 = 1;
@@ -73,12 +71,6 @@ const MODIFIER_META: u8 = 4;
 const MODIFIER_SHIFT: u8 = 8;
 static RENDERER_CREATED: AtomicBool = AtomicBool::new(false);
 
-/// Lost-wake-safe engine signal: one durable wakeup covering both a lifecycle
-/// event to drain and a frame to draw. The Lynx-main Worker arms it whenever
-/// it publishes, and this Worker arms it for itself whenever it hands the
-/// view a fact whose frame it still owes — the view paints on this thread and
-/// wakes nobody on its own. The atomic is the durable edge; the waker list
-/// only turns it into an awaitable browser Promise.
 #[derive(Debug, Default)]
 struct EventSignal {
     pending: AtomicBool,
@@ -129,9 +121,6 @@ impl Future for EventWait {
             .wakers
             .lock()
             .unwrap_or_else(|error| panic!("the browser event signal is poisoned: {error}"));
-        // EventRequester stores the atomic before taking this mutex. This
-        // second check closes the only lost-wake window between the first
-        // check and registering our waker.
         if self.signal.pending.load(Ordering::Acquire) {
             return Poll::Ready(());
         }
@@ -142,34 +131,12 @@ impl Future for EventWait {
     }
 }
 
-/// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. Its canvas, Wasm instance and image decoder
-/// outlive every page it shows; each document, element tree,
-/// `QuickJS` realm, engine, and set of Stylo workers stays behind one opaque
-/// `LynxView`, built by [`BobcatRenderer::load`] and replaced wholesale by
-/// the next load.
-///
-/// The resource system is `bobcat-resources`: the Render Worker registers
-/// the script and stylesheet bytes its own `fetch` produced, and the system
-/// fetches everything else a page names on this Worker, decodes its images
-/// here too with the browser's own `createImageBitmap` and `ImageDecoder`
-/// (`platform::BrowserDecoder`), whose `ImageBitmap`s the painter copies into
-/// textures, and wakes this Worker through the same signal a commit uses.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    /// This canvas's painter, built once and kept across page loads: the
-    /// WebGPU context belongs to the canvas, and rebuilding it per page would
-    /// tear the surface down and put it back for no reason. Declared before
-    /// the view so its surface is released before anything else here is.
-    /// Its views' stores hand it `ImageBitmap`s ([`BrowserFrame`]), which it
-    /// copies into textures with WebGPU.
     painter: Option<Painter<BrowserFrame>>,
     view: Option<LynxView<ViewResources<BrowserPlatform>>>,
-    /// Empty/staged sources for the next load, sharing the platform decoder.
     resources: Resources<BrowserPlatform>,
-    /// Current page registrations stay available after boot, including ZIP assets.
     page_resources: Option<Resources<BrowserPlatform>>,
-    /// Scripts/styles remain registered until the loading view reports boot's outcome.
     boot_urls: Vec<String>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
@@ -177,59 +144,18 @@ pub struct BobcatRenderer {
     width: f32,
     height: f32,
     device_pixel_ratio: f32,
-    /// The screen every view this renderer builds reports as `SystemInfo`,
-    /// measured by the facade on the page's own thread — the one thread
-    /// `screen` and `devicePixelRatio` exist on — or, for a host that could
-    /// not read them, the renderer's create-time viewport in physical pixels.
-    /// Wrapper state like the fonts: read once, at `BobcatCanvas.create`, and
-    /// not updated afterwards.
     screen: ScreenMetrics,
-    /// Owned font containers are part of the stable browser wrapper, so every
-    /// view this renderer builds receives the same registered faces without
-    /// another UI-to-Worker transfer.
     fonts: Vec<FontBlob>,
-    /// The selected embedder default is stable wrapper state too; every view
-    /// this renderer builds gets the same generic-family map.
     default_font_family: Option<String>,
-    /// The containers every script falls back to, in the order they were
-    /// registered. The browser gives this target no system-font backend, so
-    /// these are the only fallback a view this renderer builds has.
     fallback_fonts: Vec<FontBlob>,
-    /// The language of every page's text, as a BCP-47 tag, read once at
-    /// construction like the fonts: `en-US` until [`Self::set_locale`] names
-    /// another, since every view names one.
     locale: String,
-    /// The Stylo worker count each group this renderer builds gets. The
-    /// workers themselves are the group's and retire with it; only the size
-    /// is wrapper state.
     style_threads: StyleThreads,
-    /// The Render Worker's `postExplorerMessage`, which posts each of
-    /// `js/protocol.d.ts`'s Explorer messages to the facade. Every view this
-    /// renderer builds gets an [`ExplorerModule`] that posts through it.
     #[cfg(feature = "explorer-module")]
     on_explorer: js_sys::Function,
-    /// The Render Worker's `postTextInputState`: each
-    /// [`TextInputState`] the view publishes, as the `bobcat-text-input`
-    /// fields, on its way to the facade's `<textarea>` proxy.
     on_text_input: js_sys::Function,
-    /// Whether the last state handed to [`Self::on_text_input`] had a host
-    /// focused: a view replaced while it did owes the facade a state that
-    /// says nothing is, since the next view publishes none until it focuses
-    /// a host of its own.
     text_input_focused: bool,
-    /// The Render Worker's `postPerformanceEntry`, when the page asked for
-    /// performance entries: each [`EngineEvent::Performance`] as Lynx's
-    /// `onPerformanceEvent` JSON text. `None` is the page that did not ask,
-    /// whose views are never told to observe anything.
     on_performance: Option<js_sys::Function>,
-    /// Reused for every entry [`Self::pump`] writes.
     performance_json: String,
-    /// The group the current view belongs to, and the one thing that ends its
-    /// two Workers: the Lynx-main one, and the worker-realm one after it.
-    ///
-    /// Ending is all it is on this target. Under `panic=abort` a trapped
-    /// Worker never signals its join handle, so teardown here says the goodbye
-    /// and does not wait for either. One page, one group: see [`Self::load`].
     group: Option<LynxGroup>,
     script_finished: bool,
     disposed: bool,
@@ -247,10 +173,6 @@ impl fmt::Debug for BobcatRenderer {
 
 #[wasm_bindgen]
 impl BobcatRenderer {
-    /// Construct the browser embedder on its explicit Render Worker and give
-    /// core the Worker bootstrap it will use for the main-thread VM and Stylo.
-    ///
-    /// No native view exists until [`Self::load`] builds one.
     #[wasm_bindgen(js_name = create)]
     #[allow(
         clippy::too_many_arguments,
@@ -262,10 +184,6 @@ impl BobcatRenderer {
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
-        // The screen the facade measured, in physical pixels. Two plain
-        // numbers rather than an option: a host with no `screen` passes
-        // values this refuses, and the renderer then reports its own
-        // create-time viewport instead.
         screen_pixel_width: f32,
         screen_pixel_height: f32,
         worker_url: String,
@@ -273,33 +191,17 @@ impl BobcatRenderer {
         default_display_linear: bool,
         default_overflow_visible: bool,
         enable_css_selector: bool,
-        // Called with each Explorer message of `js/protocol.d.ts`, which the
-        // `ExplorerModule` of a build with the `explorer-module` feature
-        // sends; a build without it has no such module and never calls this.
         on_explorer: js_sys::Function,
-        // Called with each published `TextInputState` as one plain object of
-        // `js/protocol.d.ts`'s `TextInputFields`.
         on_text_input: js_sys::Function,
-        // Each performance entry as Lynx's JSON text; `None` observes none.
         on_performance: Option<js_sys::Function>,
-        // Called with each `bobcat-media` message of `js/protocol.d.ts`, for
-        // the facade's `<video>` elements (`platform::BrowserMedia`).
         on_media: js_sys::Function,
     ) -> Result<BobcatRenderer, JsValue> {
         FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
-        // `available_parallelism` cannot answer on Wasm, so the machine's
-        // parallelism arrives from `navigator.hardwareConcurrency` — and then
-        // takes exactly the path a native view's does, through the same
-        // function, so comparable hardware gets the same pool on both.
         let style_threads = usize::try_from(hardware_concurrency)
             .map_or(StyleThreads::Sequential, StyleThreads::for_parallelism);
-        // A host that could not read `screen` sent numbers that describe none,
-        // so the renderer names its own create-time viewport in physical
-        // pixels instead: a view of its own metrics is a better `SystemInfo`
-        // than a zero or a `NaN`.
         let screen = measured_screen(device_pixel_ratio, screen_pixel_width, screen_pixel_height)
             .unwrap_or_else(|| ScreenMetrics::for_viewport(width, height, device_pixel_ratio));
         if RENDERER_CREATED.swap(true, Ordering::AcqRel) {
@@ -315,10 +217,6 @@ impl BobcatRenderer {
             configure_wasm_workers(worker_url).map_err(js_error)?;
 
             let events = Arc::new(EventSignal::default());
-            // A canvas owns its own resolution — configuring a context does
-            // not set it — and the painter builds its surface from this
-            // canvas. So it is sized first, to the same physical target those
-            // metrics give the painter.
             let frame_size =
                 FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
             set_canvas_size(&canvas, frame_size);
@@ -330,8 +228,6 @@ impl BobcatRenderer {
             )
             .await
             .map_err(js_error)?;
-            // The code cache's store is opened here, once per Worker: every
-            // later page is a `new_scope` of this system and shares it.
             let (platform, notes) = BrowserPlatform::new(
                 Some(CodeCacheConfig::default()),
                 BrowserMedia::new(on_media),
@@ -339,9 +235,6 @@ impl BobcatRenderer {
             .await;
             let resources = Resources::with_platform(
                 ResourcesConfig {
-                    // Lazy bundles: a `lynx.fetchBundle` installs its
-                    // sections through this, and without one every fetch
-                    // fails.
                     container_installer: Some(Arc::new(bobcat_source::BundleInstaller)),
                     ..ResourcesConfig::default()
                 },
@@ -396,21 +289,6 @@ impl BobcatRenderer {
         result
     }
 
-    /// Build the native `LynxView` for one page and attach it to the
-    /// Worker-owned `OffscreenCanvas`.
-    ///
-    /// The entry and the background entry are loaded as they were registered:
-    /// the engine adds nothing to either. [`Self::register_script`] leaves a
-    /// raw script as it is, and [`Self::register_lynx_xml`] registers an XML
-    /// envelope's scripts with the imports `bobcat-source` gives a card's
-    /// bodies.
-    ///
-    /// A view is its page, so loading a second one replaces the view rather
-    /// than mutating the running one. The Wasm instance, resource provider,
-    /// page configuration, metrics, font containers, default family, and
-    /// Stylo worker count are this wrapper's and are reapplied to each new
-    /// view; the Stylo workers themselves belong to the view and retire when
-    /// it is dropped.
     #[wasm_bindgen(js_name = load)]
     pub async fn load(
         &mut self,
@@ -421,7 +299,6 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // The entry's own URL is the view's base, and so the fetcher's.
         let sources = ViewSources {
             config: self.config,
             style_sheets: style_sheet_urls,
@@ -431,13 +308,6 @@ impl BobcatRenderer {
         self.load_sources(sources, global_props).await
     }
 
-    /// Decode a fetched page container through the shared source adapter.
-    /// Bundle configuration belongs to this page; subsequent raw loads still
-    /// use the host configuration. Relative assets resolve against the input.
-    ///
-    /// A `.web.bundle` is decoded while the view boots: only its section
-    /// table is read before the view is created, and its decode runs as a
-    /// task of this Worker that the view's first loads wait for.
     #[wasm_bindgen(js_name = loadTemplate)]
     pub async fn load_template(
         &mut self,
@@ -453,7 +323,6 @@ impl BobcatRenderer {
             .await
     }
 
-    /// Load a ZIP through bobcat-source's platform-independent archive API.
     #[wasm_bindgen(js_name = loadZip)]
     pub async fn load_zip(
         &mut self,
@@ -473,13 +342,6 @@ impl BobcatRenderer {
             .await
     }
 
-    /// Internal Render-Worker seam: retain bytes that the browser host already
-    /// fetched under its URL policy. Returns the normalized absolute URL.
-    ///
-    /// The bytes are registered verbatim. A raw script is neither a Lynx nor a
-    /// web-core product, so it is no card body for `bobcat-source` to wrap: a
-    /// raw main-thread entry imports what it uses from `bobcat:runtime` and
-    /// `bobcat:element` itself.
     #[wasm_bindgen(js_name = registerScript)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -490,18 +352,6 @@ impl BobcatRenderer {
         self.register(&url, bytes, "text/javascript")
     }
 
-    /// Map one browser-decoded Lynx XML source envelope through the shared
-    /// embedder source adapter and register its logical template sections as
-    /// fixed fragments of the final response URL.
-    ///
-    /// The returned array is
-    /// `[main, styleOrNull, backgroundOrNull, compatibilityWarnings]`. Its
-    /// first three slots preserve the existing internal Worker ABI; the last
-    /// carries shared, sanitized warning text. Both script bodies are registered;
-    /// the background URL is passed to [`Self::load`] for the page's BTS worker.
-    /// The source adapter returns no page configuration: this
-    /// renderer's host-selected [`PageConfig`] remains authoritative in
-    /// [`Self::load`].
     #[wasm_bindgen(js_name = registerLynxXml)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -511,10 +361,6 @@ impl BobcatRenderer {
         self.ensure_running()?;
         let input_url = Url::parse(&source_url)
             .map_err(|error| js_error(format!("the Lynx XML response URL is invalid: {error}")))?;
-        // JavaScript has already applied the browser's replacement-mode UTF-8
-        // decoder. The one-shot adapter parses, maps and registers directly
-        // from this string, retaining just the scripts and author CSS needed
-        // by the view.
         let registered =
             register_lynx_xml_response(&input_url, &source, &self.resources).map_err(js_error)?;
         let compatibility_warnings = Array::new();
@@ -538,11 +384,6 @@ impl BobcatRenderer {
         Ok(registration)
     }
 
-    /// Register CSS bytes the browser host fetched, under a URL [`Self::load`]
-    /// will name among its stylesheets.
-    ///
-    /// Raw stylesheet loads use the text arm of the stylesheet contract;
-    /// bundled `StyleInfo` is registered by the shared source adapter instead.
     #[wasm_bindgen(js_name = registerStyleSheet)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -553,8 +394,6 @@ impl BobcatRenderer {
         self.register(&url, bytes, "text/css")
     }
 
-    /// Retain a font container for every view this renderer builds. Faces are
-    /// registered at construction, so call this before [`Self::load`].
     #[wasm_bindgen(js_name = registerFonts)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -566,9 +405,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Map CSS's default generic families to an embedder-selected family for
-    /// every view this renderer builds. The name is checked at construction:
-    /// [`Self::load`] fails if nothing provides it.
     #[wasm_bindgen(js_name = setDefaultFontFamily)]
     pub fn set_default_font_family(&mut self, family: String) -> Result<(), JsValue> {
         self.ensure_running()?;
@@ -576,9 +412,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Retain a font container every script falls back to, for every view
-    /// this renderer builds: its families shape the text no family of its own
-    /// `font-family` covers. Registered when a view is constructed.
     #[wasm_bindgen(js_name = registerFallbackFonts)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -590,10 +423,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Name the language of every page this renderer builds, as a BCP-47
-    /// tag (`zh-Hant`, `ja`): what the per-script font fallback is asked
-    /// with. `en-US` until this is called. Checked at construction:
-    /// [`Self::load`] fails if it is not a language tag.
     #[wasm_bindgen(js_name = setLocale)]
     pub fn set_locale(&mut self, tag: String) -> Result<(), JsValue> {
         self.ensure_running()?;
@@ -601,7 +430,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Await the next durable engine wakeup without timer polling.
     #[wasm_bindgen(js_name = waitForEngineEvent)]
     pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
         self.ensure_running()?;
@@ -612,41 +440,11 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Answer one durable engine wakeup: run both turns on this Worker — the
-    /// painter draws the frame it owes, then the view services its host's
-    /// resources — and hand back the lifecycle events they produced. Returns
-    /// whether the entry module has finished booting.
-    ///
-    /// One call covers everything because the engine has one wakeup: a commit
-    /// and a `ScriptFinished` arrive on the same signal, and the Worker turn
-    /// that observes it is the turn that presents — no animation-frame
-    /// callback sits between a committed frame and the canvas. No timestamp
-    /// crosses either: the animation timeline is core's own clock, read on
-    /// this Worker once the canvas surface has handed over an image.
-    ///
-    /// Anything the turn leaves owed — a running animation, a swap chain
-    /// that had no image to give — is answered by [`Self::owes_frame`], which
-    /// this Worker's loop reads before it parks, and takes at the display's
-    /// own rate. Nothing is re-armed here: the signal carries facts from the
-    /// Lynx main thread, and a frame is not one of them.
-    ///
-    /// Only an event for which [`EngineEvent::is_fatal`] holds, or a draw
-    /// target that failed, fails this call; every other failure is written
-    /// to the console and the page keeps running. A fatal event is reported
-    /// after the turn, never instead of it: the frame the view committed
-    /// before it still reaches the canvas, with nobody left to ask for
-    /// another.
     #[wasm_bindgen(js_name = pump)]
     pub fn pump(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
-        // Clear the durable edge before serving, so anything the turn itself
-        // publishes re-arms it and the Worker comes back for it.
         self.events.take();
         let mut fatal = None;
-        // The painter first: the frame a view committed before a fatal event
-        // reaches the canvas on the turn that reports it, with nobody left to
-        // ask for another frame. A draw target that failed cannot be reached
-        // again, so it is reported once and the painter draws nothing after.
         if let Some(painter) = self.painter.as_mut()
             && let Err(error) = painter.pump()
         {
@@ -659,8 +457,6 @@ impl BobcatRenderer {
         if let Some(resources) = &self.page_resources {
             warn_notes(resources);
         }
-        // Only the newest state of a turn reaches the facade: each one is the
-        // whole of it, so an older one says nothing the newest does not.
         let mut text_input = None;
         let origin = view.time_origin();
         for event in view.pump() {
@@ -678,12 +474,9 @@ impl BobcatRenderer {
                     self.script_finished = true;
                     boot_finished = true;
                 }
-                // The view has ended. The first failure is the one reported.
                 event if event.is_fatal() && fatal.is_none() => {
                     fatal = Some(fatal_error(event));
                 }
-                // Not fatal: the view and its realms go on, so each of these
-                // is written to the console and the page keeps running.
                 EngineEvent::ScriptRunError(error)
                 | EngineEvent::ListenerFailed(error)
                 | EngineEvent::TimerFailed(error) => {
@@ -728,8 +521,6 @@ impl BobcatRenderer {
         if (boot_finished || fatal.is_some())
             && let Some(resources) = &self.page_resources
         {
-            // Only release this page's boot sources. ZIP assets remain available
-            // for later frames, and staged sources belong to the next load.
             for url in self.boot_urls.drain(..) {
                 let _ = resources.unregister(&url);
             }
@@ -740,33 +531,17 @@ impl BobcatRenderer {
         Ok(self.script_finished)
     }
 
-    /// Whether the view has a frame to put on the canvas: a running
-    /// animation, a gesture deadline the clock has yet to reach, a swap chain
-    /// that had no image to give, or a commit the last turn did not draw.
-    ///
-    /// The Render Worker's continuation signal. While it holds, the loop
-    /// takes its next turn at the display's own rate —
-    /// `requestAnimationFrame` on this target — instead of parking on the
-    /// engine's wakeup. Nothing crosses a thread for it: on a canvas the
-    /// acquire never waits, so the display is the only honest pace there is.
     #[wasm_bindgen(js_name = owesFrame)]
     pub fn owes_frame(&self) -> bool {
         self.painter.as_ref().is_some_and(Painter::owes_frame)
     }
 
-    /// Report the browser's display callback separately from engine wakeups.
     pub fn vsync(&mut self) {
         if let Some(painter) = self.painter.as_mut() {
             painter.vsync();
         }
     }
 
-    /// Route one browser `PointerEvent` into the opaque native view.
-    ///
-    /// The JavaScript facade owns pointer capture and converts client
-    /// coordinates into viewport CSS px. Core stamps the event's arrival from
-    /// its own clock as it takes it, so a long idle period cannot make a new
-    /// `longpress` deadline start from the last rendered frame.
     #[wasm_bindgen(js_name = dispatchPointer)]
     #[allow(
         clippy::too_many_arguments,
@@ -789,9 +564,6 @@ impl BobcatRenderer {
         }
         let device = match device {
             POINTER_DEVICE_TOUCH => PointerKind::Touch,
-            // The device the browser reported. A primary-button mouse drag
-            // still scrolls: the engine's drag recognizer latches a mouse
-            // too (user ruling 2026-10-13).
             POINTER_DEVICE_MOUSE => PointerKind::Mouse,
             POINTER_DEVICE_PEN => PointerKind::Pen,
             _ => return Err(js_error(format!("unknown browser pointer device {device}"))),
@@ -803,28 +575,16 @@ impl BobcatRenderer {
             POINTER_PHASE_CANCEL => PointerPhase::Cancel,
             _ => return Err(js_error(format!("unknown browser pointer phase {phase}"))),
         };
-        // The browser's own `button` and `buttons`, passed through.
         let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
             .with_buttons(button, buttons)
             .with_default_prevented(default_prevented);
-        // A pointer that arrives before any page is loaded has nothing to
-        // reach; the painter is attached to no view, so it routes nothing and
-        // there is nothing to buffer.
         if let Some(painter) = self.painter.as_mut() {
             painter.dispatch_input(event);
-            // Routing happened here, on this Worker; the frame it may owe is
-            // this Worker's to take, and the loop is parked until it is told.
             self.events.request_event();
         }
         Ok(())
     }
 
-    /// Route one browser `WheelEvent` into the opaque native view.
-    ///
-    /// The facade converts the browser's line and page units and the canvas's
-    /// own scale away, so both the position and the delta arrive in viewport
-    /// CSS px, with the browser's sign — a positive delta increases the scroll
-    /// offset — which is the engine's own.
     #[wasm_bindgen(js_name = dispatchWheel)]
     pub fn dispatch_wheel(
         &mut self,
@@ -843,8 +603,6 @@ impl BobcatRenderer {
         }
         let event = InputEvent::wheel(Point2D::new(x, y), (delta_x, delta_y))
             .with_default_prevented(default_prevented);
-        // As for a pointer: with no page loaded the painter is attached to no
-        // view, so there is nothing to route and nothing to buffer.
         if let Some(painter) = self.painter.as_mut() {
             painter.dispatch_input(event);
             self.events.request_event();
@@ -852,9 +610,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Route one browser `KeyboardEvent` into the opaque native view: its own
-    /// W3C `key` and `code`, passed through, `keydown` when `down`, and the
-    /// modifier bitmask the facade packed (alt 1, ctrl 2, meta 4, shift 8).
     #[wasm_bindgen(js_name = dispatchKey)]
     pub fn dispatch_key(
         &mut self,
@@ -873,8 +628,6 @@ impl BobcatRenderer {
             shift: modifiers & MODIFIER_SHIFT != 0,
         };
         let event = InputEvent::key(phase, key, code, repeat, modifiers);
-        // As for a pointer: with no page loaded the painter is attached to no
-        // view, so there is nothing to route and nothing to buffer.
         if let Some(painter) = self.painter.as_mut() {
             painter.dispatch_input(event);
             self.events.request_event();
@@ -882,19 +635,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Apply one editing command from the facade's `<textarea>` proxy to the
-    /// view's focused editing host: a `bobcat-edit` message, flattened by
-    /// the Render Worker into the command's name, its text and two numbers
-    /// (`src/text_input.rs` lists them).
-    ///
-    /// A command the view cannot take yet — before its boot has been
-    /// observed, or after it ended — is dropped: the facade cannot know
-    /// either, and a key typed into a page that is still loading types
-    /// nothing in a browser too.
-    ///
-    /// # Errors
-    ///
-    /// A command the protocol does not describe, which is the facade's bug.
     #[wasm_bindgen(js_name = edit)]
     pub fn edit(
         &mut self,
@@ -906,22 +646,11 @@ impl BobcatRenderer {
         self.ensure_running()?;
         let command = edit_command(kind, text, first, second).map_err(js_error)?;
         if let Some(view) = self.view.as_ref() {
-            // `NotReady` is the only failure, and it is dropped (above).
             let _ = view.edit(command);
         }
         Ok(())
     }
 
-    /// Report the host's marks around the current view, Lynx's
-    /// `setExtraTiming`: when the user opened the page, when the container
-    /// (this canvas) was initialized, and when the template was prepared,
-    /// each as Unix milliseconds on the wall clock. `NaN` or a negative
-    /// value leaves that mark unset. A mark the view already has is kept,
-    /// and a load entry already reported is reported again with `fcp` and
-    /// `totalFcp` filled.
-    ///
-    /// A call before any view exists, or after the view ended, reports
-    /// nothing: there is no load for the marks to belong to.
     #[wasm_bindgen(js_name = setExtraTiming)]
     pub fn set_extra_timing(
         &self,
@@ -935,7 +664,6 @@ impl BobcatRenderer {
         let Some(view) = self.view.as_ref() else {
             return Ok(());
         };
-        // `NotReady` is the only failure: the view has ended.
         let _ = view.set_extra_timing(ExtraTiming {
             open_time: wall_clock(open_time),
             container_init_start: wall_clock(container_init_start),
@@ -946,8 +674,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Apply browser device metrics and resize the Worker-owned surface.
-    /// Metrics that arrive before a page is loaded become the next view's.
     #[wasm_bindgen(js_name = resize)]
     pub fn resize(
         &mut self,
@@ -970,10 +696,6 @@ impl BobcatRenderer {
         Ok(())
     }
 
-    /// Release the current native view before the outer facade terminates its
-    /// Render Worker and the Wasm session with it. Dropping the view stops it,
-    /// and dropping its group ends its two Workers — the Lynx-main one, and
-    /// the worker-realm one after it.
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;
@@ -995,23 +717,7 @@ impl BobcatRenderer {
         mut sources: ViewSources,
         global_props: Option<String>,
     ) -> Result<(), JsValue> {
-        // Parsed before anything of the previous page is released, so a base
-        // that is not a URL leaves that page running. The fetcher is given
-        // the same base below, which is what keeps the view's resolution and
-        // the fetcher's alike.
         let base_url = Url::parse(&sources.base_url).map_err(js_error)?;
-        // Detaching first, then dropping the previous view — which stops it —
-        // and then the group it belonged to, which is what ends its two
-        // Workers, the Lynx-main one and the worker-realm one after it. All
-        // before construction of the independent
-        // replacement begins. The painter is not one of them: it owns this
-        // canvas's surface, keeps showing the old page's last frame while the
-        // new one loads, and is re-attached below.
-        //
-        // A page gets a group of its own rather than reusing this renderer's:
-        // the script runtime is the group's, and a page loaded twice would
-        // otherwise register its entry module a second time under a name the
-        // previous load already took.
         if let Some(painter) = self.painter.as_mut() {
             painter.detach();
         }
@@ -1019,30 +725,18 @@ impl BobcatRenderer {
         drop(self.group.take());
         self.page_resources = None;
         self.boot_urls.clear();
-        // The outgoing page's focused host went with it: the facade hides its
-        // proxy now rather than when the next page focuses one of its own.
         if self.text_input_focused {
             self.post_text_input(&TextInputState::default());
         }
-        // Release the old page's post-boot waiter. The Render Worker advances
-        // its generation before calling load, so it exits without pumping the
-        // replacement view.
         self.events.request_event();
         self.script_finished = false;
 
-        // A relative `url(...)` in the page's CSS resolves against the page,
-        // which is the view's own base.
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
         sources.fallback_fonts = self.fallback_fonts.clone();
         sources.locale.clone_from(&self.locale);
-        // JSON text the host serialized and Rust never reads.
         sources.global_props = global_props;
-        // A draw target that failed cannot be reached again, so a page loaded
-        // after one gets a painter of its own. Dropping the old one first is
-        // what releases this canvas's WebGPU context before the replacement
-        // asks for another.
         if self
             .painter
             .as_ref()
@@ -1060,9 +754,6 @@ impl BobcatRenderer {
                 .map_err(js_error)?,
             );
         }
-        // The view retains this scope, including ZIP assets needed after boot.
-        // The next submission stages sources in a fresh scope sharing the
-        // same image decoder, but no cached image or URL.
         let next_resources = self.resources.new_scope();
         let resources = mem::replace(&mut self.resources, next_resources);
         let group = LynxGroup::new(self.events.clone(), self.style_threads)
@@ -1082,49 +773,21 @@ impl BobcatRenderer {
         );
         warn_notes(&resources);
         let view = built.map_err(js_error)?;
-        // The facade's `<textarea>` proxy reports every insertion, deletion
-        // and line break as a `beforeinput`, which arrives as an `edit`; a
-        // `keydown` sent beside it (with no text) must not do them again.
-        // Sent before the painter can route a key, and so ahead of every
-        // one. Refused only by a view that has already ended, which takes
-        // no key either.
         let _ = view.set_text_input_source(TextInputSource::Commands);
-        // Asked before the boot can complete a load, so the load's own entry
-        // is among those reported. A page that passed no callback asks for
-        // nothing, and the view assembles nothing.
         if self.on_performance.is_some() {
             view.observe_performance(EntryTypes::ALL);
         }
         if let Some(painter) = self.painter.as_mut() {
-            // Attaching imposes the painter's metrics on the view, so a page
-            // built at the wrapper's size lays out at the canvas's. It is
-            // also what *binds* the view: its boot waits here, publishes no
-            // frame before this, and would never finish without it — which is
-            // why the block above makes sure there is a painter to attach.
-            // The canvas itself is not resized here: it already carries that
-            // resolution, and setting a canvas's size clears its bitmap —
-            // which would blank the previous page's last frame while this one
-            // loads.
             painter.attach(&view).map_err(js_error)?;
         }
         self.view = Some(view);
         self.page_resources = Some(resources);
         self.boot_urls = boot_urls;
         self.group = Some(group);
-        // Start servicing the loading view. Its startup sources were handed
-        // to the resource system inside `create_lynx_view` and may already be
-        // loading, or answered; what a turn is needed for is everything the
-        // boot asks for after them. The previous page's waiter may have
-        // consumed their wakeup before this view was installed.
         self.events.request_event();
         Ok(())
     }
 
-    /// Hands one published state to the Render Worker as the
-    /// `bobcat-text-input` fields: geometry in viewport CSS px, offsets in
-    /// UTF-16 units, the enumerations as HTML attribute keywords. A
-    /// `postMessage` that threw is reported and the page goes on: the proxy
-    /// is the page's input, not the view.
     fn post_text_input(&mut self, state: &TextInputState) {
         self.text_input_focused = state.host.is_some();
         let fields = text_input_fields(state);
@@ -1133,9 +796,6 @@ impl BobcatRenderer {
         }
     }
 
-    /// Retains bytes the browser host already fetched under its URL policy,
-    /// labelled the way a `Content-Type` would. Returns the normalized
-    /// absolute URL.
     fn register(&self, url: &str, bytes: Vec<u8>, media_type: &str) -> Result<String, JsValue> {
         self.resources
             .register(url, bytes, Some(media_type))
@@ -1151,9 +811,6 @@ impl BobcatRenderer {
         }
     }
 
-    /// The native modules of one view this renderer builds: a fresh
-    /// [`ExplorerModule`] in a build with the `explorer-module` feature, and
-    /// none in a build without it.
     #[cfg_attr(
         not(feature = "explorer-module"),
         expect(
@@ -1175,10 +832,6 @@ impl BobcatRenderer {
     }
 }
 
-/// The page an [`ExplorerModule`] asks for what only the page can do: each
-/// request is one of `js/protocol.d.ts`'s Explorer messages, handed to the
-/// Render Worker's `postExplorerMessage`. A post that threw is reported and
-/// the view goes on: the request is the page's, not the view's.
 #[cfg(feature = "explorer-module")]
 #[derive(Debug)]
 struct BrowserExplorerPage {
@@ -1225,10 +878,6 @@ impl ExplorerPage for BrowserExplorerPage {
     }
 }
 
-/// Hands one performance entry to the Render Worker as Lynx's
-/// `onPerformanceEvent` JSON text, written into `json`. A callback that threw
-/// is reported and the page goes on: the panel that reads entries is the
-/// page's, not the view.
 fn post_performance(
     callback: Option<&js_sys::Function>,
     json: &mut String,
@@ -1245,8 +894,6 @@ fn post_performance(
     }
 }
 
-/// A Unix-millisecond reading from the facade as a wall-clock instant;
-/// `None` for `NaN`, a negative value or one past what the clock holds.
 fn wall_clock(unix_millis: f64) -> Option<SystemTime> {
     if !unix_millis.is_finite() || unix_millis < 0.0 {
         return None;
@@ -1255,19 +902,12 @@ fn wall_clock(unix_millis: f64) -> Option<SystemTime> {
     SystemTime::UNIX_EPOCH.checked_add(since_epoch)
 }
 
-/// Surfaces what the resource system recorded — an image that failed, a
-/// decoder that is missing — on the console, where a browser host looks.
 fn warn_notes(resources: &Resources<BrowserPlatform>) {
     for note in resources.take_notes() {
         console_warn(&JsValue::from(format!("bobcat-resources: {note}")));
     }
 }
 
-/// The screen the facade measured, where it measured one.
-///
-/// A screen only where all three numbers describe one: anything else is a host
-/// that could not read `screen`, which [`BobcatRenderer::create`] answers with
-/// its own create-time viewport.
 fn measured_screen(pixel_ratio: f32, pixel_width: f32, pixel_height: f32) -> Option<ScreenMetrics> {
     (pixel_width.is_finite() && pixel_height.is_finite() && pixel_width > 0.0 && pixel_height > 0.0)
         .then_some(ScreenMetrics {
@@ -1286,9 +926,6 @@ fn js_error(error: impl fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
 
-/// The error [`BobcatRenderer::pump`] fails with on an event for which
-/// [`EngineEvent::is_fatal`] holds: the error the event carries, or, for a
-/// fatal event a later engine adds, its debug form.
 fn fatal_error(event: EngineEvent) -> JsValue {
     match event {
         EngineEvent::StartupFailed(error) => js_error(error),
@@ -1297,12 +934,9 @@ fn fatal_error(event: EngineEvent) -> JsValue {
     }
 }
 
-/// One [`TextInputState`] as `js/protocol.d.ts`'s `TextInputFields`, a plain
-/// object the Render Worker spreads into its message.
 fn text_input_fields(state: &TextInputState) -> JsValue {
     let fields = Object::new();
     let set = |key: &str, value: &JsValue| {
-        // Setting a data property on a fresh plain object cannot throw.
         let _ = Reflect::set(&fields, &JsValue::from_str(key), value);
     };
     set("host", &JsValue::from_bool(state.host.is_some()));
@@ -1340,7 +974,6 @@ fn text_input_fields(state: &TextInputState) -> JsValue {
     fields.into()
 }
 
-/// One viewport rectangle as `{ x, y, width, height }` in CSS px.
 fn rect_fields(rect: &Rect<f32>) -> JsValue {
     let fields = Object::new();
     for (key, value) in [

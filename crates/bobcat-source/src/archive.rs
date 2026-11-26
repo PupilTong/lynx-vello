@@ -10,20 +10,15 @@ use vant::registry::Register;
 
 use crate::{PageSource, SourceError};
 
-/// Maximum compressed input accepted by the shared ZIP loader.
 pub const MAX_ZIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
-/// A validated archive whose files are ready to register as resource bytes.
-/// Native and Wasm embedders use the same parser and limits. Entries are never
-/// written to disk; stored and deflated ZIP members are supported.
 #[derive(Debug)]
 pub struct ZipSource {
     files: BTreeMap<String, Vec<u8>>,
 }
 
-/// Failure to decode an archive or select its page.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ZipSourceError {
@@ -52,7 +47,6 @@ pub enum ZipSourceError {
 }
 
 impl ZipSource {
-    /// Decode and validate every file before publishing any resources.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZipSourceError> {
         Self::decode(bytes, MAX_EXPANDED_BYTES, MAX_ENTRIES)
     }
@@ -83,8 +77,6 @@ impl ZipSource {
             if entry.size() > (limit - total) as u64 {
                 return Err(ZipSourceError::ExpandedLimit);
             }
-            // Count actual output as well as declared sizes. Never reserve
-            // an allocation from an untrusted header or read beyond the cap.
             let mut data = Vec::new();
             let mut chunk = [0; 8192];
             loop {
@@ -103,20 +95,12 @@ impl ZipSource {
         Ok(Self { files })
     }
 
-    /// Select an entry by the decoded pathname of an absolute URL and parse
-    /// it through the ordinary XML/web/native page adapter. URL origin is
-    /// embedder policy: e.g. `bobcat-memory://archive/dist/main.web.bundle` or
-    /// the original `https://cdn.example/dist/main.web.bundle`.
     pub fn page(&self, entry: &Url) -> Result<PageSource, ZipSourceError> {
         let path = entry_path(entry)?;
         let bytes = self.files.get(&path).ok_or(ZipSourceError::MissingEntry)?;
         Ok(PageSource::from_bytes(entry, bytes)?)
     }
 
-    /// Move archive bytes into an embedder-owned registry under the entry's
-    /// origin, preserving ZIP-root paths. Call only after `page` succeeds.
-    /// Keep these registrations for the view's lifetime: images may load
-    /// after boot. Replacing a page should retire its resource scope.
     pub fn register_with(
         self,
         resources: &impl Register<bobcat_core::PreparsedStyleSheet>,
@@ -129,8 +113,6 @@ impl ZipSource {
         root.set_path("/");
         for (path, bytes) in self.files {
             let mut url = root.clone();
-            // Push segments instead of joining text: %, # and ? in a ZIP
-            // name are filename characters, not URL syntax.
             url.path_segments_mut()
                 .map_err(|()| ZipSourceError::InvalidEntryUrl)?
                 .clear()
@@ -165,10 +147,6 @@ fn entry_path(entry: &Url) -> Result<String, ZipSourceError> {
     Ok(path.into_owned())
 }
 
-// Check the small central-directory envelope before ZipArchive allocates its
-// metadata index. zip deduplicates names while indexing, so checking only
-// zip.len() would hide duplicate members and undercount the work it performed.
-// ZIP64/multi-disk containers are deliberately outside these small-package limits.
 fn validate_directory(bytes: &[u8], limit: usize) -> Result<(), ZipSourceError> {
     let malformed = || {
         ZipSourceError::Decode(zip::result::ZipError::InvalidArchive(

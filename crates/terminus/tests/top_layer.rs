@@ -13,8 +13,6 @@ mod common;
 use common::Doc;
 use terminus::link::ElementState;
 
-/// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
-/// reduced to what these tests read.
 const UA: &str = "
     dialog { display: flex; }
     ::backdrop { display: flex; position: fixed; inset: 0; }";
@@ -61,11 +59,6 @@ fn modal_and_open_match_their_state_bits_and_restyle_on_change() {
     assert_eq!(doc.value(dialog, "height"), "auto");
 }
 
-/// `-servo-top-layer: auto` is UA-only and makes Stylo's adjuster compute a
-/// top-layer element's `relative` position to `absolute` (css-position-4
-/// §3.1). The fork's `lynx` build admits the longhand in a UA-origin sheet
-/// (`LYNX_UA_LONGHANDS` in `vendor/stylo/style/properties/data.py`), which is
-/// the origin `add_ua_css` parses at; an author sheet still drops it.
 #[test]
 fn the_ua_top_layer_longhand_computes_a_relative_position_to_absolute() {
     let mut doc = page("dialog { position: relative; }");
@@ -76,12 +69,6 @@ fn the_ua_top_layer_longhand_computes_a_relative_position_to_absolute() {
     assert_eq!(doc.value(dialog, "position"), "absolute");
 }
 
-/// What membership stands in for where no UA rule declares
-/// `-servo-top-layer` for an element in the layer, so the fixup does not
-/// run: a top-layer element whose position computes to `relative` (or
-/// `static`) is still placed against the viewport and still generates the
-/// containing block of its absolutely positioned descendants, as a computed
-/// `absolute` would.
 #[test]
 fn membership_stands_in_for_the_position_fixup() {
     let mut doc = page(
@@ -110,11 +97,6 @@ fn membership_stands_in_for_the_position_fixup() {
     assert_eq!(rect(&doc, abs), (10.0, 4.0, 5.0, 5.0));
 }
 
-/// `display_mode` panics on a display this engine does not lay out, so
-/// every box the top layer creates must compute to one it does. A
-/// `display: contents` top-layer element no UA rule gives
-/// `-servo-top-layer` is not blockified (the fixup does not run): it
-/// generates no box and renders nothing, without a panic.
 #[test]
 fn top_layer_boxes_compute_to_displays_the_engine_lays_out() {
     let mut doc = page(".contents { display: contents; }");
@@ -155,7 +137,6 @@ fn the_public_top_layer_api_reports_order_and_flags() {
     doc.dom.remove_from_top_layer(first);
     doc.dom.remove_from_top_layer(first);
     assert_eq!(doc.dom.top_layer().count(), 1);
-    // Selector queries never see a backdrop node.
     assert_eq!(
         doc.dom
             .query_selector_all(doc.root, "*")

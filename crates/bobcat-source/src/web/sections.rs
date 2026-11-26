@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use super::DecodeError;
 use super::reader::Reader;
 
-/// A binary string map, each key and value borrowed from the section.
 pub(crate) fn decode_string_map<'a>(
     bytes: &'a [u8],
     section: &'static str,
@@ -27,8 +26,6 @@ pub(crate) fn decode_string_map<'a>(
     Ok(map)
 }
 
-/// Whether a binary string map names `key`, read from its keys alone; a map
-/// too short for what it declares names what it holds before the end.
 pub(crate) fn string_map_has_key(bytes: &[u8], key: &[u8]) -> bool {
     let mut reader = Reader::new(bytes);
     let Ok(count) = reader.read_u32() else {
@@ -67,7 +64,6 @@ fn decode_utf8_field<'a>(
     })
 }
 
-/// A UTF-16LE section's text, as UTF-8.
 pub(crate) fn decode_utf16_text(
     bytes: &[u8],
     section: &'static str,
@@ -79,8 +75,6 @@ pub(crate) fn decode_utf16_text(
         });
     }
     let units = bytes.as_chunks::<2>().0;
-    // The compiler's JSON is ASCII but for what its strings hold, and ASCII
-    // is its own UTF-8.
     if units.iter().all(|&[low, high]| high == 0 && low.is_ascii()) {
         let ascii = units.iter().map(|&[low, _]| low).collect();
         return Ok(String::from_utf8(ascii).expect("ASCII is UTF-8"));

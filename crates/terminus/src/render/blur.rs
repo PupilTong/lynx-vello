@@ -138,46 +138,18 @@ use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::peniko::Color;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
-/// Largest per-axis device-pixel count one filter bake may have: the
-/// longest texture side the device is created with
-/// ([`SharedGpu::LIMITS`]), the same bound
-/// [`crate::render::image::MAX_RENDERABLE_DIMENSION`] enforces for bitmaps.
 pub(crate) const MAX_FILTER_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
-/// Largest total device-pixel area one frame's filter bakes may cover.
-///
-/// A quarter of one texture of the longest side on each axis, so blurred
-/// groups cannot take more GPU memory than the cap the module doc works out.
-/// See the module doc for what a group over the cap does instead.
 pub const MAX_FILTER_AREA: u64 = (MAX_FILTER_DIMENSION as u64 * MAX_FILTER_DIMENSION as u64) / 4;
 
-/// Variance, in source px², that one 2× box downsample and the bilinear tent
-/// that undoes it contribute together: 0.25 from the box (two samples one px
-/// apart), 0.667 from the tent.
 const RESAMPLE_VARIANCE: f64 = 0.917;
 
-/// Variance above which one more decimation level is worth taking — σ = 2,
-/// which is exactly the largest σ the ≤ 7-tap kernel covers to 3σ.
 const DECIMATE_ABOVE: f64 = 4.0;
 
-/// Decimation levels a bake may take.
-///
-/// This is a guard, not the stop that normally fires: the size floor in
-/// [`decimate`] halts a `MAX_FILTER_DIMENSION`-wide rect after 12 levels
-/// anyway (8192 halves to 2 in twelve steps). It has to be at least that
-/// large to be inert, because the largest σ a bake rect can carry is the one
-/// whose own 6σ extent fills it — σ ≈ 8192/6 ≈ 1365 — and twelve levels
-/// divide that by 4096, comfortably inside the kernel's σ ≤ 2 reach. A
-/// smaller ceiling would leave σ in the hundreds capped at the kernel's
-/// radius and silently under-blurred.
 const MAX_LEVELS: u32 = 12;
 
-/// Symmetric taps one separable half-pass may use, the first being the
-/// centre: radius 6 as three linear-sampled pairs.
 const MAX_TAPS: usize = 4;
 
-/// The uniform block every pass reads. Laid out for WGSL's uniform rules:
-/// 16-byte alignment for the tap array, and a size that is a multiple of 16.
 #[derive(Debug, Clone, Copy, Default)]
 struct Params {
     texel: [f32; 2],
@@ -187,12 +159,9 @@ struct Params {
     tap: [[f32; 2]; MAX_TAPS],
 }
 
-/// `Params`' WGSL size: two `vec2f`, `f32` + `u32` + `vec2f` padding, then
-/// four `vec4f`.
 const PARAMS_SIZE: u64 = 96;
 
 impl Params {
-    /// A same-size pass over a source of `width` × `height`.
     fn plain(width: u32, height: u32) -> Self {
         Self {
             texel: [1.0 / width as f32, 1.0 / height as f32],
@@ -208,7 +177,6 @@ impl Params {
         self
     }
 
-    /// One separable half-pass: `vertical` picks the axis, `kernel` the taps.
     fn with_kernel(mut self, kernel: &Kernel, vertical: bool) -> Self {
         self.axis = if vertical {
             [0.0, self.texel[1]]
@@ -239,34 +207,18 @@ impl Params {
     }
 }
 
-/// One separable gaussian kernel as linear-sampled symmetric taps.
 #[derive(Debug, Clone, Copy)]
 struct Kernel {
     count: u32,
-    /// `(offset in source texels, weight)`, entry 0 the centre. Normalized
-    /// so `tap[0].1 + 2 · Σ tap[1..].1 == 1`.
     tap: [[f32; 2]; MAX_TAPS],
 }
 
-/// The kernel for one σ, in source texels.
-///
-/// Each non-centre tap replaces two adjacent texels with one bilinear fetch
-/// at their weight-weighted midpoint, which is exact for a linear filter: a
-/// bilinear sample at `i + t` returns `(1 − t)·s[i] + t·s[i+1]`, so placing
-/// it at `t = w[i+1] / (w[i] + w[i+1])` and weighting it `w[i] + w[i+1]`
-/// reproduces both texels' contributions.
-///
-/// The radius is capped at 6 (three pairs). σ ≤ 2 after decimation keeps
-/// `ceil(3σ) ≤ 6`, so the cap only binds for a bake too small to decimate
-/// far enough — a sliver the viewport intersection cut down — where it
-/// under-blurs rather than misbehaving.
 fn kernel(sigma: f64) -> Kernel {
     let mut tap = [[0.0_f32; 2]; MAX_TAPS];
     if !(sigma.is_finite() && sigma > 0.0) {
         tap[0] = [0.0, 1.0];
         return Kernel { count: 1, tap };
     }
-    // Clamped to 0..=6 immediately: three linear-sampled pairs.
     let radius = ((3.0 * sigma).ceil() as u32).clamp(0, 2 * (MAX_TAPS as u32 - 1)) as usize;
     let mut weights = [0.0_f64; 13];
     let denominator = 2.0 * sigma * sigma;
@@ -300,18 +252,12 @@ fn kernel(sigma: f64) -> Kernel {
     Kernel { count, tap }
 }
 
-/// How many 2× decimation levels one bake takes, and the σ left at the
-/// deepest one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Decimation {
     levels: u32,
     sigma: f64,
 }
 
-/// Plans the decimation for `sigma` over a `width` × `height` bake.
-///
-/// Stops early once a level would leave either axis under two texels, where a
-/// bilinear tap has nothing left to interpolate between.
 fn decimate(sigma: f64, width: u32, height: u32) -> Decimation {
     let mut variance = sigma * sigma;
     let mut levels = 0;
@@ -332,7 +278,6 @@ fn decimate(sigma: f64, width: u32, height: u32) -> Decimation {
     }
 }
 
-/// Level `level`'s size, halving with `ceil` so no source column is dropped.
 fn level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
     let (mut w, mut h) = (width.max(1), height.max(1));
     for _ in 0..level {
@@ -341,8 +286,6 @@ fn level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
     (w, h)
 }
 
-/// The three fragment stages, so a pass names one without borrowing the
-/// pipeline set that holds it.
 #[derive(Debug, Clone, Copy)]
 enum Stage {
     Copy,
@@ -350,7 +293,6 @@ enum Stage {
     Gaussian,
 }
 
-/// One texture plus the view every pass binds it through.
 struct Plane {
     width: u32,
     height: u32,
@@ -390,46 +332,16 @@ impl Plane {
     }
 }
 
-/// Every texture one filter group's bake needs, and the handle its result is
-/// drawn through.
-///
-/// Three planes are always full-res — `target`, `levels[0]` and `output` —
-/// and the rest depends on how far the bake decimates:
-///
-/// - **No decimation** (`sigma_device` <= 2): those three and nothing else. `pong` stays `None`,
-///   because the horizontal half-pass writes into `target`, which the copy pass has already
-///   consumed.
-/// - **`n` levels**: plus `levels[1..=n]`, whose areas are a geometric quarter-series summing to
-///   under a third of full-res, plus one `pong` at level `n`'s size.
-///
-/// So an admitted group costs between three and roughly four full-res RGBA8
-/// textures of its own area, which is what [`MAX_FILTER_AREA`] is sized
-/// against.
 struct Bank {
     width: u32,
     height: u32,
-    /// The rasterizer's own render target. Also the horizontal half-pass's
-    /// destination when the bake takes no decimation level, which is sound
-    /// because the copy pass has already consumed it by then — and is
-    /// why an undecimated bake allocates no `pong`.
     target: Plane,
-    /// The decimation pyramid, index 0 being the full-res copy of the bake. Grown to whatever
-    /// depth a bake asks for and kept.
     levels: Vec<Plane>,
-    /// The second half of the separable pair, at the deepest level's size.
-    /// `None` until a decimated bake needs one, and reallocated when that
-    /// level moves.
     pong: Option<Plane>,
     output: Plane,
     handle: Texture,
 }
 
-/// Usage flags, named once so a texture's role is readable at its allocation.
-///
-/// The bake target is what the rasterizer renders into, and also a pass's
-/// source and, undecimated, the horizontal half-pass's destination. The
-/// output is a pass's destination and what the rasterizer binds for the
-/// frame to draw.
 const BAKE_USAGE: wgpu::TextureUsages = Raster::TARGET_USAGE
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::RENDER_ATTACHMENT);
@@ -456,7 +368,6 @@ impl Bank {
         }
     }
 
-    /// Ensures the pyramid reaches `deepest`, allocating what is missing.
     fn ensure_levels(&mut self, device: &wgpu::Device, deepest: u32) {
         let wanted = deepest as usize + 1;
         while self.levels.len() < wanted {
@@ -467,7 +378,6 @@ impl Bank {
         }
     }
 
-    /// Ensures the separable pair's second plane exists at `width` × `height`.
     fn ensure_pong(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if self
             .pong
@@ -486,21 +396,12 @@ impl Bank {
     }
 }
 
-/// The pipelines, bind-group layout and sampler the passes share, built once
-/// per [`FilterTextures`] on the first frame that blurs.
 struct Pipelines {
     layout: wgpu::BindGroupLayout,
     copy: wgpu::RenderPipeline,
     resample: wgpu::RenderPipeline,
     gaussian: wgpu::RenderPipeline,
-    /// Clamp-to-edge, for a `filter: blur()` group: its rect carries a 3σ
-    /// transparent margin, so what the clamp extends is the transparent
-    /// black filter-effects-1 specifies for a filter region's outside.
     clamp: wgpu::Sampler,
-    /// `MirrorRepeat`, for a `backdrop-filter` entry: its rect is the crop
-    /// itself with no margin, so a clamp would smear the crop's edge row
-    /// outward and a transparent border would darken it. Mirroring reflects
-    /// the backdrop back in, which is the ruled edge mode.
     mirror: wgpu::Sampler,
 }
 
@@ -611,20 +512,11 @@ impl Pipelines {
     }
 }
 
-/// One group's chain of passes, recorded into one encoder and submitted once.
-///
-/// Every pass needs its own uniform block, because a queue write lands before
-/// any command of the submission that follows it — one buffer rewritten
-/// between passes would give every pass the last pass's parameters. The
-/// buffers are pooled on [`FilterTextures`], so a settled page allocates none.
 struct Passes<'a> {
     gpu: &'a SharedGpu,
     pipelines: &'a Pipelines,
     uniforms: &'a mut Vec<wgpu::Buffer>,
     next: usize,
-    /// Whether this entry's chain samples with the mirror sampler — set once
-    /// per entry, because the edge mode is a property of what is being
-    /// filtered rather than of a pass.
     mirror: bool,
     encoder: wgpu::CommandEncoder,
 }
@@ -698,42 +590,20 @@ impl Passes<'_> {
     }
 }
 
-/// The device side of `filter: blur()`: one bake texture set per filter group
-/// of the frame being rendered, cached across frames. See the module doc.
 #[derive(Default)]
 pub(crate) struct FilterTextures {
     pipelines: Option<Pipelines>,
-    /// One entry per filter group of the cached frame, `None` for a group
-    /// over the budget.
     banks: Vec<Option<Bank>>,
     uniforms: Vec<wgpu::Buffer>,
-    /// The scene one group's ops replay into. Reset per group, so its
-    /// encoding capacity is reused across groups and frames.
     bake: DisplayList,
-    /// Index-parallel with the frame's filter groups: the texture the
-    /// compose program draws each one through, or `None` for the raw
-    /// fallback.
     images: Vec<Option<Texture>>,
-    /// Whether each group fits the budget, in program order. A field so the
-    /// admission pass allocates nothing.
     admitted: Vec<bool>,
-    /// The entries in bake order — increasing `ops.end`, so an entry whose
-    /// range draws another one's texture bakes after it.
     order: Vec<u32>,
-    /// The commit the bakes belong to. See the module doc.
     commit: Option<u64>,
-    /// The canvas colour the bakes were taken over.
     canvas: Option<Color>,
-    /// Per entry, the readings its bake was taken at; see [`reading`].
     readings: Vec<(u64, u64)>,
-    /// Per entry, the picture reading its bake was taken at; see
-    /// [`picture_reading`]. An entry past the end reads zero.
     pictures: Vec<u64>,
-    /// Per entry, this prepare's picture reading. A field so the pass
-    /// allocates nothing.
     pictures_now: Vec<u64>,
-    /// Per entry, whether this prepare bakes it. A field so the pass
-    /// allocates nothing.
     due: Vec<bool>,
 }
 
@@ -748,30 +618,6 @@ impl std::fmt::Debug for FilterTextures {
 }
 
 impl FilterTextures {
-    /// Brings the bake textures up to `frame` and answers the table the
-    /// compose program indexes by filter group.
-    ///
-    /// Cheap and allocation-free when no entry's readings moved, which is
-    /// every frame that neither commits nor scrolls a blurred scroller's
-    /// content nor ticks a curve some entry holds; otherwise only the
-    /// entries whose readings moved re-bake.
-    ///
-    /// `images` is the frame's resolved bitmaps and `vectors` the textures
-    /// its vector draws were baked into, both index-parallel with their
-    /// side tables: an entry's range may draw either.
-    ///
-    /// `canvas` is the colour the composite render of this frame clears its
-    /// target to — the `base` it hands [`Raster::render_to_texture`]. An entry that
-    /// [reads the canvas](crate::paint::compose::FilterGroup::reads_canvas) bakes over it,
-    /// so the two must be the same colour or the filtered backdrop is the
-    /// backdrop of another canvas.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Render`] if a bake render fails. The table then holds a
-    /// texture for every entry that was not due or baked before the failure,
-    /// each current for these readings, and `None` for the rest, which fall
-    /// back to replaying raw; the next prepare re-bakes every entry.
     #[expect(
         clippy::too_many_arguments,
         reason = "one bake pre-step's full inputs: the rasterizer and its stack, and the frame \
@@ -820,8 +666,6 @@ impl FilterTextures {
             self.images.resize(groups.len(), None);
             self.plan(groups);
         }
-        // Unset until every due bake succeeds: a failed bake must not leave
-        // the cache serving a table it did not finish.
         self.commit = None;
         self.readings.clear();
         self.readings
@@ -848,21 +692,10 @@ impl FilterTextures {
         Ok(&self.images)
     }
 
-    /// Forgets which frame the bakes belong to, so the next
-    /// [`Self::prepare`] re-bakes.
-    ///
-    /// For a target that changes documents: commit ids restart at one per
-    /// document, so a retained key could otherwise match a different
-    /// document's first frame. The textures stay allocated, since the next
-    /// page's groups will want textures of their own.
     pub(crate) fn forget(&mut self) {
         self.commit = None;
     }
 
-    /// Records the canvas colour this prepare bakes over, forgetting the
-    /// cached bakes when it is not the one they were taken over: those belong
-    /// to no frame drawn over this canvas. The same colour, which is every
-    /// prepare of a target after its first, leaves the cache as it is.
     fn adopt_canvas(&mut self, canvas: Color) {
         if self.canvas != Some(canvas) {
             self.canvas = Some(canvas);
@@ -870,18 +703,12 @@ impl FilterTextures {
         }
     }
 
-    /// Fills `due` with the entries this prepare bakes, answering whether the
-    /// cached bakes belong to `commit`: of another commit every entry bakes,
-    /// of the cached one only those whose readings moved.
     fn mark_due(
         &mut self,
         commit: u64,
         groups: &[crate::paint::compose::FilterGroup],
         readings: Readings,
     ) -> bool {
-        // The length checks are a net, not the contract: a commit id carries
-        // no document identity (see the module doc), and a table of the wrong
-        // length is the one such mix-up that is cheap to catch.
         let cached = self.commit == Some(commit)
             && self.images.len() == groups.len()
             && self.readings.len() == groups.len();
@@ -902,7 +729,6 @@ impl FilterTextures {
         cached
     }
 
-    /// Decides which groups fit the budget, and the order to bake them in.
     fn plan(&mut self, groups: &[crate::paint::compose::FilterGroup]) {
         let mut budget = MAX_FILTER_AREA;
         self.admitted.clear();
@@ -924,9 +750,6 @@ impl FilterTextures {
             (0..groups.len())
                 .map(|index| u32::try_from(index).expect("a frame cannot hold 2^32 filters")),
         );
-        // Post-order: a group's `ops` range contains every nested group's, and
-        // a backdrop's range ends before its op, so ordering by range end
-        // alone bakes every drawn texture before the bake that draws it.
         self.order
             .sort_unstable_by_key(|&index| groups[index as usize].ops.end);
     }
@@ -981,9 +804,6 @@ impl FilterTextures {
                 offset_of,
                 animation_now,
             );
-            // The canvas is under the document root's Backdrop Root Image
-            // and is no op of the frame, so it enters here, as the base the
-            // range composes over; every other entry starts from nothing.
             let base = if group.reads_canvas() {
                 canvas
             } else {
@@ -993,9 +813,6 @@ impl FilterTextures {
 
             let plan = decimate(f64::from(group.sigma), width, height);
             bank.ensure_levels(device, plan.levels);
-            // Only a decimated bake needs a second plane for the separable
-            // pair; at level 0 the bake target is free again and serves. See
-            // `run_chain`.
             if plan.levels > 0 {
                 let (deep_w, deep_h) = level_size(width, height, plan.levels);
                 bank.ensure_pong(device, deep_w, deep_h);
@@ -1020,8 +837,6 @@ impl FilterTextures {
     }
 }
 
-/// One prepare's readings: the compositor's scroll generation and clock
-/// reading, and whether the frame composes a curve on a scroll timeline.
 #[derive(Clone, Copy)]
 struct Readings {
     scroll_generation: u64,
@@ -1029,18 +844,6 @@ struct Readings {
     scroll_curves: bool,
 }
 
-/// The readings one entry's bake depends on: the scroll generation when its
-/// range rides a scroll or sticky node its own space does not, or draws a
-/// backdrop that reads it, or when it [samples
-/// animations](crate::paint::compose::FilterGroup::samples_animations) and some composed
-/// curve reads a scroll offset — whose source need not be on the range's
-/// paths at all; and the timeline reading when it samples animations; each
-/// zero otherwise.
-///
-/// A timeline reading enters as its bit pattern, and an absent one as zero —
-/// which is also `0.0`'s pattern. The two therefore collide at the timeline's
-/// own origin, and the cost is one stale bake in the instant a page's first
-/// exported curve starts.
 fn reading(group: &crate::paint::compose::FilterGroup, readings: Readings) -> (u64, u64) {
     let animates = group.samples_animations();
     let generation = if group.inner_chains || (animates && readings.scroll_curves) {
@@ -1056,15 +859,6 @@ fn reading(group: &crate::paint::compose::FilterGroup, readings: Readings) -> (u
     (generation, instant)
 }
 
-/// The picture reading one entry's bake depends on: which bitmap each image
-/// draw in its range resolves to — the picture whose texture it samples,
-/// and the frame or upload it names — folded into one number, or zero for
-/// an entry that draws no image.
-///
-/// A picture's new frame, a wanted picture arriving and a restore are each a
-/// new bitmap and so a new reading, which re-bakes the entries that draw it
-/// and no other. A frame that is the bitmap already drawn re-bakes nothing:
-/// its pixels are the same.
 fn picture_reading(group: &crate::paint::compose::FilterGroup, images: &[Option<ImageRef>]) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let range = group.pictures.start as usize..group.pictures.end as usize;
@@ -1081,16 +875,10 @@ fn picture_reading(group: &crate::paint::compose::FilterGroup, images: &[Option<
             .map(|image| (image.picture, image.descriptor))
             .hash(&mut hasher);
     }
-    // Never zero, which is what an entry with no image reads.
     hasher.finish() | 1
 }
 
-/// Records one group's whole pass chain against its bank.
 fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
-    // A colour-only `backdrop-filter` bakes at σ = 0: there is nothing to
-    // decimate and nothing to convolve, but the entry still owes its element
-    // the isolated copy of the backdrop that its blend passes
-    // and its own group effects compose against.
     if plan.levels == 0 && plan.sigma <= 0.0 {
         passes.run(
             Stage::Copy,
@@ -1119,11 +907,6 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     }
     let deepest = &levels[plan.levels as usize];
     let kernel = kernel(plan.sigma);
-    // The horizontal half-pass needs somewhere to put its result that is not
-    // its own source. A decimated bake uses `pong`, allocated at the deepest
-    // level's size; an undecimated one uses the *bake target*, which the
-    // copy pass has already read and which is full-res by
-    // construction — so no full-res plane is allocated for it.
     let (pong, vertical_target) = if plan.levels == 0 {
         (&bank.target, &bank.output)
     } else {
@@ -1165,12 +948,6 @@ fn run_chain(passes: &mut Passes<'_>, bank: &Bank, plan: &Decimation) {
     }
 }
 
-/// The bank for one group at `width` × `height`, reusing the one already
-/// there when it is the right size.
-///
-/// A resize is a new texture and therefore a new [`Texture`]: a draw reads
-/// the texture's size from the handle it names, so the old one is unbound
-/// rather than repointed.
 fn ensure_bank<'bank>(
     slot: &'bank mut Option<Bank>,
     raster: &mut Raster,
@@ -1199,7 +976,6 @@ mod tests {
     };
     use crate::render::image::ImageDescriptor;
 
-    /// The readings of a frame composing no scroll-timeline curve.
     const fn at(scroll_generation: u64, animation_now: Option<f64>) -> Readings {
         Readings {
             scroll_generation,
@@ -1208,9 +984,6 @@ mod tests {
         }
     }
 
-    /// A kernel is a probability distribution: the centre plus twice every
-    /// symmetric tap has to be one, or the blur changes the image's total
-    /// brightness.
     #[test]
     fn every_kernel_sums_to_one() {
         for sigma in [0.1_f64, 0.5, 1.0, 1.75, 2.0, 3.0, 8.0] {
@@ -1233,8 +1006,6 @@ mod tests {
         }
     }
 
-    /// Each pair tap sits between the two texels it stands in for, nearer the
-    /// heavier one — which for a gaussian is always the inner texel.
     #[test]
     fn pair_taps_sit_between_their_two_texels() {
         let kernel = kernel(2.0);
@@ -1249,8 +1020,6 @@ mod tests {
         }
     }
 
-    /// Decimation runs until the residual sigma is inside the kernel's reach,
-    /// and each level accounts for the resample pair's own variance.
     #[test]
     fn decimation_stops_at_a_kernel_sized_sigma() {
         for sigma in [1.0_f64, 2.0, 4.0, 16.0, 64.0, 400.0, 1365.0] {
@@ -1277,9 +1046,6 @@ mod tests {
         );
     }
 
-    /// The largest sigma a bake rect can carry — the one whose own 6 sigma
-    /// extent fills `MAX_FILTER_DIMENSION` — still decimates into the
-    /// kernel's reach rather than stopping at `MAX_LEVELS` and under-blurring.
     #[test]
     fn the_largest_bakeable_sigma_still_reaches_the_kernel() {
         let plan = decimate(1365.0, MAX_FILTER_DIMENSION, MAX_FILTER_DIMENSION);
@@ -1296,26 +1062,15 @@ mod tests {
         );
     }
 
-    /// A bake too narrow to halve stops decimating rather than producing a
-    /// one-texel level a bilinear tap has nothing to interpolate across.
-    ///
-    /// Only a bake the viewport intersection cut into a sliver can get here:
-    /// a rect carries a 3 sigma margin on both sides, so an uncut one is at
-    /// least 6 sigma across and always decimates far enough.
     #[test]
     fn a_sliver_stops_decimating_before_it_vanishes() {
-        // 3 -> 2 is legal, 2 -> 1 is not.
         assert_eq!(decimate(400.0, 3, 4096).levels, 1);
-        // 5 -> 3 -> 2, then stop.
         assert_eq!(decimate(400.0, 5, 4096).levels, 2);
         assert_eq!(decimate(400.0, 2, 4096).levels, 0);
-        // And the residual sigma is capped to what the kernel covers, so the
-        // pass is well formed even when the sliver stopped it early.
         let plan = decimate(400.0, 2, 4096);
         assert!(super::kernel(plan.sigma).count as usize <= MAX_TAPS);
     }
 
-    /// Levels halve with `ceil`, so no source column is ever dropped.
     #[test]
     fn level_sizes_round_up() {
         assert_eq!(level_size(7, 3, 1), (4, 2));
@@ -1323,16 +1078,12 @@ mod tests {
         assert_eq!(level_size(7, 3, 0), (7, 3));
     }
 
-    /// The canvas colour is part of what a cached bake belongs to: the same
-    /// colour keeps the cache, so a still frame over a still canvas bakes
-    /// once, and another colour forgets it.
     #[test]
     fn a_canvas_change_forgets_the_bakes_and_the_same_canvas_keeps_them() {
         use crate::peniko::Color;
 
         let mut textures = FilterTextures::default();
         textures.adopt_canvas(Color::WHITE);
-        // What a successful prepare over that canvas leaves behind.
         textures.commit = Some(3);
         textures.adopt_canvas(Color::WHITE);
         assert_eq!(textures.commit, Some(3), "the same canvas keeps the cache");
@@ -1340,9 +1091,6 @@ mod tests {
         assert_eq!(textures.commit, None, "another canvas forgets it");
     }
 
-    /// A colour-only `backdrop-filter` plans no work at all: no decimation
-    /// level and no kernel. `run_chain` reads exactly that pair to decide it
-    /// owes only the copy.
     #[test]
     fn a_zero_sigma_plan_decimates_and_convolves_nothing() {
         let plan = decimate(0.0, 256, 256);
@@ -1352,18 +1100,10 @@ mod tests {
             !(plan.levels == 0 && plan.sigma > 0.0),
             "which is the condition run_chain short-circuits on",
         );
-        // And the guard is genuinely narrow: the smallest sigma that still
-        // blurs takes the ordinary path.
         let smallest = decimate(0.25, 256, 256);
         assert!(smallest.levels == 0 && smallest.sigma > 0.0);
     }
 
-    /// An entry's two readings are independent, and each stays zero unless
-    /// its own pixels depend on it.
-    ///
-    /// This is what keeps a scroll frame over a blurred box no scroll node
-    /// moves relative to its range, and an animation tick over a backdrop
-    /// nothing is moving behind, from re-baking it.
     #[test]
     fn an_entry_reads_only_what_its_pixels_depend_on() {
         use crate::kurbo::{Affine, Rect};
@@ -1431,8 +1171,6 @@ mod tests {
         );
     }
 
-    /// A tick re-bakes the entry that samples the timeline and leaves the
-    /// one beside it alone; a new commit re-bakes both.
     #[test]
     fn a_sampling_entry_does_not_re_bake_a_still_one() {
         use crate::kurbo::Rect;
@@ -1445,7 +1183,6 @@ mod tests {
         let mut textures = FilterTextures::default();
         assert!(!textures.mark_due(3, &groups, at(0, Some(2.5))));
         assert_eq!(textures.due, [true, true], "a first commit bakes both");
-        // What a successful prepare at that instant leaves behind.
         textures.commit = Some(3);
         textures.images = vec![None; groups.len()];
         textures.readings = groups
@@ -1464,10 +1201,6 @@ mod tests {
         assert_eq!(textures.due, [true, true], "and a new commit bakes both");
     }
 
-    /// One element with both `filter: blur()` and `backdrop-filter`, over a
-    /// scroller and beside a sliding card: a scroll or a tick re-bakes its
-    /// backdrop, and with it the blur group that draws that backdrop, though
-    /// nothing in the group's own range moves.
     #[test]
     fn a_moving_backdrop_re_bakes_the_blur_group_drawing_it() {
         let page = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -1483,8 +1216,6 @@ mod tests {
              .frost { display: flex; position: absolute; left: 20px; top: 20px;
                       width: 600px; height: 100px; filter: blur(2px);
                       backdrop-filter: blur(4px); }";
-        // What moves behind the element, and the two readings the second
-        // prepare takes after a first one at generation 0 and instant 0.25.
         for (behind, generation, now) in [("list", 1, 0.25), ("card", 0, 0.5)] {
             let mut doc = crate::test_common::Doc::with_css(page);
             let root = doc.root;
@@ -1515,7 +1246,6 @@ mod tests {
             let commit = frame.commit_id();
             let mut textures = FilterTextures::default();
             assert!(!textures.mark_due(commit, groups, at(0, Some(0.25))));
-            // What a successful prepare at those readings leaves behind.
             textures.commit = Some(commit);
             textures.images = vec![None; groups.len()];
             textures.readings = groups
@@ -1531,10 +1261,6 @@ mod tests {
         }
     }
 
-    /// A backdrop over a card that a list elsewhere drives by a named
-    /// scroll timeline: nothing in the backdrop's range rides the list's
-    /// scroll node, yet a scroll moves the card, so the frame's scroll
-    /// curve makes the scroll generation one of the backdrop's readings.
     #[test]
     fn a_backdrop_over_an_off_path_scroll_curve_re_bakes_on_scroll() {
         let mut doc = crate::test_common::Doc::with_css(
@@ -1589,7 +1315,6 @@ mod tests {
         assert_eq!(textures.due, [true], "a scroll re-bakes it");
     }
 
-    /// The uniform block's WGSL offsets, which nothing but this test can see.
     #[test]
     fn the_uniform_block_lands_where_wgsl_reads_it() {
         let params = Params::plain(4, 8).with_ratio(2.0);
@@ -1606,10 +1331,6 @@ mod tests {
         assert!((at(36) - 1.0).abs() < 1e-7, "the centre tap's weight");
     }
 
-    /// An entry's picture reading moves when a draw in its range resolves
-    /// to another bitmap, and only then: a draw outside its range, or the
-    /// same bitmap drawn again from its upload, moves nothing; an entry with
-    /// no draw reads zero whatever the table holds.
     #[test]
     fn a_bake_reads_only_the_pictures_its_range_draws() {
         use crate::paint::compose::FilterGroup;

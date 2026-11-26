@@ -55,21 +55,13 @@ use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 use crate::visual::curves::{CompositeCurve, ScrollTimeline, Timeline};
 
-/// One element's exportable animation state, minus the geometry only the
-/// paint-order builder knows.
 pub(crate) struct ExportedComposite {
-    /// `curve.transform` starts `None`; the builder attaches it when
-    /// `transform` holds.
     pub(crate) curve: CompositeCurve,
-    /// Whether an animation or a transition animates `opacity`.
     pub(crate) opacity: bool,
-    /// Whether an animation or a transition animates `transform`.
     pub(crate) transform: bool,
 }
 
 impl<T: Sync> Document<T> {
-    /// The exportable animation state of `node`, if the whole of it
-    /// exports; see the module documentation for what refuses.
     pub(crate) fn composite_export(&self, node: &Node<T>) -> Option<ExportedComposite> {
         if !node.may_have_animations() {
             return None;
@@ -110,15 +102,12 @@ impl<T: Sync> Document<T> {
                     == PropertyDeclarationId::Longhand(longhand)
             })
         };
-        // The `Transitions` origin outranks author `!important`, so only a
-        // property animations alone drive can be held still by one.
         let (animated_opacity, animated_transform) = (opacity, transform);
         opacity |= transitioned(LonghandId::Opacity);
         transform |= transitioned(LonghandId::Transform);
         if !opacity && !transform {
             return None;
         }
-        // A transition contributes from its creation to its end.
         steady[0] |= transitioned(LonghandId::Opacity);
         steady[1] |= transitioned(LonghandId::Transform);
         if committed
@@ -161,22 +150,13 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// One element's exportable animations, with what the base-value rule
-/// reads per property, `[opacity, transform]`.
 struct Animations {
     entries: Vec<(Animation, Timeline)>,
-    /// Whether an animation with side effects animates the property.
     animated: [bool; 2],
-    /// Whether one contributes to it at the commit instant and offsets.
     committed: [bool; 2],
-    /// Whether one contributes to it at every instant and offset of the
-    /// domain.
     steady: [bool; 2],
 }
 
-/// The non-canceled ones of `id`'s `animations`, in order, each with its
-/// timeline; `None` when one animates a property other than `opacity` or
-/// `transform`, or is pending and not anchored yet.
 fn exported_animations(
     driver: &AnimationDriver,
     key: &AnimationSetKey,
@@ -209,21 +189,13 @@ fn exported_animations(
                 _ => return None,
             }
         }
-        // What the driver's `animates` bits count: a finished animation
-        // with no forwards fill, or one on an inactive timeline, animates
-        // nothing, though it stays in the curve to keep the set's order.
         let current = animation_has_side_effects(animation, || {
             driver.timelines.is_current(id, &animation.name)
         });
         let mut animation = animation.clone();
-        // The driver promotes a pending animation on the first tick at or
-        // past its start, then iterates it. Stylo samples a pending and a
-        // running animation alike before the start, so a running copy
-        // samples what the main thread does at every instant.
         if animation.state == AnimationState::Pending {
             animation.state = AnimationState::Running;
         }
-        // A paused one holds its sample, as the main thread does.
         let timeline = match driver.timelines.binding_of(id, &animation.name) {
             Some(&Binding::Active {
                 source,
@@ -256,9 +228,6 @@ fn exported_animations(
     Some(exported)
 }
 
-/// The pending and running ones of `transitions`, in order; `None` when one
-/// animates a property other than `opacity` or `transform`, or is pending and
-/// not anchored yet.
 fn exported_transitions(
     driver: &AnimationDriver,
     key: &AnimationSetKey,
@@ -286,7 +255,6 @@ fn exported_transitions(
     Some(exported)
 }
 
-/// The timeline second `transition` ends at, where the cascade drops it.
 fn transition_end(transition: &Transition) -> f64 {
     transition.start_time + transition.property_animation.duration
 }

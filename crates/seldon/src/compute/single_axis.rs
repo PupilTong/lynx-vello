@@ -6,7 +6,6 @@ use crate::tree::{
     AvailableSpace, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
-/// Physical main/cross mapping derived by each algorithm frontend.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FlowAxes<Base = ()> {
     pub(super) main: Axis,
@@ -61,8 +60,6 @@ pub(super) fn flow_to_physical(
     }
 }
 
-/// Builds and performs one child measurement without changing the algorithm's
-/// requested axis, sizing mode, or definiteness contract.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn measure_child<T: LayoutTree>(

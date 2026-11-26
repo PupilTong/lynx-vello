@@ -26,15 +26,9 @@ pub enum SectionLabel {
     CustomSections = 4,
     ElementTemplates = 5,
     Configurations = 6,
-    /// The custom sections the compiler tagged `encoding: 'CSS'`, as an rkyv
-    /// [`StyleInfoMap`] keyed by section name (lynx-stack#4138,
-    /// `TemplateSectionLabel.CustomSectionsStyleInfo` in web-core's
-    /// `ts/constants.ts`). The encoder writes it only when such a section
-    /// exists, and those sections are then absent from `CustomSections`.
     CustomSectionsStyleInfo = 7,
 }
 
-/// A decoded web binary template.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct WebTemplate {
@@ -44,9 +38,6 @@ pub struct WebTemplate {
     pub manifest: BTreeMap<String, String>,
     pub custom_sections: Option<serde_json::Value>,
     pub style_info: Option<StyleInfo>,
-    /// The `CustomSectionsStyleInfo` section: one [`StyleInfo`] per named
-    /// CSS custom section, empty when the section is absent. The native
-    /// decoder fills it from a `.lynx.bundle`'s CSS custom sections.
     pub custom_sections_style_info: BTreeMap<String, StyleInfo>,
     pub element_templates: Option<Vec<u8>>,
 }
@@ -93,16 +84,6 @@ pub fn decode(bytes: &[u8]) -> Result<WebTemplate, DecodeError> {
     })
 }
 
-/// A web container's sections, borrowed from its bytes wherever they can be:
-/// a registration copies a body once, into the text it registers, and lowers
-/// a `StyleInfo` from where it lies.
-///
-/// `C` is what the `Configurations` object is read as: the whole object for
-/// [`decode`], only the [`PageConfig`] a registration needs.
-///
-/// Decoding one validates exactly what [`decode`] validates, in the same
-/// order, except the two rkyv sections, which are left to whoever reads them
-/// — the full decode checks them right after, `StyleInfo` first.
 #[derive(Debug)]
 #[expect(
     clippy::struct_field_names,
@@ -119,9 +100,7 @@ pub(crate) struct Sections<'a, C> {
     pub(crate) element_templates: Option<&'a [u8]>,
 }
 
-/// What a `Configurations` object is read as.
 pub(crate) trait ReadConfig: Sized {
-    /// `Ok(None)` for JSON that is no object.
     fn read(text: &str) -> Result<Option<Self>, serde_json::Error>;
 }
 
@@ -212,29 +191,18 @@ impl<'a, C: ReadConfig> Sections<'a, C> {
 }
 
 impl Sections<'_, PageConfig> {
-    /// The page flags the `Configurations` section sets, every one off when
-    /// it is absent.
     pub(crate) fn page_config(&self) -> PageConfig {
         self.config.unwrap_or_else(config::all_off)
     }
 }
 
-/// What a view starts from, read from a web container without decoding its
-/// sections: the page flags, and which of the sections a page's view names
-/// it carries.
 #[derive(Debug)]
 pub(crate) struct Scan {
     pub(crate) config: PageConfig,
-    /// Whether the (last) `LepusCode` section names a `root` chunk.
     pub(crate) has_root: bool,
     pub(crate) has_style_info: bool,
 }
 
-/// Reads the container header, every section's label and length and the
-/// `Configurations` section, and the `LepusCode` section's keys only. It
-/// fails as [`decode`] fails on the header, an unknown or truncated section,
-/// and the `Configurations` section; anything inside another section is
-/// left to the decode.
 pub(crate) fn scan(bytes: &[u8]) -> Result<Scan, DecodeError> {
     let mut reader = Reader::new(bytes);
     let magic0 = reader.read_u32()?;

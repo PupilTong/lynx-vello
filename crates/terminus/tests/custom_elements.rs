@@ -32,7 +32,6 @@ fn take(log: &Log) -> Vec<String> {
 type Action = Box<dyn Fn(&mut Document<()>, NodeId) + Send + Sync>;
 type ReadAction = Box<dyn Fn(&Document<()>, NodeId) + Send + Sync>;
 
-/// Records lifecycle reactions and optional callback mutations.
 struct Probe {
     tag: &'static str,
     log: Log,
@@ -41,8 +40,6 @@ struct Probe {
     on_connected: Option<Action>,
     on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
-    /// Whether [`CustomElement::freed`] is logged, which only the tests about
-    /// it ask for.
     records_freed: bool,
 }
 
@@ -373,9 +370,6 @@ fn class_id_and_style_fire_like_any_other_attribute() {
     );
 }
 
-/// The property and record setters report the `style` text before the write
-/// as the old value and the block's serialization after it as the new one,
-/// and a write that changes nothing reports nothing.
 #[test]
 fn style_property_and_record_writes_report_the_text_before_and_after() {
     let log = log();
@@ -575,10 +569,6 @@ fn drop_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
     );
 }
 
-/// `freed` is the definition's last word on an id: once per defined element
-/// the free takes, a host and the defined element in its shadow tree alike,
-/// after the disconnect; never for a removal that keeps the node, nor for a
-/// child `drop_element` leaves allocated.
 #[test]
 fn freed_fires_once_per_defined_element_the_free_takes() {
     let log = log();
@@ -616,8 +606,6 @@ fn freed_fires_once_per_defined_element_the_free_takes() {
     assert_eq!(freed, expected);
     assert!(doc.dom.get(host).is_none() && doc.dom.get(inside).is_none());
 
-    // `drop_element` frees the host and its shadow tree; its light child
-    // survives, unlinked, and is not told.
     let host = doc.el(root, "x-host");
     let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
     let inside = doc.el(shadow, "x-item");
@@ -1193,18 +1181,10 @@ fn a_document_with_no_definitions_behaves_exactly_as_before() {
     assert!(doc.matches(child, ":defined"));
 }
 
-// ---------------------------------------------------------------------------
-// `slotchange` (DOM §4.2.2.5), heard by the host through its shadow root
-// ---------------------------------------------------------------------------
-
-/// A component whose constructor builds a shadow tree of `slots` — `""` for
-/// the default slot, otherwise a named one — and that records every event it
-/// hears as `who:kind:phase:slot:assigned-count`.
 struct SlotHost {
     who: &'static str,
     log: Log,
     slots: &'static [&'static str],
-    /// A component built inside this one's shadow tree, with one light child.
     inner: Option<&'static str>,
 }
 
@@ -1266,7 +1246,6 @@ fn slot_host(who: &'static str, log: &Log, slots: &'static [&'static str]) -> Sl
     }
 }
 
-/// Both passes of one `slotchange` at `slot`, as the host hears them.
 fn slotchange(who: &str, slot: &str, count: usize) -> Vec<String> {
     vec![
         format!("{who}:slotchange:capture:{slot}:{count}"),
@@ -1446,13 +1425,6 @@ fn slotchange_does_not_leave_a_nested_components_shadow_tree() {
     assert_eq!(take(&log), slotchange("outer", "default", 1));
 }
 
-// ---------------------------------------------------------------------------
-// A tap the host fires, heard by the component whose shadow tree it hit
-// ---------------------------------------------------------------------------
-
-/// A component whose constructor builds `<frame><a/><slot/></frame>` in its
-/// shadow tree, with an `inner` component after the slot when one is named,
-/// and that records every tap it hears as `who:phase:target-tag:x,y`.
 struct TapHost {
     who: &'static str,
     log: Log,
@@ -1503,7 +1475,6 @@ impl CustomElement<()> for TapHost {
     }
 }
 
-/// The one shadow-tree child of `host`'s `<frame>` with tag `tag`.
 fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
     let shadow = doc
         .dom
@@ -1520,8 +1491,6 @@ fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
         .expect("the constructor built it")
 }
 
-/// The non-composed `tap` a host fires at the node a tap hit, with the
-/// pointer detail its gesture recognizer gives one.
 fn tap(doc: &mut Doc, target: NodeId) {
     let detail = EventDetail::Pointer {
         position: terminus::link::Point2D::new(3.0, 4.5),
@@ -1557,11 +1526,6 @@ fn a_non_composed_tap_inside_a_shadow_tree_reaches_the_host_with_the_inner_targe
         "the shadow root's step, in both passes, with the node the tap hit as the target"
     );
 
-    // A light child is in the document's tree, so `composed: false` ends
-    // nothing short of the document: the host is an ancestor on the path and
-    // hears the tap as itself, the light child as the target. Keeping a host
-    // from hearing taps at content it merely displays is the firing side's
-    // choice of target (`bobcat-core` fires at shadow content alone).
     let slotted = doc.el(host, "view");
     tap(&mut doc, slotted);
     assert_eq!(
@@ -1621,8 +1585,6 @@ fn a_tap_inside_a_nested_components_shadow_tree_stays_there() {
     );
 }
 
-/// A `slotchange` handler that mutates: what it signals fires after the
-/// set being fired, not inside its own call.
 #[test]
 fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
     struct Mover {
@@ -1696,18 +1658,10 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Element methods: `CustomElement::invoke` through
-// `Document::invoke_element_method`
-// ---------------------------------------------------------------------------
-
-/// A definition that overrides no method.
 struct Silent;
 
 impl CustomElement<()> for Silent {}
 
-/// A definition with one method per outcome, each recording the call, and
-/// `mark`, which sets an attribute it observes inside the method.
 struct Methods {
     log: Log,
 }

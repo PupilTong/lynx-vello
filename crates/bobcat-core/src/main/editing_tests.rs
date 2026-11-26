@@ -19,20 +19,14 @@ use crate::EngineEvent;
 use crate::editing::TextInputSource;
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
-/// Solid em squares: at 20px every character is a 20px-wide box.
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// The editing host.
 const HOST: u64 = 3;
 
 fn node_id(bits: u64) -> terminus::link::NodeId {
     terminus::link::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
-/// One host 200×40 at the page's origin, listening for `names` with a
-/// listener that logs `type:inputType:data:isComposing:relatedTarget` —
-/// each member only when the event carries it — and running `extra` (which
-/// sees `event`) first.
 fn page(names: &[&str], extra: &str) -> String {
     let names = names
         .iter()
@@ -80,7 +74,6 @@ fn log_of(engine: &mut TestEngine) -> Option<String> {
         .flatten()
 }
 
-/// Polls until the host's `log` equals `expected` exactly.
 fn wait_for_log(engine: &mut TestEngine, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -96,8 +89,6 @@ fn wait_for_log(engine: &mut TestEngine, expected: &str) {
     }
 }
 
-/// Every [`TextInputState`] the view has published, in order, as a host
-/// sees them through `pump`.
 #[derive(Default)]
 struct States(Vec<TextInputState>);
 
@@ -110,8 +101,6 @@ impl States {
         }
     }
 
-    /// Pumps until the newest published state satisfies `until`, and
-    /// answers it.
     fn wait(
         &mut self,
         engine: &mut TestEngine,
@@ -142,15 +131,11 @@ fn mouse(phase: PointerPhase, x: f32, y: f32) -> InputEvent {
     InputEvent::pointer(Point2D::new(x, y), 1, PointerKind::Mouse, phase)
 }
 
-/// A `keydown` of `text`, which the key typed and the platform reports with
-/// it.
 fn key(text: &str) -> InputEvent {
     InputEvent::key(KeyPhase::Down, text, "", false, Modifiers::default())
         .with_text(Some(text.into()))
 }
 
-/// Taps the host with a finger, which focuses it on the tap (the `click`),
-/// and waits for the state that says so.
 fn focus_host(engine: &mut TestEngine, states: &mut States) {
     engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
     engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
@@ -159,8 +144,6 @@ fn focus_host(engine: &mut TestEngine, states: &mut States) {
     });
 }
 
-/// A host's insertion dispatches `beforeinput` then `input`, with
-/// `InputEvent`'s members, at the focused host, and the value follows.
 #[test]
 fn an_edit_from_the_host_fires_beforeinput_then_input_and_changes_the_value() {
     let mut engine = booted(&["beforeinput", "input"], "");
@@ -180,15 +163,9 @@ fn an_edit_from_the_host_fires_beforeinput_then_input_and_changes_the_value() {
     assert_eq!(state.composition, None);
 }
 
-/// What a listener runs first to show the event carries no cancellation
-/// member: a listener that throws logs nothing, so the expected log is
-/// never reached.
 const NO_CANCELLATION: &str = "if ('preventDefault' in event || 'cancelable' in event \
      || 'defaultPrevented' in event) throw new Error('a cancellation member');";
 
-/// A `beforeinput` listener cannot stop the edit: the event has no
-/// `preventDefault` (`docs/tracking/deviations.md`), the value changes and
-/// `input` follows.
 #[test]
 fn a_beforeinput_listener_cannot_stop_the_edit() {
     let mut engine = booted(&["beforeinput", "input"], NO_CANCELLATION);
@@ -203,9 +180,6 @@ fn a_beforeinput_listener_cannot_stop_the_edit() {
     states.wait(&mut engine, "with the value x", |state| state.value == "x");
 }
 
-/// An input method's composition and commit fire the composition events
-/// with their `data`, and `beforeinput`/`input` of `insertCompositionText`
-/// with `isComposing`.
 #[test]
 fn a_composition_fires_the_composition_events() {
     let mut engine = booted(
@@ -253,9 +227,6 @@ fn a_composition_fires_the_composition_events() {
     assert_eq!(committed.selection, 1..1);
 }
 
-/// The state reaches the host after an edit, and only when it changed: no
-/// two published states are equal, and a command that changes nothing
-/// publishes nothing.
 #[test]
 fn the_text_input_state_is_published_when_it_changes_and_only_then() {
     let mut engine = booted(&[], "");
@@ -273,10 +244,6 @@ fn the_text_input_state_is_published_when_it_changes_and_only_then() {
         "the host's border box"
     );
 
-    // The caret is already at 2, so this changes nothing. Two probes after
-    // it: the second is a burst of its own, queued after the epilogue of
-    // the burst the command was in, so whatever that epilogue published is
-    // in the notice queue once it answers.
     engine
         .view
         .edit(Command::SetSelection { range: 2..2 })
@@ -305,8 +272,6 @@ fn the_text_input_state_is_published_when_it_changes_and_only_then() {
     }
 }
 
-/// A key goes to the focused host, and a `keydown` inserts the text it
-/// typed whatever its listener does: the event has no `preventDefault`.
 #[test]
 fn a_keydown_types_into_the_focused_host_whatever_its_listener_does() {
     let mut engine = booted(&["keydown"], NO_CANCELLATION);
@@ -323,10 +288,6 @@ fn a_keydown_types_into_the_focused_host_whatever_its_listener_does() {
     assert_eq!(target, Some(node_id(HOST)));
 }
 
-/// A key the platform reports without its text — its input method delivers
-/// the text instead, as macOS's `insertText:` and a browser's `beforeinput`
-/// do — types nothing by its `keydown`; the host's commit of that text is
-/// the one insertion.
 #[test]
 fn a_keydown_without_text_types_nothing_and_the_commit_inserts_once() {
     let mut engine = booted(&["keydown"], "");
@@ -360,11 +321,6 @@ fn a_keydown_without_text_types_nothing_and_the_commit_inserts_once() {
     );
 }
 
-/// A host that sets [`TextInputSource::Commands`] — the browser host, whose
-/// `<textarea>` proxy reports every insertion and deletion as a
-/// `beforeinput` it forwards as a command — gets only movement and
-/// select-all from a `keydown`: a key's text types nothing, and a Backspace
-/// sent both as a key and as the proxy's command deletes once.
 #[test]
 fn a_host_that_sends_commands_deletes_once_and_keys_only_move() {
     let mut engine = booted(&["keydown"], "");
@@ -396,7 +352,6 @@ fn a_host_that_sends_commands_deletes_once_and_keys_only_move() {
     let moved = states.wait(&mut engine, "with the caret moved left", |state| {
         state.selection == (1..1)
     });
-    // Keys that deleted and typed would have left "ax".
     assert_eq!(moved.value, "ab");
     assert!(
         states
@@ -408,12 +363,6 @@ fn a_host_that_sends_commands_deletes_once_and_keys_only_move() {
     );
 }
 
-/// A finger's tap on a host nobody listens to the pointer events of
-/// focuses it (`focus` then `focusin`, with no `relatedTarget`); keys typed
-/// with no `keydown` listener reach it; a mouse press places the caret at
-/// the character pressed, a mouse drag extends the selection, and a quick
-/// second press selects the word. Ahem makes every character a 20px box, so
-/// offsets are exact.
 #[test]
 fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     let mut engine = TestViewSpec::new(&page(&["focus", "focusin"], ""))
@@ -435,30 +384,22 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     states.wait(&mut engine, "with the value abcde", |state| {
         state.value == "abcde"
     });
-    // The face is a load of its own: the text is Ahem's once the caret
-    // after it is five 20px squares in. The host is a `view`, so its text is
-    // laid out by the anonymous block box around it, which the published
-    // state measures through.
     let state = states.wait(&mut engine, "with Ahem's 100px", |state| {
         (state.caret.min_x() - state.editable_bounds.min_x() - 100.0).abs() < f32::EPSILON
     });
     let origin = state.editable_bounds.origin;
 
-    // Inside `c`'s left half: the caret goes before it.
     engine.painter.clock_mut().pin(10.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     states.wait(&mut engine, "with the caret at 2", |state| {
         state.selection == (2..2)
     });
-    // Dragged with the button held into `e`'s left half: the selection
-    // runs from the press to there.
     engine.dispatch_input(mouse(PointerPhase::Move, origin.x + 85.0, origin.y + 10.0));
     states.wait(&mut engine, "selecting cd", |state| {
         state.selection == (2..4)
     });
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 85.0, origin.y + 10.0));
 
-    // Two quick presses: the second selects the word.
     engine.painter.clock_mut().pin(20.0);
     engine.dispatch_input(mouse(PointerPhase::Down, origin.x + 45.0, origin.y + 10.0));
     engine.dispatch_input(mouse(PointerPhase::Up, origin.x + 45.0, origin.y + 10.0));
@@ -475,10 +416,6 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     );
 }
 
-/// A finger that starts a scroll on a host does not focus it: touch focuses
-/// on the tap, and a drag the scroller consumed is no tap. A tap afterwards
-/// does. The host (node 4) is the first child of a 200px column scroller
-/// (node 3) and twice its height.
 #[test]
 fn a_touch_drag_that_scrolls_does_not_focus_the_host_and_a_tap_does() {
     let mut engine = TestViewSpec::new(
@@ -514,12 +451,6 @@ fn a_touch_drag_that_scrolls_does_not_focus_the_host_and_a_tap_does() {
     assert_eq!(focused(&mut engine), Some(node_id(4)), "the tap focused it");
 }
 
-// --- `selectionchange` ---------------------------------------------------------
-
-/// A `<text contenteditable>` (node 3) logging, to its `log` attribute, the
-/// W3C `selectionchange` at the document (`document`, through the handle of
-/// the document node, id 1) and its own Lynx `selectionchange` with web-core's
-/// detail (`text:start:end:direction`).
 const SELECTION_PAGE: &str = r"
     import { __BobcatHandleOf } from 'bobcat:element';
     globalThis.renderPage = function () {
@@ -541,7 +472,6 @@ const SELECTION_PAGE: &str = r"
     };
 ";
 
-/// A key with Shift held and no text: an arrow that extends the selection.
 fn shift_key(key: &str) -> InputEvent {
     InputEvent::key(
         KeyPhase::Down,
@@ -555,14 +485,6 @@ fn shift_key(key: &str) -> InputEvent {
     )
 }
 
-/// Every change of the document's selection fires the W3C
-/// `selectionchange` at the document — focusing the host, typing, placing
-/// the caret, each Shift+arrow, the blur of a tap outside it — and the
-/// `<text>` hears its Lynx `selectionchange` right after it, in the same
-/// entry, whenever its record changed: a range in its text, forward or
-/// backward, and the empty record `-1:-1:forward` once its selection is gone.
-/// A collapsed caret is the empty record, which is not sent before a range
-/// was.
 #[test]
 fn selection_changes_fire_at_the_document_then_at_the_text() {
     let mut engine = TestViewSpec::new(SELECTION_PAGE).boot();
@@ -571,8 +493,6 @@ fn selection_changes_fire_at_the_document_then_at_the_text() {
 
     focus_host(&mut engine, &mut states);
     wait_for_log(&mut engine, &expected.join("|"));
-    // The host's text is typed: a `raw-text` carrier is no text node, and an
-    // editing host's value is its text nodes.
     engine
         .view
         .edit(Command::Insert("abcdef".to_owned()))
@@ -603,13 +523,6 @@ fn selection_changes_fire_at_the_document_then_at_the_text() {
     states.wait(&mut engine, "blurred", |state| state.host.is_none());
 }
 
-// --- read-only text selection ---------------------------------------------------
-
-/// A `<text>` (node 3) 240×40 at the page's origin in 20px Ahem holding the
-/// `raw-text` run `abcdef ghij`, with `attributes`, logging the W3C
-/// `selectionchange` at the document and its own Lynx `selectionchange` as
-/// [`SELECTION_PAGE`] does. Every character is a 20px box on one 20px line,
-/// 220px in all.
 fn selectable_page(attributes: &str) -> TestEngine {
     let source = format!(
         r"
@@ -637,8 +550,6 @@ fn selectable_page(attributes: &str) -> TestEngine {
     let mut engine = TestViewSpec::new(&source)
         .with_default_font("Ahem", AHEM)
         .boot();
-    // The face is a load of its own: the text is Ahem's once its eleven
-    // characters measure 220px.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let width = engine
@@ -655,12 +566,10 @@ fn selectable_page(attributes: &str) -> TestEngine {
     }
 }
 
-/// The `text-selection` page.
 fn selectable_text() -> TestEngine {
     selectable_page("__SetAttribute(text, 'text-selection', 'true');")
 }
 
-/// The document's selection, as host, anchor and focus.
 fn selection_of(engine: &mut TestEngine) -> Option<(terminus::link::NodeId, u32, u32)> {
     engine
         .probe_document(|tree| {
@@ -670,20 +579,14 @@ fn selection_of(engine: &mut TestEngine) -> Option<(terminus::link::NodeId, u32,
         .flatten()
 }
 
-/// A mouse press in a `text-selection` text selects without focusing: the
-/// press places a caret (the W3C event alone, the Lynx record of a caret
-/// being empty), a drag with the button held extends the selection, and a
-/// press outside the text clears it.
 #[test]
 fn a_mouse_press_and_drag_select_a_selectable_text() {
     let mut engine = selectable_text();
     let mut expected = vec!["document"];
 
     engine.painter.clock_mut().pin(10.0);
-    // Inside `a`: the caret before it.
     engine.dispatch_input(mouse(PointerPhase::Down, 10.0, 10.0));
     wait_for_log(&mut engine, &expected.join("|"));
-    // Into `d`'s left half: the selection runs to before it.
     engine.dispatch_input(mouse(PointerPhase::Move, 65.0, 10.0));
     expected.extend(["document", "text:0:3:forward"]);
     wait_for_log(&mut engine, &expected.join("|"));
@@ -703,8 +606,6 @@ fn a_mouse_press_and_drag_select_a_selectable_text() {
     assert_eq!(selection_of(&mut engine), None);
 }
 
-/// A second quick mouse press on a selectable text selects the word under
-/// it.
 #[test]
 fn two_quick_presses_select_the_word_of_a_selectable_text() {
     let mut engine = selectable_text();
@@ -718,8 +619,6 @@ fn two_quick_presses_select_the_word_of_a_selectable_text() {
     wait_for_log(&mut engine, "document|document|text:0:6:forward");
 }
 
-/// A `<text>` without `text-selection` is not selected by a press or a tap,
-/// and its Lynx `selectionchange` never fires.
 #[test]
 fn a_text_without_text_selection_is_not_selected() {
     let mut engine = selectable_page("");
@@ -740,13 +639,6 @@ fn a_text_without_text_selection_is_not_selected() {
     assert_eq!(log_of(&mut engine), None, "no selectionchange fired");
 }
 
-// --- `x-input` and `x-textarea` (E5) -----------------------------------------
-
-/// The text field (node 3), 200×40 with 10px padding in 20px Ahem, with
-/// `attributes`, and listeners for the Lynx events and the standard
-/// `beforeinput`, each logging `type:detail` — the detail as JSON — to the
-/// field's `log` attribute. `on_confirm` runs in the `confirm` listener
-/// with `field` and `note` in scope, after the confirm is logged.
 fn field_page(tag: &str, attributes: &[(&str, &str)], on_confirm: &str) -> String {
     let mut set = String::new();
     for (name, value) in attributes {
@@ -798,11 +690,6 @@ fn enter() -> InputEvent {
     .with_text(Some("\r".into()))
 }
 
-/// A tap in the field's padding focuses its editor; keys type into it and
-/// fire web-core's `input`, never the standard `beforeinput` (which stays in
-/// the shadow tree); `maxlength` refuses the fourth character; Enter fires
-/// `confirm`, whose listener reads `getValue` and blurs the field, which
-/// fires `blur`.
 #[test]
 fn an_x_input_types_confirms_and_reports_in_web_core_s_shape() {
     let mut engine = field_engine(
@@ -856,9 +743,6 @@ fn an_x_input_types_confirms_and_reports_in_web_core_s_shape() {
     assert_eq!(blurred, TextInputState::default());
 }
 
-/// A host's input-method commands reach the field's editor: a composition
-/// fires one `input` at its end, and `setValue`/`setSelectionRange` from a
-/// listener move the value and the selection with no `input`.
 #[test]
 fn an_x_textarea_reports_a_composition_once_and_takes_script_writes() {
     let mut engine = field_engine(
@@ -904,8 +788,6 @@ fn an_x_textarea_reports_a_composition_once_and_takes_script_writes() {
     assert_eq!(state.selection, 1..3);
 }
 
-/// A `readonly` field cannot be focused: a tap focuses nothing and keys
-/// type nothing.
 #[test]
 fn a_readonly_x_input_is_not_focused_by_a_tap() {
     let mut engine = field_engine("x-input", &[("readonly", ""), ("value", "fixed")], "");
@@ -930,9 +812,6 @@ fn a_readonly_x_input_is_not_focused_by_a_tap() {
     assert_eq!(log_of(&mut engine), None, "no event fired");
 }
 
-/// The `-ng` aliases are the same fields, and an `x-textarea-ng` keeps its
-/// value within `maxlines` through the runtime: Enter on the second line is
-/// taken back and fires no `input`.
 #[test]
 fn the_ng_aliases_are_fields() {
     let mut engine = field_engine("x-textarea-ng", &[("maxlines", "2")], "");
@@ -970,12 +849,6 @@ fn the_ng_aliases_are_fields() {
     );
 }
 
-/// The Lynx tags `input` and `textarea` create an `x-input` and an
-/// `x-textarea` (`tree::tag_map`, user ruling 2026-11-26): the element has
-/// the field's shadow root, a tap focuses its editor, a typed key reaches
-/// it and fires `input`, and `__GetTag` of the element, read in the
-/// `confirm` listener, answers the Lynx tag. The textarea confirms on Enter
-/// with `confirm-enter`, after the Enter's `input`.
 #[test]
 fn the_lynx_tags_input_and_textarea_are_the_fields() {
     let input = |value: &str, at: u32| {
@@ -1028,9 +901,6 @@ fn the_lynx_tags_input_and_textarea_are_the_fields() {
     }
 }
 
-/// An empty, focused `x-input` paints its caret: the editor's paragraph has
-/// one empty line even with no value, and the caret stands on it, one line
-/// tall at the content box's origin, in the field's text colour.
 #[test]
 fn an_empty_focused_x_input_paints_its_caret() {
     const SOURCE: &str = r"
@@ -1054,7 +924,6 @@ fn an_empty_focused_x_input_paints_its_caret() {
     let state = states.wait(&mut engine, "focusing the editor", |state| {
         state.host.is_some()
     });
-    // The editor is centred in the 40px field: a 10px line from y = 15.
     assert_eq!(
         state.caret,
         terminus::link::Rect::new(
@@ -1078,7 +947,6 @@ fn an_empty_focused_x_input_paints_its_caret() {
         let shot = engine.capture().expect("capture the committed page");
         assert_eq!(shot.size.width, 200);
         if pixel(&shot, 0, 20) == [0, 0, 0, 255] {
-            // The caret alone: one column, one line.
             assert_eq!(pixel(&shot, 0, 14), [255, 255, 255, 255], "above the line");
             assert_eq!(pixel(&shot, 0, 25), [255, 255, 255, 255], "below the line");
             assert_eq!(

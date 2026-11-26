@@ -11,8 +11,6 @@ use terminus::link::{CustomElement, Document, MethodCall, MethodOutcome, NodeId}
 
 const SVG_NS: &str = "@namespace svg url(http://www.w3.org/2000/svg);";
 
-/// A definition whose one method answers `Done`, so a test can tell an
-/// element that took it from one that did not.
 struct Plain;
 
 impl CustomElement<()> for Plain {
@@ -45,9 +43,6 @@ fn svg_root(doc: &mut Doc) -> NodeId {
     doc.dom.append_child(doc.root, svg);
     svg
 }
-
-// ---------------------------------------------------------------------------
-// Namespace
 
 #[test]
 fn create_element_makes_only_svg_an_svg_element() {
@@ -100,8 +95,6 @@ fn defining_svg_panics() {
 #[test]
 fn an_svg_text_takes_no_definition_for_text() {
     let mut doc = Doc::new();
-    // An SVG `text` made before the definition does not count as an
-    // element the definition missed.
     let early = doc.dom.create_svg_element("text", ());
     doc.dom.define("text", Box::new(Plain));
     let svg = svg_root(&mut doc);
@@ -112,9 +105,6 @@ fn an_svg_text_takes_no_definition_for_text() {
     assert!(!took_definition(&mut doc, late));
     assert!(took_definition(&mut doc, html_text));
 }
-
-// ---------------------------------------------------------------------------
-// Presentation attributes
 
 #[test]
 fn presentation_attributes_sit_between_ua_and_author_rules() {
@@ -181,7 +171,6 @@ fn paint_attributes_compute_to_their_variants() {
     doc.dom.set_attribute(server, "fill", "url(#g) red");
     doc.dom.set_attribute(server, "clip-path", "url(#c)");
     doc.flush();
-    // The serialization resolves `currentcolor` against `color`.
     assert_eq!(doc.value(current, "fill"), "rgb(9, 9, 9)");
     assert_eq!(
         doc.value(server, "fill"),
@@ -262,7 +251,6 @@ fn transform_attribute_computes_to_its_matrix() {
     doc.dom
         .set_attribute(g, "transform", "translate(10 20) rotate(45 5 5)");
     doc.flush();
-    // translate(10 20) · translate(5 5) · rotate(45°) · translate(-5 -5).
     let (sin, cos) = 45f64.to_radians().sin_cos();
     let e = 10.0 + 5.0 - 5.0 * cos + 5.0 * sin;
     let f = 20.0 + 5.0 - 5.0 * sin - 5.0 * cos;
@@ -319,9 +307,6 @@ fn fill_inherits_into_a_child_and_opacity_does_not() {
     assert_eq!(doc.value(path, "opacity"), "1");
 }
 
-// ---------------------------------------------------------------------------
-// The `svg` element's box
-
 const PAGE: &str = "page { display: flex; align-items: flex-start; width: 400px; height: 300px; }";
 
 fn size(doc: &Doc, id: NodeId) -> (f32, f32) {
@@ -377,9 +362,6 @@ fn percentage_width_fills_the_container() {
     assert_eq!(size(&doc, svg), (400.0, 150.0));
 }
 
-// ---------------------------------------------------------------------------
-// The SVG user-agent sheet
-
 #[test]
 fn ua_sheet_sets_transform_origin_on_svg_content() {
     let mut doc = Doc::new();
@@ -405,8 +387,6 @@ fn ua_sheet_sets_transform_origin_on_svg_content() {
     );
 }
 
-/// Absolute units parse in a presentation attribute, the one place the
-/// `lynx` grammar takes them; the `style` attribute keeps refusing them.
 #[test]
 fn absolute_units_are_lengths_in_presentation_attributes_only() {
     let mut doc = Doc::new();

@@ -31,11 +31,6 @@ use terminus::link::{FontBlob, FontFaceRequest, FontFaceSource, NodeId, Vector2D
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
-/// The four registered integer properties the Lynx UA sheet declares — two for
-/// the truncation attributes, one for `tail-color-convert`, one flagging a
-/// truncation marker (`crates/bobcat-core/src/main/tree/text.rs:121-124`).
-/// Without the `@property` registration a custom property is an untyped token
-/// stream and the layout never sees a limit at all.
 const LIMIT_PROPERTIES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
@@ -43,7 +38,6 @@ const LIMIT_PROPERTIES: &str = r#"
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
 "#;
 
-/// The paragraph ink `holder` establishes, as `(width, height)`.
 fn ink(doc: &Doc, holder: NodeId) -> (f32, f32) {
     let size = doc
         .dom
@@ -52,7 +46,6 @@ fn ink(doc: &Doc, holder: NodeId) -> (f32, f32) {
     (size.width, size.height)
 }
 
-/// A node's border box as `(x, y, width, height)`.
 fn rect(doc: &Doc, id: NodeId) -> (f32, f32, f32, f32) {
     let layout = doc.dom.rounded_layout(id).expect("node id is live");
     (
@@ -63,13 +56,11 @@ fn rect(doc: &Doc, id: NodeId) -> (f32, f32, f32, f32) {
     )
 }
 
-/// One RGBA pixel out of a readback buffer.
 fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let index = ((y * width + x) * 4) as usize;
     pixels[index..index + 4].try_into().unwrap()
 }
 
-/// Lays the document out, renders it, and reads the framebuffer back.
 fn readback(test: &str, doc: &mut Doc, width: u32, height: u32) -> Vec<u8> {
     let mut gpu = headless(test);
     doc.dom.layout();
@@ -95,38 +86,6 @@ fn is_blue(color: [u8; 4]) -> bool {
     color[2] > 200 && color[0] < 60 && color[1] < 60
 }
 
-/// Replicates `x-text/text-not-resize-detect-new-line`
-/// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-not-resize-detect-new-line.
-/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:378`): moving
-/// a clamped paragraph must not re-run line detection, while a change to the
-/// line limit alone must.
-///
-/// The web implementation observes its inner box with a `ResizeObserver` and
-/// skips exactly one first callback, so that `left: 200px` — which changes the
-/// element's origin and nothing about its content box — cannot be mistaken for
-/// a resize that re-drives truncation. Here relayout is keyed on the inline
-/// available size and the content instead of on an observer, so the equivalent
-/// claim is that the paragraph the move produces is identical to the one
-/// before it, and only the `text-maxline` 3 -> 2 edit in the same task changes
-/// the line set.
-///
-/// This is the frame-level half of the replica, and on its own it cannot fail
-/// on the property it is named for: re-breaking is idempotent here, so the ink
-/// below is the same number whether or not the move re-shaped and re-broke the
-/// paragraph. What it does pin is the fixture's own final frame — a two-line
-/// clamp at an origin 200px to the right — and the third stage, where a limit
-/// edit alone must change the line set.
-///
-/// The claim itself is asserted where the counters live:
-/// `moving_a_clamped_paragraph_does_not_reshape_or_rebreak_it` in
-/// `crates/terminus/src/layout/mod.rs`'s `mod tests` asserts `text_block_rebuilds`
-/// and `break_count` are unchanged across the same move.
-/// `Document::text_block`, `text_block_rebuilds` and `text_block_is_probe_dirty`
-/// are all crate-private (`crates/terminus/src/layout/mod.rs:303`, `:311`, `:319`),
-/// so no integration test can see them.
-///
-/// The line count is therefore read here as ink height over an explicit
-/// `line-height`.
 #[test]
 fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -143,8 +102,6 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
     let root = doc.root;
     let wrap = doc.el(root, "view.wrap");
     let target = doc.el(wrap, "text.target");
-    // Six five-character words: each one fills the 100px line exactly, so the
-    // natural paragraph is six lines and every clamp below is unambiguous.
     let run = doc
         .dom
         .create_text_node("aaaaa bbbbb ccccc ddddd eeeee fffff", ());
@@ -154,7 +111,6 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
     assert_eq!(ink(&doc, target), (100.0, 60.0), "clamped to three lines");
     assert_eq!(rect(&doc, target), (0.0, 0.0, 100.0, 60.0));
 
-    // The move. Same content box, same available inline size, new origin.
     doc.set_inline(target, "position: relative; left: 200px");
     doc.flush();
     assert_eq!(
@@ -168,7 +124,6 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
         "the block moved and kept its size",
     );
 
-    // The limit edit that rides the same task in the fixture.
     doc.set_inline(
         target,
         "position: relative; left: 200px; --lynx-text-maxline: 2",
@@ -182,26 +137,6 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
     assert_eq!(rect(&doc, target), (200.0, 0.0, 100.0, 40.0));
 }
 
-/// Replicates `x-text/text-maxline-with-custom-truncation-innertext-change`
-/// (`packages/web-platform/web-elements/tests/fixtures/x-text/
-/// text-maxline-with-custom-truncation-innertext-change.html`, `packages/web-platform/web-elements/
-/// tests/web-elements.spec.ts:327`): rewriting a truncated text node's data re-clamps against the
-/// new string, with no trace of the old one.
-///
-/// The web implementation cuts the node's data in place and saves the original
-/// to restore later, so the hazard the fixture exists to catch is a stale
-/// saved string surviving a host mutation. Here truncation is a layout-time
-/// cut recomputed from the source items every pass, so the third stage below —
-/// long, then short, then long again — is what proves the state is not sticky:
-/// the short string must produce a genuinely unclamped one-line paragraph and
-/// the second long string must clamp afresh.
-///
-/// Adaptation: the fixture's `<inline-truncation>` marker content is dropped.
-/// A marker is content only where the UA sheet flagged it, which this replica's
-/// CSS does not do (`collect_block`,
-/// `crates/terminus/src/layout/text_block.rs:142`), and the marker's own claim is
-/// carried by `a_shown_truncation_subtree_is_painted_at_the_clamp`, so this
-/// replica pins the re-clamp and not the marker.
 #[test]
 fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -221,7 +156,6 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     doc.dom.append_child(target, run);
     doc.flush();
 
-    // Thirty characters break-all onto six 100px lines, clamped to two.
     assert_eq!(ink(&doc, target), (100.0, 40.0));
 
     doc.dom.set_text_node_data(run, "bb");
@@ -242,27 +176,6 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     );
 }
 
-/// Replicates `text/tail-color-convert`
-/// (`web-tests/dist/basic-element-text-tail-color-convert/index.web.json`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:2734`) as the colour claim it is.
-///
-/// **Native semantics, not web-core's** — the user's ruling of 2026-09-15.
-/// `tail-color-convert` is a boolean whose default is *false*, and false means
-/// the truncation marker wears the colour of the inline run the cut landed in
-/// (Android `TextRenderer.convertTailColor`, iOS
-/// `LynxTextRenderer.m overrideTruncatedAttrIfNeed`, both of which rewrite the
-/// foreground of an ellipsis span that is already built out of that run).
-/// True hands the marker the establishing element's own colour instead, and
-/// nothing else about it: the dots keep the cut run's font, so no geometry
-/// moves between the two passes below. web-core inverts the default and its
-/// `="false"` selects a different code path entirely; that is deliberately not
-/// replicated.
-///
-/// The paragraph is one black glyph, then a red nested scope. A one-line
-/// clamp at 100px leaves five 20px squares; `text-overflow: ellipsis` backs the
-/// cut off by three units, so the kept prefix is the black square plus one red
-/// one and the last three squares are the marker — painted red by default and
-/// black once the block converts.
 #[test]
 fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
     fn marker_and_prefix(convert: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
@@ -300,8 +213,6 @@ fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
             200,
             100,
         );
-        // One clamped line of five 20px squares: the black lead, one kept red
-        // square, then the three-square marker.
         assert_eq!(ink(&doc, text), (100.0, 20.0));
         (
             pixel(&pixels, 200, 10, 10),
@@ -327,39 +238,6 @@ fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
     );
 }
 
-/// Replicates `x-text/text-maxline-with-custom-truncation`
-/// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-maxline-with-custom-truncation.
-/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:226`)
-/// at the terminus layer: a clamped block that overflows paints its
-/// `inline-truncation` subtree's content at the end of the last visible line,
-/// in place of the units a retreat frees for it, and paints no dots beside it.
-///
-/// This is the *wiring* half, and it is deliberately narrower than the tree
-/// layer's replica of the same fixture
-/// (`a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline`
-/// in `crates/bobcat-core/src/main/tree/web_text_replication.rs`), which also
-/// carries the `inline-truncation { display: none }` default the Lynx UA sheet
-/// lifts only for a `text`'s own child. `crates/terminus` names no Lynx tag, so the
-/// marker here is a nested text scope carrying the registered
-/// `--lynx-inline-truncation` that same sheet flags it with — the one fact the
-/// paragraph walker keys on.
-///
-/// The algorithm underneath it is complete one layer down:
-/// `custom_truncation_content_replaces_the_marker_at_the_clamp` in
-/// `crates/seldon/tests/web_text_replication.rs` passes, and it fixes the
-/// geometry asserted below — the cut retreats until the discarded tail is at
-/// least as wide as the truncation content, but never by fewer than two units
-/// (`removed >= 1 && freed >= needed`, `crates/seldon/src/text/block/truncate.rs:216`,
-/// matching web-core's own `maxLineEndAt = end - 1` plus its fitting loop in
-/// `XTextTruncation.ts`). Five Ahem em squares fill each 100px line and the
-/// content is one square wide, so the minimum governs: two squares are given
-/// up, the last line is three kept squares, the marker takes the fourth, and
-/// the fifth stays empty.
-///
-/// Colour, not ink, is what separates the reference from what happens today: a
-/// clamped line is 100px wide either way, so only the fifth square of the
-/// second line being *red* distinguishes truncation content laid in at the cut
-/// from black content that merely reaches the same place.
 #[test]
 fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -391,7 +269,6 @@ fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
         100,
     );
 
-    // Thirty squares break-all onto six 100px lines, clamped to two.
     assert_eq!(ink(&doc, text), (100.0, 40.0));
 
     let marker_square = pixel(&pixels, 200, 70, 30);
@@ -422,15 +299,6 @@ fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
     );
 }
 
-/// The box half of the same wiring: an atomic inline box written *inside* the
-/// truncation content is laid out and placed like any other atom when the
-/// marker is shown, and reports the Lynx `HideView` outcome when it is not.
-///
-/// Both blocks carry a second `inline-truncation` child as well. web-core
-/// honours only the first (`XTextTruncation.ts` queries
-/// `:scope > inline-truncation`), and a second one that leaked into the
-/// content flow would widen the paragraph, so its absence from every measure
-/// below is the assertion.
 #[test]
 fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
     let mut doc = Doc::with_device(device(400.0, 200.0));
@@ -462,11 +330,6 @@ fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
     let (fitting, unused) = block("HHHHH");
     doc.flush();
 
-    // Six break-all lines clamped to two. The 40px icon needs two of the five
-    // squares on the clamp line, which is also the two-unit minimum, so three
-    // squares are kept and the icon takes the fourth and fifth. The 20px icon
-    // sits on the baseline, 4px higher than the 16px ascent of a 20px line,
-    // so the clamp line's box is 24 (CSS 2.2 §10.8.1).
     assert_eq!(ink(&doc, overflowing), (100.0, 44.0));
     assert_eq!(
         rect(&doc, placed).0,
@@ -491,22 +354,6 @@ fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
     );
 }
 
-/// The `inline-truncation` element itself gets no *box*: it is a text scope,
-/// so it has no paragraph and no layout box of its own, and the slot the
-/// paragraph leaves it is empty whether or not its content is shown.
-///
-/// What paints is its *runs* — through the flattened paragraph, in the
-/// marker's own colour — and, since the 2026-09-16 ruling, its own
-/// `background-color` behind exactly those runs, as the inline box it is. A
-/// background on the marker is therefore the probe for both halves: it must
-/// cover the marker's fragment and nothing else — not the rest of the clamp
-/// line, not the paragraph, which is what an element with a box would have
-/// painted.
-///
-/// The marker's content is a space and an `H`, not a bare `H`: Ahem's glyphs
-/// are solid em squares, so ink covering the whole fragment would hide the
-/// very background this samples. The blank first unit is where the background
-/// is read.
 #[test]
 fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only() {
     fn readback_marker(content: &str) -> Vec<u8> {
@@ -538,8 +385,6 @@ fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only()
     }
 
     let shown = readback_marker(&"H".repeat(30));
-    // Three kept squares, then the marker's two units: a blank one carrying
-    // the background and the marker's own glyph.
     assert!(
         is_red(pixel(&shown, 200, 90, 30)),
         "the marker's own run paints, in the marker's colour",
@@ -572,26 +417,6 @@ fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only()
     );
 }
 
-/// A nested `<text>` scope has no box of its own — the paragraph is flattened
-/// and its slot hidden — so until the 2026-09-16 ruling a `background-color`
-/// on it painted nothing at all. It now paints as css-backgrounds-3 says an
-/// *inline box* does, which is what web-core gets by making a nested
-/// `x-text`/`inline-text` `display: inline`
-/// (`packages/web-platform/web-elements/src/elements/XText/x-text.css:52-67`
-/// adds nothing to that but `background-clip: inherit`): one fragment per
-/// line, spanning that scope's own glyphs horizontally and the font's content
-/// area — ascent over descent — vertically.
-///
-/// Native Lynx fills the *line box* instead (Android `BackgroundColorSpan` /
-/// `LynxTextBackgroundSpan`, iOS `NSBackgroundColorAttributeName`); this
-/// engine follows web-core, and the `line-height: 40px` below is what tells
-/// the two apart — the 10px of half-leading above and below the 20px content
-/// area must stay unpainted.
-///
-/// Every test in this group paints the nested run's ink `transparent`. Ahem's
-/// glyphs are solid em squares that cover the whole content area, which is
-/// exactly the band the background fills, so visible ink would hide the
-/// subject.
 #[test]
 fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
     let mut doc = Doc::with_device(device(300.0, 60.0));
@@ -620,8 +445,6 @@ fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
         60,
     );
 
-    // Nine em squares at 20px: the nested run is the fourth through sixth, so
-    // its fragment is x 60..120.
     for x in [62, 90, 118] {
         assert!(
             is_blue(pixel(&pixels, 300, x, 20)),
@@ -636,8 +459,6 @@ fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
         );
     }
 
-    // The line box is 40px and the content area 20px, so the half-leading is
-    // y 0..10 and y 30..40. A native-style line-box fill would paint it.
     for y in [2, 8, 32, 38] {
         assert!(
             is_white(pixel(&pixels, 300, 90, y)),
@@ -647,9 +468,6 @@ fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
     }
 }
 
-/// `box-decoration-break: slice`, approximated: a nested scope that wraps gets
-/// one fragment per line, each covering only the part of the scope that landed
-/// on that line.
 #[test]
 fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -677,8 +495,6 @@ fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
         100,
     );
 
-    // Five squares per 100px line: AAA and two of the six B squares on the
-    // first, the remaining four on the second.
     assert!(
         is_blue(pixel(&pixels, 200, 62, 10)) && is_blue(pixel(&pixels, 200, 98, 10)),
         "the first fragment covers the part of the scope on the first line",
@@ -701,8 +517,6 @@ fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
     );
 }
 
-/// Paint order within a paragraph's inline backgrounds: outermost scope first,
-/// so a nested scope's background covers the one it sits inside.
 #[test]
 fn an_inner_scope_s_background_covers_its_ancestor_s() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
@@ -747,17 +561,6 @@ fn an_inner_scope_s_background_covers_its_ancestor_s() {
     );
 }
 
-/// A `display: contents` element generates no box, so it has no background
-/// painting area either (css-display-3 3.3) — which matters here because the
-/// compiled `wrapper` carrier between a `<text>` and its nested `<text>` is
-/// exactly that element.
-///
-/// The wrapper holds two backgrounded scopes with a plain run between them, so
-/// a pass that let a `display: contents` ancestor into the chain would betray
-/// itself twice over: its fragment is the union of both scopes' runs, and the
-/// gap between them is the one place neither scope paints. The scopes' own
-/// backgrounds still paint, which is what keeps this from passing on a pass
-/// that does nothing at all.
 #[test]
 fn a_wrapper_between_scopes_paints_no_background() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
@@ -804,16 +607,6 @@ fn a_wrapper_between_scopes_paints_no_background() {
     );
 }
 
-/// An atomic inline box inside a nested scope is part of that scope's
-/// fragment: the background runs behind the atom as it does behind the glyphs
-/// beside it.
-///
-/// The atom is unioned into the fragment on *both* axes. A browser keeps the
-/// band at the inline box's own font metrics and lets a taller atom overflow
-/// it; the union is the approximation this engine takes, because it is also
-/// what lets a scope whose only content is an atom — which has no glyph run to
-/// take metrics from — paint anything at all
-/// (`crates/terminus/src/paint/text.rs`'s `inline_background_fragments`).
 #[test]
 fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
@@ -841,7 +634,6 @@ fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
         40,
     );
 
-    // Two squares of plain run, then the scope: one square and a 40px atom.
     assert!(
         is_blue(pixel(&pixels, 300, 42, 10)),
         "the scope's background covers its own glyph",
@@ -856,10 +648,6 @@ fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
     );
 }
 
-/// A `background-image` layer on a nested scope fills the same fragment its
-/// `background-color` would, gradient box and all — the fragment is handed to
-/// the ordinary background painter, so every layer the property supports
-/// resolves against it.
 #[test]
 fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
@@ -886,8 +674,6 @@ fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
         40,
     );
 
-    // The ramp spans the fragment, x 60..120, and nothing wider: a tile taken
-    // from the block would have run the whole 300px.
     let left = pixel(&pixels, 300, 62, 10);
     let right = pixel(&pixels, 300, 118, 10);
     assert!(
@@ -904,20 +690,6 @@ fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
     );
 }
 
-/// Replicates `layout/percentage-cyclic-text`
-/// (`packages/web-platform/web-elements/tests/fixtures/layout/percentage-cyclic-text.html`,
-/// `packages/web-platform/web-elements/tests/web-elements.spec.ts:46`): a
-/// percentage width on a text block whose containing block is sized
-/// `fit-content` from that same text.
-///
-/// This case has no reference answer to copy. Its source test is
-/// `test.skip(true)` and no snapshot directory was ever committed for it, and
-/// the fixture's own comment records that the web result diverges from the
-/// Lynx SDK — which is why it is disabled. So `AGENTS.md`'s bucket 1 applies
-/// and the W3C answer is the one to pin: css-sizing-3 5.2.1, a percentage
-/// resolved against an indefinite basis behaves as `auto`. The outer box's
-/// `fit-content` width is therefore the text's own max-content width — twenty
-/// Ahem digits at 10px, so 200px — and not a cycle through the 50%.
 #[test]
 fn a_percentage_width_against_an_indefinite_basis_behaves_as_auto() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -951,33 +723,6 @@ fn a_percentage_width_against_an_indefinite_basis_behaves_as_auto() {
     );
 }
 
-/// Replicates `scroll-view/scroll-into-view-text`
-/// (`packages/web-platform/web-elements/tests/fixtures/scroll-view/scroll-into-view-text.html`,
-/// `packages/web-platform/web-elements/tests/web-elements.spec.ts:785`): a
-/// text block is a scroll target with the same border-box geometry as a view.
-///
-/// The original calls `scrollIntoView({ block: 'start' | 'center' | 'end' })`
-/// on the sixth of eight equal children. This engine has no `scrollIntoView`
-/// at any layer — `crates/terminus/src/scroll/mod.rs` exposes `scroll_box`,
-/// `scroll_offset`, `scroll_to(id, offset)` (`:200`), `scroll_by`,
-/// `nearest_user_scrollable` and `scroll_chain`, and nothing else in the
-/// workspace names the operation — so no test can call it.
-///
-/// What this test pins is therefore stated plainly, and it is **not**
-/// alignment: it is the scroll-target *geometry* a text block exposes — its
-/// border box, its container's `scroll_size` and `max_offset` — plus
-/// `scroll_to`'s clamping of an offset against that maximum. The three
-/// CSSOM-View block alignments below are computed *by this test*, from that
-/// geometry, and then asserted to land where the arithmetic says; no engine
-/// code participates in the alignment step, so a wrong or missing alignment
-/// implementation could not fail this test. The alignment computation is an
-/// open gap that no test in this replication carries.
-///
-/// The fixture's sizing is kept verbatim (`x-view`/`x-text { width: 100%;
-/// height: 50% }` against a 100x400 port), so the 200px slot is measured out
-/// of the percentage rather than declared: a text block that resolved
-/// percentages differently from a view would move the sixth slot and fail
-/// every offset below.
 #[test]
 fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
     let mut doc = Doc::with_device(device(400.0, 600.0));
@@ -997,8 +742,6 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
         .map(|index| {
             if index == 5 {
                 let text = doc.el(port, "text.textcell");
-                // `<x-text><x-text>hello lynx</x-text></x-text>`: an outer
-                // block whose only content is one nested inline run.
                 let scope = doc.el(text, "text.scope");
                 let run = doc.dom.create_text_node("hello lynx", ());
                 doc.dom.append_child(scope, run);
@@ -1029,8 +772,6 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
     assert_eq!(scroll_box.scroll_size.height, 1600.0);
     assert_eq!(scroll_box.max_offset().y, 1200.0);
 
-    // The three CSSOM-View block alignments, computed from the text block's
-    // own border box against the 400px scrollport.
     let (_, top, _, height) = rect(&doc, text);
     for (alignment, offset, landed) in [
         ("start", top, 1000.0),
@@ -1046,21 +787,6 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
     }
 }
 
-/// Replicates `scroll-view/scroll-into-view-text-x`
-/// (`packages/web-platform/web-elements/tests/fixtures/scroll-view/scroll-into-view-text-x.html`,
-/// `packages/web-platform/web-elements/tests/web-elements.spec.ts:808`): the
-/// inline-axis half of the case above — a text block is a horizontal scroll
-/// target with a view's geometry.
-///
-/// Same substitution, and the same limit on what it proves:
-/// `scrollIntoView({ inline: ... })` does not exist here, so what is pinned is
-/// the text block's inline-axis scroll-target geometry and `scroll_to`'s
-/// clamping on that axis — not alignment. The three inline alignments are
-/// arithmetic this test performs on the block's own border box before calling
-/// `scroll_to`, so no engine code computes them and none of these assertions
-/// can fail on them. The fixture's own percentage sizing (`x-view`/`x-text
-/// { width: 50%; height: 100% }` against a 400x100 port) is kept, so the 200px
-/// slot is measured rather than declared.
 #[test]
 fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
     let mut doc = Doc::with_device(device(600.0, 400.0));
@@ -1120,17 +846,6 @@ fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
     }
 }
 
-/// Replicates `text/text-with-linear-gradient`
-/// (`packages/web-platform/web-tests/dist/basic-element-text-text-with-linear-gradient/index.web.
-/// json`, `packages/web-platform/web-core-e2e/tests/reactlynx.spec.ts:2623`): Lynx's
-/// gradient-valued `color` paints glyph ink with the ramp rather than a solid
-/// fill.
-///
-/// The original is an 80px `<text>` reading "sub text"; Ahem stands in so the
-/// ramp can be sampled at exact pixels — a glyph's ink is the whole em square,
-/// and `linear-gradient(green, yellow)` with no angle runs top to bottom
-/// across the establishing element's padding box, so the top and bottom of one
-/// glyph are two different points on the ramp.
 #[test]
 fn gradient_valued_color_paints_glyph_ink_with_the_ramp() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -1173,11 +888,6 @@ fn gradient_valued_color_paints_glyph_ink_with_the_ramp() {
         is_white(pixel(&pixels, 200, 40, 90)),
         "nothing paints below the block",
     );
-    // The negative control that makes this about glyph ink rather than the
-    // box: two 80px em squares stop at x = 160, so x = 180 is inside the
-    // block's own 200x80 border box and off the glyphs. A ramp painted as a
-    // block fill — the failure the fixture's golden exists to catch — would
-    // colour it.
     let off_ink = pixel(&pixels, 200, 180, 40);
     assert!(
         is_white(off_ink),
@@ -1185,27 +895,6 @@ fn gradient_valued_color_paints_glyph_ink_with_the_ramp() {
     );
 }
 
-/// Replicates `text/linear-gradient-color`
-/// (`packages/web-platform/web-tests/dist/basic-element-text-linear-gradient-color/index.web.json`,
-/// `packages/web-platform/web-core-e2e/tests/reactlynx.spec.ts:2765`): a
-/// gradient `color` on the block, on one nested inline run, and inherited by
-/// an unstyled nested run from a gradient-colored block.
-///
-/// The fixture builds three paragraphs. This test carries the first and the
-/// third, in the fixture's own order and at the fixture's own offsets; the
-/// middle one is the sibling test below. The spec file carries a
-/// `TODO: fix this issue` note that the inheritance in the third paragraph
-/// behaves differently on Android; web-core is the reference (`AGENTS.md`),
-/// and under it the nested run inherits.
-///
-/// The first and third paragraphs hold today and are this test; the middle one
-/// does not and is `a_gradient_color_on_a_nested_run_fills_only_that_run`
-/// below. The case is split rather than ignored whole so that the two ramps
-/// that do paint stay in CI.
-///
-/// The shared CSS and the `greenish`/`yellowish` predicates are duplicated
-/// across the two halves rather than hoisted, so each half reads as the
-/// fixture paragraph it replicates.
 #[test]
 fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
     let mut doc = Doc::with_device(device(240.0, 180.0));
@@ -1220,13 +909,11 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
 
-    // 1. The gradient on the block itself.
     let block = doc.el(root, "text.text.grad");
     doc.set_inline(block, "top: 0px");
     let run = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(block, run);
 
-    // 3. A gradient block with an unstyled nested run, which inherits it.
     let inheriting = doc.el(root, "text.text.grad");
     doc.set_inline(inheriting, "top: 120px");
     let plain_scope = doc.el(inheriting, "text.scope");
@@ -1240,7 +927,6 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
         180,
     );
 
-    // Every em square is 40px wide, so glyph n spans x in [40n, 40n + 40).
     let greenish = |color: [u8; 4]| color[0] < 80 && color[1] > 100;
     let yellowish = |color: [u8; 4]| color[0] > 200 && color[1] > 200 && color[2] < 80;
 
@@ -1260,9 +946,6 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
          ({inherited_top:?} then {inherited_bottom:?})"
     );
 
-    // Both rows pinned to glyph coverage rather than to the box: each row is
-    // two 40px em squares stopping at x = 80, so x = 200 is inside the 240px
-    // block and off the glyphs. A ramp painted as a block fill colours it.
     for (row, y) in [("block", 20), ("inherited", 140)] {
         let off_ink = pixel(&pixels, 240, 200, y);
         assert!(
@@ -1272,21 +955,6 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
     }
 }
 
-/// The middle paragraph of `text/linear-gradient-color`, split out of
-/// `a_gradient_color_fills_a_block_and_the_run_that_inherits_it` because it
-/// does not hold: a solid-colored block with one gradient-colored nested run
-/// must paint each in its own fill.
-///
-/// This is the reason per-run painting exists, and the reason a golden of the
-/// whole page would not catch its absence — such a golden passes just as
-/// happily if every glyph wears the establishing element's style.
-///
-/// The tile a gradient `color` fills from is decided per run
-/// (`crates/terminus/src/paint/text.rs:215-269`): the establishing element keeps its
-/// padding box, a nested element gets the union of its own line fragments. It
-/// used to be one paragraph-level decision taken from the establishing
-/// element's own color, so a solid-colored block resolved no tile at all and
-/// every nested run's gradient fell back to a solid fill.
 #[test]
 fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
     let mut doc = Doc::with_device(device(240.0, 180.0));
@@ -1302,7 +970,6 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
 
-    // 2. A solid block with one gradient-colored nested run.
     let mixed = doc.el(root, "text.text.solid");
     doc.set_inline(mixed, "top: 60px");
     let solid_run = doc.dom.create_text_node("A", ());
@@ -1333,7 +1000,6 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
         "the nested run paints its own ramp ({nested_top:?} then {nested_bottom:?})"
     );
 
-    // Off the two 40px em squares but inside the 240px block.
     let off_ink = pixel(&pixels, 240, 200, 80);
     assert!(
         is_white(off_ink),
@@ -1341,20 +1007,6 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
     );
 }
 
-/// Replicates `text/extra-font-family`
-/// (`packages/web-platform/web-core-e2e/tests/reactlynx/basic-element-text-extra-font-family/index.
-/// jsx`, `packages/web-platform/web-core-e2e/tests/reactlynx.spec.ts:2596`): a
-/// family beyond the default one is selected by name and actually shapes the
-/// text that asks for it.
-///
-/// The original supplies that family through a card-authored
-/// `@font-face { src: url(...) }`. `terminus` fetches nothing itself, so the
-/// fixture is carried by two tests: this one, the adapted replica, where the
-/// extra face arrives through `register_fonts` and what is asserted is that
-/// selecting it by family name overrides the default family; and
-/// `a_font_face_declared_family_shapes_the_text_that_names_it` below, which
-/// asserts the unadapted reference — the card's own `@font-face`, reported
-/// over the loader seam and reaching shaping under its declared family.
 #[test]
 fn an_extra_registered_family_is_selected_over_the_default_one() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
@@ -1376,17 +1028,11 @@ fn an_extra_registered_family_is_selected_over_the_default_one() {
     doc.dom.append_child(extra_family, extra_run);
     doc.flush();
 
-    // Five Ahem em squares at 16px, exactly.
     assert_eq!(
         ink(&doc, extra_family),
         (80.0, 16.0),
         "the extra family shapes the run that names it",
     );
-    // The other half of the selection: the run that names no family is shaped
-    // by the registered default, with Roboto's own advances and line metrics
-    // for the same five characters. Asserting the number rather than merely
-    // "not 80" is what catches a regression that swapped which face answers
-    // the default family — a bare inequality is satisfied by any second face.
     let (default_width, default_line) = ink(&doc, default_family);
     assert!(
         (default_width - 48.960_938).abs() < 0.01,
@@ -1399,40 +1045,6 @@ fn an_extra_registered_family_is_selected_over_the_default_one() {
     );
 }
 
-/// Replicates `text/extra-font-family`
-/// (`packages/web-platform/web-core-e2e/tests/reactlynx/basic-element-text-extra-font-family/index.
-/// jsx`, `packages/web-platform/web-core-e2e/tests/reactlynx.spec.ts:2596`)
-/// without the adaptation the test above makes: the family the card declares
-/// with `@font-face { font-family: ...; src: url(...) }` must be the family
-/// that shapes the text naming it.
-///
-/// This is what a browser gives web-core, and it is the whole point of the
-/// fixture — a card ships a face with its bundle and uses it. The `src` here
-/// is an absolute `file:` URL to a face that really exists in this repo, so
-/// the assertion is answerable by any implementation that fetches it: five
-/// Ahem em squares at 16px are 80px of advance on a 16px line box, a number no
-/// other face in this test produces.
-///
-/// `terminus` performs no IO (`AGENTS.md`), so the rule is not fetched here: it is
-/// *reported*. `Document::take_font_face_requests`
-/// (`crates/terminus/src/layout/mod.rs`) reduces every `@font-face` rule the
-/// cascade collected to a family plus its `src` components in author order,
-/// once per rule; the embedder loads one of them and hands the bytes back
-/// through `Document::register_font_face`, which files the face under the
-/// declared family rather than under the name inside the font file
-/// (`crates/seldon/src/text/context.rs`). This test stands in for the
-/// embedder — it reads the `file:` URL it was handed off the disk — so what it
-/// pins is the whole seam: the rule reaches the loader, and the loaded face
-/// reaches shaping under the declared name. The engine's own embedder half
-/// lives in `crates/bobcat-core` (the page's epilogue spawns one load per
-/// request over `SourceRequest::Font`).
-///
-/// The bundle-side half of this path covers only the wire:
-/// `font_face_with_a_src_url_survives_the_bundle` and
-/// `font_face_descriptors_decode_in_authored_order_and_form` in
-/// `crates/bobcat-source/tests/web_text_css_replication.rs` carry the
-/// descriptors from a `.web.bundle` into the engine's stylesheet contract, and
-/// hand them to exactly the rule this test reads back.
 #[test]
 fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     const AHEM_URL: &str = concat!(
@@ -1450,13 +1062,9 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
          .label {{ font-size: 16px;
                    font-family: DeclaredAhem; }}"
     ));
-    // Only the default face is handed over the embedder seam; the extra one is
-    // the card's own, and reaches the document only through the rule above.
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(ROBOTO)), 1);
     assert!(doc.dom.set_default_font_family("Roboto"));
 
-    // What is reported is the URL resolved against the document's base, so
-    // the `..` this fixture path spells has already been normalized away.
     let resolved = AHEM_URL.replace("/terminus/../seldon/", "/seldon/");
     let requests = doc.dom.take_font_face_requests();
     assert_eq!(
@@ -1472,7 +1080,6 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
         "a rule is reported once, not again on the next drain",
     );
 
-    // The embedder's half: fetch the source and hand the bytes back.
     let bytes = std::fs::read(
         resolved
             .strip_prefix("file://")
@@ -1494,7 +1101,6 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
          the run falling back to another face",
     );
 
-    // A sheet mounted later is reported when it arrives, and only it.
     doc.add_css(
         "@font-face { font-family: LateFace; src: local(\"Helvetica\"); }
          @font-face { font-family: Nameless; src: url(\"about:blank\"); }",
@@ -1515,37 +1121,6 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     );
 }
 
-/// Replicates the atomic-inline-box half of
-/// `x-text/text-not-resize-detect-new-line`
-/// (`packages/web-platform/web-elements/tests/fixtures/x-text/text-not-resize-detect-new-line.
-/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:378`), whose
-/// fixture nests a whole element inside its `<x-text>`: a non-text child of a
-/// text block paints, whatever kind of paint root or stacking context the
-/// block is.
-///
-/// In web-core such a child is an ordinary element inside the shadow host and
-/// the browser paints it like any other box; nothing about the enclosing
-/// element being a stacking context changes that.
-///
-/// Two independent defects stopped that here, so the case is carried by three
-/// tests rather than one — a single ignore standing for both would not go
-/// green when either was fixed, and would never cover the path that already
-/// works:
-///
-/// 1. This test: the in-context descent (`crates/terminus/src/visual/build.rs:902-965`), which does
-///    reach a text block's non-text child. It has always passed.
-/// 2. `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`: the same child, reached
-///    through the paint root and the stacking-context paths, where `build_stacking_context` used to
-///    push the paragraph and return without descending. It now falls through to the same collection
-///    walk (`crates/terminus/src/visual/build.rs:563-569`).
-/// 3. `an_atomic_inline_box_keeps_the_size_it_measured`: an in-flow atom's own committed box, which
-///    `d19cbea2` (#227) closed by giving the paragraph a real inline-box commit entry point.
-///
-/// The child here is `position: absolute`, which is what separates (1) and (2)
-/// from (3): the paragraph's own out-of-flow pass
-/// (`crates/terminus/src/layout/text_block.rs:569-584`) lays such a child out and
-/// gives it a real box, so the only thing left to vary is which frame-builder
-/// path the enclosing block takes.
 #[test]
 fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -1580,30 +1155,9 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
     );
 }
 
-/// The paint-root and stacking-context halves of the case above, split out
-/// because they failed for their own reason. The child is the same
-/// `position: absolute` one that
-/// `a_boxed_child_paints_from_a_text_block_inside_its_parents_context` paints,
-/// and it has a real box from the paragraph's out-of-flow pass
-/// (`crates/terminus/src/layout/text_block.rs:569-584`), so nothing but the
-/// frame-builder path differs between that test and this one.
-///
-/// `build_stacking_context` — the path a text block takes both as the paint
-/// root and as a real stacking context — pushed the paragraph and returned
-/// without descending, and the text painter draws only
-/// `PositionedLayoutItem::GlyphRun` (`crates/terminus/src/paint/text.rs:403-420`),
-/// so nobody emitted the child: `[255, 255, 255, 255]` where it should be.
-/// It now pushes the paragraph and falls through to the collection walk
-/// (`crates/terminus/src/visual/build.rs:563-569`), the same order as the in-context
-/// path. The glyphs stay unique because `collect_child`
-/// (`crates/terminus/src/visual/build.rs:829-871`) drops text nodes and the layout
-/// slots `place_and_hide` (`crates/terminus/src/layout/text_block.rs:607`) hid, so
-/// an absorbed nested scope reaches no second record.
 #[test]
 fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
-    // The text block is the paint root itself.
     let mut as_root = Doc::with_device(device(200.0, 100.0));
-    // The page is the paragraph: the definition upgrades the document element.
     as_root.define_lynx_text("page");
     as_root.add_css(
         "page { position: relative;
@@ -1627,7 +1181,6 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
         "a child of the paint root's own paragraph must paint ({ink:?})"
     );
 
-    // The text block is a nested, real stacking context.
     let mut as_context = Doc::with_device(device(200.0, 100.0));
     as_context.define_lynx_text("text");
     as_context.add_css(
@@ -1658,24 +1211,6 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
     );
 }
 
-/// The in-flow-atom half of the same case, split out because its cause is a
-/// different one: an atomic inline box keeps the size it was measured at.
-///
-/// In web-core the `x-view` inside an `x-text` is an inline-block with its own
-/// declared 40x20 box, and every consumer of that box — paint, hit testing,
-/// the scroll area — reads the same number the line was broken against.
-///
-/// The assertion is on the committed box rather than on pixels, so the frame
-/// builder — the subject of the two tests above — takes no part in it.
-///
-/// This held only from `d19cbea2` (#227) on. Before it the paragraph measured
-/// every atom with a measure-goal input, which writes no layout, and
-/// `place_and_hide` copied that unwritten `unrounded.size` into the placed
-/// layout, so the atom ended the pass 0x0. #227 needed committed geometry for
-/// atomic children restored after a content replacement and gave the
-/// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/terminus/src/layout/text_block.rs:540-548`), which fixed this case with
-/// it.
 #[test]
 fn an_atomic_inline_box_keeps_the_size_it_measured() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -1702,38 +1237,6 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
     );
 }
 
-/// Replicates the padded-`<x-text>`-with-a-child half of
-/// `scroll-view/scroll-into-view-text`
-/// (`packages/web-platform/web-elements/tests/fixtures/scroll-view/scroll-into-view-text.html`,
-/// `packages/web-platform/web-elements/tests/web-elements.spec.ts:785`), whose
-/// text elements nest another element inside them: an atomic inline box sits
-/// in the same coordinate system as the glyphs around it, inside the block's
-/// border and padding.
-///
-/// In web-core the paragraph and everything in it lay out inside the content
-/// box, so padding moves the two together. That is now what happens here:
-/// `place_and_hide` (`crates/terminus/src/layout/text_block.rs`) converts an atom's
-/// paragraph-space origin into the border-box space every reader of `location`
-/// works in, by adding the establishing element's content-box inset — the same
-/// inset the frame builder adds to the glyphs
-/// (`crates/terminus/src/visual/build.rs`'s `push_paragraph` and the
-/// `DisplayMode::Text` branch of `collect_in_context`). Before that conversion
-/// the atom landed short by the border plus padding: with the 10px padding
-/// below it reported `location` `(0, 0)`.
-///
-/// The assertion is on `location` rather than on pixels so that it answers
-/// only for the origin: the atom's size is a separate claim, carried by
-/// `an_atomic_inline_box_keeps_the_size_it_measured`, and whether the frame
-/// builder descends to the atom at all is a third one, carried by
-/// `a_boxed_child_paints_from_a_text_block_that_is_its_own_context`.
-///
-/// Both insets are covered, and they are deliberately different numbers so
-/// that neither can stand in for the other. A third block puts its atom under
-/// a `display: contents` carrier: a carrier keeps an empty layout at `(0, 0)`
-/// rather than a hidden one, so the atom beneath it is still read against the
-/// establishing element's border box and the same conversion has to answer for
-/// it — which is the composition the frame builder relies on, since
-/// `flattened_children` never yields the carrier a box of its own.
 #[test]
 fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
@@ -1794,47 +1297,6 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     );
 }
 
-/// The atom half of `x-text/inline-image-padding-and-margin`
-/// (`packages/web-platform/web-elements/tests/fixtures/x-text/inline-image-padding-and-margin.
-/// html`, `packages/web-platform/web-elements/tests/web-elements.spec.ts:189`) at the
-/// layer that owns it: an atomic inline box's margins are what the line
-/// advances by, and what its border box is then stepped back in from.
-///
-/// The tag half of the same fixture — that `padding` on an inline `image`
-/// contributes nothing, because web-core's host element has no box — is a UA
-/// cascade claim and lives with the sheet, in
-/// `an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not`
-/// (`crates/bobcat-core/src/main/tree/web_text_replication.rs`). `crates/terminus`
-/// names no Lynx tag, so the atom here is spelled as the `display: flex` box
-/// the UA sheet gives one.
-///
-/// Four claims, each against the same unmargined control:
-///
-/// - `margin-left` is outer advance ahead of the box, and moves the border box with it;
-/// - a *negative* `margin-left` shrinks that advance and pulls the border box back over what
-///   precedes it, which is legal and is not floored away;
-/// - `margin-top` grows the line, and moves the border box down inside its own margin box;
-/// - `margin-bottom` grows the line by the same amount and leaves the border box where it was.
-///
-/// The last two are one rule: an atom with no baseline of its own sits with
-/// its bottom *margin* edge on the line's baseline, so the whole margin box —
-/// both vertical margins included — is above-baseline contribution. What
-/// differs is only where inside that box the border box sits.
-///
-/// That rule is CSS's and web-core's, and it is a **ruled** deviation from
-/// native (2026-09-17, `docs/tracking/deviations.md`): native puts the bottom
-/// *border* edge on the baseline and lets `margin-bottom` hang below it —
-/// `GetOffsetFromTopMarginEdgeToBaseline` returns `margin-top + offset_height_`
-/// when a box reports no baseline of its own
-/// (`lynx/core/renderer/starlight/layout/layout_object.cc:1118-1124`), and
-/// `offset_height_` is the border-box height. So this engine's `.down` line
-/// reserves the 8px margin above the baseline, where native's reserves it
-/// below.
-///
-/// The atom is deliberately much taller than the run, so that the line's
-/// height above the baseline is the box's contribution and nothing else; the
-/// run's 4px descent below the baseline is the rest of the line box (CSS 2.2
-/// §10.8.1, as parley 0.12 builds it).
 #[test]
 fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
     let mut doc = Doc::with_device(device(400.0, 400.0));
@@ -1920,22 +1382,6 @@ fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
     );
 }
 
-/// An out-of-flow child of a `<text>` is placed against the block's own
-/// padding box, and that box has to be read from this pass rather than from
-/// the element's layout slot.
-///
-/// The slot is the hazard: a parent writes a child's layout only once that
-/// child's `compute_layout` has returned, so while a text block's own
-/// algorithm runs its slot still holds the previous pass's box — on a first
-/// flush, none at all. Reading the containing block from there gave every
-/// absolutely positioned child of a text a `0x0` box at `(0, 0)` on the first
-/// flush, and the layout cache then kept that answer for every later one.
-/// `BlockBox` (`crates/terminus/src/layout/text_block.rs`) resolves the border and
-/// padding from style instead, against the same inline basis the box wrapper
-/// used, and takes the size from the output this pass just produced.
-///
-/// Percentages are what make the test answer for the containing block rather
-/// than for an offset: a `50%` against a stale `0` is `0`.
 #[test]
 fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
     let mut doc = Doc::with_device(device(200.0, 200.0));
@@ -1970,43 +1416,6 @@ fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
     );
 }
 
-/// A `position: relative` or `sticky` child of a `<text>` stays in the
-/// paragraph's flow; only `absolute` and `fixed` leave it. Its insets are
-/// ignored.
-///
-/// There is no lynx-stack original for this: web-core gets it from the
-/// browser, where `position: relative` on an inline-level box is an ordinary
-/// in-flow box that paints offset. Here the paragraph used to test its
-/// children against `position: static` in four places, so a relative child was
-/// dropped from the flatten walk and then laid out by the out-of-flow pass —
-/// it vanished from the line and landed at its static position. The split is
-/// now `out_of_flow` (`crates/terminus/src/layout/text_block.rs`), the same
-/// `Absolute | Fixed` split `Document::layout_rect` and every seldon algorithm
-/// uses.
-///
-/// The insets are the deviation, and it is a ruled one (2026-09-17,
-/// `docs/tracking/deviations.md`). **Native** never applies them to inline
-/// content of a paragraph: `CalcRelativePosition`
-/// (`lynx/core/renderer/starlight/layout/position_layout_utils.cc:38-71`) has
-/// exactly one caller, `LayoutAlgorithm::HandleRelativePosition`
-/// (`layout_algorithm.cc:215-228`), which walks the container algorithm's
-/// `inflow_items_` — and a `<text>` has a `measure_func_`, so it returns before
-/// any `LayoutAlgorithm` is built (`layout_object.cc:684-696`) and the inline
-/// view's position comes only from `AlignmentByPlatform`. **web-core** differs:
-/// `x-view` carries `position: relative`
-/// (`packages/web-platform/web-elements/src/elements/common-css/linear.css:142`)
-/// and `x-text > x-view` is `display: inline-flex !important`
-/// (`XText/x-text.css:90-93`), so the browser shifts the box while leaving the
-/// advance alone. This engine follows native, so an authored inset on an atom
-/// is a silent no-op.
-///
-/// Native Lynx's own default `position` is `relative`
-/// (`lynx/core/renderer/starlight/style/default_layout_style.h:65`), so on
-/// that engine this is the ordinary case rather than an authored one; here,
-/// as in web-core, the computed default is `static` and a card reaches this
-/// path by declaring it. That default is also why ignoring the insets costs
-/// native nothing: on it, honouring them for every element would be the
-/// surprising behaviour.
 #[test]
 fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
     let mut doc = Doc::with_device(device(400.0, 400.0));
@@ -2040,8 +1449,6 @@ fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
 
     let control = ink(&doc, plain);
     assert_eq!(control, (120.0, 30.0), "two em squares and two 40px boxes");
-    // The 30px line puts the baseline 21 down (16 of ascent and 5 of
-    // half-leading), and each box sits its bottom edge on it.
     assert_eq!(rect(&doc, plain_first), (40.0, 1.0, 40.0, 20.0));
     assert_eq!(rect(&doc, plain_second), (80.0, 1.0, 40.0, 20.0));
 

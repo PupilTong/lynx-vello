@@ -15,7 +15,6 @@ use skrifa::{FontRef, GlyphId, MetadataProvider};
 use super::{Direction, TextAlign, TextBaseline};
 use crate::kurbo::{BezPath, Rect};
 
-/// The `font` a context starts with: `10px sans-serif`.
 pub(crate) fn default_font() -> ResolvedFont {
     ResolvedFont {
         families: vec![ResolvedFamily::Generic(GenericFamily::SansSerif)],
@@ -26,8 +25,6 @@ pub(crate) fn default_font() -> ResolvedFont {
     }
 }
 
-/// `TextMetrics`, every distance in CSS px from the alignment point
-/// `textAlign` and `textBaseline` select, with the standard's signs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextMetrics {
     pub width: f64,
@@ -44,21 +41,15 @@ pub struct TextMetrics {
     pub ideographic_baseline: f64,
 }
 
-/// One shaped line: its glyph runs, x from the line's left edge and y down
-/// from the alphabetic baseline, and the metrics it is anchored by.
 #[derive(Debug)]
 pub(crate) struct Line {
     pub(crate) shaped: ShapedLine,
     pub(crate) width: f64,
-    /// The first available font's ascent and descent.
     ascent: f64,
     descent: f64,
 }
 
 impl Line {
-    /// Shapes `text` as one unwrapped line, after the text preparation
-    /// algorithm's whitespace step: every ASCII whitespace character becomes
-    /// a space, and every space is kept.
     pub(crate) fn shape(
         context: &mut TextContext,
         text: &str,
@@ -73,7 +64,6 @@ impl Line {
         };
         let options = LineOptions {
             letter_spacing: 0.0,
-            // `inherit` with no element to inherit from is `ltr`.
             direction: Some(if direction == Direction::Rtl {
                 seldon::text::paragraph::Direction::Rtl
             } else {
@@ -81,8 +71,6 @@ impl Line {
             }),
         };
         let shaped = shape_line(context, &text, font, options);
-        // Text with no glyph run (empty text) names no font: the first
-        // available font's metrics are read off a shaped letter.
         let size = f64::from(font.size);
         let (ascent, descent) = shaped
             .first_font
@@ -98,14 +86,6 @@ impl Line {
         }
     }
 
-    /// The y of `baseline` relative to the alphabetic baseline, down
-    /// positive.
-    ///
-    /// The em square's top and bottom split the font size in the ratio of
-    /// the font's ascent to its descent. The hanging baseline sits at 80% of
-    /// the ascent and the ideographic-under baseline at the descent: the
-    /// standard leaves these to the font's baseline table, which is not
-    /// read.
     pub(crate) fn baseline_offset(&self, baseline: TextBaseline, size: f64) -> f64 {
         let total = self.ascent + self.descent;
         let (em_ascent, em_descent) = if total > 0.0 {
@@ -123,9 +103,6 @@ impl Line {
         }
     }
 
-    /// The summed length of the shaped glyphs' outlines at the font size,
-    /// as [`super::path::length`] measures a path: what a dash list cuts
-    /// when the line is stroked.
     pub(crate) fn outline_length(&self) -> f64 {
         let mut pen = OutlinePath::default();
         for run in &self.shaped.runs {
@@ -144,16 +121,12 @@ impl Line {
                 };
                 let settings =
                     DrawSettings::unhinted(Size::new(run.size), LocationRef::new(&coords));
-                // A glyph that fails to draw part way counts what it drew.
                 let _ = outline.draw(settings, &mut pen);
             }
         }
         super::path::length(&pen.0)
     }
 
-    /// The union of the shaped glyphs' outline bounds, relative to the
-    /// line's left edge on the alphabetic baseline, y down; `None` for no
-    /// ink.
     pub(crate) fn ink_bounds(&self) -> Option<Rect> {
         let mut bounds: Option<Rect> = None;
         for run in &self.shaped.runs {
@@ -179,7 +152,6 @@ impl Line {
                 let Some(glyph_bounds) = pen.bounds else {
                     continue;
                 };
-                // Outlines are y-up; the line is y-down.
                 let placed = Rect::new(
                     f64::from(glyph.x) + glyph_bounds.x0,
                     f64::from(glyph.y) - glyph_bounds.y1,
@@ -193,8 +165,6 @@ impl Line {
     }
 }
 
-/// The physical anchor `textAlign` picks, as a fraction of the line width
-/// from its left edge.
 pub(crate) fn align_fraction(align: TextAlign, direction: Direction) -> f64 {
     let rtl = direction == Direction::Rtl;
     match align {
@@ -206,7 +176,6 @@ pub(crate) fn align_fraction(align: TextAlign, direction: Direction) -> f64 {
     }
 }
 
-/// The metrics `measureText` answers for a shaped line.
 pub(crate) fn metrics(
     line: &Line,
     ink: Option<Rect>,
@@ -243,7 +212,6 @@ pub(crate) fn metrics(
     }
 }
 
-/// An outline pen collecting the segments drawn into one path.
 #[derive(Default)]
 struct OutlinePath(BezPath);
 
@@ -276,7 +244,6 @@ impl OutlinePen for OutlinePath {
     }
 }
 
-/// An outline pen keeping the exact bounds of the segments drawn.
 #[derive(Default)]
 struct BoundsPen {
     current: (f64, f64),

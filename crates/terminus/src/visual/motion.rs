@@ -34,9 +34,6 @@ use stylo::values::specified::svg_path::{PathCommand, SVGPathPosition};
 use super::CornerRadii;
 use super::geometry::normalize_corner_radii;
 
-/// The sampled offset: the position on the path in border-box coordinates
-/// and the total rotation in radians (path direction where `offset-rotate`
-/// says `auto`/`reverse`, plus any fixed angle).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct OffsetSample {
     pub position: Point2D<f32>,
@@ -82,9 +79,6 @@ pub(crate) fn offset_sample(
 
 const FLATTEN_TOLERANCE: f32 = 0.1;
 
-/// A flattened path: polyline vertices with cumulative arc lengths.
-/// Subpath jumps (`M` inside a path) contribute segments of zero length —
-/// the walk teleports, matching "total length of all sub-paths".
 struct Contour {
     points: Vec<Point2D<f32>>,
     cumulative: Vec<f32>,

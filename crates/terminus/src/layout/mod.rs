@@ -38,34 +38,16 @@ use crate::render::image::ImageStatus;
 use crate::render::picture::PictureKey;
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
 
-/// The two kinds of paragraph an element can establish
-/// ([`Document::paragraph_kind`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParagraphKind {
-    /// A Lynx text element's flattened Lynx paragraph: verbatim white space,
-    /// the `text-maxline`/`text-maxlength` truncation.
     Lynx,
-    /// A block container's CSS inline formatting context.
     InlineFormattingContext,
 }
 
-/// One line of a Lynx paragraph as the `<text>` `layout` event reports it
-/// ([`Document::text_lines`]): `lines[i].{start, end, ellipsisCount}` of the
-/// event's detail (`TextLayoutEventDetail`,
-/// `lynx/js_libraries/types/types/common/events.d.ts:391`).
-///
-/// Offsets are the paragraph's source UTF-16 units, an inline image or view
-/// counting one, the units [`Document::text_range_boxes`] takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextLineReport {
-    /// The first source unit the line shows.
     pub start: u32,
-    /// One past the last source unit the line shows. The collapsible white
-    /// space a soft wrap consumed belongs to no line, so `end` of one line
-    /// and `start` of the next can differ.
     pub end: u32,
-    /// How many of the line's source units the truncation cut removed:
-    /// `end` minus the cut when the cut falls in this line, else zero.
     pub ellipsis_count: u32,
 }
 
@@ -75,47 +57,12 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 });
 
 impl<T: Sync> Document<T> {
-    /// Flushes style and lays the document out — up to
-    /// `CONTAINER_PASSES` times, because a
-    /// css-contain-3 size query container's size is a *cascade* input that
-    /// only layout can produce.
-    ///
-    /// Gecko does the same thing after its reflow, in
-    /// `UpdateContainerQueryStyles`. A pass that moved no query container's
-    /// content box — every pass of every page that has none — is the whole
-    /// call, so the loop costs a page that does not use the feature one
-    /// `is_empty` test.
-    ///
-    /// **The loop is the fallback, not the path.** A `container-type: size`
-    /// box's size is contained in both axes, so the layout run settles it
-    /// inside itself: it publishes the size at the entry of that box's own
-    /// committing run and restyles the readers under it before laying its
-    /// contents out at all (`layout::host::run_layout`, and
-    /// `layout::committed_box` for why the size is knowable there).
-    /// What reaches this loop is what that cannot predict — an
-    /// `inline-size` container, whose block axis answers to its contents, and
-    /// a Lynx text element, whose paragraph algorithm implements no size
-    /// containment — plus the safety net of a prediction that disagreed with
-    /// its algorithm.
-    ///
-    /// Which iteration this is decides how the marks are spelled, so the loop
-    /// counts. A mark made *inside* the loop is read by the very next
-    /// `layout_pass`'s flush, in this call, with nothing in between — so it
-    /// can use the cheap `RECASCADE_SELF`, which no animation tick is there to
-    /// strip. A mark made on the last permitted iteration is laid out by
-    /// nobody here: it waits for whatever flush comes next, which an animation
-    /// tick can precede, so that one is spelled the way
-    /// `Document::mark_subtree_recascade` spells it.
     pub fn layout(&mut self) {
-        // css-scroll-anchoring-1 around the whole call: the anchors are read
-        // from the layout this one replaces (`scroll::anchoring`).
         let anchors = self.select_scroll_anchors();
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
             let cap = pass + 1 == committed_box::CONTAINER_PASSES;
-            // First: its animation-only traversal would strip the
-            // `RECASCADE_SELF` marks the containers' pass writes.
             let timelines = self.resolve_timelines();
             let containers = self.recascade_resized_containers(&mut resized, cap);
             if !timelines && !containers {
@@ -126,17 +73,9 @@ impl<T: Sync> Document<T> {
             self.adjust_scroll_anchors(anchors);
         }
         self.clamp_scroll_offsets_after_layout();
-        // The focused host's selection follows the layout it was placed in
-        // (`editing`): re-snapped, or rebuilt from the offsets an edit left.
         self.refresh_editing_after_layout();
     }
 
-    /// One flush and one layout, publishing the query-container sizes the
-    /// pass committed into `resized`.
-    ///
-    /// Inside a timed render ([`crate::visual::timing`]) the pass marks its
-    /// flush and its layout run; anywhere else it reads that one `bool` and
-    /// takes no instant.
     fn layout_pass(&mut self, resized: &mut Vec<crate::tree::document::NodeId>) {
         let timed = self.commit_timer.marking();
         let style_start = timed.then(ClockInstant::now);
@@ -155,8 +94,6 @@ impl<T: Sync> Document<T> {
 
         let layout_start = timed.then(ClockInstant::now);
         self.run_layout_once(viewport, scale, resized);
-        // css-anchor-position-1's settle loop (`layout::anchors`), out of
-        // line: a page with no anchor-positioned box pays this one test.
         let state = self.layout_state_mut();
         if !state.anchored.is_empty() || !state.anchor_pending.get_mut().is_empty() {
             self.settle_anchor_runs(viewport, scale, resized);
@@ -166,7 +103,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// One layout run and its bookkeeping.
     #[inline]
     fn run_layout_once(
         &mut self,
@@ -179,31 +115,12 @@ impl<T: Sync> Document<T> {
         let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
         self.layout_state_mut().ensure_covers(bound, elements);
         host::run_layout(self, viewport, scale, full, rescale, resized);
-        // Publishing is what makes the pass's sizes readable by the style
-        // traversal, which is parallel, and by the pass after this one; see
-        // [`crate::layout::committed_box`]. The run publishes on its own
-        // whenever it interleaved a restyle into itself, so what is left here
-        // is what the *last* boxes it laid out recorded.
         self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
-        // A pass that ran may have resized any box, so the next resize
-        // observation update reads every registration again
-        // (`crate::visual::resize`, "The stale bit"). One store, observers
-        // or not; a `layout()` that ran no pass never reaches here.
         self.resizes.note_layout();
     }
 
-    /// The settle loop after a run that laid out anchor-positioned boxes: a
-    /// box that read an anchor which moved after it read it is invalidated
-    /// and the document runs again, until every read is stable or every box
-    /// whose read moved has already been invalidated once in this call
-    /// (`layout::anchors`, "The settle loop"). The runs are bounded by the
-    /// number of distinct such boxes, not by a constant. The loop never
-    /// closes on unverified reads: the last run's are verified by the
-    /// `settle_anchors` call that ends it, and a repeat found there is
-    /// invalidated, which leaves the document dirty, so the next `layout()`
-    /// — or `render()` — runs again even if nothing else changes.
     #[cold]
     #[inline(never)]
     fn settle_anchor_runs(
@@ -218,33 +135,6 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Marks the container-unit users under every query container the pass
-    /// resized, and answers whether another pass is owed.
-    ///
-    /// Two gates, either of which ends the call, and a third inside the mark.
-    /// The list is empty unless a size query container's content box actually
-    /// moved, and the flag is false unless some style this document ever
-    /// cascaded resolved a `cqw`/`cqh` — a page with query containers and no
-    /// container units has nothing to re-resolve when one of them resizes.
-    /// Then `mark_container_units_users` visits a resized container's subtree
-    /// and marks only the elements whose own style resolved one, so a
-    /// container that moved with no such element under it owes no pass
-    /// either.
-    ///
-    /// `cap` says this is the last permitted iteration, and it changes the
-    /// mark rather than suppressing it. Everywhere else the mark is consumed
-    /// by the next `layout_pass`'s flush, inside the same `layout()` call and
-    /// with no animation tick reachable in between, which is what licenses the
-    /// rematch-free `RECASCADE_SELF` the targeted walk writes. Here the marks
-    /// are made and simply not laid out: they wait for whatever flush comes
-    /// next, and `RestyleHint::remove_animation_hints` deletes
-    /// `RECASCADE_SELF` outright, so an animation tick in the gap would erase
-    /// them. `mark_subtree_recascade`'s `RESTYLE_SELF | RECASCADE_DESCENDANTS`
-    /// survives one, at the cost of being the coarse whole-subtree mark and of
-    /// recascading the container itself, both of which this path accepts: it
-    /// is reached only by a page whose containers are still moving after
-    /// `CONTAINER_PASSES` layouts, and the document is one commit behind at
-    /// worst either way.
     fn recascade_resized_containers(
         &mut self,
         resized: &mut Vec<crate::tree::document::NodeId>,
@@ -259,8 +149,6 @@ impl<T: Sync> Document<T> {
         }
         let mut marked = false;
         for id in resized.drain(..) {
-            // A container freed since the run that measured it resolves to
-            // nothing: `NodeId` carries the generation its key was at.
             if self
                 .get(id)
                 .is_some_and(crate::tree::node::Node::is_element)
@@ -277,10 +165,6 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// The intrinsic size a completed image load reports, as layout wants it.
-///
-/// One conversion for the two places a load can reach layout — the report
-/// itself, and a source set on a node that had already loaded.
 #[must_use]
 pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
     #[expect(
@@ -293,7 +177,6 @@ pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
 }
 
 impl<T> Document<T> {
-    /// Updates intrinsic dimensions and invalidates affected layout.
     pub fn set_natural_size(
         &mut self,
         id: crate::tree::document::NodeId,
@@ -321,34 +204,6 @@ impl<T> Document<T> {
             .map_or(NaturalSize::NONE, crate::tree::node::Node::natural_size)
     }
 
-    /// Makes `id` present `picture` — a URL the document resolves as it
-    /// resolves a CSS image, or a picture one element owns — with the natural
-    /// size `natural` (width × height), or none while it is not known; `None`
-    /// takes the picture off, and `id` is no longer replaced.
-    ///
-    /// This is the document's one primitive for a replaced box. Which picture
-    /// an element presents, and when that changes, is its embedder's: the
-    /// document draws what it is given into the content box, fitted by
-    /// `object-fit` against `natural`, and draws nothing for a URL that is
-    /// still pending or has failed. Presenting a URL asks for it, as
-    /// [`Self::request_image`] does, and holds it: a document handed over as
-    /// bytes ([`Self::insert_image_document`]) is forgotten when the last box
-    /// presenting it lets go, by presenting another picture or by being
-    /// freed.
-    ///
-    /// The document holds the picture's key and its natural size, never a
-    /// frame: the frames reach the painter through the host's store
-    /// ([`FrameImages`](crate::render::image::FrameImages)), and a new frame
-    /// of an owned picture is drawn with no commit.
-    ///
-    /// Presenting another picture at the same natural size invalidates only
-    /// the scene; a change of the natural size is a layout change, and so is
-    /// the call that makes the element replaced or takes its picture off:
-    /// being replaced forces `DisplayMode::Leaf`, which sizes the box from
-    /// its natural size and hides every child. Handing the element the
-    /// picture it already presents at the size it already has does nothing,
-    /// and so does taking the picture off an element that has none — an
-    /// element made replaced by [`Self::set_natural_size`] alone stays so.
     pub fn set_picture(
         &mut self,
         id: crate::tree::document::NodeId,
@@ -381,9 +236,6 @@ impl<T> Document<T> {
             }
             (node.is_replaced(), node.natural_size(), key_changed)
         };
-        // The box holds the registry's own key for a URL it presents, and the
-        // one it displaces is unbound after it, so a document presented by
-        // both is never forgotten in between.
         let value = value.map(|(picture, natural)| match picture {
             PictureKey::Url(url) if key_changed => {
                 (PictureKey::Url(self.images.bind(&url)), natural)
@@ -418,50 +270,20 @@ impl<T> Document<T> {
         }
     }
 
-    /// The picture `id` presents, if it presents one ([`Self::set_picture`]).
     #[must_use]
     pub fn picture(&self, id: crate::tree::document::NodeId) -> Option<&PictureKey> {
         self.get(id)?.picture()
     }
 
-    /// Asks for `url` — the start of this document's interest in it — and
-    /// answers what is known of it: pending, loaded as a bitmap or as a
-    /// vector document with its natural size, or failed.
-    ///
-    /// The URL image service a CSS image goes through, offered to whoever
-    /// embeds the document. A URL is asked of the host once
-    /// ([`Self::take_wanted_images`]) however often it is requested, and its
-    /// report settles it for good ([`Self::apply_image_events`], which
-    /// answers every source that settled): a URL that settled before this
-    /// call is reported by nothing else ever again, so this answer is the
-    /// only place its caller can learn it. Interest in a host URL never ends,
-    /// because one URL is reported once and its state never regresses; a
-    /// document handed over as bytes is held by the replaced boxes presenting
-    /// it ([`Self::set_picture`]). A synthetic source named here without its
-    /// bytes is never asked of the host and stays pending.
     pub fn request_image(&mut self, url: &str) -> ImageStatus {
         self.images.request(url).1
     }
 
-    /// What is known of `url`, asking for nothing ([`Self::request_image`]).
     #[must_use]
     pub fn image_status(&self, url: &str) -> ImageStatus {
         self.images.status(url)
     }
 
-    /// Files a document handed over as its bytes rather than named by a URL
-    /// — the Lynx `<svg content>` — and answers the synthetic source it is
-    /// filed under, for the caller to present ([`Self::set_picture`]) and
-    /// learn the status of as of any URL.
-    ///
-    /// The source is `svg-content:` and the 32 hex digits of a 128-bit hash
-    /// of `bytes`, so identical markup names one registry entry whichever
-    /// element, and however many, present it. A source this document already
-    /// holds costs a hash; an unknown one is created pending and its bytes
-    /// are queued as a request for the host to parse
-    /// ([`Self::take_document_requests`]), so the host is never asked to
-    /// fetch it. The entry is forgotten when the last box presenting it lets
-    /// go of it.
     pub fn insert_image_document(
         &mut self,
         bytes: &[u8],
@@ -470,9 +292,6 @@ impl<T> Document<T> {
         self.images.insert_document(bytes, kind)
     }
 
-    /// Whether the document's image registry holds an entry for `source`.
-    /// For tests: a synthetic source no element presents any more must leave
-    /// none behind.
     #[doc(hidden)]
     #[must_use]
     pub fn knows_image_source(&self, source: &str) -> bool {
@@ -499,31 +318,17 @@ impl<T> Document<T> {
         self.invalidate_layout(id);
     }
 
-    /// Takes over a text context an embedder built before this document
-    /// existed.
-    ///
-    /// The alternative to [`Self::register_fonts`] and
-    /// [`Self::set_default_font_family`], for a caller that has to know
-    /// whether the fonts and the default family are usable *before* it is
-    /// willing to build a document at all: it validates them against a
-    /// context of its own and hands the result over here. Replaces whatever
-    /// context this document had, so a document that has already laid
-    /// anything out has to be invalidated whole.
     pub fn adopt_text_context(&mut self, context: TextContext) {
         self.layout_state_mut().text_context = Some(Box::new(context));
         self.invalidate_layout_all();
     }
 
-    /// The text context this document lays text out with — its registered
-    /// fonts and `@font-face` faces included — for a caller that shapes
-    /// text of its own with the same fonts (a canvas's `fillText`).
     pub fn text_context_mut(&mut self) -> &mut TextContext {
         self.layout_state_mut()
             .text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
     }
 
-    /// Registers an owned font resource without copying its byte payload.
     pub fn register_fonts(&mut self, data: FontBlob) -> usize {
         let context = self
             .layout_state_mut()
@@ -536,25 +341,10 @@ impl<T> Document<T> {
         registered
     }
 
-    /// Every `@font-face` rule this document has not reported before.
-    ///
-    /// The document names the declared faces; the embedder fetches their
-    /// sources — no IO happens in `terminus` — and hands each blob back through
-    /// [`Self::register_font_face`]. Each rule is reported exactly once,
-    /// whatever later sheets do to the cascade.
-    ///
-    /// See [`FontFaceRequest`](crate::style::engine::FontFaceRequest) for what is and is not
-    /// carried out of a rule.
     pub fn take_font_face_requests(&mut self) -> Vec<crate::style::engine::FontFaceRequest> {
         self.style_engine_mut().take_font_face_requests()
     }
 
-    /// Registers a loaded `@font-face` source under its declared family.
-    ///
-    /// The answer to [`Self::take_font_face_requests`]: `data` is filed under
-    /// `family` rather than under the name inside the font file, so runs
-    /// naming the declared family shape with it. Returns how many faces the
-    /// blob contributed, like [`Self::register_fonts`].
     pub fn register_font_face(&mut self, family: &str, data: FontBlob) -> usize {
         let context = self
             .layout_state_mut()
@@ -567,10 +357,6 @@ impl<T> Document<T> {
         registered
     }
 
-    /// Selects a registered family as the embedder-provided platform default.
-    ///
-    /// This maps CSS `system-ui`, `sans-serif`, and `serif` to `family` ahead
-    /// of any platform fallbacks. Returns `false` when the family is unknown.
     pub fn set_default_font_family(&mut self, family: &str) -> bool {
         let context = self
             .layout_state_mut()
@@ -589,51 +375,6 @@ impl<T> Document<T> {
         Some(&self.layout_state().get(slot)?.slot.rounded)
     }
 
-    /// The element's border box in viewport CSS pixels, as of the last
-    /// completed layout pass.
-    ///
-    /// This is Lynx's own engine-side conversion
-    /// (`platform_event_target_helper.cc`), not the web's
-    /// `getBoundingClientRect`, and it differs from it in two ways.
-    ///
-    /// **No transforms.** `transform`, `offset-path` and any animation of
-    /// them are ignored entirely: the rect is the untransformed border box
-    /// the layout pass produced. Native sums each ancestor's `Left()`/`Top()`
-    /// with an explicit `TODO: add transform support`, and Android excludes
-    /// transforms unless asked for them; only iOS folds them in.
-    ///
-    /// **No flush.** Nothing here runs style, layout or paint — it reads
-    /// what the last [`Document::layout`] left behind, so a caller that
-    /// mutated the tree since sees the pre-mutation geometry until it lays
-    /// out again.
-    ///
-    /// Ancestor scroll offsets *are* applied, for every scroll container on
-    /// this box's containing-block chain (an out-of-flow box does not move
-    /// with scrollers between it and its containing block, exactly as it
-    /// does not in the paint order). The box's own scroll offset never
-    /// applies: scrolling a container does not move the container.
-    /// Sticky offsets are sampled from these same live scroll positions,
-    /// including those inherited from sticky containing-block ancestors.
-    ///
-    /// So is css-anchor-position-1's default scroll shift (§3.3), for the
-    /// box and every anchor-positioned box on its containing-block chain,
-    /// as browsers report it: layout places such a box against its anchors'
-    /// remembered offsets and the painter shifts it, so the rect adds the
-    /// shift at the stored offsets (unsnapped, like them). A box hidden by
-    /// `position-visibility` still reports its rect: the hide is a paint
-    /// and hit-testing effect, as in Blink.
-    ///
-    /// `None` when the element has no box at all: `display: none` or
-    /// `display: contents`, a node that is not a styled element, a node no
-    /// pass has laid out, or one detached from the document tree.
-    ///
-    /// Coordinates are device-pixel-snapped, like [`Self::rounded_layout`].
-    ///
-    /// An inline box of an inline formatting context has no layout box: its
-    /// rect is the union of its fragments' border boxes (CSSOM-View's
-    /// `getBoundingClientRect` over `getClientRects`), placed in the
-    /// paragraph's content box, unsnapped. One with no fragment — no
-    /// content and no nonzero edge — answers `None`.
     #[must_use]
     pub fn bounding_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
         let node = self.get(id)?;
@@ -677,18 +418,9 @@ impl<T> Document<T> {
                 origin += shift(step.id);
             }
         }
-        // A subtree detached from the document answers nothing, the way a
-        // disconnected element does on the web: its coordinates would be
-        // relative to a root that is not the viewport.
         (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
-    /// Whether [`Self::bounding_client_rect`] answers a rect for `id`, without
-    /// computing one: the same tests — a styled element that generates a
-    /// box, laid out, its containing-block chain ending at the document
-    /// element — and none of the offset, sticky or anchor arithmetic, so no
-    /// scroll box is resolved for a scrolling ancestor. For a caller that
-    /// only asks whether an element is rendered.
     #[must_use]
     pub fn generates_rendered_box(&self, id: crate::tree::document::NodeId) -> bool {
         let Some(node) = self.get(id) else {
@@ -712,8 +444,6 @@ impl<T> Document<T> {
         chain.end() == Some(ChainEnd::DocumentElement)
     }
 
-    /// [`Self::bounding_client_rect`] of an inline box: its fragments'
-    /// union, moved from the paragraph's content box to the viewport.
     fn inline_box_client_rect(&self, id: crate::tree::document::NodeId) -> Option<Rect<f32>> {
         let paragraph = self.paragraph_of(id)?;
         let painted = self.painted_paragraph(paragraph)?;
@@ -738,22 +468,6 @@ impl<T> Document<T> {
         Some(union.translate(block.origin.to_vector() + content))
     }
 
-    /// The measured size of the paragraph `id` establishes, from its last
-    /// commit. What it measures depends on the kind:
-    ///
-    /// - A Lynx text element's: the widest line, trailing whitespace excluded, by the stacked line
-    ///   heights (`seldon::text::block::TextBlock::size`). This is the size Lynx's `layout` event
-    ///   reports. It is the text's extent, not the element's box: a stretched text element is wider
-    ///   than the text in it.
-    /// - A block container's inline formatting context: the fit-content width `min(max-content,
-    ///   max(min-content, available))` (css-sizing-3) at the width the commit laid the lines out
-    ///   at, by the stacked line boxes' height (`seldon::text::inline::InlineFlow::size`). It is
-    ///   neither the widest broken line nor the container's content box, which a definite `width`
-    ///   makes wider.
-    ///
-    /// A text node has no box of its own, so this is how an embedder asks
-    /// what a run measured. `None` when `id` establishes no paragraph (an
-    /// inline box, an element of another display) or no commit reached it.
     #[must_use]
     pub fn text_block_size(
         &self,
@@ -762,10 +476,6 @@ impl<T> Document<T> {
         self.committed_paragraph(id)?.committed_size()
     }
 
-    /// Which kind of paragraph `id` establishes, from its last commit: a
-    /// Lynx text element's Lynx paragraph or a block container's inline
-    /// formatting context. `None` when `id` establishes no paragraph or no
-    /// commit reached it, as for [`Self::text_block_size`].
     #[must_use]
     pub fn paragraph_kind(&self, id: crate::tree::document::NodeId) -> Option<ParagraphKind> {
         Some(match self.committed_paragraph(id)? {
@@ -774,30 +484,11 @@ impl<T> Document<T> {
         })
     }
 
-    /// How many lines the paragraph `id` establishes laid out at its last
-    /// commit: the lines it shows, wrapped lines and the lines its preserved
-    /// line breaks start included. A Lynx paragraph whose text ends in a line
-    /// break counts the empty line after it, which it shows; an inline
-    /// formatting context does not, having no line box there (CSS). An empty
-    /// paragraph has no line, except an editing host's, which has one empty
-    /// line of its strut. Lines a truncation cut hides are not counted. `None` as for
-    /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::tree::document::NodeId) -> Option<usize> {
         Some(self.committed_paragraph(id)?.painted()?.line_count)
     }
 
-    /// The lines the Lynx paragraph `id` establishes laid out at its last
-    /// commit, as the `<text>` `layout` event reports them: one entry per
-    /// line the paragraph shows, in order (`seldon::text::block::LineInfo`,
-    /// [`seldon::text::block::TextBlock::lines`]). The source ranges are the
-    /// lines of the layout before truncation, so a line the truncation cut
-    /// keeps its full range and states the cut in its `ellipsis_count`.
-    ///
-    /// `None` when `id` is not a Lynx text element that establishes a
-    /// paragraph (a block container's inline formatting context, a nested
-    /// Lynx text scope, any other element) or when no commit has reached it.
-    /// Nothing here runs a pass, so the answer is the last one's.
     #[must_use]
     pub fn text_lines(&self, id: crate::tree::document::NodeId) -> Option<Vec<TextLineReport>> {
         let block = self.committed_paragraph(id)?.as_block()?.committed()?;
@@ -814,20 +505,6 @@ impl<T> Document<T> {
         )
     }
 
-    /// Turns the `<text>` `layout` report on or off for the Lynx text element
-    /// `id` (`docs/layout-observer-design.md` §3.3).
-    ///
-    /// While it is on, every committing layout run that recomputes `id`'s
-    /// paragraph lists `id` for [`Self::take_text_layout_reports`]. A run
-    /// that seldon answers from its layout cache recomputes nothing and lists
-    /// nothing. Turning it off also drops `id`'s entries not yet taken.
-    /// Turning it on lists nothing by itself: the next committing run of the
-    /// paragraph does.
-    ///
-    /// # Panics
-    ///
-    /// On a stale `id`, and on an `id` that is not a Lynx text element
-    /// ([`crate::tree::custom::CustomElement::is_lynx_text`]).
     pub fn set_text_layout_reporting(&mut self, id: crate::tree::document::NodeId, on: bool) {
         let node = self
             .get(id)
@@ -844,18 +521,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Takes the reporting Lynx text elements whose paragraph a committing
-    /// layout run recomputed since the last call, each once, in the order
-    /// the runs first reached them, and leaves the list empty.
-    ///
-    /// One `layout()` can commit a paragraph more than once (the
-    /// size-container passes and the anchor settle runs in
-    /// [`Self::layout`]), and two layouts without a take between them can
-    /// each commit it: every repeat after the first is dropped here.
-    ///
-    /// An empty list hands back an empty `Vec` without allocating, and leaves
-    /// the list's own storage in place, as
-    /// [`Self::take_content_visibility_changes`] does.
     #[must_use]
     pub fn take_text_layout_reports(&mut self) -> Vec<crate::tree::document::NodeId> {
         let pending = &mut self.layout_state_mut().text_layout_reports;
@@ -871,29 +536,6 @@ impl<T> Document<T> {
         reports
     }
 
-    /// The boxes the source range `[start, end)` of the paragraph `id`
-    /// establishes occupies, from the last committed layout: one per line the
-    /// range shows content on, each from the first selected cluster's inline
-    /// start to the last one's inline end on that line, with the line's top
-    /// and height.
-    ///
-    /// Offsets are the paragraph's source UTF-16 units, the units Lynx's
-    /// `layout` event and `text-maxlength` count, with an inline image or
-    /// view counting one; such a box's unit selects its placed margin box.
-    /// Coordinates are the paragraph's own, whose origin is the element's
-    /// content-box top-left, the space [`Self::text_block_size`] measures in.
-    /// Text past a truncation cut, the truncation marker, and the collapsible
-    /// whitespace hanging at a soft wrap show no content and contribute no
-    /// box, so a range covering only those answers an empty list.
-    ///
-    /// `start == end` answers one zero-width box at `(0, 0)` as tall as the
-    /// line holding `start`. That is a quirk kept for parity with native
-    /// Lynx, whose `getTextBoundingRect` answers exactly that for an empty
-    /// range, not a caret position.
-    ///
-    /// `None` when `id` establishes no committed paragraph, when `end` is
-    /// past the source length, or when `start > end`. Nothing here runs a
-    /// pass, so the answer is the last one's.
     #[must_use]
     pub fn text_range_boxes(
         &self,
@@ -915,30 +557,6 @@ impl<T> Document<T> {
         )
     }
 
-    /// The source offset of the cluster under `point` in the paragraph
-    /// `paragraph` establishes, from the last committed layout.
-    ///
-    /// Offsets and coordinates are [`Self::text_range_boxes`]'s: source
-    /// UTF-16 units with an inline image or view counting one, in the
-    /// paragraph's own space whose origin is the element's content-box
-    /// top-left. The inverse of that query over one unit — a point inside
-    /// `text_range_boxes(paragraph, u, u + 1)` answers `u` — so a line owns
-    /// its whole line box, leading included, and an atomic box answers its
-    /// unit across its placed margin box. A cluster answers its first unit,
-    /// so a surrogate pair or a multi-character grapheme is one hit, and a
-    /// collapsed whitespace run answers the first unit it collapsed.
-    ///
-    /// `None` on a point that hits no content, as native Lynx's text hit
-    /// test answers the paragraph itself there rather than a character:
-    /// above the first line or below the last, before a line's first cluster
-    /// or past its last, on the whitespace hanging at a soft wrap or a
-    /// preserved newline, and on the truncation marker or the
-    /// `inline-truncation` content drawn at a cut, neither of which is
-    /// source text. It does not snap to the nearest position the way a caret
-    /// query does; it answers what was hit.
-    ///
-    /// `None` too when `paragraph` establishes no committed paragraph.
-    /// Nothing here runs a pass, so the answer is the last one's.
     #[must_use]
     pub fn text_index_at_point(
         &self,
@@ -951,23 +569,6 @@ impl<T> Document<T> {
         usize::try_from(unit).ok()
     }
 
-    /// The source range `element` contributes to the paragraph it is inline
-    /// content of, from the last committed layout.
-    ///
-    /// Units are [`Self::text_range_boxes`]'s. A nested Lynx text scope
-    /// answers its own text together with every scope and atom nested in it,
-    /// which is one contiguous range because the paragraph is flattened in
-    /// tree order; an atomic inline box answers its one unit. A run's units
-    /// are its source text *before* whitespace collapsing, so a scope that
-    /// holds only collapsible whitespace still owns the units it was written
-    /// with. The range is a property of the content, not of the line break:
-    /// text a truncation cut hides keeps its range.
-    ///
-    /// `None` when `element` is no element, is the paragraph's own root,
-    /// is not inline content of a committed paragraph ([`Self::paragraph_of`]
-    /// answers which), or contributes nothing — an empty scope, or anything
-    /// in the `inline-truncation` content, which is no source text. Nothing
-    /// here runs a pass.
     #[must_use]
     pub fn inline_source_range(
         &self,
@@ -978,22 +579,6 @@ impl<T> Document<T> {
         Some(usize::try_from(units.start).ok()?..usize::try_from(units.end).ok()?)
     }
 
-    /// The element establishing the committed paragraph whose content `node`
-    /// is: `node` itself when it establishes one, else the nearest
-    /// Lynx text element ancestor whose last committed layout flattened
-    /// `node` into its paragraph.
-    ///
-    /// The paragraph [`Self::text_index_at_point`] and
-    /// [`Self::text_range_boxes`] are asked about. A node is content when
-    /// the flatten walk reaches it: a text node, a nested Lynx text scope
-    /// or `contents` wrapper, or an in-flow atomic inline box, reached only
-    /// through scopes and wrappers. `None` for anything else — a node inside
-    /// an atomic box's own subtree with no paragraph of its own nearer to it,
-    /// a `display: none` or absolutely positioned element and what is under
-    /// it, the children a generated-content list replaced — and when no
-    /// committed paragraph is above `node` at all. A node in the
-    /// `inline-truncation` content answers the paragraph it truncates.
-    /// Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_of(
         &self,
@@ -1003,9 +588,6 @@ impl<T> Document<T> {
         paragraph::paragraph_of(self.arenas(), self.layout_state(), slot)
     }
 
-    /// The committed paragraph `id` establishes, of either kind. An inline
-    /// box establishes none, whatever its layout state still holds from a
-    /// time it laid itself out.
     pub(crate) fn committed_paragraph(
         &self,
         id: crate::tree::document::NodeId,
@@ -1022,13 +604,6 @@ impl<T> Document<T> {
             .filter(|store| store.has_committed())
     }
 
-    /// The source text of the committed paragraph `paragraph` establishes:
-    /// its flattened content's runs in order — DOM text and generated
-    /// `content` — with one U+FFFC per atomic inline box, so its UTF-16
-    /// units are the paragraph's source units, the units
-    /// [`Self::text_range_boxes`] takes. Rebuilt by the flatten walk of the
-    /// paragraph's kind from the tree as it is now, never stored. `None`
-    /// when `paragraph` establishes no committed paragraph.
     pub(crate) fn paragraph_source_text(&self, paragraph: crate::link::NodeId) -> Option<String> {
         let store = self.committed_paragraph(paragraph)?;
         let slot = self.slot(paragraph)?;
@@ -1038,21 +613,12 @@ impl<T> Document<T> {
         })
     }
 
-    /// The offset of the source unit `unit` of the committed paragraph
-    /// `paragraph` establishes, counted in its text content alone: `unit`
-    /// less the atomic inline boxes (an inline `image` or `view`, one source
-    /// unit each) before it ([`seldon::text::paragraph::OffsetMap::boxes_before`]).
-    /// What a browser's `Range.toString()` length counts, where an atom is
-    /// no text. `None` when `paragraph` establishes no committed paragraph
-    /// or `unit` is past its source length. Nothing here runs a pass.
     #[must_use]
     pub fn text_content_offset(&self, paragraph: crate::link::NodeId, unit: u32) -> Option<u32> {
         let view = self.committed_paragraph(paragraph)?.editable()?;
         (unit <= view.map.source_len()).then(|| unit - view.map.boxes_before(unit))
     }
 
-    /// The Lynx paragraph `id` established, if a commit has produced one:
-    /// what this crate's tests inspect beyond [`Self::text_block_size`].
     #[cfg(test)]
     pub(crate) fn text_block(
         &self,
@@ -1067,8 +633,6 @@ impl<T> Document<T> {
             .committed()
     }
 
-    /// The committed paragraph `id` establishes, of either kind, as paint
-    /// and the `background-clip: text` silhouette read it.
     #[must_use]
     pub(crate) fn painted_paragraph(
         &self,
@@ -1078,8 +642,6 @@ impl<T> Document<T> {
         self.layout_state().get(slot)?.text.as_deref()?.painted()
     }
 
-    /// The inline formatting context `id` establishes, if a commit has
-    /// produced one.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn inline_flow(
@@ -1095,7 +657,6 @@ impl<T> Document<T> {
             .committed()
     }
 
-    /// How many times `id`'s paragraph has been shaped from scratch.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn text_block_rebuilds(&self, id: crate::tree::document::NodeId) -> Option<u32> {
@@ -1103,7 +664,6 @@ impl<T> Document<T> {
         Some(self.layout_state().get(slot)?.text.as_deref()?.rebuilds())
     }
 
-    /// Whether a probe left `id`'s paragraph off its committed break.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn text_block_is_probe_dirty(&self, id: crate::tree::document::NodeId) -> bool {
@@ -1118,9 +678,6 @@ impl<T> Document<T> {
         self.get(id)?.layout_computed_style()
     }
 
-    /// The device-snapped grid area a sticky grid item's insets resolve
-    /// against, in its box parent's border-box coordinates, when the last
-    /// layout recorded one; `None` for every other box.
     #[must_use]
     pub(crate) fn sticky_containing_block(
         &self,
@@ -1145,23 +702,8 @@ impl<T> Document<T> {
         )
     }
 
-    /// Drops the cached box measurements of `id` and of every ancestor whose
-    /// geometry could move because of it.
-    ///
-    /// **Box caches only.** A shaped paragraph is not geometry: it dies when
-    /// the text or the style it was shaped from changes, which the paragraph
-    /// checks against the content and styles it kept when it is next laid
-    /// out, or which [`Document::invalidate_text_artifact`] states outright.
-    /// Clearing it here would make every descendant mutation and every
-    /// ancestor this walk touches re-shape a paragraph, owned by the element
-    /// that establishes it, whose text never changed.
     pub(crate) fn invalidate_layout(&mut self, id: crate::tree::document::NodeId) {
-        // Paragraph content (including generated runs) shares one cache. A
-        // transparent scope has none, so starting the usual walk there would
-        // stop early and leave its enclosing paragraph measured at the old text.
         let id = if let Some(paragraph) = self.paragraph_container(id) {
-            // An atomic inline child still owns a measured box. Clear it as
-            // well, before asking the paragraph to measure its children again.
             if paragraph != id
                 && let Some(slot) = self.slot(id)
             {
@@ -1193,12 +735,6 @@ impl<T> Document<T> {
                     .is_some_and(|style| style.display().is_contents())
                     || inline_flow::is_inline_box(node)
                 {
-                    // A contents element never owns a layout cache, and
-                    // neither does an inline box, which runs no layout of its
-                    // own. Their children participate in the nearest box
-                    // ancestor, so an empty cache here cannot prove that
-                    // ancestor was already invalidated or provide an in-place
-                    // boundary.
                     state.clear_box_cache(node_slot);
                     current = node.flat_parent_id();
                     continue;
@@ -1207,14 +743,6 @@ impl<T> Document<T> {
                 if node_state.is_none_or(LayoutSlot::layout_cache_is_empty)
                     && node.flat_parent_id().is_some()
                 {
-                    // Nothing above needs clearing: either an earlier
-                    // invalidation already walked past here (whatever it
-                    // recorded still stands), the node sits parked for a
-                    // committed-input relayout (recording clears its cache),
-                    // or it was never laid out (detached or hidden). The
-                    // parentless document node is exempt — it never holds a
-                    // cache, and stopping there must still count as reaching
-                    // the root.
                     reached_root = false;
                     break;
                 }
@@ -1226,10 +754,6 @@ impl<T> Document<T> {
                 } else if node.is_element()
                     && node_id != crate::tree::document::DOCUMENT_ELEMENT_NODE_ID
                 {
-                    // A committed input the parent imposed independently of
-                    // this subtree's content survives the mutation, so the
-                    // subtree can relayout in place under it; run_layout
-                    // verifies the output stayed identical before trusting it.
                     node_state.and_then(LayoutSlot::committed_independent).map(
                         |(input, previous)| (node_id, input, RelayoutKind::InPlace { previous }),
                     )
@@ -1243,25 +767,11 @@ impl<T> Document<T> {
                     break;
                 }
                 if skips_contents {
-                    // A skipped box is a relayout boundary, so the arm above
-                    // parks it whenever it has a committed input to re-run
-                    // under. Reaching here means it has none — its size was
-                    // only ever probed, or the cache just cleared holds no
-                    // commit — and then there is nothing to re-run and
-                    // nothing above it to tell: its contents are not laid out
-                    // and do not paint until it stops skipping, which
-                    // invalidates it on its own.
                     reached_root = false;
                     break;
                 }
                 current = node.flat_parent_id();
             }
-            // Running off the top of a detached subtree is not reaching the
-            // root: nothing above it was ever laid out, and the caches of the
-            // document it will join are untouched. Counting it would make the
-            // next pass a whole-tree pass that ignores the relayout roots the
-            // eventual insertion records, and that pass stops at the root's
-            // still-valid cache, leaving the inserted subtree unlaid.
             reached_root &= top == crate::tree::document::DOCUMENT_NODE_ID;
             (pending, reached_root)
         };
@@ -1271,27 +781,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// `id` gained or lost the containing block of its absolute and fixed
-    /// descendants: its transform animation started or ended (a current one
-    /// acts as `will-change: transform`), or a restyle flipped what
-    /// [`establishes_fixed_containing_block`] or
-    /// [`establishes_absolute_containing_block`] read (the harvests compare
-    /// the old and new computed style). Answers whether any such descendant
-    /// was invalidated.
-    ///
-    /// Every positioned descendant that could name `id` lays out again —
-    /// its parent re-records its static position under whichever
-    /// containing block it escapes to now (`layout::hoisted`) — and, if it
-    /// is anchor-positioned with a last successful position option, has made
-    /// a fallback-sensitive change (css-anchor-position-1 §6.5.1). That
-    /// holds even where its style establishes the block now, since the same
-    /// flush can have changed that style too and the relayout damage it
-    /// produced reaches `id` alone. `id` itself lays out again only through a
-    /// child whose lowered position flipped, whose upward walk clears it; a
-    /// deeper box is hoisted on both sides of the flip. The walk stops below
-    /// an element that establishes the fixed containing block itself, which
-    /// the absolute one implies; it runs only for an element whose role
-    /// flipped, never per frame.
     pub(crate) fn invalidate_containing_block(
         &mut self,
         id: crate::tree::document::NodeId,
@@ -1324,8 +813,6 @@ impl<T> Document<T> {
             }
         }
         let anchored = &mut self.layout_state_mut().anchored;
-        // css-anchor-position-1 §6.5.1: "the box's containing block
-        // association changed" is a fallback-sensitive change.
         for descendant in &positioned {
             if let Some(entry) = anchored.get_mut(descendant)
                 && entry.last_successful.is_some()
@@ -1339,30 +826,14 @@ impl<T> Document<T> {
         !positioned.is_empty()
     }
 
-    /// Generated runs have no box cache of their own. Reach the paragraph
-    /// through transparent/nested scopes before using normal layout invalidation.
-    ///
-    /// A block container establishes a paragraph too, but never nests in
-    /// one: inside a Lynx paragraph's subtree or an inline formatting context
-    /// it is an atomic box, and its own runs end at it. The walk stops there,
-    /// answering the Lynx paragraph it passed if there was one: a Lynx text
-    /// element that is an atom of the block container's inline formatting
-    /// context is the paragraph its own text belongs to, and the upward walk
-    /// from it reaches the block anyway. An inline box of an inline
-    /// formatting context establishes none: its runs are the paragraph's
-    /// around it, so the walk goes through it.
     fn paragraph_container(
         &self,
         id: crate::tree::document::NodeId,
     ) -> Option<crate::tree::document::NodeId> {
-        // Loose text is not under the anonymous box that lays it out
-        // (`tree::anonymous`), so no walk up from it finds the box.
         if let Some(anonymous) = self.arenas().anonymous().box_of(id) {
             return Some(anonymous);
         }
         let start = self.get(id)?;
-        // Its own display may just have become none. The old run still
-        // belongs to the surrounding paragraph and must be removed from it.
         let own = start
             .layout_computed_style()
             .map(|style| display_mode(start, *style.get_display()));
@@ -1396,8 +867,6 @@ impl<T> Document<T> {
         self.mark_layout_dirty(true);
     }
 
-    /// Test/benchmark-only cache invalidation hook for protocol fixtures that
-    /// mutate synthetic leaf data outside the production DOM mutation API.
     #[cfg(feature = "layout-test-utils")]
     #[doc(hidden)]
     pub fn invalidate_layout_for_testing(&mut self, id: crate::tree::document::NodeId) {
@@ -1405,69 +874,31 @@ impl<T> Document<T> {
     }
 }
 
-/// A box's containing-block chain, walked from its box parent up to the
-/// document element: every box above it, each flagged with whether it is on
-/// the chain. [`Document::bounding_client_rect`] and the intersection
-/// geometry ([`crate::visual::intersection`]) both fold over it.
-///
-/// The walk visits *every* box ancestor, because each contributes its
-/// offset: layout records a location relative to the box parent. Only the
-/// ancestors **on** the chain contribute what a containing block does to
-/// the boxes it contains — their scroll offset, sticky and anchor shifts,
-/// clip and transform. An out-of-flow box neither moves with the scrollers
-/// between it and its containing block nor is clipped by them (CSS2
-/// §11.1.1), the rule the paint walk keys its flow contexts on.
-///
-/// Whether an ancestor is on the chain is decided by the position of the
-/// last box below it that was (the *escaping* box, the walked box first):
-/// `absolute` skips ancestors that establish no absolute containing block,
-/// `fixed` those that establish no fixed one. The position is the computed
-/// value, not seldon's parent-lowered one, as the paint walk reads it. A
-/// top-layer element (or `::backdrop`) is placed against the initial
-/// containing block: no box above it is on its chain, nor on its
-/// descendants' past it.
-///
-/// [`ContainingBlockChain::end`] answers how the walk stopped, once it has.
 pub(crate) struct ContainingBlockChain<'a, T> {
     document: &'a Document<T>,
     current: &'a crate::tree::node::Node<T>,
-    /// The last box the walk stood on: the box itself, then each ancestor.
     top: crate::tree::document::NodeId,
-    /// The position the escaping box was keyed on.
     escape: PositionProperty,
-    /// A top-layer box was passed: nothing above is on the chain.
     escaped: bool,
     end: Option<ChainEnd>,
 }
 
-/// One box above the walked one, as [`ContainingBlockChain`] yields it.
 pub(crate) struct ChainStep<'a, T> {
     pub(crate) node: &'a crate::tree::node::Node<T>,
     pub(crate) id: crate::tree::document::NodeId,
     pub(crate) style: StyleView<'a, T>,
-    /// Its rounded layout; `location` is relative to its own box parent.
     pub(crate) layout: &'a Layout,
-    /// Whether it is on the walked box's containing-block chain.
     pub(crate) on_chain: bool,
 }
 
-/// How a [`ContainingBlockChain`] stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainEnd {
-    /// It ran off the top of the document element: the box is in the
-    /// document, and the walk's sum is in viewport coordinates.
     DocumentElement,
-    /// It ran off the top of a subtree that is not the document's: the box
-    /// is detached, and its coordinates are relative to nothing.
     Detached,
-    /// An ancestor is `display: none`, or has no rounded layout: nothing
-    /// under it was laid out, so whatever geometry the box still carries is
-    /// from before.
     Hidden,
 }
 
 impl<'a, T> ContainingBlockChain<'a, T> {
-    /// The chain above `node`, whose own computed style is `style`.
     pub(crate) fn new(
         document: &'a Document<T>,
         node: &'a crate::tree::node::Node<T>,
@@ -1484,7 +915,6 @@ impl<'a, T> ContainingBlockChain<'a, T> {
         }
     }
 
-    /// How the walk stopped; `None` while it has not.
     pub(crate) fn end(&self) -> Option<ChainEnd> {
         self.end
     }
@@ -1497,9 +927,6 @@ impl<'a, T> Iterator for ContainingBlockChain<'a, T> {
         if self.end.is_some() {
             return None;
         }
-        // `box_parent` skips `display: contents` ancestors, which hold a
-        // zero layout and contribute no offset, and stops above the document
-        // element — the node the paint order itself is rooted at.
         let Some(ancestor) = box_parent(self.current) else {
             self.end = Some(if self.top == DOCUMENT_ELEMENT_NODE_ID {
                 ChainEnd::DocumentElement
@@ -1564,10 +991,6 @@ mod tests {
         const PRE_SPLIT_NODE_SIZE: usize = 368;
         const PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE: usize = 456;
         const PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE: usize = 160;
-        // The paragraph is one `Option<Box<_>>` on the node's layout state, so
-        // the store's own size never entered this budget — only the pointer
-        // does. The retired measurement path's `TextLayoutStore` used to be
-        // measured here beside it, which said nothing the pointer did not.
         let current = (
             size_of::<crate::tree::node::Node<()>>(),
             size_of::<LayoutSlot>(),
@@ -1592,8 +1015,6 @@ mod tests {
         );
     }
 
-    /// A document with one size query container holding one child, and
-    /// whatever `item` declaration the case wants on it.
     fn query_container_document(item: &str) -> (Document<()>, crate::tree::document::NodeId) {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
@@ -1617,11 +1038,6 @@ mod tests {
         (document, item)
     }
 
-    /// The loop's first gate: a page whose styles never resolved a `cqw` or a
-    /// `cqh` has nothing to re-resolve when a query container's size moves,
-    /// so the container's *first* recorded size — which is always a move,
-    /// from nothing to something — costs it no second pass and leaves no
-    /// restyle behind.
     #[test]
     fn a_query_container_without_container_units_never_recascades() {
         let (mut document, item) = query_container_document("width: 10px; height: 10px;");
@@ -1635,9 +1051,6 @@ mod tests {
         assert_eq!(document.rounded_layout(item).unwrap().size.width, 10.0);
     }
 
-    /// The second gate: once the units are in play the first pass does
-    /// recascade, and the pass after it settles — the container's size did
-    /// not move again, so the changed list is empty and the call ends.
     #[test]
     fn a_settled_query_container_leaves_no_pass_owing() {
         let (mut document, item) = query_container_document("width: 25cqw; height: 50cqh;");
@@ -1657,8 +1070,6 @@ mod tests {
         );
     }
 
-    /// One document per shape: `page > .query > .item`, with the case's own
-    /// rules for the two.
     fn query_document(
         rules: &str,
     ) -> (
@@ -1695,16 +1106,6 @@ mod tests {
         (size.width, size.height)
     }
 
-    /// The interleave, shape by shape: a `container-type: size` box publishes
-    /// the size it is about to take *before* its contents are laid out, so one
-    /// layout run settles the page — the units resolve against the container
-    /// on the only pass there is.
-    ///
-    /// The `inline-size` shape is the one the interleave declines, and it is
-    /// here to show what declining costs: its block axis answers to its
-    /// contents, so there is nothing to publish before them and the loop in
-    /// [`Document::layout`] settles it in a second run, exactly as it did
-    /// before the interleave existed.
     #[test]
     fn one_run_settles_a_size_query_container() {
         for (case, rules, size, runs) in [
@@ -1748,12 +1149,6 @@ mod tests {
         }
     }
 
-    /// A container that moves on a settled page settles in one run too —
-    /// including the move that stops it being a container at all, which the
-    /// interleave never sees: losing `container-type` is a change to the
-    /// *container's own* style, so Stylo's own invalidation has already put
-    /// the units back on the viewport fallback in the flush that precedes the
-    /// run.
     #[test]
     fn a_container_that_moves_settles_in_one_run() {
         let (mut document, query, item) = query_document(
@@ -1776,10 +1171,6 @@ mod tests {
         );
     }
 
-    /// Nested containers settle in one run as well, one nesting level per
-    /// iteration of the run's own settling loop: the outer container's
-    /// contents — the inner container among them — are laid out only once the
-    /// outer's size is published, and the inner's only once its own is.
     #[test]
     fn nested_containers_settle_in_one_run() {
         let mut document: Document<()> =
@@ -1819,12 +1210,6 @@ mod tests {
         assert!(!document.document_element().needs_style_flush());
     }
 
-    /// The interleave is a prediction, and the record the algorithm leaves
-    /// behind is what is believed. A published size no run ever produced —
-    /// staged here behind the run's back, which is what a prediction that
-    /// disagreed with its algorithm would amount to — is therefore not
-    /// durable: the next committing run of that container finds it, publishes
-    /// what the box actually takes, and the readers re-resolve from that.
     #[test]
     fn a_published_size_no_run_produced_is_corrected_by_the_next_one() {
         use committed_box::{CommittedBox, ContainerSize, RememberedSize};
@@ -1861,14 +1246,8 @@ mod tests {
         assert!(!document.document_element().needs_style_flush());
     }
 
-    /// The Ahem face every text measurement here is deterministic because of:
-    /// one em per glyph, so a run's width is its length times its font size.
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-    /// A Lynx text element is a paragraph by its kind, not by a `display`
-    /// value: the author's `grid` is its computed value and still lays its
-    /// text out as one paragraph; `none` hides it; `contents` acts as computed
-    /// and crashes nothing.
     #[test]
     fn a_lynx_text_element_is_a_paragraph_whatever_its_display_computes_to() {
         use stylo::values::computed::Display;
@@ -1913,16 +1292,6 @@ mod tests {
         assert_eq!(document.bounding_client_rect(paragraph), None);
     }
 
-    /// A paragraph whose *font size* is a container unit is the case the
-    /// interleave has to reach past style into the text pipeline for: the
-    /// shaped run is an artifact of the style, not of the geometry, and a
-    /// paragraph shaped against the viewport fallback would have to be thrown
-    /// away and shaped again.
-    ///
-    /// One run, one shaping. The restyle the run interleaves into itself goes
-    /// through the same damage harvest a flush does, so the text artifact is
-    /// evicted before the paragraph is ever built — rather than after it was
-    /// built at the wrong size.
     #[test]
     fn a_text_reader_under_a_container_is_shaped_once_at_the_container_size() {
         let mut document: Document<()> =
@@ -1963,12 +1332,6 @@ mod tests {
         );
     }
 
-    /// The loop is still the fallback, and a Lynx text element that is a
-    /// query container is what still needs it: the text block algorithm implements
-    /// no size containment, so its content box is not a function of its own
-    /// style and the interleave declines to predict one. The container's size
-    /// is published after the run that laid it out, and the units under it
-    /// re-resolve in the run after that — the pre-interleave path, intact.
     #[test]
     fn a_text_query_container_is_settled_by_the_loop() {
         let mut document: Document<()> =
@@ -2010,17 +1373,8 @@ mod tests {
         assert!(!document.document_element().needs_style_flush());
     }
 
-    /// Plain leaves per container in [`mixed_container_document`] — enough
-    /// that marking them would be visible, few enough to name each in a
-    /// failure.
     const PLAIN_LEAVES: usize = 8;
 
-    /// Two query containers of `container_type` on one page: the first holds
-    /// one `cqw` leaf among [`PLAIN_LEAVES`] px ones, the second holds px
-    /// leaves only.
-    ///
-    /// Both containers record a size on the first pass, so both reach the
-    /// recascade — the second is the container that must mark nothing.
     fn mixed_container_document(
         container_type: &str,
     ) -> (
@@ -2080,14 +1434,6 @@ mod tests {
             .hint
     }
 
-    /// What a resized container's restyle costs: one mark per element that
-    /// actually resolved a container unit, and nothing for the rest of the
-    /// subtree.
-    ///
-    /// The mark is made *inside* the layout run now, which consumes it before
-    /// it returns, so it is replayed here on the settled document — the same
-    /// call the run makes, against a page whose readers are already at their
-    /// final size.
     #[test]
     fn a_resized_container_marks_only_its_container_unit_readers() {
         let (mut document, [reading, plain_only], reader, plain) = mixed_container_document("size");
@@ -2137,21 +1483,8 @@ mod tests {
         );
     }
 
-    /// The cap iteration spells its marks differently, because they are the
-    /// only ones that outlive the `layout()` call that made them.
-    ///
-    /// Everywhere else in the loop the next `layout_pass` flushes immediately,
-    /// so a bare `RECASCADE_SELF` is safe and cheap — and, as the second half
-    /// of this test shows by running Stylo's own eraser over it, it is exactly
-    /// what an animation tick would take away if one could run first. On the
-    /// last permitted iteration the marks wait for a later flush, so the
-    /// container gets the whole-subtree spelling that survives that tick.
     #[test]
     fn the_cap_iteration_leaves_a_mark_an_animation_tick_cannot_erase() {
-        // An `inline-size` container is the shape the interleave declines —
-        // its block axis answers to its contents, so there is no size to
-        // publish before them — which is what leaves the loop to settle it and
-        // makes the two halves drivable apart here.
         let (mut document, [reading, _], reader, _) = mixed_container_document("inline-size");
 
         let mut resized = Vec::new();
@@ -2185,12 +1518,6 @@ mod tests {
         );
     }
 
-    /// The marks stop at the elements that resolved a unit because Stylo
-    /// carries the rest: a `font-size: 10cqw` child is the only element under
-    /// the container whose style carries `USES_CONTAINER_UNITS`, and its own
-    /// grandchild's `2em` width follows the container anyway — the child
-    /// cascade requirement propagates `RECASCADE_SELF` down when an inherited
-    /// value moves.
     #[test]
     fn an_inherited_container_unit_reaches_an_unmarked_grandchild() {
         let mut document: Document<()> =
@@ -2217,9 +1544,6 @@ mod tests {
 
         document.layout();
 
-        // 10cqw of the 200px container is a 20px font, and the leaf is 2em of
-        // that — reached in the one call, from a first pass that resolved the
-        // font against the 800px viewport fallback.
         assert_eq!(document.rounded_layout(leaf).unwrap().size.width, 40.0);
         assert!(
             !document
@@ -2237,8 +1561,6 @@ mod tests {
         assert_eq!(document.rounded_layout(leaf).unwrap().size.width, 60.0);
     }
 
-    /// Builds the shape a Lynx label actually has: an auto-sized `text`
-    /// element holding one text node, inside a definite-width flex row.
     fn label_document_parts(
         text: &str,
         width: f32,
@@ -2269,9 +1591,6 @@ mod tests {
         (document, label, run)
     }
 
-    /// `-webkit-text-security` masks every character of a `<text>`'s runs,
-    /// its newline included, one mask per scalar value; toggling it rebuilds
-    /// the paragraph.
     #[test]
     fn a_masked_text_shows_one_mask_per_character_and_follows_the_property() {
         let (mut document, label, _run) = label_document_parts("a b\n\u{1F600}", 200.0);
@@ -2286,14 +1605,11 @@ mod tests {
             let block = document.text_block(label).expect("committed");
             let map = block.offset_map();
             assert_eq!(map.display_text(), mask.to_string().repeat(5), "{security}");
-            // Still the six source units, the emoji's mask standing for both.
             assert_eq!(map.source_len(), 6);
             assert_eq!(map.unit_to_byte(4), Some(12));
             assert_eq!(map.unit_to_byte(5), Some(12));
-            // The newline is a mask: one line.
             assert_eq!(block.lines().len(), 1, "{security}");
         }
-        // Ahem has a disc glyph: five 16px squares.
         document.set_inline_style(label, "-webkit-text-security: disc");
         document.layout();
         assert_eq!(
@@ -2310,24 +1626,11 @@ mod tests {
         assert_eq!(document.text_block_rebuilds(label), Some(rebuilds + 1));
     }
 
-    /// The number this whole path exists to hold down.
-    ///
-    /// Nine measurements reach a flex text child in one pass — max-content,
-    /// min-content, and its used width, each asked once per enclosing flex
-    /// level, plus the commit — because the box cache keys on the available
-    /// height a text node's answer does not depend on. What survives is one
-    /// line break per *distinct* constraint, which is the floor. Before the
-    /// break and constraint memos all nine broke, and the first probe also
-    /// deep-cloned the shaped layout.
     #[test]
     fn one_pass_breaks_a_text_node_once_per_distinct_constraint() {
         for (case, text, width, lines, breaks) in [
-            // min-content == max-content == used width: two distinct widths.
             ("one word", "hello", 200.0, 1, 2),
-            // min-content (one word) < used width == max-content: three.
             ("one line, two words", "hello world", 200.0, 1, 3),
-            // min-content, max-content as a width, the used width, and
-            // unconstrained: four, one break each.
             ("wrapped", "hello world", 100.0, 2, 4),
         ] {
             let (mut document, label, run) = label_document_parts(text, width);
@@ -2346,15 +1649,6 @@ mod tests {
         }
     }
 
-    /// The case the restore queue exists for: a pass that measures a text node
-    /// and never commits it.
-    ///
-    /// It is reachable whenever the box cache answers a node's `Commit` but
-    /// not the `Measure` that preceded it — a single-axis probe can never be
-    /// served from the committed slot, while the commit input the parent
-    /// re-imposes always is. Driving the host directly is the deterministic
-    /// way to produce it; what matters is that the layout does not end the
-    /// pass painting the probe's line breaks.
     #[test]
     fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
         use seldon::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis};
@@ -2390,8 +1684,6 @@ mod tests {
         assert_eq!(restored.lines().len(), lines);
     }
 
-    /// Paragraph limits evict box and break measurements, preserving the
-    /// natural shaped layout even across intrinsic-width probes.
     #[test]
     fn changing_paragraph_limits_rebreaks_without_reshaping() {
         let (mut document, label, _run) = label_document_parts("hello world", 100.0);
@@ -2438,10 +1730,6 @@ mod tests {
         }
     }
 
-    /// A text block's min-content width counts its `text-indent` on the
-    /// indented line, as the inline formatting context's does: a flex item
-    /// offered 5px shrinks no narrower than "a" after the 15px indent, with
-    /// "b" on the next line, so 25.
     #[test]
     fn a_text_block_s_min_content_counts_its_indent() {
         let (mut document, label, _run) = label_document_parts("a b", 5.0);
@@ -2549,8 +1837,6 @@ mod tests {
                 StylesheetOrigin::Author,
             );
             document.layout();
-            // The flush above creates the animation; the tick that follows is
-            // the frame it starts on, which puts its origin at zero.
             document.advance_animations(0.0);
             document.layout();
             let rebuilds = document.text_block_rebuilds(label);
@@ -2600,20 +1886,13 @@ mod tests {
         }
     }
 
-    /// A relayout-damaged element keeps its shaped glyphs unless the restyle
-    /// moved something Parley shapes from.
     #[test]
     fn a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved() {
         for (case, declaration, survives) in [
-            // Geometry: a different `Font`/`InheritedText` is never even
-            // allocated, so level one answers.
             ("width", "width: 150px", true),
             ("padding", "padding: 4px", true),
-            // Same struct as `letter-spacing`, but not a shaping input — only
-            // the field comparison can tell these apart.
             ("text-align", "text-align: center", true),
             ("text-indent", "text-indent: 8px", true),
-            // Shaping inputs.
             ("font-size", "font-size: 24px", false),
             ("font-weight", "font-weight: 700", false),
             ("letter-spacing", "letter-spacing: 2px", false),
@@ -2667,8 +1946,6 @@ mod tests {
         document.layout();
         let first = document.text_block(label).expect("committed").size();
 
-        // Force the whole spine to re-measure, then check the paragraph did
-        // not end the pass holding an intrinsic-sizing probe's break.
         document.invalidate_layout(run);
         document.layout();
 
@@ -2706,13 +1983,6 @@ mod tests {
         }
     }
 
-    /// Becoming replaced is a layout change, not just a paint change:
-    /// `is_replaced` forces `DisplayMode::Leaf`, which sizes the box from its
-    /// natural size and hides every child. A picture that arrives before any
-    /// natural size — the ordinary order, because the picture comes from an
-    /// attribute and the size only from a completed load — must therefore
-    /// invalidate layout, or the document keeps laying the node out as a
-    /// container while painting it as an image.
     #[test]
     fn the_picture_that_makes_an_element_replaced_invalidates_layout() {
         let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
@@ -2742,9 +2012,6 @@ mod tests {
             );
         }
 
-        // A later picture at the same natural size only changes which pixels
-        // the same replaced box draws, so the retained boxes survive and only
-        // the scene is rebuilt.
         prime(&mut document);
         document.render();
         document.set_picture(image, Some((url("app:///b.png"), None)));
@@ -2761,10 +2028,6 @@ mod tests {
         }
     }
 
-    /// Taking a picture off an element that has none must stay a no-op.
-    /// Writing `Replaced` for it would turn an ordinary container into a
-    /// childless zero-sized leaf, which is not what "there is no image here"
-    /// means; and an element made replaced by a natural size alone keeps it.
     #[test]
     fn taking_a_picture_off_an_element_that_has_none_leaves_it_alone() {
         let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
@@ -2816,9 +2079,6 @@ mod tests {
         }
     }
 
-    /// What a host reports for `svg` fetched at `source`: the document it
-    /// parsed with the engine's parser, or the failure of one that did not
-    /// parse.
     fn document_report(source: &str, svg: &str) -> crate::render::image::ImageEvent {
         crate::render::image::ImageEvent::parse_document(
             std::sync::Arc::from(source),
@@ -2827,7 +2087,6 @@ mod tests {
         )
     }
 
-    /// The settled sources a batch of reports answers, by name.
     fn settled(
         document: &mut Document<()>,
         events: &[crate::render::image::ImageEvent],
@@ -2839,10 +2098,6 @@ mod tests {
             .collect()
     }
 
-    /// A host reports an SVG document as the document it parsed: the source
-    /// settles as a vector document at its natural size, a repeat report
-    /// moves nothing, and a document that did not parse fails its source
-    /// exactly as any failure report does.
     #[test]
     fn a_parsed_document_settles_and_a_malformed_one_fails() {
         let (mut document, _) = image_document();
@@ -2881,9 +2136,6 @@ mod tests {
         assert_eq!(document.image_status(OTHER_SRC), ImageStatus::Failed);
     }
 
-    /// The URL image service: a request asks the host once, a status read
-    /// asks nothing, and a source that settled before a request answers it
-    /// there, because no report will name it again.
     #[test]
     fn a_request_asks_once_and_answers_what_is_known() {
         let (mut document, _) = image_document();
@@ -2914,10 +2166,6 @@ mod tests {
         assert_eq!(document.take_wanted_images(), []);
     }
 
-    /// The natural size a picture is presented with sizes the box wherever
-    /// containment does not remove it, so every change of it has to reach
-    /// layout — the same invalidation `set_natural_size` does on its own —
-    /// and presenting the picture at the size it already has does nothing.
     #[test]
     fn a_changed_natural_size_invalidates_layout() {
         let (mut document, image) = image_document();
@@ -2952,9 +2200,6 @@ mod tests {
         }
     }
 
-    /// Taking the picture off an element makes it an ordinary one again,
-    /// natural size and all: there is no picture left for
-    /// `DisplayMode::Leaf` to size the box from or to hide its children for.
     #[test]
     fn taking_the_picture_off_an_element_unreplaces_it() {
         let (mut document, image) = image_document();
@@ -2968,8 +2213,6 @@ mod tests {
         assert_eq!(document.picture(image), None);
     }
 
-    /// Presenting a URL asks for it, as a request does, so a box presented
-    /// before any walk or request still gets its picture.
     #[test]
     fn presenting_a_url_asks_for_it() {
         let (mut document, image) = image_document();
@@ -2980,9 +2223,6 @@ mod tests {
         );
     }
 
-    /// Whether the node's committing parent proved its input survives any
-    /// change confined to the node's own subtree — the license the in-place
-    /// relayout path parks on.
     fn is_content_independent(doc: &Document<()>, id: crate::tree::document::NodeId) -> bool {
         let slot = doc.live_slot(id);
         doc.layout_state()
@@ -2994,10 +2234,6 @@ mod tests {
         let mut doc: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         doc.add_stylesheet(
-            // `overflow: hidden` is what the Lynx UA sheet gives every element,
-            // and it is load-bearing here: it is what frees the flex list's
-            // automatic minimum size from its content, without which the list
-            // has no independent main axis for percentages to chain off.
             "page, view { overflow: hidden; box-sizing: border-box; }
              page { display: flex; flex-direction: column; width: 100%; height: 100%; }
              .list { display: linear; linear-direction: column;
@@ -3028,19 +2264,10 @@ mod tests {
         let mut doc = linear_page();
         let root = doc.document_element().id();
         let list = child_of(&mut doc, root, "list");
-        // A pinned main size and a stretched cross axis: both imposed. Linear
-        // has no content-based automatic minimum, so `overflow` plays no part
-        // here the way it does under flexbox.
         let row = child_of(&mut doc, list, "row");
-        // Main size distributed from the row's own definite main size by
-        // weight, cross size stretched to it.
         let weighted = child_of(&mut doc, row, "weighted");
-        // Its main size is whatever its content measures.
         let measured = child_of(&mut doc, row, "measured");
-        // A ratio ties the axes together: a definite width fixes the height.
         let ratio = child_of(&mut doc, row, "ratio");
-        // A percentage main size resolves against the list's own main axis,
-        // which the page imposes.
         let percent = child_of(&mut doc, list, "percent-row");
 
         doc.layout();
@@ -3060,9 +2287,6 @@ mod tests {
         let mut doc: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         doc.add_stylesheet(
-            // Lynx's UA `overflow: hidden` is again load-bearing: it is what
-            // frees a grid item's automatic minimum from its content, which is
-            // what lets a flexible track stay put under it.
             "page, view { overflow: hidden; box-sizing: border-box; }
              page { display: flex; flex-direction: column; width: 300px; height: 300px; }
              .grid { display: grid; grid-template-columns: 100px 1fr;
@@ -3075,10 +2299,7 @@ mod tests {
         );
         let root = doc.document_element().id();
         let grid = child_of(&mut doc, root, "grid");
-        // Fixed column, fixed row: the area cannot move at all.
         let fixed_cell = child_of(&mut doc, grid, "");
-        // Flexible column, but a pinned width keeps this item's contribution
-        // out of the track's sizing.
         let pinned_cell = child_of(&mut doc, grid, "pinned");
         let relative = child_of(&mut doc, root, "relative");
         let anchored = child_of(&mut doc, relative, "sized");
@@ -3142,11 +2363,6 @@ mod tests {
         );
     }
 
-    /// Two boundaries parked in one pass, one under the other with a
-    /// `display: contents` wrapper between them. The inner boundary's subtree
-    /// is rounded and its top-layer box placed, although no layout write
-    /// marked the wrapper: the outer boundary's walk descends through marked
-    /// nodes alone, so the inner boundary walks its own subtree.
     #[test]
     fn a_parked_boundary_under_another_parked_boundary_is_rounded_on_its_own() {
         let mut doc: Document<()> =
@@ -3185,9 +2401,6 @@ mod tests {
             "hidden until shown"
         );
 
-        // Shown under the inner boundary, and a change under the outer one,
-        // in the same pass: the flush parks both, and neither reaches the
-        // root.
         doc.set_classes(top, "top");
         doc.set_inline_style(leaf, "height: 20px");
         doc.flush_styles_with_damage_sink(&mut |_, _| {});
@@ -3215,11 +2428,6 @@ mod tests {
         );
     }
 
-    /// A whole-tree run: a change reached the root while an in-place root
-    /// parked under an unwritten `display: contents` wrapper. The root walk
-    /// descends through marked nodes alone and the wrapper carries no mark,
-    /// so the parked root's subtree must still be rounded and its top-layer
-    /// box placed.
     #[test]
     fn a_parked_in_place_root_under_a_wrapper_is_rounded_in_a_whole_tree_run() {
         let mut doc: Document<()> =
@@ -3279,11 +2487,6 @@ mod tests {
         );
     }
 
-    /// An empty linear box lays out as a leaf, but its committed input keeps
-    /// the definiteness its parent gave it. A linear parent commits a child
-    /// with its size styles ignored, and the children a contained scroller
-    /// gains later, as a pager's pages arrive, are laid out in place under
-    /// that input: without it their percentages resolve to nothing.
     #[test]
     fn an_empty_linear_box_that_gains_children_lays_them_out_under_its_definite_size() {
         let mut doc: Document<()> =
@@ -3311,10 +2514,6 @@ mod tests {
         assert_eq!((rect.size.width, rect.size.height), (50.0, 40.0));
     }
 
-    /// A whole-tree run: a change reached the root while a containment
-    /// boundary parked under a box whose own cache stayed warm. The root
-    /// pass answers that box from its cache and never descends, so the
-    /// boundary's subtree must be relaid in place as in an incremental run.
     #[test]
     fn a_parked_boundary_under_a_warm_box_is_relaid_in_a_whole_tree_run() {
         let mut doc: Document<()> =
@@ -3435,13 +2634,6 @@ mod tests {
         );
     }
 
-    /// A skipped box is a relayout boundary — `SIZE` and `LAYOUT` both — and
-    /// now that it holds a committed input it can be the root of one.
-    ///
-    /// Its re-run is the trivial size it already answered plus the hide sweep,
-    /// so parking it costs one box model and one pass over its children, where
-    /// the alternative is either reflowing from the root or leaving the box
-    /// tree's change unanswered until the box stops skipping.
     #[test]
     fn a_mutation_under_a_skipped_box_parks_the_box_itself() {
         let mut doc: Document<()> =
@@ -3477,21 +2669,12 @@ mod tests {
         );
     }
 
-    /// How a row list skips: `content-visibility: hidden` on the rows the
-    /// page keeps out, or `auto` on rows the render finds outside the encode
-    /// window.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Skipping {
         Hidden,
         Auto,
     }
 
-    /// A fixed-height scroller of `rows` rows, each holding one cell, where
-    /// everything past the first `VISIBLE_ROWS` skips its contents.
-    ///
-    /// The scroller's own box never moves, so every row's committed input is
-    /// the same input on every pass: a row's own cell changing width is the
-    /// one thing dirty about the page.
     fn skipping_row_list(
         rows: usize,
         skipping: Skipping,
@@ -3504,9 +2687,6 @@ mod tests {
         let mut doc: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
         let (row_rule, skipped_rule) = match skipping {
-            // `auto` is on every row; which of them skips is the render's
-            // answer, and rows below the encode window are the ones it says
-            // no to.
             Skipping::Auto => ("content-visibility: auto;", ""),
             Skipping::Hidden => ("", ".skipped { content-visibility: hidden; }"),
         };
@@ -3539,14 +2719,6 @@ mod tests {
         (doc, row_ids, first_cell.expect("the list has rows"))
     }
 
-    /// The number this cache exists to hold down.
-    ///
-    /// A mutation beside the skipped rows re-runs the list, which asks every
-    /// row for its box — and a skipped box's answer reads no child, so it is
-    /// the same answer as last pass and comes back from the cache. Before it
-    /// did, every skipped row on the page re-resolved its own box model on
-    /// every pass, which is what made a long list of skipped rows more
-    /// expensive to mutate beside than a list of ordinary ones.
     #[test]
     fn a_mutation_beside_skipped_rows_re_resolves_no_skipped_box() {
         for skipping in [Skipping::Hidden, Skipping::Auto] {
@@ -3554,8 +2726,6 @@ mod tests {
             for rows in [8_usize, 64] {
                 let (mut doc, row_ids, cell) = skipping_row_list(rows, skipping);
                 let settle = |doc: &mut Document<()>| match skipping {
-                    // Relevance is the rendering update's answer, so an
-                    // `auto` page has to render to have one at all.
                     Skipping::Auto => {
                         doc.render();
                     }

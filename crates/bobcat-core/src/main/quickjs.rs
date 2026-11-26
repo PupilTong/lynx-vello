@@ -26,17 +26,6 @@ use crate::jobs::JsThreadHandle;
 use crate::realm::child::ChildRealms;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
-/// The first panic a host function of one realm raised, kept until the
-/// operation that reached it ends.
-///
-/// The bridge cannot let a panic unwind through `QuickJS`'s C frames, so it
-/// turns one into an exception, which the script may catch. The payload is
-/// kept here instead of being lost, and the realm's next checkpoint resumes
-/// it: a host function that panics fails the entry it was called in as a
-/// panic, whatever the script did with the exception it was shown.
-///
-/// Every use takes the whole value or sets it when empty, never holding it
-/// across a call, so a `Cell` is enough.
 type HostPanic = Rc<Cell<Option<Box<dyn Any + Send>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,78 +55,19 @@ impl Default for QuickJsConfig {
     }
 }
 
-/// One realm on a [`ScriptRuntime`] — one view's global object, modules and
-/// host functions — with Bobcat's job policy on it.
-///
-/// A group opens one of these per view on one runtime, so everything the
-/// runtime owns is shared: the heap, the atom table, the promise-job queue,
-/// the execution limits. Everything a *failure* is made of is not: a
-/// checkpoint run through this realm reports this realm's rejections alone,
-/// so one view's broken script cannot be reported to another's.
-///
-/// Created on the thread that will own it — the engine-owned Lynx main
-/// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
-    /// The namespace object and the interned name of every [`Export`] the
-    /// host has called in this realm, indexed by the export, each resolved
-    /// on its first call.
-    ///
-    /// One call per crossing into the realm — an event with its whole path,
-    /// a timer, a frame, a settle, a worker message — goes through one of a
-    /// dozen fixed exports. `QuickJS` resolves a property by atom, and
-    /// interning the name on every call would hash and allocate once per
-    /// crossing, so the atom is kept, and the namespace object beside it.
-    ///
-    /// One cell per export, each set once, so a call reads the pair through
-    /// a shared borrow of the engine: a realm is called again from inside
-    /// one of its own calls ([`Self::call_module_export_nested`]), and every
-    /// call into it takes `&self`.
     exports: [OnceCell<(quickjs::Value, quickjs::Member)>; Export::COUNT],
-    /// The promise of the root module's evaluation, until it settles. Only
-    /// boot and [`Self::module_finished`] touch it, never from inside a
-    /// call, so the borrow is never contended.
     evaluation: RefCell<Option<quickjs::Value>>,
-    /// Per realm, like a rejection: a sibling's checkpoint may run this
-    /// realm's promise jobs, and a panic one of them raised is this realm's
-    /// to resume, not the sibling's. A `ShadowRealm` child shares its
-    /// parent's: the child's code runs inside the parent's calls, so a panic
-    /// its host function raised there is the parent entry's to resume.
     host_panic: HostPanic,
-    /// The `ShadowRealm` children of an owner's realm, whose leftover
-    /// rejections go with this realm's when an entry of this realm has
-    /// already reported a failure. Weak, because the list is the realm
-    /// core's and drops after this engine; dangling for a child's own engine,
-    /// whose grandchildren are in that same flat list.
     children: Weak<ChildRealms>,
-    /// What this realm looks bytecode up in and files what it compiled
-    /// under ([`crate::code_cache`]); shared with its synchronous loader.
     code: Rc<RealmCodeCache>,
 }
 
-/// The `QuickJS` runtime a group's realms share.
-///
-/// Everything here is a runtime-wide fact rather than a realm's: one heap,
-/// one atom table, one promise-job queue, one set of execution limits. The
-/// queue is one of those facts, and no checkpoint ever leaves work in it:
-/// every checkpoint runs it dry, whichever realm queued the jobs. A
-/// *failure* is not a runtime-wide fact: a rejection belongs to the realm
-/// that raised it, and only a checkpoint run through that realm's
-/// [`ScriptEngine`] reports it.
 pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
-    /// Bumped by every checkpoint any realm on this runtime runs.
-    ///
-    /// The job queue is the runtime's: one view's checkpoint runs another's
-    /// promise jobs, so an import a sibling was waiting on can finish inside
-    /// an entry that has nothing to do with it. The sibling learns that here
-    /// rather than by being told, which is what makes it impossible to enter
-    /// JavaScript and forget to say so.
     checkpoint: tokio::sync::watch::Sender<u64>,
-    /// The memory tier of the code cache every realm opened here reads and
-    /// fills: [`Artifacts::global`](vant::artifact::Artifacts::global)
-    /// outside this crate's tests.
     artifacts: Arc<vant::artifact::Artifacts>,
 }
 
@@ -156,8 +86,6 @@ impl ScriptRuntime {
         })
     }
 
-    /// A runtime whose realms use `artifacts` as their code cache instead of
-    /// the process-wide tier, so a test's assertions about it are exact.
     #[cfg(test)]
     pub(crate) fn with_artifacts(
         artifacts: Arc<vant::artifact::Artifacts>,
@@ -168,38 +96,23 @@ impl ScriptRuntime {
         Ok(runtime)
     }
 
-    /// The checkpoint generation, for a task that must settle what its own
-    /// realm owes again whenever any realm on this runtime has entered
-    /// JavaScript.
     pub(crate) fn checkpoints(&self) -> tokio::sync::watch::Receiver<u64> {
         self.checkpoint.subscribe()
     }
 
-    /// The generation as it stands right now.
-    ///
-    /// A page records this at the end of every entry of its own, so the clock
-    /// task watching [`Self::checkpoints`] can tell a sibling's bump —
-    /// which may have finished this realm's imports — from the one this
-    /// realm just ran up itself.
     pub(crate) fn checkpoint_generation(&self) -> u64 {
         *self.checkpoint.borrow()
     }
 
-    /// Announces a checkpoint nobody ran: a task ended part-way through, so
-    /// whatever it left behind is now a sibling's to finish.
     pub(crate) fn mark_checkpoint(&self) {
         self.checkpoint
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// What the runtime's heap holds now, for the memory monitor: a walk of
-    /// the whole heap — every realm on the thread — that runs no
-    /// JavaScript. Called only by a memory sample.
     pub(crate) fn memory_usage(&self) -> quickjs::MemoryUsage {
         self.runtime.memory_usage()
     }
 
-    /// Opens one realm on this runtime. Every view in a group gets its own.
     pub(crate) fn create_realm(&self) -> Result<ScriptEngine, ScriptError> {
         let realm = self
             .runtime
@@ -213,20 +126,6 @@ impl ScriptRuntime {
         ))
     }
 
-    /// Registers one module source on the runtime, for every realm on it.
-    ///
-    /// Sources are runtime-wide and compile per realm, so the modules every
-    /// view shares are registered once here rather than once per view — a
-    /// second registration of a name is refused, not merged.
-    ///
-    /// No checkpoint runs: registering a source names no realm and enters no
-    /// JavaScript, so there is neither work to finish on some realm's behalf
-    /// nor a realm to report a pending failure to. The entry that imports the
-    /// name reports it, on its own realm.
-    ///
-    /// The engine registers its built-ins as bytecode
-    /// ([`Self::register_module_bytecode`]); registering text is what this
-    /// module's own tests do.
     #[cfg(test)]
     pub(crate) fn register_module_source(
         &mut self,
@@ -238,11 +137,6 @@ impl ScriptRuntime {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
 
-    /// Registers one module on the runtime as bytecode, for every realm on
-    /// it: [`Self::register_module_source`] with the module already compiled,
-    /// which is how the built-ins arrive (`crate::esm`). A realm that imports
-    /// the name reads the module back instead of compiling it, and the bytes,
-    /// `'static`, are borrowed rather than copied.
     pub(crate) fn register_module_bytecode(
         &mut self,
         specifier: &str,
@@ -253,14 +147,6 @@ impl ScriptRuntime {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
 
-    /// Keeps every module name under `prefix` to what this runtime registered
-    /// and what each realm declares: an `import` of one resolves only to
-    /// those, and a `require` of one answers only from a module the realm has
-    /// already imported. Any other fails in the realm that asked with a
-    /// `ReferenceError`, and is never sent to a fetcher as a
-    /// [`SourceRequest::Module`].
-    ///
-    /// [`SourceRequest::Module`]: crate::resource::SourceRequest::Module
     pub(crate) fn reserve_module_prefix(&mut self, prefix: &str) -> Result<(), ScriptError> {
         self.runtime
             .reserve_module_prefix(prefix)
@@ -268,27 +154,8 @@ impl ScriptRuntime {
     }
 }
 
-/// The runtime every realm on one engine thread is opened on, as that
-/// thread's tasks and jobs share it.
-///
-/// Shared rather than owned by any one task, and borrowed only inside a job:
-/// an entry holds it for its whole length, a synchronous wait included, which
-/// is safe because no other job runs until that one returns and no task ever
-/// takes it.
-///
-/// A runtime that could not be built is not fatal to the group: it is the
-/// failure of every view or worker that would have run on it, and each hears
-/// about it when it asks for a realm.
 pub(crate) type SharedRuntime = Rc<RefCell<Result<ScriptRuntime, ScriptError>>>;
 
-/// Announces a checkpoint nobody ran, from a task: a task on `thread` ended
-/// part-way through, so whatever it left in the shared job queue is now a
-/// sibling realm's to finish.
-///
-/// A job rather than a call, because the caller is a task and the shared
-/// runtime belongs to whichever job holds it. Nothing waits for the bump, so
-/// the answer is dropped. A runtime that was never built has no realm to
-/// wake, and is left alone.
 pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle) {
     let js = Rc::clone(js);
     drop(thread.run(move || {
@@ -299,8 +166,6 @@ pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle)
 }
 
 impl ScriptEngine {
-    /// One bridge realm as an engine of its own, with nothing loaded in it
-    /// yet.
     fn adopt(realm: quickjs::Context, host_panic: HostPanic, code: Rc<RealmCodeCache>) -> Self {
         Self {
             realm,
@@ -312,35 +177,16 @@ impl ScriptEngine {
         }
     }
 
-    /// Files the bytecode of every compile this realm kept since the last
-    /// call ([`RealmCodeCache::insert`]). Run at the end of every operation
-    /// that can link a module or reach a `require`, so what a compile kept
-    /// is in the memory tier before the job that compiled it ends.
     fn file_compiled(&self) {
         while let Some(compiled) = self.realm.take_compiled() {
             self.code.insert(compiled);
         }
     }
 
-    /// Names the list this realm's `ShadowRealm` children live in, whose
-    /// leftover rejections [`Self::finish_operation`] drops with this
-    /// realm's own.
     pub(crate) fn set_children(&mut self, children: Weak<ChildRealms>) {
         self.children = children;
     }
 
-    /// Installs the TC39 `ShadowRealm` constructor as a global of this
-    /// realm, with `hook` as its `HostInitializeShadowRealm`.
-    ///
-    /// Every `new ShadowRealm()` hands `hook` the fresh child realm as an
-    /// engine of its own, synchronously, in the middle of the JavaScript
-    /// call that constructs it: the hook installs what the child should have
-    /// and keeps it for as long as it lives, because dropping the engine
-    /// releases the realm. An `Err` refuses the construction with a
-    /// `TypeError` saying what it said. The child shares this realm's
-    /// [`HostPanic`], so a panic one of its host functions raises during a
-    /// call of this realm's is resumed by this realm's checkpoint; a hook
-    /// that panics is kept the same way and refuses the construction.
     pub(crate) fn install_shadow_realm(
         &mut self,
         mut hook: impl FnMut(ScriptEngine) -> Result<(), String> + 'static,
@@ -358,28 +204,10 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::InstallShadowRealm))
     }
 
-    /// Whether anything of another realm still needs this one: a
-    /// `ShadowRealm` whose child it is, a wrapped function whose target lives
-    /// in it, or an `importValue` still loading in it. Objects that are only
-    /// cyclic garbage count until a collection has finalized them.
     pub(crate) fn is_referenced_across_realms(&self) -> bool {
         self.realm.is_referenced_across_realms()
     }
 
-    /// Reports one rejection this realm left unhandled, outside any
-    /// checkpoint of an entry of its own, and drops the rest of them.
-    ///
-    /// For a realm whose code runs inside another realm's entries — a
-    /// `ShadowRealm` child, whose rejections that entry's checkpoint leaves
-    /// queued for the child — and for the parent beside it, which a child's
-    /// own operations can leave rejections in. The queue has normally
-    /// already run dry, so this runs no job; one that does run is the
-    /// runtime's, as in any drain, and the caller announces it. The
-    /// generation is not bumped here, because this is not an entry: it is
-    /// the end of one, whose own checkpoint already did.
-    ///
-    /// A panic one of this realm's host functions raised is resumed here, as
-    /// [`Self::checkpoint`] resumes one.
     pub(crate) fn take_unhandled_rejection(
         &self,
         runtime: &mut ScriptRuntime,
@@ -390,37 +218,15 @@ impl ScriptEngine {
             panic::resume_unwind(payload);
         }
         drained.map_err(|error| {
-            // One report per failure, as an entry's own checkpoint makes it.
             runtime.runtime.discard_unhandled_rejections(&self.realm);
             map_quickjs_error(error, ScriptErrorPhase::ShadowRealmCheckpoint)
         })
     }
 
-    /// Drops every rejection this realm has left unhandled, for a caller that
-    /// is releasing it or has already reported its failure.
     pub(crate) fn discard_own_rejections(&self, runtime: &mut ScriptRuntime) {
         runtime.runtime.discard_unhandled_rejections(&self.realm);
     }
 
-    /// Ends one entry into this realm: the checkpoint runs whether the entry
-    /// succeeded or not, because the jobs it queued are due either way.
-    ///
-    /// An entry that ends in a failure reports one, and drops whatever
-    /// rejections this realm still has queued behind it: one throw rejects
-    /// its module's evaluation promise and everything awaiting it, and
-    /// handing those out one entry at a time would turn one broken script
-    /// into a realm that fails forever. A worker whose script throws at load
-    /// still answers the next message, which is what HTML says it does.
-    /// Pending *jobs* are not dropped — they are still due, and this entry's
-    /// own checkpoint runs them before the caller hears the failure.
-    ///
-    /// A checkpoint error raised beside a failure the caller is already
-    /// reporting is one of those rejections: the checkpoint still runs, and
-    /// its error is dropped with the rest. Nothing is kept for the next entry
-    /// into this realm. A failure does not end the realm, so that entry is an
-    /// ordinary operation — a module completion, a future settle — and
-    /// refusing it in order to report an older error would leave whatever it
-    /// was resuming pending for good.
     fn finish_operation<T>(
         &self,
         runtime: &mut ScriptRuntime,
@@ -443,11 +249,6 @@ impl ScriptEngine {
         }
     }
 
-    /// Drops the rejections this realm left behind a failure its caller has
-    /// already been told about. Only this realm's and its `ShadowRealm`
-    /// children's: the children's code ran inside this realm's entry, so what
-    /// they left is part of the one failure reported, while a sibling's is
-    /// still news to the sibling.
     fn discard_leftover_rejections(&self, runtime: &mut ScriptRuntime) {
         self.discard_own_rejections(runtime);
         if let Some(children) = self.children.upgrade() {
@@ -455,30 +256,13 @@ impl ScriptEngine {
         }
     }
 
-    /// Drains the runtime's promise-job queue on this realm's behalf.
-    ///
-    /// The jobs are the runtime's and all of them run, whichever realm
-    /// queued them. The *rejections* reported are this realm's alone: a
-    /// sibling's stays queued until that sibling's own next checkpoint.
-    ///
-    /// Every entry that runs this realm's JavaScript ends here, so this is
-    /// also where a panic one of its host functions raised during the entry
-    /// is resumed, after the drain: the caller's entry unwinds, and the
-    /// thread reports it as that entry's panic. Like a rejection, a panic a
-    /// sibling's checkpoint ran into waits for this realm's own.
     fn checkpoint(
         &self,
         runtime: &mut ScriptRuntime,
         phase: ScriptErrorPhase,
     ) -> Result<usize, ScriptError> {
         let drained = runtime.runtime.drain_pending_jobs(&self.realm);
-        // Structurally, on both outcomes: this realm entered the shared job
-        // queue, and every sibling has to settle what its own realm owes
-        // whether or not the drain got through it.
         runtime.mark_checkpoint();
-        // Every entry ends in a checkpoint, and a compile — a module linked,
-        // a `require` — happens inside one, so this is where what it kept is
-        // filed, before a resumed panic could skip it.
         self.file_compiled();
         if let Some(payload) = self.host_panic.take() {
             panic::resume_unwind(payload);
@@ -487,12 +271,6 @@ impl ScriptEngine {
         Ok(executed)
     }
 
-    /// Runs a collection now, so a dead handle's finalizer reaches the
-    /// document before the batch it belongs to ends.
-    ///
-    /// A collection is the whole runtime's: in a group it walks every realm
-    /// on it, and every view's finalizers run. One realm asks for it, though,
-    /// and that realm is the one its checkpoints report to.
     pub(crate) fn collect_garbage(&self, runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
         runtime.runtime.run_gc();
         self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
@@ -507,16 +285,6 @@ impl ScriptEngine {
         self.realm.take_module_request()
     }
 
-    /// Answers one module request of this realm's with its source and
-    /// response URL, or with why there is none, and resumes the imports
-    /// waiting on it.
-    ///
-    /// The bridge passes the URL and the error text on as C strings, and
-    /// refuses one containing a NUL without completing the module, which
-    /// would leave the import pending forever. So both are made safe here,
-    /// for every caller: a NUL in the error text is replaced with U+FFFD, and
-    /// a response URL containing one fails the module instead, because the
-    /// replaced URL would name an address the fetcher never answered for.
     pub(crate) fn complete_module(
         &self,
         runtime: &mut ScriptRuntime,
@@ -532,9 +300,6 @@ impl ScriptEngine {
             Err(error) => Err(error.replace('\0', "\u{fffd}")),
         };
         let completed = match result {
-            // The code cache's choice is about how the text becomes a
-            // module, never what it is: the module behaves the same either
-            // way, so a text it does not cache keeps the plain completion.
             Ok((url, text)) => match self.code.module_code(name, text) {
                 crate::code_cache::ModuleCode::Compile => {
                     self.realm.complete_module(name, Ok((url, text)))
@@ -553,16 +318,6 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, PHASE)
     }
 
-    /// Answers one module request of this realm's with bytecode alone — a
-    /// native module's ES module, framed as
-    /// [`compile_module_framed`](quickjs::Context::compile_module_framed)
-    /// writes it — and resumes the imports waiting on it.
-    ///
-    /// The module is named `name` and that is also its `import.meta.url`.
-    /// It has no text: bytes that cannot be read as the module `name` fail
-    /// every import of it with a `TypeError` naming it, and nothing is
-    /// compiled in their place. The code cache takes no part, because this
-    /// is no host text answer.
     pub(crate) fn complete_module_bytecode(
         &self,
         runtime: &mut ScriptRuntime,
@@ -596,25 +351,6 @@ impl ScriptEngine {
         result.map(|value| value.is_some())
     }
 
-    /// Installs one Rust-backed function as a named export of a native ESM
-    /// module: a leaf host callback.
-    ///
-    /// The realm turns a returned message into a JavaScript exception. Values
-    /// crossing either way are primitives or structured clones — the
-    /// arguments lent for the call ([`quickjs::HostArgument`]), the answer
-    /// owned ([`quickjs::HostValue`]) — so no realm handle and no DOM
-    /// identity ever crosses as itself.
-    ///
-    /// Every export must be registered before that module first loads, and a
-    /// name cannot be replaced. Registration retains the callback without
-    /// invoking it, and enters no JavaScript, so it needs no runtime borrow:
-    /// it happens on the owning thread before the realm's first JavaScript,
-    /// which for a `ShadowRealm` child is inside the hook that runs while the
-    /// parent's entry holds the runtime.
-    ///
-    /// A callback that panics throws "the host function panicked" into the
-    /// script, and the panic itself is resumed by the checkpoint that ends
-    /// the entry: see [`HostPanic`].
     pub(crate) fn register_host_module_function<F>(
         &self,
         module_specifier: &str,
@@ -641,11 +377,6 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
-    /// [`Self::register_host_module_function`] for an `Fn` callback, which
-    /// may be called again while a call of it is running: a member whose
-    /// callback calls into realms ([`Self::call_module_export_nested`])
-    /// whose code can reach the same member back. Everything the callback touches must be borrowed
-    /// per use and released before it calls into a realm.
     pub(crate) fn register_reentrant_host_module_function<F>(
         &self,
         module_specifier: &str,
@@ -672,12 +403,6 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
-    /// Adds the runtime's shared object as a named export of a native ESM
-    /// module: the one object every realm of this runtime it is added to
-    /// holds by reference, so what one realm stores on it another reads as
-    /// itself. Registered when [`Self::register_host_module_function`]
-    /// registers; see the bridge's `register_host_module_shared_object` for
-    /// how long the object lives.
     pub(crate) fn register_host_module_shared_object(
         &mut self,
         module_specifier: &str,
@@ -688,18 +413,6 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
-    /// Installs one synchronous source loader as a named export of a native
-    /// ESM module: the realm asks it for a URL and gets back the compiled
-    /// source, and the text never becomes a JavaScript value.
-    ///
-    /// Registered when [`Self::register_host_module_function`] registers, and
-    /// a loader that panics is treated the way a host function that panics
-    /// is.
-    ///
-    /// What `load` answers goes through the realm's code cache
-    /// ([`RealmCodeCache::required`]): the compile reads bytecode a previous
-    /// load of the same text under the same names left, when the memory tier
-    /// holds it, and keeps its own otherwise.
     pub(crate) fn register_synchronous_loader<F>(
         &mut self,
         module_specifier: &str,
@@ -724,9 +437,6 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
-    /// Evaluates classic source, which the runtime never does: every entry and
-    /// every built-in is a module. It survives so this module's own tests can
-    /// state a realm invariant in a snippet and let a throw fail the test.
     #[cfg(test)]
     fn execute_script(
         &self,
@@ -749,10 +459,6 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, PHASE)
     }
 
-    /// Evaluates an in-memory module through its immediate job checkpoint.
-    /// Test snippets use this contract; an MTS realm's boot uses
-    /// `start_module` and a worker realm's `load_root_module`, so boot can
-    /// wait for resources or timers.
     #[cfg(test)]
     fn execute_module(
         &self,
@@ -772,8 +478,6 @@ impl ScriptEngine {
         }
     }
 
-    /// Starts module evaluation and retains its completion promise across
-    /// resource and timer turns. `module_finished` observes its settlement.
     pub(crate) fn start_module(
         &self,
         runtime: &mut ScriptRuntime,
@@ -799,17 +503,6 @@ impl ScriptEngine {
         self.module_finished().map(|_| ())
     }
 
-    /// Loads the module `name` as this realm's root, the way an `import()`
-    /// of it would, and retains the promise that load settles, as
-    /// [`Self::start_module`] retains a module's evaluation: one
-    /// `module_finished` observes.
-    ///
-    /// Nothing is written around the module: the root *is* the module at
-    /// `name`. A registered one, and any graph whose every source this realm
-    /// already has, evaluates under this call. Any other waits as an import
-    /// does, its own source first: `name` itself becomes a
-    /// [`Self::take_module_request`], and completing it is what goes on to
-    /// load the rest of the graph and evaluate it.
     pub(crate) fn load_root_module(
         &self,
         runtime: &mut ScriptRuntime,
@@ -825,17 +518,6 @@ impl ScriptEngine {
         self.module_finished().map(|_| ())
     }
 
-    /// Calls a function a loaded source module exported, if it exported one
-    /// under that name.
-    ///
-    /// `Ok(false)` means the module exported no such function — a bundle with
-    /// no listener runtime, not a failure. `Ok(true)` means it ran and
-    /// returned.
-    ///
-    /// There is no return value, because the one thing a callee needs to tell
-    /// the host — that a walk should end — is a host call of its own, and
-    /// making it a return value would mean the host could only hear it once
-    /// the callee finished.
     pub(crate) fn call_module_export(
         &self,
         runtime: &mut ScriptRuntime,
@@ -843,15 +525,9 @@ impl ScriptEngine {
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
         let result = self.invoke_module_export(export, arguments)?;
-        // The checkpoint runs through `finish_operation`, never inline:
-        // draining the job queue while this call is still on the stack would
-        // run promise jobs re-entrantly, inside the very walk they belong to.
         self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
     }
 
-    /// [`Self::call_module_export`] for an export of any loaded module, named
-    /// by its specifier and name and resolved on every call: the tests' own
-    /// modules export what no [`Export`] names.
     #[cfg(test)]
     fn call_named_export(
         &self,
@@ -865,15 +541,6 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
     }
 
-    /// Calls a module export as the first step of the operation its caller
-    /// runs next, without a checkpoint of its own.
-    ///
-    /// The promise jobs the call queued are drained by that next operation's
-    /// checkpoint, so the two are one checkpoint and one generation bump: no
-    /// sibling realm is woken in between to settle what it owes, as it would
-    /// be by [`Self::call_module_export`]'s own checkpoint. A call that fails
-    /// is finished the way [`Self::call_module_export`] finishes one, since
-    /// its caller runs nothing after it.
     pub(crate) fn call_module_export_before_operation(
         &self,
         runtime: &mut ScriptRuntime,
@@ -884,9 +551,6 @@ impl ScriptEngine {
         self.finish_call_before_operation(runtime, result)
     }
 
-    /// [`Self::call_module_export_before_operation`] for an export no
-    /// [`Export`] names, as [`Self::call_named_export`] is for
-    /// [`Self::call_module_export`].
     #[cfg(test)]
     fn call_named_export_before_operation(
         &self,
@@ -900,8 +564,6 @@ impl ScriptEngine {
         self.finish_call_before_operation(runtime, result)
     }
 
-    /// A call made before an operation needs no checkpoint of its own unless
-    /// it failed, in which case its caller runs nothing after it.
     fn finish_call_before_operation(
         &self,
         runtime: &mut ScriptRuntime,
@@ -915,10 +577,6 @@ impl ScriptEngine {
         }
     }
 
-    /// The checkpoint that ends a run of
-    /// [`Self::call_module_export_before_operation`] calls with nothing after
-    /// them: the one [`Self::call_module_export`] would have ended the last
-    /// of them with, run on its own.
     pub(crate) fn checkpoint_after_calls(
         &self,
         runtime: &mut ScriptRuntime,
@@ -926,19 +584,11 @@ impl ScriptEngine {
         self.finish_operation(runtime, Ok(()), ScriptErrorPhase::CallModuleExport)
     }
 
-    /// The call both [`Self::call_module_export`] and
-    /// [`Self::call_module_export_before_operation`] make. The outer error is
-    /// a lookup that failed before JavaScript ran, which needs no checkpoint;
-    /// the inner result is the call's own.
     fn invoke_module_export(
         &self,
         export: Export,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<Result<bool, ScriptError>, ScriptError> {
-        // The pair stays borrowed from its cell while the call runs, and
-        // nothing is cloned. A nested call of the same export finds the cell
-        // set; one that resolved it first, from inside the lookup, would
-        // have set it to the same pair.
         let slot = &self.exports[export as usize];
         if slot.get().is_none() {
             let resolved = resolve_export(&self.realm, export.specifier(), export.name())?;
@@ -948,22 +598,6 @@ impl ScriptEngine {
         Ok(call_resolved(&self.realm, object, member, arguments))
     }
 
-    /// Calls a module export from inside a JavaScript call on this runtime,
-    /// where [`Self::call_module_export`] cannot be used: no
-    /// [`Self::finish_operation`] and no checkpoint, since draining the job
-    /// queue while the enclosing call is still on the stack would run
-    /// promise jobs re-entrantly. The enclosing operation's checkpoint
-    /// drains the runtime-wide queue, and a rejection this call left
-    /// unhandled is this realm's, reported by its own next checkpoint or
-    /// [`Self::take_unhandled_rejection`], as a `ShadowRealm` child's already
-    /// is. A panic of one of this realm's host functions is kept in its
-    /// [`HostPanic`] and resumed the same way.
-    ///
-    /// The caller may be a host function of this same realm: `QuickJS` lets
-    /// a host function on the owning thread call into any realm of its
-    /// runtime, its own included, and the bridge's execution guard counts
-    /// the depth, so the enclosing entry's limits cover the call. Its one
-    /// caller is the synthetic dispatch member (`main/runtime/lib.rs`).
     pub(crate) fn call_module_export_nested(
         &self,
         export: Export,
@@ -973,12 +607,6 @@ impl ScriptEngine {
     }
 }
 
-/// Resolves a module export to the namespace object it lives on and the
-/// interned name to look it up by.
-///
-/// A module a realm has loaded stays loaded for the realm's life, so the
-/// namespace object one lookup answers is the one every later lookup would
-/// answer, and the pair can be kept.
 fn resolve_export(
     realm: &quickjs::Context,
     specifier: &str,
@@ -993,34 +621,21 @@ fn resolve_export(
     Ok((object, member))
 }
 
-/// Calls `member` on a module's namespace `object` in `realm`: `Ok(false)`
-/// when the module exports no such function.
 fn call_resolved(
     realm: &quickjs::Context,
     object: &quickjs::Value,
     member: &quickjs::Member,
     arguments: &[quickjs::HostArgument<'_>],
 ) -> Result<bool, ScriptError> {
-    // One crossing carries the lookup and every argument, and nothing here
-    // allocates: the primitives are described in place and a string is lent,
-    // not copied — the caller holds it for the whole walk, and the realm
-    // needs it only for the length of this call.
     realm
         .call_member(object, member, arguments)
         .map(|outcome| match outcome {
-            // The realm published nothing here. Not an error: a bundle with
-            // no listener runtime simply has no member to call.
             quickjs::CallOutcome::MemberAbsent => false,
             quickjs::CallOutcome::Called(_) => true,
         })
         .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))
 }
 
-/// Runs one call the realm made into Rust, keeping the payload of a panic in
-/// `host_panic` and answering the script with `message` in its place.
-///
-/// Only the first panic of an entry is kept: a second one is what the script
-/// ran into after the first, and the checkpoint resumes one.
 fn keep_host_panic<T>(
     host_panic: &HostPanic,
     message: &str,
@@ -1033,14 +648,6 @@ fn keep_host_panic<T>(
     })
 }
 
-/// URL identity is shared by static and dynamic imports. Bare names are
-/// reserved for the built-ins; transport and response policy stay with the host.
-/// An engine name and a `lynx:` name are kept as written, so `lynx:<name>`
-/// is the native module `<name>`'s ES module whatever `<name>` spells.
-///
-/// Reachable past this module because a `require` resolves the same way an
-/// `import` does, and the realm runtime that implements it asks through the
-/// host member [`crate::require`] installs over this.
 pub(crate) fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
     if specifier == crate::esm::WORKER_CLASS_MODULE_SPECIFIER
         || specifier.starts_with(crate::esm::NATIVE_MODULE_ESM_PREFIX)
@@ -1083,10 +690,6 @@ impl fmt::Debug for ScriptRuntime {
     }
 }
 
-/// Compiles `source` as the ES module `name` to bytecode in the bridge's
-/// frame, on a runtime of its own that strips source text, as `build.rs`
-/// compiles the built-ins: what [`ScriptEngine::complete_module_bytecode`]
-/// reads.
 pub(crate) fn compile_module_framed(name: &str, source: &str) -> Result<Vec<u8>, ScriptError> {
     let compiler = quickjs::Runtime::with_options(quickjs::RuntimeOptions {
         strip_source: true,
@@ -1158,7 +761,6 @@ mod tests {
 
     use super::*;
 
-    /// A runtime and one realm on it, as a group holds them.
     fn engine_with(config: QuickJsConfig) -> (ScriptRuntime, ScriptEngine) {
         let runtime = ScriptRuntime::with_config(config).expect("QuickJS runtime");
         let realm = runtime.create_realm().expect("QuickJS realm");
@@ -1169,8 +771,6 @@ mod tests {
         engine_with(QuickJsConfig::default())
     }
 
-    /// Runs `operation` on its own thread so a wedged interrupt fails the test
-    /// instead of hanging the suite.
     fn with_watchdog<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
         let (sender, receiver) = flume::bounded(1);
         let worker = thread::spawn(move || {
@@ -1262,11 +862,6 @@ mod tests {
         assert!(error.message.contains("not preloaded"));
     }
 
-    /// The bridge refuses a C string containing a NUL without completing the
-    /// module, which would leave the import pending forever. So a completion
-    /// makes both of its strings safe first — the error text by replacement,
-    /// the response URL by failing the module — and either way the import
-    /// settles and the completion itself succeeds.
     #[test]
     fn a_nul_in_a_module_completion_still_settles_the_import() {
         let (mut runtime, mut engine) = engine();
@@ -1412,8 +1007,6 @@ mod tests {
         assert_eq!(error.kind, ScriptErrorKind::Exception);
         assert_eq!(error.message.as_ref(), "TypeError: invalid receiver");
 
-        // A `SyntaxError` *object* thrown at run time is still an exception:
-        // `Syntax` names a source that would not parse, which this one did.
         let thrown = engine
             .execute_script(
                 &mut runtime,
@@ -1426,8 +1019,6 @@ mod tests {
 
     #[test]
     fn two_realms_do_not_share_globals() {
-        // One runtime, two realms — the shape a group hands its views. They
-        // share a heap and an atom table; they must not share a `globalThis`.
         let (mut runtime, first) = engine();
         let second = runtime.create_realm().expect("a second realm");
 
@@ -1533,11 +1124,6 @@ mod tests {
 
     #[test]
     fn a_realms_leftover_rejection_never_reaches_a_sibling() {
-        // The shape a group boots: one runtime, one realm per view, and an
-        // entry loaded with `await import(...)`. An entry that throws under
-        // that await rejects *through* the job queue rather than out of
-        // `evaluate`, and leaves behind more than the one rejection its own
-        // caller is handed. The rest is its realm's, and waits for it.
         let (mut runtime, first) = engine();
         let second = runtime.create_realm().expect("a second view's realm");
         runtime
@@ -1574,8 +1160,6 @@ mod tests {
                 .expect("an event dispatch into the second view is not the first view's failure")
         );
 
-        // Nor does it reach the failing realm a second time: one failure is
-        // reported once, and the realm that raised it stays usable.
         first
             .execute_script(&mut runtime, "globalThis.retry = true", "retry.js")
             .expect("the failing realm is not condemned to fail forever");
@@ -1583,10 +1167,6 @@ mod tests {
 
     #[test]
     fn a_reported_failure_takes_its_own_leftovers_with_it() {
-        // One throw rejects the module's evaluation promise and everything
-        // awaiting it. The caller hears one failure; handing out the rest one
-        // entry at a time would make every later entry fail too — which is
-        // what a worker whose script throws at load must not do.
         let (mut runtime, engine) = engine();
         runtime
             .register_module_source(
@@ -1618,9 +1198,6 @@ mod tests {
 
     #[test]
     fn discarding_a_failures_leftovers_does_not_discard_its_jobs() {
-        // Only rejections are dropped. A job the failing entry queued is
-        // still due, and that entry's own checkpoint runs it — before the
-        // next entry's own code.
         let (mut runtime, engine) = engine();
         engine
             .execute_script(
@@ -1647,10 +1224,6 @@ mod tests {
 
     #[test]
     fn a_checkpoint_drains_every_queued_job_in_one_entry() {
-        // A checkpoint is a browser's microtask checkpoint: it runs the
-        // queue dry, however long it is, and jobs a job queues are part of
-        // the same checkpoint. Nothing is left for the next entry to
-        // inherit, so no entry can be spent finishing the last one's work.
         let (mut runtime, engine) = engine();
         engine
             .execute_script(
@@ -1683,7 +1256,6 @@ mod tests {
             .expect("the very next entry sees every job already done");
     }
 
-    /// Gives `engine` one host function, `explode`, that panics.
     fn install_a_panicking_host_function(engine: &mut ScriptEngine) {
         engine
             .register_host_module_function("bobcat-internal:test", "explode", 0, |_| {
@@ -1710,8 +1282,6 @@ mod tests {
             "a host bug"
         );
 
-        // The script was shown an exception, and caught it; the panic was
-        // resumed once, and the next entry is an ordinary one.
         engine
             .execute_script(
                 &mut runtime,
@@ -1736,8 +1306,6 @@ mod tests {
         first
             .execute_module(&mut runtime, "import 'app:///arm.js';", "bobcat:boot-first")
             .expect("load the first view's module");
-        // Queued without a checkpoint of its own, so the sibling's entry below
-        // is what runs the job.
         assert!(
             first
                 .call_named_export_before_operation(&mut runtime, "app:///arm.js", "arm", &[])

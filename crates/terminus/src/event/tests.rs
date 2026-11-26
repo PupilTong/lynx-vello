@@ -8,7 +8,6 @@ use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 use crate::tree::shadow::ShadowRootMode;
 
-/// `page > outer > inner`, returning the two descendants.
 fn nested() -> (Document<()>, NodeId, NodeId, NodeId) {
     let mut document: Document<()> = Document::new(device(), "page", ());
     let page = document.document_element().id();
@@ -99,7 +98,6 @@ fn a_step_that_outlived_its_node_names_nothing_rather_than_a_stranger() {
     let (mut document, _page, outer, inner) = nested();
     let steps = document.event_steps(inner, true, false);
 
-    // Detaching keeps every step resolvable — a re-render does this constantly.
     document.remove_element(outer);
     assert!(
         steps
@@ -108,9 +106,6 @@ fn a_step_that_outlived_its_node_names_nothing_rather_than_a_stranger() {
             .all(|step| document.get(step.node).is_some())
     );
 
-    // Freeing retires the ids. The steps naming them resolve to nothing, and
-    // no later element can take their place, so a host holding this path needs
-    // no staleness protocol of its own.
     document.drop_subtree(outer);
     assert!(document.get(outer).is_none() && document.get(inner).is_none());
     let live = steps
@@ -129,9 +124,6 @@ fn a_path_from_a_freed_node_is_refused() {
     let _ = document.event_steps(inner, true, false);
 }
 
-// --- shadow trees -------------------------------------------------------
-
-/// `page > host`, with a shadow tree `#shadow-root > button`.
 fn shadow_tree(mode: ShadowRootMode) -> (Document<()>, NodeId, NodeId, NodeId) {
     let mut document: Document<()> = Document::new(device(), "page", ());
     let page = document.document_element().id();
@@ -179,9 +171,6 @@ fn a_closed_shadow_root_retargets_the_same_way() {
     let root = document_node(&document);
     let steps = document.event_steps(button, true, true);
 
-    // Every step from the host outward — not just the host's own — must report
-    // the host. Checking only the host would still pass if the walk reverted
-    // to the inner node one step later.
     for node in [host, page, root] {
         let targets: Vec<NodeId> = steps
             .steps()
@@ -223,8 +212,6 @@ fn a_slotted_node_walks_up_through_its_slot_without_retargeting() {
     document.append_child(host, light);
     assert_eq!(document.assigned_slot(light), Some(slot));
 
-    // A light-DOM target starts in the document tree, so even a non-composed
-    // event walks out through the shadow tree that displays it.
     let steps = document.event_steps(light, true, false);
     let bubble: Vec<EventStep> = steps
         .steps()
@@ -297,8 +284,6 @@ fn a_shadow_host_keeps_its_bubble_turn_when_the_event_does_not_bubble() {
     let (document, host, _shadow_root, button) = shadow_tree(ShadowRootMode::Open);
     let steps = document.event_steps(button, false, true);
 
-    // `bubbles: false` drops ancestor steps from the bubble pass, but a
-    // shadow-adjusted target is not an ancestor step — the standard keeps it.
     let bubble: Vec<NodeId> = steps
         .steps()
         .iter()
@@ -308,11 +293,6 @@ fn a_shadow_host_keeps_its_bubble_turn_when_the_event_does_not_bubble() {
     assert_eq!(bubble, vec![button, host]);
 }
 
-// --- the O(1) retargeting rule, checked against the standard's own ---------
-
-/// The standard's predicate, written out: is `ancestor` a shadow-including
-/// inclusive ancestor of `node`? A shadow root's parent is its host here, so
-/// the plain parent chain is already the shadow-including one.
 fn literally_is_ancestor(document: &Document<()>, ancestor: NodeId, node: NodeId) -> bool {
     let mut current = Some(node);
     while let Some(id) = current {
@@ -324,8 +304,6 @@ fn literally_is_ancestor(document: &Document<()>, ancestor: NodeId, node: NodeId
     false
 }
 
-/// `event_path`, rebuilt against that predicate instead of the
-/// one-comparison equivalent the implementation uses.
 fn literal_path(
     document: &Document<()>,
     target: NodeId,
@@ -348,9 +326,6 @@ fn literal_path(
     path
 }
 
-/// Every shape that can make the two disagree, if they ever do, each with the
-/// roots its nodes hang from — a detached subtree is unreachable from the
-/// document node and would otherwise go unchecked.
 fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     let mut shapes = Vec::new();
 
@@ -372,8 +347,6 @@ fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     let roots = vec![closed.root_node().id()];
     shapes.push(("one closed shadow root", closed, roots));
 
-    // A host whose shadow tree slots light content, so the walk enters a
-    // shadow tree going *up* without the target ever leaving its own.
     let mut slotted: Document<()> = Document::new(device(), "page", ());
     let page = slotted.document_element().id();
     let host = slotted.create_element("view", ());
@@ -390,7 +363,6 @@ fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     let roots = vec![slotted.root_node().id()];
     shapes.push(("slotted light content", slotted, roots));
 
-    // Two boundaries stacked, so the target is retargeted twice.
     let mut nested: Document<()> = Document::new(device(), "page", ());
     let page = nested.document_element().id();
     let outer_host = nested.create_element("view", ());
@@ -404,8 +376,6 @@ fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     let roots = vec![nested.root_node().id()];
     shapes.push(("nested shadow roots", nested, roots));
 
-    // A slotted element that is itself a host: the walk crosses out of one
-    // tree while standing inside another it entered through a slot.
     let mut both: Document<()> = Document::new(device(), "page", ());
     let page = both.document_element().id();
     let outer_host = both.create_element("view", ());
@@ -421,7 +391,6 @@ fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     let roots = vec![both.root_node().id()];
     shapes.push(("a slotted element that is itself a host", both, roots));
 
-    // A detached subtree, where the path ends before any document node.
     let mut orphan: Document<()> = Document::new(device(), "page", ());
     let top = orphan.create_element("view", ());
     let child = orphan.create_element("view", ());
@@ -435,7 +404,6 @@ fn shapes() -> Vec<(&'static str, Document<()>, Vec<NodeId>)> {
     shapes
 }
 
-/// Every node in a document, including the ones inside shadow trees.
 fn every_node(document: &Document<()>, roots: &[NodeId]) -> Vec<NodeId> {
     let mut found = Vec::new();
     let mut stack = roots.to_vec();
@@ -456,7 +424,6 @@ fn every_node(document: &Document<()>, roots: &[NodeId]) -> Vec<NodeId> {
 fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
     let mut checked = 0;
     for (name, document, roots) in shapes() {
-        // Every live node, as a target, under both composed settings.
         for target in every_node(&document, &roots) {
             for composed in [false, true] {
                 let actual: Vec<(NodeId, NodeId, bool)> = document
@@ -470,11 +437,6 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
                     literal_path(&document, target, composed),
                     "{name}: target {target}, composed {composed}"
                 );
-                // An at-target entry is exactly one whose target is itself:
-                // crossing a boundary sets the target to the node it crossed
-                // to, and nothing else can make the two equal. Checked here
-                // rather than argued, because a step's phase is derived from
-                // it rather than carried.
                 for (node, entry_target, at_target) in &actual {
                     assert_eq!(
                         *at_target,
@@ -489,10 +451,6 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
     assert!(checked > 80, "only {checked} paths compared");
 }
 
-// ---------------------------------------------------------------------------
-// The Rust walk: the observed-events gate and a walk over caller-held steps
-// ---------------------------------------------------------------------------
-
 mod rust_walk {
     use std::sync::{Arc, Mutex};
 
@@ -506,8 +464,6 @@ mod rust_walk {
 
     type Log = Arc<Mutex<Vec<String>>>;
 
-    /// Records `type:phase:timestamp:x` per delivery, and stops the walk at
-    /// its own element when `stops` is set.
     struct Listener {
         who: &'static str,
         log: Log,
@@ -543,7 +499,6 @@ mod rust_walk {
         }
     }
 
-    /// `page > outer(probe-outer) > inner(probe-inner)`, both listening.
     fn page(log: &Log, outer_stops: bool) -> (Document<()>, NodeId, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.define(
@@ -605,11 +560,6 @@ mod rust_walk {
         );
     }
 
-    /// A name is live while any definition observing it has an element: the
-    /// first element of either probe makes `pointerdown` live, freeing one of
-    /// two changes nothing, freeing the last ends its liveness, and a
-    /// create-and-free between two drains reports nothing. The
-    /// definition-based gate observes the name throughout.
     #[test]
     fn an_observed_name_is_live_while_an_element_observing_it_exists() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -673,7 +623,6 @@ mod rust_walk {
         assert!(!document.observes_event("slotchange"));
         assert_eq!(document.observed_event_names().count(), 0);
         let page = document.document_element().id();
-        // Nothing to call and nothing to fail: the gate returns first.
         document.dispatch_element_event(page, "slotchange", &EventDetail::None, true, false, 0.0);
     }
 
@@ -693,7 +642,6 @@ mod rust_walk {
             "capture root-inward, the target once, bubble outward, with the caller's detail and \
              timestamp"
         );
-        // The steps were only borrowed: the caller hands the same list on.
         assert_eq!(steps, document.event_steps(inner, true, true));
     }
 
@@ -723,8 +671,6 @@ mod rust_walk {
             ["outer:pointerdown:capture:0:0"],
             "the capture-phase stop keeps the target from hearing it"
         );
-        // A second walk over the same steps starts afresh: the stop belonged
-        // to that one dispatch's event object, not to the path.
         document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
         assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
     }
@@ -814,7 +760,6 @@ mod rust_walk {
         assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
     }
 
-    /// Stops immediately at its own element.
     struct ImmediateStop {
         log: Log,
     }
@@ -933,7 +878,6 @@ fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries(
         Some(page)
     );
 
-    // A node inside a shadow tree meets a light node at the host or above.
     let shadow = document.attach_shadow(inner, ShadowRootMode::Open);
     let chrome = document.create_element("view", ());
     document.append_child(shadow, chrome);
@@ -946,14 +890,9 @@ fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries(
         Some(outer)
     );
 
-    // Two detached trees share nothing.
     let loose = document.create_element("view", ());
     assert_eq!(document.nearest_common_event_ancestor(loose, inner), None);
 }
-
-// ---------------------------------------------------------------------------
-// The listener table
-// ---------------------------------------------------------------------------
 
 mod listener_table {
     use super::{nested, shadow_tree};
@@ -973,8 +912,6 @@ mod listener_table {
         names.iter().map(|name| &**name).collect()
     }
 
-    /// Which of the two lists `key` is on for `name`: a path registration
-    /// a dispatch at `target` reaches, and a global registration anywhere.
     fn reached(
         document: &Document<()>,
         target: NodeId,
@@ -1111,7 +1048,6 @@ mod listener_table {
         document.add_listener(inner, "scroll", GLOBAL, CARD);
         document.add_listener(outer, "scroll", BUBBLE, PAGE);
 
-        // Detaching is not freeing: a re-render moves nodes constantly.
         document.remove_element(inner);
         assert!(document.has_listener(inner, "tap"));
         assert!(document.take_pending_last_removals().is_empty());
@@ -1210,7 +1146,6 @@ mod listener_table {
         document.remove_listener(page, "pointerdown", CARD);
         assert!(!document.has_listeners_for("pointerdown"));
         assert!(document.hears("pointerdown"));
-        // An observed type still walks the components when nothing registered.
         document.dispatch_element_event(page, "pointerdown", &EventDetail::None, true, true, 0.0);
     }
 
@@ -1256,9 +1191,6 @@ mod listener_table {
         );
     }
 
-    /// A global registration in a shadow tree is reached by a path through
-    /// that shadow root — the composed path from inside it, and the
-    /// non-composed one, which ends there — and not by a path outside it.
     #[test]
     fn a_global_registration_in_a_shadow_tree_is_reached_only_through_its_shadow_root() {
         let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
@@ -1300,11 +1232,6 @@ mod listener_table {
         );
     }
 
-    /// A global registration in the document tree is reached by every
-    /// connected composed path, one from inside a shadow tree included,
-    /// since each ends at the document node; not by a detached tree's path,
-    /// nor by a non-composed path that ends at a shadow root. Each
-    /// registrant once, in the order its first global row was made.
     #[test]
     fn a_light_tree_global_registration_is_reached_by_every_connected_path() {
         let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
@@ -1343,8 +1270,6 @@ mod listener_table {
         );
     }
 
-    /// The global rows follow every removal: a kinds change that drops
-    /// `GLOBAL`, a removal, a freed node and a registrant going away.
     #[test]
     fn the_global_rows_follow_every_removal() {
         let (mut document, page, outer, inner) = nested();
@@ -1428,9 +1353,6 @@ mod listener_table {
         );
     }
 
-    /// The answer [`Document::would_reach_listener`] must agree with: the
-    /// path built and probed for a path registration, or a global one
-    /// anywhere.
     fn reaches_by_path(
         document: &Document<()>,
         target: NodeId,
@@ -1459,7 +1381,6 @@ mod listener_table {
             }
         };
 
-        // Bubble registrations only: the target's own rows are the answer.
         document.add_listener(outer, "scroll", BUBBLE, PAGE);
         document.add_listener(sibling, "scroll", BUBBLE, CARD);
         agrees(&document);
@@ -1469,19 +1390,15 @@ mod listener_table {
             "an ancestor's bubble registration misses a non-bubbling event"
         );
 
-        // A capture registration on an ancestor reaches its descendants,
-        // which no row of theirs says.
         document.add_listener(page, "scroll", CAPTURE, CARD);
         agrees(&document);
         assert!(document.would_reach_listener(inner, "scroll", false, false));
         assert!(!document.has_listener(inner, "scroll"));
 
-        // Gone again: back to the target's rows.
         document.remove_listener(page, "scroll", CARD);
         agrees(&document);
         assert!(!document.would_reach_listener(inner, "scroll", false, false));
 
-        // A capture kind that a repeated add drops is counted out too.
         document.add_listener(outer, "scroll", BUBBLE | CAPTURE, PAGE);
         agrees(&document);
         assert!(document.would_reach_listener(inner, "scroll", false, false));

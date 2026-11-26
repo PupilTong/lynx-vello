@@ -3,7 +3,6 @@
 use std::fmt;
 use std::path::Path;
 
-/// A tightly packed, row-major RGBA8 image.
 #[derive(PartialEq, Eq)]
 pub struct Image {
     width: u32,
@@ -72,7 +71,6 @@ impl From<std::io::Error> for ImageError {
 }
 
 impl Image {
-    /// Wraps a tightly packed RGBA8 buffer.
     pub fn from_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, ImageError> {
         let expected =
             Self::byte_len(width, height).ok_or(ImageError::Dimensions { width, height })?;
@@ -91,7 +89,6 @@ impl Image {
         }
     }
 
-    /// A fully transparent image, for diff output.
     pub fn transparent(width: u32, height: u32) -> Result<Self, ImageError> {
         let len = Self::byte_len(width, height).ok_or(ImageError::Dimensions { width, height })?;
         Ok(Self {
@@ -111,7 +108,6 @@ impl Image {
         self.height
     }
 
-    /// The number of pixels, for diff-budget arithmetic.
     #[must_use]
     pub const fn pixel_count(&self) -> usize {
         (self.width as usize) * (self.height as usize)
@@ -127,19 +123,11 @@ impl Image {
         &mut self.pixels
     }
 
-    /// Whether both images cover the same area.
     #[must_use]
     pub const fn has_same_size(&self, other: &Self) -> bool {
         self.width == other.width && self.height == other.height
     }
 
-    /// Decodes an 8-bit RGB or RGBA PNG.
-    ///
-    /// An opaque reference written by another tool is usually RGB — Playwright
-    /// writes its screenshots that way — and refusing those would mean
-    /// re-encoding a golden before it can be compared, which is exactly the
-    /// step that lets a golden stop being the thing it came from. An RGB image
-    /// reads as fully opaque.
     pub fn decode_png(bytes: &[u8]) -> Result<Self, ImageError> {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder
@@ -179,7 +167,6 @@ impl Image {
         Self::from_rgba8(frame.width, frame.height, pixels)
     }
 
-    /// Encodes an 8-bit RGBA PNG.
     pub fn encode_png(&self) -> Result<Vec<u8>, ImageError> {
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, self.width, self.height);
@@ -192,12 +179,10 @@ impl Image {
         Ok(bytes)
     }
 
-    /// Reads an image from a PNG file.
     pub fn read_png(path: impl AsRef<Path>) -> Result<Self, ImageError> {
         Self::decode_png(&std::fs::read(path)?)
     }
 
-    /// Writes the image as a PNG file, creating parent directories.
     pub fn write_png(&self, path: impl AsRef<Path>) -> Result<(), ImageError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -235,8 +220,6 @@ mod tests {
         assert_eq!(decoded.pixels(), pixels.as_slice());
     }
 
-    /// Playwright writes opaque screenshots as RGB, and those screenshots are
-    /// goldens here, so reading one must not need a re-encode first.
     #[test]
     fn an_rgb_png_reads_as_opaque_rgba() {
         let mut bytes = Vec::new();

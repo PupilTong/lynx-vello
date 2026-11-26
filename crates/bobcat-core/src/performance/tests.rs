@@ -80,7 +80,6 @@ fn a_pipeline_entry_writes_lynx_json_with_its_nested_objects() {
     assert!((paint_end - origin.unix_millis() - 9.0).abs() < 1e-6);
     let compose = value["hostPlatformTiming"]["composeEnd"].as_f64().unwrap();
     assert!((compose - origin.unix_millis() - 8.0).abs() < 1e-6);
-    // Absent fields are left out, not zeroed.
     assert!(value.get("actualFmp").is_none());
     assert!(value.get("loadBundleStart").is_none());
 }
@@ -133,7 +132,6 @@ fn a_flagged_flush_completes_at_the_present_of_its_commit() {
     );
     registry.mark(id, "diffVdomStart");
     assert!(!registry.bind_commit(flush(OpenerId::PAGE, id, &["f"], 3)));
-    // An older commit's present completes nothing.
     assert_eq!(registry.note_presented(frame(2)), []);
     assert_eq!(registry.generation(), 0);
     registry.note_presented(frame(3));
@@ -146,7 +144,6 @@ fn a_flagged_flush_completes_at_the_present_of_its_commit() {
     assert_eq!(entry.origin, PipelineOrigin::UpdateTriggeredByBts);
     assert_eq!(entry.framework_rendering_timing.marks.len(), 1);
     assert!(registry.records_for_test().is_empty(), "taken and freed");
-    // A flag fires once.
     let again = registry.generate_id();
     registry.open(again, None, "", "", true, Opener::Realm(OpenerId::PAGE));
     registry.bind_commit(flush(OpenerId::PAGE, again, &["f"], 4));
@@ -322,10 +319,8 @@ fn paint_marks_nobody_asked_for_make_no_record_and_no_detection() {
     assert!(!registry.wants_presentation_timing());
     assert_eq!(registry.generation(), 0);
     assert!(registry.records_for_test().is_empty());
-    // A worker that observes pipelines only asks for no detection either.
     registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::NONE));
     assert!(!registry.wants_content_detection());
-    // Asking for paint turns detection on until the contentful paint.
     registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::PAINT));
     assert!(registry.wants_content_detection());
     assert!(registry.wants_presentation_timing());
@@ -342,7 +337,6 @@ fn a_waiting_record_wants_presentation_timing_and_an_untimed_present_completes_i
     assert!(!registry.wants_presentation_timing());
     registry.bind_commit(flush(OpenerId::PAGE, 0, &["waits"], 2));
     assert!(registry.wants_presentation_timing());
-    // The painter drew commit 2 before it read the switch on.
     assert_eq!(registry.note_untimed_present(2), []);
     assert_eq!(registry.generation(), 1);
     assert!(!registry.wants_presentation_timing());
@@ -362,7 +356,6 @@ fn a_delivered_entry_reaches_the_audiences_that_asked_for_its_type_in_order() {
             start: Timestamp(start + Duration::from_millis(millis)),
         })
     };
-    // Nobody asked: nothing kept, nothing to wake.
     assert!(!registry.deliver_entry(paint(0), EntryTypes::PAINT, WorkerAudience::None));
     assert!(!registry.deliver_entry(paint(0), EntryTypes::PAINT, WorkerAudience::One(plain)));
     assert_eq!(registry.generation(), 0);
@@ -376,7 +369,6 @@ fn a_delivered_entry_reaches_the_audiences_that_asked_for_its_type_in_order() {
     );
     assert_eq!(registry.take_completed_for_worker(plain), []);
     assert_eq!(registry.take_completed_for_rust(), []);
-    // A worker that stops observing drops what it had not taken.
     assert!(registry.deliver_entry(paint(3), EntryTypes::PAINT, WorkerAudience::Every));
     registry.observe_worker(painting, None);
     assert_eq!(registry.take_completed_for_worker(painting), []);
@@ -406,7 +398,6 @@ fn the_long_task_monitor_is_off_by_default_and_reports_to_rust_alone_bounded() {
             WorkerAudience::None,
         )
     };
-    // Nobody observes long tasks, a worker included: dropped as it is made.
     registry.observe_rust(EntryTypes::PIPELINE);
     registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::ALL));
     assert!(!deliver(60, JobKind::Post));
@@ -455,7 +446,6 @@ fn a_long_task_entry_writes_long_tasks_and_lynx_s_keys() {
     assert!((value["duration_ms"].as_f64().unwrap() - 62.0).abs() < 1e-6);
     let start = value["startTime"].as_f64().expect("a number");
     assert!((start - origin.unix_millis() - 10.0).abs() < 1e-6);
-    // A kind Lynx files under no category leaves `task_type` out.
     let settle = PerformanceEntry::LongTask(LongTaskEntry {
         start: at(&origin, 0),
         end: at(&origin, 1),
@@ -495,7 +485,6 @@ fn the_js_blocking_monitor_is_off_by_default_and_reports_to_rust_alone_bounded()
     assert_eq!(config.threshold, Duration::from_millis(20));
     assert_eq!(config.report_interval, Duration::from_secs(5));
     let start = ClockInstant::now();
-    // Off: a wait counts nothing, and nothing reports.
     registry.note_js_blocking(Duration::from_secs(1));
     assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
     let epoch = registry
@@ -504,8 +493,6 @@ fn the_js_blocking_monitor_is_off_by_default_and_reports_to_rust_alone_bounded()
     assert!(registry.js_blocking_stamp().is_some());
     assert!(registry.js_blocking_is_current(epoch));
     assert_eq!(registry.js_blocking_anchor(epoch), None, "no load yet");
-    // A report nobody observes is made, its totals spent, and dropped; a
-    // worker that asked for everything is not its audience.
     registry.observe_worker(WorkerKey::new(1), Some(EntryTypes::ALL));
     registry.note_js_blocking(Duration::from_millis(5));
     assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
@@ -529,9 +516,7 @@ fn js_blocking_reports_follow_lynx_s_formulas() {
     registry.observe_rust(EntryTypes::JS_BLOCKING);
     let start = ClockInstant::now();
     registry.set_js_blocking_monitor(Some(blocking(20)), start);
-    // Under the threshold: not counted.
     registry.note_js_blocking(Duration::from_millis(19));
-    // Nothing counted: no report, and the span is not restarted.
     assert!(!registry.report_js_blocking_at(JsBlockingStage::LoadBundle, start));
     registry.note_js_blocking(Duration::from_millis(20));
     registry.note_js_blocking(Duration::from_millis(40));
@@ -547,8 +532,6 @@ fn js_blocking_reports_follow_lynx_s_formulas() {
     assert!((report.blocking_ratio - 0.3).abs() < 1e-9);
     assert_eq!(report.avg_blocking_time, Duration::from_millis(30));
     assert_eq!(report.time_after_load_bundle, None);
-    // Lynx resets the totals after a report: a timer report with nothing
-    // counted since is not made.
     let first_timer = load + Duration::from_secs(5);
     assert!(!registry.report_js_blocking_at(JsBlockingStage::Timer, first_timer));
     registry.note_js_blocking(Duration::from_millis(100));
@@ -559,7 +542,6 @@ fn js_blocking_reports_follow_lynx_s_formulas() {
     };
     assert_eq!(report.stage, JsBlockingStage::Timer);
     assert_eq!(report.total_blocking_count, 1);
-    // From the last report made, which the skipped one was not.
     assert_eq!(report.total_duration, Duration::from_secs(15));
     assert!((report.blocking_ratio - 0.1 / 15.0).abs() < 1e-9);
     assert_eq!(report.avg_blocking_time, Duration::from_millis(100));
@@ -592,7 +574,6 @@ fn the_page_load_makes_the_load_bundle_report_and_anchors_the_timer() {
     };
     assert_eq!(report.stage, JsBlockingStage::LoadBundle);
     assert_eq!(report.total_blocking_count, 1);
-    // A report task of an earlier configuration reports nothing.
     registry.note_js_blocking(Duration::from_millis(1));
     assert!(!registry.report_js_blocking(epoch + 1));
     assert!(registry.report_js_blocking(epoch));
@@ -601,8 +582,6 @@ fn the_page_load_makes_the_load_bundle_report_and_anchors_the_timer() {
     };
     assert_eq!(report.stage, JsBlockingStage::Timer);
     assert!(report.time_after_load_bundle.is_some());
-    // Another monitor's setter keeps this configuration current; turned on
-    // again after the load, the timer is anchored at once.
     registry.set_long_task_threshold(None);
     assert!(registry.js_blocking_is_current(epoch));
     registry.set_js_blocking_monitor(None, ClockInstant::now());
@@ -646,8 +625,6 @@ fn a_js_blocking_entry_writes_lynx_s_keys_and_types() {
     assert_eq!(value["time_after_load_bundle"].as_i64(), Some(5_001));
     assert!((value["blocking_ratio"].as_f64().unwrap() - 0.009).abs() < 1e-12);
     assert!((value["avg_blocking_time"].as_f64().unwrap() - 22.5).abs() < 1e-9);
-    // A `loadBundle` report has no `time_after_load_bundle`, and a ratio
-    // over a zero span is `null` rather than invalid JSON.
     let load = PerformanceEntry::JsBlocking(JsBlockingEntry::from_totals(
         JsBlockingStage::LoadBundle,
         Duration::from_millis(45),
@@ -702,7 +679,6 @@ fn the_memory_monitor_is_off_by_default_and_reads_nothing() {
     assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 10)));
     let epoch = registry.set_memory_monitor(Some(memory(0))).expect("on");
     assert!(registry.memory_is_current(epoch));
-    // Another monitor's setter leaves the memory monitor's epoch current.
     registry.set_long_task_threshold(None);
     assert!(registry.memory_is_current(epoch));
     assert_eq!(registry.set_memory_monitor(None), None);
@@ -716,13 +692,10 @@ fn the_memory_monitor_is_off_by_default_and_reads_nothing() {
 fn memory_reports_follow_lynx_s_change_rule() {
     let registry = PipelineRegistry::detached();
     registry.observe_rust(EntryTypes::MEMORY);
-    // A zero threshold reports every reading that changes a category.
     registry.set_memory_monitor(Some(memory(0)));
     assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 100)));
     assert!(registry.note_memory(reading(MemoryCategory::LynxTasmElement, 20)));
     assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 101)));
-    // Lynx's `UpdateMemoryUsage`: a category whose size did not change is
-    // not a report, and its reading is not replaced.
     let mut same = reading(MemoryCategory::LynxTasmElement, 20);
     same.detail = Vec::new();
     assert!(!registry.note_memory(same));
@@ -745,18 +718,13 @@ fn memory_reports_follow_lynx_s_change_rule() {
         "the unchanged reading was dropped"
     );
 
-    // A threshold: the first reading after turning the monitor on is
-    // reported whatever it changed, and starts afresh.
     registry.set_memory_monitor(Some(memory(1_000)));
     assert!(registry.note_memory(reading(MemoryCategory::MainThreadScriptingEngine, 10)));
-    // Kept, not reported: the total moved by less than the threshold.
     assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 900)));
-    // This one takes the total 1 000 past the last report's.
     assert!(registry.note_memory(reading(
         MemoryCategory::BackgroundThreadScriptingEngine,
         100
     )));
-    // A drop counts as much as a rise, measured from the last report.
     assert!(!registry.note_memory(reading(MemoryCategory::LynxTasmElement, 0)));
     assert!(registry.note_memory(reading(MemoryCategory::BackgroundThreadScriptingEngine, 0)));
     let entries = memory_entries(&registry);
@@ -819,11 +787,8 @@ fn a_memory_entry_writes_lynx_s_nested_maps_and_a_mark_stays_one_member() {
             "sizeBytes": 4_736,
         })
     );
-    // `detail` comes before the total, as `ReportMemory` pushes it.
     assert!(json.find("\"detail\"") < json.find(",\"sizeBytes\":4736}"));
 
-    // A framework mark's own `.` and `\` nest nothing in the JSON, and the
-    // BTS's record carries the mark's name as it was.
     let mut timing = pipeline(&origin);
     timing.framework_rendering_timing.marks = vec![
         (Arc::from("a.b"), at(&origin, 1)),
@@ -881,7 +846,6 @@ fn a_lazy_bundle_is_timed_while_observed_and_reaches_rust_and_the_fetching_realm
     assert!(!registry.times_resources(), "nobody observes at first");
     registry.observe_rust(EntryTypes::PIPELINE | EntryTypes::MEMORY);
     assert!(!registry.times_resources(), "other types time no fetch");
-    // Nobody asks: dropped, and the embedder is not woken.
     assert!(!registry.note_lazy_bundle(
         Opener::Realm(OpenerId::PAGE),
         lazy_bundle(&origin, "app:///dropped.bundle")
@@ -897,8 +861,6 @@ fn a_lazy_bundle_is_timed_while_observed_and_reaches_rust_and_the_fetching_realm
     registry.observe_worker(page_bts, Some(EntryTypes::RESOURCE));
     assert!(registry.times_resources(), "a BTS observer of resource");
     registry.observe_rust(EntryTypes::RESOURCE);
-    // The page realm's fetch and its BTS's own reach that BTS; the card's
-    // BTS does not ask for `resource`, so the card's reaches Rust alone.
     for (opener, url) in [
         (Opener::Realm(OpenerId::PAGE), "app:///page.bundle"),
         (Opener::Worker(page_bts), "app:///bts.bundle"),
@@ -941,13 +903,11 @@ fn a_fetch_s_lazy_bundle_entry_takes_the_fetcher_s_readings_and_writes_lynx_s_ke
     assert_eq!(fetched.size_bytes, Some(2048));
     assert_eq!(fetched.require, at(&origin, 1)..at(&origin, 4));
     assert_eq!(fetched.decode, Some(at(&origin, 5)..at(&origin, 7)));
-    // A fetcher that read nothing: the delivery ends the require span.
     let silent = crate::resource::FetchOutcome::default();
     let quiet = LazyBundleEntry::from_fetch(url(), instant(1), instant(9), Some(&silent));
     assert!(quiet.load_success);
     assert_eq!(quiet.require, at(&origin, 1)..at(&origin, 9));
     assert_eq!((quiet.size_bytes, quiet.decode), (None, None));
-    // A failed fetch carries no outcome.
     let failed = LazyBundleEntry::from_fetch(url(), instant(1), instant(9), None);
     assert!(!failed.load_success);
     assert_eq!(failed.require, at(&origin, 1)..at(&origin, 9));
@@ -977,7 +937,6 @@ fn a_fetch_s_lazy_bundle_entry_takes_the_fetcher_s_readings_and_writes_lynx_s_ke
         .as_f64()
         .zip(value["requireStart"].as_f64());
     assert!(span.is_some_and(|(end, start)| (end - start - 3.0).abs() < 1e-6));
-    // A failed fetch: no size, no decode, and the boolean in the BTS record.
     let failed = PerformanceEntry::LazyBundle(failed);
     assert_eq!(
         keys(&failed).join(" "),
@@ -988,8 +947,6 @@ fn a_fetch_s_lazy_bundle_entry_takes_the_fetcher_s_readings_and_writes_lynx_s_ke
     assert!(record.contains("9:entryType9:sresource"), "{record}");
 }
 
-/// Opens, renders and presents the load of `realm`, whose bundle is `url`,
-/// at commit `commit_id`.
 fn complete_load(registry: &PipelineRegistry, realm: OpenerId, url: &str, commit_id: u64) {
     registry.open_load(realm, url, None);
     registry.mark_load(realm, LoadMark::VmExecuteEnd);
@@ -1026,7 +983,6 @@ fn a_card_s_load_is_owed_as_loadmetrics_once_whoever_observes_and_the_page_s_nev
         "to nobody else"
     );
 
-    // Sent again after `set_extra_timing`, a load is not owed again.
     registry.observe_rust(EntryTypes::LOAD_BUNDLE);
     assert!(registry.set_extra_timing(&ExtraTiming {
         open_time: Some(SystemTime::now()),
@@ -1046,7 +1002,6 @@ fn a_container_entry_is_the_draft_s_json_for_the_rust_embedder_alone() {
     let origin = TimeOrigin::now();
     let registry = PipelineRegistry::detached();
     registry.set_container_identifier(node(5), Some("hero"));
-    // A 40×20 CSS px box at (10, 20), 600 square CSS px of it painted.
     let paint = |root| terminus::link::ContainerPaint {
         root: node(root),
         painted: Rect::new(Point2D::new(10.0, 20.0), Size2D::new(40.0, 20.0)),
@@ -1056,8 +1011,6 @@ fn a_container_entry_is_the_draft_s_json_for_the_rust_embedder_alone() {
         last_painted: node(root + 1),
     };
 
-    // Nobody observes `container`, a worker that asks included: dropped
-    // before the lock.
     let worker = WorkerKey::new(3);
     registry.observe_worker(worker, Some(EntryTypes::ALL));
     assert!(!registry.note_container_paints(&[paint(5)]));

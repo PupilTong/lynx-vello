@@ -2,13 +2,10 @@
 
 use stylo::servo::restyle_damage::ServoRestyleDamage;
 
-/// The restyle damage produced for one node by a flush.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StyleDamage(ServoRestyleDamage);
 
 impl StyleDamage {
-    /// Merge Stylo damage with the layout inputs read outside its longhands.
-    /// Both normal restyles and animation ticks use the same classification.
     pub(crate) fn from_style_change(
         mut damage: ServoRestyleDamage,
         paragraph_limits_changed: bool,

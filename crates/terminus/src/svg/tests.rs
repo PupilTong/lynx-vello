@@ -17,9 +17,6 @@ fn size(doc: &Doc, id: NodeId) -> (f32, f32) {
     (layout.size.width, layout.size.height)
 }
 
-// ---------------------------------------------------------------------------
-// Markup to DOM
-
 const SVG_OPEN: &str =
     r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">"#;
 
@@ -31,7 +28,6 @@ fn markup(body: &str) -> XmlMarkup {
     .expect("the markup parses")
 }
 
-/// Builds `body` inside an `svg` root under the document element.
 fn build(doc: &mut Doc, body: &str) -> NodeId {
     let markup = markup(body);
     doc.dom.append_svg_markup(doc.root, &markup, || ())
@@ -44,7 +40,6 @@ fn by_id(doc: &Doc, id: &str) -> NodeId {
         .expect("an element with that id")
 }
 
-/// The element children of the `use` element `id`'s instance.
 fn instance(doc: &Doc, id: &str) -> Vec<NodeId> {
     let shadow = doc
         .dom
@@ -165,8 +160,6 @@ fn a_use_instance_inherits_from_the_use_and_takes_document_rules() {
     assert_eq!(instance(&doc, "x").len(), 1, "xlink:href works");
 }
 
-/// A `use` resolves through `xlink:href`, kept under its own name, and
-/// `href` wins when both are present (SVG 2).
 #[test]
 fn href_takes_precedence_over_xlink_href() {
     let mut doc = Doc::new();

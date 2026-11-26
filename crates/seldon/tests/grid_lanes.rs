@@ -32,8 +32,6 @@ fn lanes_style(columns: &[TestTrack], rows: &[TestTrack]) -> TestStyle {
             track_list(rows.to_vec())
         },
         justify_items: justify_items(AlignFlags::NORMAL),
-        // Every trace below is written against an exact shortest-lane rule;
-        // the `normal` (1em) tie threshold gets its own test.
         fit_tolerance: tolerance_px(0.0),
         ..TestStyle::default()
     }
@@ -79,8 +77,6 @@ fn locations(tree: &TestTree, ids: &[TestId]) -> Vec<Point<f32>> {
 
 #[test]
 fn orientation_follows_the_templates_that_name_tracks() {
-    // §2.3: the block axis carries the tracks exactly when `grid-template-rows`
-    // alone names any; every other combination lays lanes out as columns.
     let cases: [(Vec<TestTrack>, Vec<TestTrack>, Size<f32>); 4] = [
         (Vec::new(), Vec::new(), Size::new(20.0, 40.0)),
         (vec![px(30.0)], Vec::new(), Size::new(30.0, 40.0)),
@@ -137,8 +133,6 @@ fn items_land_in_the_shortest_lane_and_stack_from_its_end() {
             Point::new(0.0, 0.0),
             Point::new(50.0, 0.0),
             Point::new(100.0, 0.0),
-            // The third lane is the shortest, and nothing sits at or after the
-            // cursor, so the first possible lane wins.
             Point::new(100.0, 10.0),
         ]
     );
@@ -146,7 +140,6 @@ fn items_land_in_the_shortest_lane_and_stack_from_its_end() {
 
 #[test]
 fn fit_tolerance_decides_which_lanes_count_as_equally_short() {
-    // The same six items, laid out under four tie thresholds.
     let cases = [
         (
             tolerance_px(0.0),
@@ -200,7 +193,6 @@ fn fit_tolerance_decides_which_lanes_count_as_equally_short() {
 #[test]
 fn a_percentage_tolerance_resolves_against_the_used_grid_axis_size() {
     for (tolerance, expected_last) in [
-        // 20% of the two 50px tracks the auto-width container resolved to.
         (tolerance_pct(0.2), Point::new(0.0, 30.0)),
         (tolerance_px(0.0), Point::new(50.0, 15.0)),
     ] {
@@ -244,8 +236,6 @@ fn an_infinite_tolerance_distributes_items_strictly_in_order() {
 
         auto_layout(&tree, root);
 
-        // Once the cursor has passed the last lane it wraps to the first
-        // possible one, which `infinite` makes the tallest lane of all.
         assert_point(tree.layout(children[3]).location, expected_last);
     }
 }
@@ -330,8 +320,6 @@ fn a_definite_position_is_honoured_without_moving_the_cursor() {
     assert_size(output.size, Size::new(150.0, 30.0));
     assert_point(tree.layout(full).location, Point::new(0.0, 20.0));
     assert_size(tree.layout(full).size, Size::new(150.0, 5.0));
-    // The cursor still points past the second item, so the last one takes the
-    // third lane rather than wrapping to the first.
     assert_point(tree.layout(last).location, Point::new(100.0, 25.0));
 }
 
@@ -382,8 +370,6 @@ fn gutters_separate_tracks_and_items_without_a_trailing_one() {
 
     let output = auto_layout(&tree, root);
 
-    // 50 + 10 + 50 across, and 20 + 6 + 20 down with no gutter after the last
-    // item in a lane.
     assert_size(output.size, Size::new(110.0, 46.0));
     assert_eq!(
         locations(&tree, &children),
@@ -504,10 +490,8 @@ fn absolute_children_resolve_against_grid_lines_and_the_stacking_range() {
 
     sized_layout(&tree, root, None, Some(50.0));
 
-    // §8: stacking lines 1 and 2 are the range's own edges.
     assert_point(tree.layout(in_range).location, Point::new(50.0, 0.0));
     assert_size(tree.layout(in_range).size, Size::new(50.0, 30.0));
-    // An auto stacking placement still resolves against the padding edge.
     assert_point(tree.layout(padding_box).location, Point::ZERO);
     assert_size(tree.layout(padding_box).size, Size::new(100.0, 50.0));
 }
@@ -537,8 +521,6 @@ fn row_lanes_count_negative_absolute_lines_from_each_axis_own_end() {
 
     auto_layout(&tree, root);
 
-    // The grid axis counts back over both explicit rows; the stacking axis has
-    // only its own two lines, so -2 / -1 is the whole range.
     assert_point(tree.layout(positioned).location, Point::new(0.0, 40.0));
     assert_size(tree.layout(positioned).size, Size::new(30.0, 40.0));
 }
@@ -570,17 +552,11 @@ fn an_auto_placed_item_grows_every_flexible_lane() {
 
     let output = sized_layout(&tree, root, Some(300.0), None);
 
-    // The auto-placed item contributes at every start position, so all three
-    // lanes carry its 150px automatic minimum.
     assert_size(tree.layout(wide).size, Size::new(150.0, 20.0));
     assert_close(tree.layout(marker).location.x, 300.0);
     assert_close(output.content_size.width, 310.0);
 }
 
-/// `repeat(n, minmax(0, 1fr))` — the template the Lynx `<list
-/// list-type="waterfall">` component lowers onto. The fixed `0` minimum is what
-/// makes it differ from `1fr` (= `minmax(auto, 1fr)`): it suppresses the
-/// automatic minimum size, so nothing an item contributes can grow a lane.
 fn zero_minimum_flexible_lanes() -> Vec<TestTrack> {
     vec![support::track_minmax(support::breadth_px(0.0), support::breadth_fr(1.0)); 2]
 }
@@ -616,13 +592,8 @@ fn zero_minimum_flexible_lanes_keep_equal_shares_under_a_definite_grid_axis() {
 
     sized_layout(&tree, root, Some(200.0), None);
 
-    // Both lanes stay at their `1fr` share even though the item's min-content
-    // width overflows one.
     assert_close(tree.layout(marker).location.x, 100.0);
     assert_size(tree.layout(wide).size, Size::new(100.0, 20.0));
-    // One call for the container plus one per item in the placement pass:
-    // track sizing issued none of its own, because every contribution a
-    // fixed-minimum flexible track collects resolves without a measurement.
     assert_eq!(tree.child_layout_calls.get(), 3);
 }
 
@@ -646,8 +617,6 @@ fn zero_minimum_flexible_lanes_still_grow_under_an_indefinite_grid_axis() {
 
     let output = auto_layout(&tree, root);
 
-    // Under a max-content constraint §12.7 sizes each `fr` from the items that
-    // could land in it, so the auto-placed item grows both lanes.
     assert_size(output.size, Size::new(300.0, 20.0));
     assert_close(tree.layout(marker).location.x, 150.0);
 }
@@ -683,8 +652,6 @@ fn a_scroll_container_item_contributes_no_automatic_minimum() {
     assert_close(tree.layout(marker).location.x, 200.0);
 }
 
-/// A leaf with a fixed content area: whichever dimension is left open comes out
-/// at 3000 divided by the other, and an unconstrained axis falls back to 100.
 fn area_leaf(input: seldon::compute::LeafMeasureInput) -> LeafMetrics {
     let bounded = |known: Option<f32>, available: AvailableSpace| {
         known.or(match available {
@@ -718,8 +685,6 @@ fn stacking_axis_intrinsic_keywords_measure_across_the_lane() {
 
     let output = auto_layout(&tree, root);
 
-    // The block-axis `min-content` is measured at the lane's 50px width, not
-    // at the width an unconstrained measurement would have picked.
     assert_size(output.size, Size::new(50.0, 60.0));
     assert_size(tree.layout(item).size, Size::new(50.0, 60.0));
 
@@ -736,8 +701,6 @@ fn stacking_axis_intrinsic_keywords_measure_across_the_lane() {
 
     let output = auto_layout(&tree, root);
 
-    // Row lanes stack along the inline axis, so the same rule measures the
-    // inline `min-content` at the row's 50px height.
     assert_size(output.size, Size::new(60.0, 50.0));
     assert_size(tree.layout(item).size, Size::new(60.0, 50.0));
 }
@@ -788,7 +751,6 @@ fn percentage_tracks_resolve_against_the_container_size_they_produce() {
     let output = auto_layout(&tree, root);
 
     assert_size(output.size, Size::new(200.0, 20.0));
-    // The second run sizes each track at 25% of the 200px the first produced.
     assert_point(tree.layout(marker).location, Point::new(50.0, 0.0));
 }
 
@@ -847,9 +809,6 @@ fn auto_fit_keeps_one_track_per_auto_placed_span_and_collapses_the_rest() {
 
     sized_layout(&tree, root, Some(200.0), None);
 
-    // Four `auto-fit` tracks: the fourth is occupied by the definite item, the
-    // first two are kept for the two auto-placed spans, and the third
-    // collapses onto the fourth.
     assert_eq!(
         locations(&tree, &[first, second, marker]),
         vec![
@@ -1074,8 +1033,6 @@ fn a_percentage_stacking_gutter_resolves_in_two_passes_and_commits_once() {
 
     let output = auto_layout(&tree, root);
 
-    // The gapless pass reports 40, against which 50% resolves to 20, and the
-    // real pass then reports 20 + 20 + 20.
     assert_size(output.size, Size::new(50.0, 60.0));
     assert_point(tree.layout(second).location, Point::new(0.0, 40.0));
     assert_eq!(tree.layout_writes.get(), 2);
@@ -1121,7 +1078,6 @@ fn margin_boxes_tile_the_lane_and_negative_margins_floor_at_zero() {
 
     let output = auto_layout(&tree, root);
 
-    // A negative margin box never pulls the running position backwards.
     assert_size(output.size, Size::new(50.0, 20.0));
     assert_point(tree.layout(pulled).location, Point::new(0.0, -15.0));
     assert_point(tree.layout(after).location, Point::new(0.0, 0.0));
@@ -1192,10 +1148,6 @@ fn rtl_mirrors_the_grid_axis_tracks() {
     assert_point(tree.layout(second).location, Point::new(0.0, 0.0));
 }
 
-/// A measured grid-lanes container reads its items' first baselines only
-/// when its own is read (`LayoutInput::reads_first_baseline`): a `linear`
-/// item then gives its fixed-size box's 7px, which otherwise is never
-/// measured.
 #[test]
 fn a_measured_container_asks_its_items_for_the_first_baseline_it_is_asked_for() {
     let run = |reads_first_baseline| {
@@ -1242,7 +1194,6 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
         vec![first, second, third],
     );
 
-    // The third item reopens no track, so its baseline never competes.
     assert_eq!(auto_layout(&tree, root).first_baseline, Some(5.0));
 
     let mut tree = TestTree::default();
@@ -1250,7 +1201,6 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     let second = tree.push_leaf(leaf_style(10.0, 20.0), Size::new(10.0, 20.0), Some(8.0));
     let root = tree.push_grid_lanes(lanes_style(&[px(50.0), px(50.0)], &[]), vec![first, second]);
 
-    // An item without a baseline contributes none rather than its bottom edge.
     assert_eq!(auto_layout(&tree, root).first_baseline, Some(8.0));
 
     let mut tree = TestTree::default();
@@ -1258,7 +1208,6 @@ fn the_first_baseline_comes_from_the_items_that_open_each_track() {
     let second = tree.push_leaf(leaf_style(20.0, 20.0), Size::new(20.0, 20.0), Some(8.0));
     let root = tree.push_grid_lanes(lanes_style(&[], &[px(40.0), px(40.0)]), vec![first, second]);
 
-    // Row lanes read the first item of the first non-empty track instead.
     assert_eq!(auto_layout(&tree, root).first_baseline, Some(15.0));
 }
 
@@ -1289,7 +1238,6 @@ fn row_lanes_size_intrinsic_tracks_and_materialise_implicit_ones() {
 
     let output = auto_layout(&tree, root);
 
-    // 12 (the min-content row) + 30 (explicit) + 20 (implicit for row 3).
     assert_size(output.size, Size::new(10.0, 62.0));
     assert_size(tree.layout(flowing).size, Size::new(10.0, 12.0));
     assert_point(tree.layout(placed).location, Point::new(0.0, 42.0));
@@ -1314,8 +1262,6 @@ fn a_measure_goal_still_applies_order_modified_document_order() {
         vec![first, second, hoisted],
     );
 
-    // Laid out in document order the range would be 30; the hoisted item runs
-    // first, which pushes the tall item onto the lane it opened.
     assert_size(
         support::measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT).size,
         Size::new(100.0, 35.0),
@@ -1347,8 +1293,6 @@ fn baseline_self_alignment_falls_back_to_start_in_the_grid_axis() {
 
     sized_layout(&tree, root, Some(100.0), None);
 
-    // `baseline` would have aligned to the item's own inline start (the left
-    // edge here); its `start` fallback takes the container's instead.
     assert_point(tree.layout(item).location, Point::new(80.0, 0.0));
 }
 
@@ -1372,8 +1316,6 @@ fn layout_containment_suppresses_the_container_baseline() {
 
 #[test]
 fn committed_items_claim_grid_axis_independence_only_over_fixed_tracks() {
-    // An auto-placed item reaches every lane, so it only inherits a still area
-    // when every live track is fixed; a definite one only needs its own span.
     let cases = [
         (vec![px(50.0)], Vec::new(), false, Size::new(true, false)),
         (vec![px(50.0)], Vec::new(), true, Size::new(true, false)),
@@ -1390,7 +1332,6 @@ fn committed_items_claim_grid_axis_independence_only_over_fixed_tracks() {
             Size::new(true, false),
         ),
         (vec![fr(1.0)], Vec::new(), true, Size::new(false, false)),
-        // Row lanes swap which axis the tracks can vouch for.
         (Vec::new(), vec![px(50.0)], false, Size::new(false, true)),
     ];
     for (index, (columns, rows, placed, expected)) in cases.into_iter().enumerate() {
@@ -1427,17 +1368,6 @@ fn committed_items_claim_grid_axis_independence_only_over_fixed_tracks() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Items with an intrinsic aspect ratio
-//
-// css-grid-3 §6.2 routes grid-axis alignment straight through regular Grid, so
-// css-grid-1 §6.2 decides whether a lanes item fills its lane and css-sizing-4
-// §5 decides what that lane size transfers into the stacking axis. The leaves
-// below are replaced: they carry a natural size and answer a known dimension
-// through their own ratio, the way `NaturalSize::measure` does for a bitmap.
-// ---------------------------------------------------------------------------
-
-/// A replaced 40x20 leaf, ratio 2:1.
 fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -1448,7 +1378,6 @@ fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     })
 }
 
-/// The same leaf standing up: 20x40, ratio 1:2.
 fn tall_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -1486,11 +1415,6 @@ fn stretched() -> TestStyle {
     }
 }
 
-/// The waterfall case. Three 100px lanes, four replaced items told to fill
-/// their lane: each is 100 wide, each takes 50 of stacking extent from
-/// css-sizing-4 §5, and §4.4 then places the fourth at the end of the shortest
-/// lane — which after three equal items is the first. The stacking range is
-/// the 100 that lane reaches.
 #[test]
 fn stretched_ratio_items_take_their_stacking_size_from_their_lane() {
     let mut tree = TestTree::default();
@@ -1519,10 +1443,6 @@ fn stretched_ratio_items_take_their_stacking_size_from_their_lane() {
     );
 }
 
-/// css-grid-1 §6.2 through css-grid-3 §6.2: `normal` does not stretch a
-/// replaced item, in lanes either. The same four items keep their natural
-/// 40x20, so lane 0 stacks two of them and the range is 40 — the lane is still
-/// 100 wide, the item simply does not fill it.
 #[test]
 fn normal_leaves_a_replaced_lanes_item_at_its_natural_size() {
     let mut tree = TestTree::default();
@@ -1543,10 +1463,6 @@ fn normal_leaves_a_replaced_lanes_item_at_its_natural_size() {
     assert_point(tree.layout(items[3]).location, Point::new(0.0, 20.0));
 }
 
-/// The grid-axis alignment values §6.2 inherits from Grid, one item per lane
-/// so each is read on its own. `stretch` fills and transfers; `normal`,
-/// `start`, `center` and `end` leave replaced content at 40x20 and only move
-/// it inside the lane.
 #[test]
 fn grid_axis_self_alignment_decides_whether_a_ratio_item_fills_its_lane() {
     let cases = [
@@ -1574,9 +1490,6 @@ fn grid_axis_self_alignment_decides_whether_a_ratio_item_fills_its_lane() {
     }
 }
 
-/// `justify-items` on the container is the same decision made once. With
-/// `stretch` every lanes item fills, including the replaced ones `normal`
-/// would have left alone.
 #[test]
 fn justify_items_stretch_fills_every_lane() {
     let mut tree = TestTree::default();
@@ -1597,10 +1510,6 @@ fn justify_items_stretch_fills_every_lane() {
     assert_size(output.size, Size::new(200.0, 200.0));
 }
 
-/// §2.3 puts the tracks in the block axis when `grid-template-rows` alone
-/// names any, and §6.2 then reads `align-self` for the grid axis. A 100-tall
-/// lane transfers into 200 of stacking width for the 2:1 item and 50 for the
-/// 1:2 one, and the two stack along the inline axis.
 #[test]
 fn row_lanes_transfer_the_lane_height_into_the_stacking_width() {
     let mut tree = TestTree::default();
@@ -1620,10 +1529,6 @@ fn row_lanes_transfer_the_lane_height_into_the_stacking_width() {
     assert_point(tree.layout(tall).location, Point::new(200.0, 0.0));
 }
 
-/// §3.4 sizes the grid axis with regular Grid's §12, so an `auto` lane takes
-/// the ratio item's max-content contribution — with nothing definite in the
-/// stacking axis to transfer from, that is its natural 40 — and an `fr` lane
-/// takes its share of the container and transfers that.
 #[test]
 fn auto_and_flexible_lanes_size_from_ratio_items() {
     let mut auto_tree = TestTree::default();
@@ -1645,10 +1550,6 @@ fn auto_and_flexible_lanes_size_from_ratio_items() {
     assert_size(flex_output.size, Size::new(300.0, 75.0));
 }
 
-/// §4.1 lets an item span lanes, and §6.1's grid-axis gutter is part of the
-/// area it then stretches into: 100 + 20 + 100 transfers to 110 of stacking
-/// extent. The stacking gutter is the 20 between the spanning item and the one
-/// that follows it in lane 0.
 #[test]
 fn a_spanning_ratio_item_stretches_across_its_lanes_and_their_gutter() {
     let mut tree = TestTree::default();
@@ -1676,10 +1577,6 @@ fn a_spanning_ratio_item_stretches_across_its_lanes_and_their_gutter() {
     assert_size(output.size, Size::new(220.0, 180.0));
 }
 
-/// The lane size is clamped by the item's own min/max in the grid axis before
-/// the ratio transfers from it, and a clamp on the stacking axis afterwards
-/// simply breaks the ratio — the same order css-sizing-3 §5.1 gives a grid
-/// item.
 #[test]
 fn item_min_and_max_sizes_clamp_a_lanes_transfer() {
     let cases = [
@@ -1716,11 +1613,6 @@ fn item_min_and_max_sizes_clamp_a_lanes_transfer() {
     }
 }
 
-/// A ratio item sharing a lane with an authored-size box and a content-sized
-/// one. Only the ratio item's stacking size follows the lane: the authored box
-/// keeps its own 80x30, and the content-sized item is a *non-replaced* box, so
-/// css-grid-1 §6.2 does stretch it to the lane — it is 100 wide at its own 16
-/// of height. The three stack in order behind the §6.1 gutter.
 #[test]
 fn a_ratio_item_stacks_with_fixed_and_content_sized_neighbours() {
     let mut tree = TestTree::default();
@@ -1745,17 +1637,11 @@ fn a_ratio_item_stacks_with_fixed_and_content_sized_neighbours() {
     assert_size(output.size, Size::new(100.0, 116.0));
 }
 
-/// §4.2's tie threshold decides *which* lane an item joins and nothing else.
-/// Under an infinite tolerance every lane counts as equally short, so the
-/// cursor walks them in order instead of chasing the shortest — the four items
-/// change places, and not one of them changes size.
 #[test]
 fn fit_tolerance_moves_ratio_items_without_resizing_them() {
     let wide_lane = Size::new(100.0, 50.0);
     let narrow_lane = Size::new(50.0, 25.0);
     let cases = [
-        // Exact shortest-lane placement: after three items lane 1 holds 50 and
-        // lane 0 holds 50 too, and the tie goes to the first lane.
         (
             tolerance_px(0.0),
             vec![
@@ -1765,7 +1651,6 @@ fn fit_tolerance_moves_ratio_items_without_resizing_them() {
                 (Point::new(0.0, 50.0), wide_lane),
             ],
         ),
-        // Every lane ties, so the cursor walks them in order and wraps.
         (
             tolerance_infinite(),
             vec![
@@ -1791,8 +1676,6 @@ fn fit_tolerance_moves_ratio_items_without_resizing_them() {
 
         sized_layout(&tree, root, Some(150.0), None);
 
-        // Two lanes, two sizes: whichever lane an item lands in, its size is
-        // that lane's width through the ratio and nothing else.
         for (&item, (location, size)) in items.iter().zip(expected) {
             assert_point(tree.layout(item).location, location);
             assert_size(tree.layout(item).size, size);
@@ -1802,9 +1685,6 @@ fn fit_tolerance_moves_ratio_items_without_resizing_them() {
 
 #[test]
 fn a_scrolling_grid_lanes_container_counts_its_items_margin_areas() {
-    // Grid-lanes items are grid items (css-grid-3 §2), so css-overflow-3
-    // §3.3 takes in their margin areas: the last item in the lane ends at 60
-    // and its margin at 80.
     let mut tree = TestTree::default();
     let first = fixed(&mut tree, 20.0, 30.0);
     let last = styled(
@@ -1833,18 +1713,6 @@ fn a_scrolling_grid_lanes_container_counts_its_items_margin_areas() {
     assert_size(output.content_size, Size::new(20.0, 80.0));
 }
 
-// ---------------------------------------------------------------------------
-// The available grid space of a container whose size is not known.
-//
-// css-grid-2 §12.1, which the grid axis follows: with no definite size of
-// its own under a definite available size, the container takes its
-// css-sizing-3 §5.2.2 fit-content width and max-content height, and the
-// grid axis is sized against those. The stacking axis is the items' own.
-// ---------------------------------------------------------------------------
-
-/// `position: absolute; inset: 0; width/height: fit-content; margin: auto`
-/// over `style`, laid out in an 800×600 containing block around the items
-/// `content` pushes.
 fn placed_fit_content_lanes(
     style: TestStyle,
     content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
@@ -1880,9 +1748,6 @@ fn two_fixed(tree: &mut TestTree) -> Vec<TestId> {
     vec![fixed(tree, 100.0, 50.0), fixed(tree, 100.0, 50.0)]
 }
 
-/// Lanes down the columns: `1fr 1fr` and `auto auto` take their items'
-/// widths (the max-content flex fraction; no `auto` stretch into space the
-/// container does not have), as fixed tracks do, and the box is centred.
 #[test]
 fn fit_content_lanes_take_their_columns_max_content_width() {
     for columns in [
@@ -1900,9 +1765,6 @@ fn fit_content_lanes_take_their_columns_max_content_width() {
     }
 }
 
-/// Lanes across the rows: the grid axis is the block axis, whose size is
-/// max-content, so `1fr 1fr` rows are the items' 50 each, not halves of 600;
-/// the stacking width is the one item in each row.
 #[test]
 fn fit_content_lanes_across_rows_take_their_max_content_height() {
     let (tree, items, layout) =
@@ -1915,9 +1777,6 @@ fn fit_content_lanes_across_rows_take_their_max_content_height() {
     );
 }
 
-/// A `flex-start` item of a column flex container is fit-content sized in
-/// the cross axis: its `1fr 1fr` lanes keep their 200 of content rather than
-/// the container's 800.
 #[test]
 fn flex_start_lanes_item_of_a_column_flex_container_fits_its_content() {
     let mut tree = TestTree::default();
@@ -1940,12 +1799,6 @@ fn flex_start_lanes_item_of_a_column_flex_container_fits_its_content() {
     assert_size(tree.layout(lanes).size, Size::new(200.0, 50.0));
 }
 
-/// The grid axis's track-sizing runs, counted as max-content width probes
-/// of the one item in an `auto` lane (the test host caches nothing). A known
-/// width sizes the axis once; a fit-content width sizes it once under a
-/// max-content constraint and once at the decided width — as many runs as a
-/// container of unknown width took before it had a fit-content size — plus a
-/// min-content run only when the max-content width overflows.
 #[test]
 fn fit_content_lanes_size_the_grid_axis_once_more_only_on_overflow() {
     let runs = |tree: &TestTree, item: TestId| {
@@ -1977,9 +1830,6 @@ fn fit_content_lanes_size_the_grid_axis_once_more_only_on_overflow() {
     }
 }
 
-/// `contain: inline-size` substitutes the grid axis's intrinsic sizes, so a
-/// fit-content container down the columns is `contain-intrinsic-width` wide
-/// and its `1fr 1fr` lanes split that.
 #[test]
 fn fit_content_lanes_with_a_contained_inline_axis_take_their_substituted_width() {
     let style = TestStyle {
@@ -2014,8 +1864,6 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
         vec![first, second, third],
     );
 
-    // The third item lands under the second and closes the second track at
-    // 20 + 6; the first closes the first at 25. The lowest wins.
     let output = auto_layout(&tree, root);
     assert_point(tree.layout(third).location, Point::new(50.0, 20.0));
     assert_eq!(output.first_baseline, Some(2.0));
@@ -2030,8 +1878,6 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
         vec![first, second, third],
     );
 
-    // A last item without a baseline contributes none; the item above it is
-    // no longer last in its track.
     assert_eq!(auto_layout(&tree, root).last_baseline, Some(25.0));
 
     let mut tree = TestTree::default();
@@ -2049,7 +1895,6 @@ fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
     );
     let root = tree.push_grid_lanes(lanes_style(&[], &[px(40.0), px(40.0)]), vec![first, second]);
 
-    // Row lanes read the last item of the last track that received one.
     let output = auto_layout(&tree, root);
     assert_eq!(output.first_baseline, Some(5.0));
     assert_eq!(output.last_baseline, Some(48.0));
@@ -2079,7 +1924,6 @@ fn last_baseline_self_alignment_falls_back_to_end_in_the_grid_axis() {
 
     sized_layout(&tree, root, Some(100.0), None);
 
-    // `end` of the right-to-left container is its left edge.
     assert_point(tree.layout(item).location, Point::new(0.0, 0.0));
 }
 
@@ -2103,11 +1947,6 @@ fn layout_containment_suppresses_the_container_last_baseline() {
     assert_eq!(auto_layout(&tree, root).last_baseline, None);
 }
 
-/// A grid-lanes container that is a last-baseline group member is asked for
-/// an exact last baseline, and asks its items in turn: which item closes a
-/// track is known only after placement. The nested flex container's last item
-/// has a fixed height, so only an exact measurement gives its 19 rather than
-/// its 22px bottom edge.
 #[test]
 fn a_requested_last_baseline_asks_the_items_that_may_close_a_track() {
     let mut tree = TestTree::default();
@@ -2160,11 +1999,6 @@ fn a_requested_last_baseline_asks_the_items_that_may_close_a_track() {
     assert_eq!(output.last_baseline, Some(19.0));
 }
 
-/// The mix `aggregated_span_one_sizing_matches_per_position_sizing` sizes:
-/// auto-placed and definite span-1 items sharing tracks, the automatic
-/// minimum in tracks that do and do not allow it, a fixed-maximum clamp, a
-/// `fit-content()` limit, definite, preferred and maximum sizes, a scroll
-/// container and spanning items, down the columns or across the rows.
 fn aggregation_fixture(rows: bool) -> (TestTree, TestId) {
     let tracks = vec![
         support::track_auto(),
@@ -2240,13 +2074,6 @@ fn aggregation_fixture(rows: bool) -> (TestTree, TestId) {
     (tree, root)
 }
 
-/// Grid-axis sizing stands for every span-1 item that may sit in a track
-/// with one aggregate entry per track, and a debug build sizes every run
-/// again with one clone per item and candidate position, asserting the
-/// tracks come out bit for bit the same — so every lanes test checks the
-/// aggregation. This one gives it a mix that reaches each of the aggregate's
-/// parts (`aggregation_fixture`) under every kind of available space, in
-/// both orientations.
 #[test]
 fn aggregated_span_one_sizing_matches_per_position_sizing() {
     for rows in [false, true] {
@@ -2275,14 +2102,6 @@ fn aggregated_span_one_sizing_matches_per_position_sizing() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Regressions found by the web-platform-tests grid-lanes suite.
-// ---------------------------------------------------------------------------
-
-/// WPT `intrinsic-sizing/row-defined-height.html`: a definite preferred size
-/// is an item's content-based minimum (css-grid-2 §6.6's specified size
-/// suggestion), even where its content measures less, so `auto` tracks in a
-/// definite container are not squeezed below it and overflow instead.
 #[test]
 fn a_definite_preferred_size_is_the_automatic_minimum_of_an_auto_track() {
     let mut tree = TestTree::default();
@@ -2292,7 +2111,6 @@ fn a_definite_preferred_size_is_the_automatic_minimum_of_an_auto_track() {
         if let Some(row) = row {
             style.grid_row = Line::new(line(row), support::grid_auto_placement());
         }
-        // No content: only the preferred size makes the item 100px tall.
         children.push(tree.push_leaf(style, Size::ZERO, None));
     }
     let auto = support::track_auto;
@@ -2316,11 +2134,6 @@ fn a_definite_preferred_size_is_the_automatic_minimum_of_an_auto_track() {
     );
 }
 
-/// WPT `alignment/grid-lanes-content-distribution-001.html`, laid out where
-/// no parent imposes the block size: the height the aspect ratio transfers
-/// from the clamped width is only a floor, since the automatic minimum in
-/// that axis is the content (css-sizing-4 §5.1), so the track fits the item
-/// and `align-content: center` has no negative free space to centre.
 #[test]
 fn a_ratio_sized_block_axis_grows_to_its_content() {
     let mut tree = TestTree::default();
@@ -2340,10 +2153,6 @@ fn a_ratio_sized_block_axis_grows_to_its_content() {
     assert_point(tree.layout(item).location, Point::new(0.0, 0.0));
 }
 
-/// WPT `track-sizing/auto-repeat/row-auto-repeat-010.html`: a parent that
-/// commits the container at the size it measured, telling it to ignore its
-/// own size properties, still leaves the `auto-fill` count to its percentage
-/// `max-height`, so `grid-row: -2` names the same last row in both passes.
 #[test]
 fn auto_fill_counts_against_the_max_size_when_the_parent_imposes_the_size() {
     let mut tree = TestTree::default();
@@ -2390,7 +2199,6 @@ fn auto_fill_counts_against_the_max_size_when_the_parent_imposes_the_size() {
     assert_size(tree.layout(item).size, Size::new(300.0, 50.0));
 }
 
-/// Two 54px words on 15px lines: one line from 108px up, two below.
 fn two_word_paragraph(input: LeafMeasureInput) -> LeafMetrics {
     let width = input
         .known_dimensions
@@ -2407,10 +2215,6 @@ fn two_word_paragraph(input: LeafMeasureInput) -> LeafMetrics {
     ))
 }
 
-/// WPT `row-min-max-content-container.html`: with lanes running across the
-/// rows, an item's `width: min-content` is the same in every lane, so the
-/// rows are sized by the height it has at that width — two lines here, not
-/// the one line it would take unconstrained.
 #[test]
 fn a_stacking_axis_keyword_is_resolved_before_the_grid_axis_is_sized() {
     let mut tree = TestTree::default();
@@ -2439,11 +2243,6 @@ fn a_stacking_axis_keyword_is_resolved_before_the_grid_axis_is_sized() {
     }
 }
 
-/// WPT `alignment/grid-lanes-align-content-refinalize-row-geometry-001.html`:
-/// an item's containing block is its lanes in the grid axis and the
-/// container's content box in the stacking axis (§4.4.1), so a percentage
-/// there resolves against the container — and the item is still not
-/// stretched along it.
 #[test]
 fn stacking_axis_percentages_resolve_against_the_content_box() {
     let mut tree = TestTree::default();

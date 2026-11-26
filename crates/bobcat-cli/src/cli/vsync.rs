@@ -13,11 +13,6 @@
 
 use std::ffi::c_void;
 
-/// The `CoreVideo` entry points this needs, and nothing else.
-///
-/// A C API, so the calls are `unsafe`; each one's contract is stated at its
-/// call site. The link itself is an opaque retained object, and the timestamps
-/// the callback is handed are ignored.
 #[allow(
     unsafe_code,
     reason = "CoreVideo is a C API with no Rust binding in this workspace"
@@ -25,11 +20,8 @@ use std::ffi::c_void;
 mod core_video {
     use std::ffi::c_void;
 
-    /// `CVDisplayLinkRef`, opaque.
     pub(super) type DisplayLinkRef = *mut c_void;
-    /// `CGDirectDisplayID`, which winit hands out as the monitor's native id.
     pub(super) type DisplayId = u32;
-    /// `CVReturn`; `kCVReturnSuccess` is zero.
     pub(super) type Return = i32;
 
     pub(super) type OutputCallback = extern "C" fn(
@@ -62,12 +54,8 @@ use self::core_video::{DisplayId, DisplayLinkRef, Return};
 
 const SUCCESS: Return = 0;
 
-/// What the display link does on every refresh. Boxed twice so the callback
-/// gets one thin pointer to reconstruct, and owned by [`DisplayLink`] for
-/// exactly as long as the link that may call it.
 type Wake = Box<dyn Fn() + Send>;
 
-/// One display's vsync, delivered as a wakeup on the run loop.
 pub(crate) struct DisplayLink {
     link: DisplayLinkRef,
     wake: *mut Wake,
@@ -83,8 +71,6 @@ impl std::fmt::Debug for DisplayLink {
     }
 }
 
-/// Posts the wakeup. Runs on `CoreVideo`'s own thread, so it touches nothing
-/// but the closure it was handed — which does one non-blocking send.
 #[allow(
     unsafe_code,
     reason = "the C callback reconstructs the context pointer DisplayLink gave it"
@@ -108,12 +94,6 @@ extern "C" fn on_vsync(
 }
 
 impl DisplayLink {
-    /// Opens the link for one display, stopped.
-    ///
-    /// Answers `None` if `CoreVideo` will not give one — a display id that has
-    /// gone away with its monitor, most likely. The caller falls back to
-    /// waiting for something else to wake it, which costs the animation its
-    /// pacing but not the window.
     #[allow(
         unsafe_code,
         reason = "creating and configuring a CVDisplayLink is three C calls"
@@ -151,7 +131,6 @@ impl DisplayLink {
         })
     }
 
-    /// Starts or stops the link, if it is not already there.
     #[allow(
         unsafe_code,
         reason = "starting and stopping a CVDisplayLink are one C call each"
@@ -170,8 +149,6 @@ impl DisplayLink {
                 core_video::CVDisplayLinkStop(self.link)
             }
         };
-        // A link that refuses to start leaves the window on whatever else
-        // wakes it, which is the same place a display with no link is.
         self.running = running && changed == SUCCESS;
     }
 }

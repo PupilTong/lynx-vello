@@ -24,14 +24,12 @@ use crate::geometry::{Point, Rect, Size};
 use crate::text::paragraph::shape::Objects;
 use crate::text::paragraph::{Additions, Direction, LineGeometry};
 
-/// Each box's inline extent on one line, if it has any.
 struct Extents<'a> {
     spans: &'a [SpanAt],
     extents: Vec<Option<(f32, f32)>>,
 }
 
 impl Extents<'_> {
-    /// Adds `[left, right)` to box `span` and every box it is nested in.
     fn add(&mut self, mut span: Option<u32>, left: f32, right: f32) {
         if right <= left {
             return;
@@ -56,7 +54,6 @@ impl InlineFlow {
             spans: &boxes.spans,
             extents: vec![None; boxes.spans.len()],
         };
-        // Per box, its fragments in line order.
         let mut by_span: Vec<Vec<InlineFragment>> = vec![Vec::new(); boxes.spans.len()];
 
         let objects = Objects::of(&self.paragraph.natural);
@@ -103,7 +100,6 @@ impl InlineFlow {
         fragments
     }
 
-    /// Every box's inline extent on `line`.
     fn line_extents(
         &self,
         line: &parley::Line<'_, crate::style::TextBrush>,
@@ -113,8 +109,6 @@ impl InlineFlow {
         let block = &self.paragraph.content.block;
         let additions = &self.paragraph.content.additions;
         let boxes = &self.boxes;
-        // The hanging zone sits at the line's end edge, which is the
-        // paragraph direction's.
         let mut low = f32::INFINITY;
         let mut high = f32::NEG_INFINITY;
         for item in line.items() {
@@ -175,9 +169,6 @@ impl InlineFlow {
         }
     }
 
-    /// Lays the edges `edge` carries across `[left, right)`, in logical
-    /// order from the side the cluster's run starts on: a start edge is its
-    /// margin then its border and padding, an end edge the other way round.
     fn add_edge(
         &self,
         extents: &mut Extents<'_>,
@@ -211,9 +202,6 @@ impl InlineFlow {
         }
     }
 
-    /// The edges slot `slot`'s atom carries, on the sides they were laid in:
-    /// from the atom's left edge `left` inward, and from `right` — the end of
-    /// its margin box — outward over the `after` laid in after it.
     fn add_atom_edges(
         &self,
         extents: &mut Extents<'_>,
@@ -227,8 +215,6 @@ impl InlineFlow {
             return;
         };
         let spans = &boxes.spans;
-        // On each side, outermost first: the margin, then the border and
-        // padding.
         let mut on_left: Vec<(f32, f32, u32)> = Vec::new();
         let mut on_right: Vec<(f32, f32, u32)> = Vec::new();
         if let Some(span) = start {

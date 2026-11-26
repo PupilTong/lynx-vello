@@ -129,8 +129,6 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     );
 }
 
-/// Renders a 100px square at the page origin with `background-image: <image>`
-/// over a white page.
 fn gradient_square(name: &str, image: &str) -> Vec<u8> {
     let mut gpu = headless(name);
     let css = format!(
@@ -172,7 +170,6 @@ fn a_linear_gradients_first_stop_colours_the_line_before_it() {
 
 #[test]
 fn a_linear_gradients_last_stop_colours_the_line_past_it() {
-    // The stop at -50% re-maps the ramp so the hard edge at 50% is its end.
     let pixels = gradient_square(
         "a_linear_gradients_last_stop_colours_the_line_past_it",
         "linear-gradient(red -50%, red 50%, blue 50%)",
@@ -326,17 +323,11 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     );
 }
 
-/// A scroll is a translation applied while the committed frame is put
-/// together, and the scrollport clip does not ride it: the content under the
-/// port moves, and nothing leaks out beside or below it at any offset inside
-/// the encode window.
 #[test]
 fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
     use terminus::link::Vector2D;
 
     let mut gpu = headless("a_composition_at_a_scroll_offset_stays_inside_the_scrollport");
-    // A 100x100 scroller over a red then a blue 100px row, on a 200x150 page,
-    // so pixels beside and below the scroller prove the clip holds.
     let mut doc = Doc::with_css_sized(
         "page { display: flex; width: 200px; height: 150px; }
          .scroller { display: flex; flex-direction: column; overflow: scroll;
@@ -357,8 +348,6 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
         .committed_frame()
         .expect("render leaves a committed frame retained");
 
-    // Screen y plus the offset is content y, so each probe names the row the
-    // port shows there.
     for (offset, near, far) in [(0.0_f32, RED, RED), (30.0, RED, BLUE), (100.0, BLUE, BLUE)] {
         let mut scene = DisplayList::new();
         frame.compose_into(
@@ -387,12 +376,6 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
     }
 }
 
-/// A nested scope paints in its own colour, not the paragraph root's.
-///
-/// This is the property per-run painting exists for, and the one thing the
-/// golden suites cannot check: they would pass identically if every glyph in a
-/// paragraph still wore the establishing element's style. Ahem gives every
-/// glyph a full em square, so each run's colour is readable at an exact pixel.
 #[test]
 fn a_nested_scope_paints_in_its_own_colour() {
     let mut gpu = headless("a_nested_scope_paints_in_its_own_colour");
@@ -407,7 +390,6 @@ fn a_nested_scope_paints_in_its_own_colour() {
         .register_fonts(terminus::link::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el_tag(root, "text", "text");
-    // "AA" in the root's red, then a nested scope's "BB" in blue.
     doc.text(holder, "AA");
     let scope = doc.el_tag(holder, "text", "scope");
     doc.text(scope, "BB");
@@ -418,7 +400,6 @@ fn a_nested_scope_paints_in_its_own_colour() {
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
-    // First em square is the root run, third is the nested scope's.
     let root_run = pixel(&pixels, 200, 10, 20);
     let nested = pixel(&pixels, 200, 50, 20);
     assert!(
@@ -431,18 +412,6 @@ fn a_nested_scope_paints_in_its_own_colour() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `filter: blur()`
-//
-// The whole blur path is only observable in pixels: the compose program's
-// bracket ops replay raw without a GPU, so every property below — that the
-// bake happens at all, that it is premultiplied, that its margin survives the
-// viewport edge, that a decimated sigma still centres — needs a real render.
-// The assertions are analytic rather than golden: a monotone profile, a
-// symmetry, an ink bound at 3 sigma.
-// ---------------------------------------------------------------------------
-
-/// A page with one absolutely-positioned square carrying `extra` declarations.
 fn blur_page(size: f32, square: f32, extra: &str) -> Doc {
     let css = format!(
         "page {{ display: flex; position: relative; width: {size}px; height: {size}px; }}
@@ -456,17 +425,12 @@ fn blur_page(size: f32, square: f32, extra: &str) -> Doc {
     doc
 }
 
-/// Renders a document through the same path an embedder's painter takes: the
-/// committed frame, its filter bakes, then the composition.
 fn render_filtered(
     gpu: &mut terminus::link::render::gpu::Headless,
     doc: &mut Doc,
     size: u32,
 ) -> Vec<u8> {
     doc.dom.render();
-    // One `Headless` here renders several independent documents, and commit
-    // ids restart at one per document, so the bake cache's key cannot tell
-    // them apart on its own.
     gpu.forget_filters();
     let frame = doc
         .dom
@@ -482,22 +446,16 @@ fn render_filtered(
         .expect("headless render")
 }
 
-/// The luminance of one pixel, 0 for black ink and 255 for the white page.
 fn luma(pixels: &[u8], width: u32, x: u32, y: u32) -> i32 {
     i32::from(pixel(pixels, width, x, y)[0])
 }
 
-/// A black square under `blur(4px)`: the centre keeps the fill, the profile
-/// across an edge is monotone and symmetric about the border, ink exists
-/// outside the box within 3 sigma, and effectively none past 4 sigma.
 #[test]
 fn a_blurred_square_spreads_monotonically_and_symmetrically() {
     let mut gpu = headless("a_blurred_square_spreads_monotonically_and_symmetrically");
     let mut doc = blur_page(128.0, 48.0, "filter: blur(4px);");
     let pixels = render_filtered(&mut gpu, &mut doc, 128);
 
-    // The square is 48px at (40, 40); sigma is 4, so the right border is at
-    // x = 88 and the ink cutoff at 3 sigma is x = 100.
     assert!(
         luma(&pixels, 128, 64, 64) < 8,
         "the centre keeps the fill ({:?})",
@@ -510,9 +468,6 @@ fn a_blurred_square_spreads_monotonically_and_symmetrically() {
             "the profile across the edge must not go back down: {profile:?}",
         );
     }
-    // The border is at x = 88.0, so the two pixels straddling it are 87
-    // (centre 87.5) and 88 (centre 88.5) — the symmetric pair, and the pair
-    // whose mean is the coverage at the border itself.
     let at_border = i32::midpoint(luma(&pixels, 128, 87, 64), luma(&pixels, 128, 88, 64));
     assert!(
         (100..=155).contains(&at_border),
@@ -538,12 +493,6 @@ fn a_blurred_square_spreads_monotonically_and_symmetrically() {
     );
 }
 
-/// A WHITE square blurred over a WHITE page stays white everywhere.
-///
-/// This is the test of the blur chain's premultiplied input: filtering
-/// unpremultiplied colour averages the colour of the transparent margin —
-/// whatever a divide by a tiny alpha left there — into the square's own edge,
-/// and a dark halo appears.
 #[test]
 fn a_white_blurred_square_over_white_grows_no_halo() {
     let mut gpu = headless("a_white_blurred_square_over_white_grows_no_halo");
@@ -560,13 +509,6 @@ fn a_white_blurred_square_over_white_grows_no_halo() {
     }
 }
 
-/// A half-transparent red square under `blur(4px)` keeps its colour at the
-/// centre: red over the white page, half covered.
-///
-/// The other half of the chain's alpha contract: the bake is premultiplied
-/// exactly once, by the rasterizer. Multiplied by alpha a second time, it
-/// draws at a quarter of its red over half of its alpha, and the page's
-/// white shows through as pink.
 #[test]
 fn a_translucent_blurred_square_keeps_its_colour() {
     let mut gpu = headless("a_translucent_blurred_square_keeps_its_colour");
@@ -584,18 +526,9 @@ fn a_translucent_blurred_square_keeps_its_colour() {
     );
 }
 
-/// A sigma small enough to need no decimation blurs correctly.
-///
-/// That is its own code path, and the one place a texture is both read and
-/// written inside one bake: with no pyramid the horizontal half-pass writes
-/// back into the bake target, which the copy pass consumed. A missing
-/// barrier or an aliasing mistake there shows up as a smeared or doubled
-/// profile, so the same monotone-and-symmetric assertions apply.
 #[test]
 fn an_undecimated_blur_reuses_the_bake_target_correctly() {
     let mut gpu = headless("an_undecimated_blur_reuses_the_bake_target_correctly");
-    // Sigma 2 is exactly the largest the kernel covers, so this bakes at
-    // level 0 and allocates no pong at all.
     let mut doc = blur_page(128.0, 48.0, "filter: blur(2px);");
     let pixels = render_filtered(&mut gpu, &mut doc, 128);
 
@@ -604,7 +537,6 @@ fn an_undecimated_blur_reuses_the_bake_target_correctly() {
         "the centre keeps the fill ({})",
         luma(&pixels, 128, 64, 64),
     );
-    // The right border is x = 88.0, so 87 and 88 are the symmetric pair.
     for distance in 0..=5_u32 {
         let inside = luma(&pixels, 128, 87 - distance, 64);
         let outside = luma(&pixels, 128, 88 + distance, 64);
@@ -626,18 +558,12 @@ fn an_undecimated_blur_reuses_the_bake_target_correctly() {
     );
 }
 
-/// A sigma large enough to force decimation still centres on the box and
-/// stays symmetric — the box downsample and the tent upsample have to agree
-/// about where the pixel grid is, or the result slides by half a level.
 #[test]
 fn a_decimated_blur_stays_centred_and_symmetric() {
     let mut gpu = headless("a_decimated_blur_stays_centred_and_symmetric");
     let mut doc = blur_page(256.0, 64.0, "filter: blur(16px);");
     let pixels = render_filtered(&mut gpu, &mut doc, 256);
 
-    // The square is 64 px at (96, 96), so its centre is x = y = 128.0 and the
-    // symmetric pixel pairs are `127 − k` (centre 127.5 − k) against
-    // `128 + k` (centre 128.5 + k).
     for distance in [8_u32, 16, 32, 48] {
         let left = luma(&pixels, 256, 127 - distance, 128);
         let right = luma(&pixels, 256, 128 + distance, 128);
@@ -661,13 +587,6 @@ fn a_decimated_blur_stays_centred_and_symmetric() {
     );
 }
 
-/// A blurred square straddling the viewport edge shows exactly the pixels the
-/// same square fully inside shows, translated.
-///
-/// The proof that the group's bake keeps its 3 sigma margin *outside* the
-/// viewport: inflating the layer bounds after the viewport intersection would
-/// cut the margin the visible pixels read from, and the edge would come out
-/// darker than it should.
 #[test]
 fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
     let mut gpu = headless("a_blurred_square_straddling_the_viewport_edge_matches_one_inside");
@@ -683,8 +602,6 @@ fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
         doc.dom.set_inline_style(boxed, &format!("left: {left}px"));
         render_filtered(gpu, &mut doc, 128)
     };
-    // 40 px inside, then 24 px off the left edge: the same square, shifted by
-    // 64 px, so the pixel at x is the pixel at x + 64 of the inside render.
     let inside = read(&mut gpu, 40.0);
     let straddling = read(&mut gpu, -24.0);
     for x in 0..40_u32 {
@@ -699,11 +616,6 @@ fn a_blurred_square_straddling_the_viewport_edge_matches_one_inside() {
     }
 }
 
-/// A blurred box inside a scroller composes at the painter's offset and stays
-/// inside the scrollport.
-///
-/// The blur is baked in the scroller's own chain, so the texture has to move
-/// with the offset while the scrollport clip does not.
 #[test]
 fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
     use terminus::link::Vector2D;
@@ -761,7 +673,6 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
         let pixels = gpu
             .render(&scene, 200, 200, Color::WHITE)
             .expect("headless render");
-        // The box's content-space centre is y = 80, so it shows at 80 - offset.
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -786,15 +697,6 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
     }
 }
 
-/// A blurred card sliding by an exported curve inside an ancestor's
-/// `overflow: clip`, composed later than its commit, is still cut at the
-/// ancestor's edge rather than at where that edge sat relative to the card
-/// when it was committed.
-///
-/// The ancestor's clip is the card's output clip, pushed in the ancestor's
-/// still space outside the bake. The bake is the card's own content, which
-/// rides the slide with it, so it does not sample the instant: the
-/// composition moves the texture and cuts it at the still edge.
 #[test]
 fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     let mut gpu = headless("a_sliding_blurred_card_stays_inside_its_ancestors_clip");
@@ -827,8 +729,6 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
         "the slide moves the texture across its ancestor's clip, not what is baked",
     );
 
-    // Committed at x = 30; at 0.6 s the card spans x = 80..140, and the
-    // frame's clip ends at x = 100.
     let now = Some(0.6);
     let filtered: Vec<Option<terminus::link::Texture>> = gpu
         .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
@@ -851,8 +751,6 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     );
 }
 
-/// Bakes `frame`'s filter entries and composes it at `now`, the way an
-/// embedder's painter draws one frame.
 fn compose_at(
     gpu: &mut terminus::link::render::gpu::Headless,
     frame: &terminus::link::CommittedFrame,
@@ -869,7 +767,6 @@ fn compose_at(
         .expect("headless render")
 }
 
-/// Every channel of `a` within `slack` of `b`'s.
 fn assert_pixels_match(a: &[u8], b: &[u8], slack: u8, label: &str) {
     assert_eq!(a.len(), b.len(), "{label}: sizes");
     let worst = a
@@ -881,9 +778,6 @@ fn assert_pixels_match(a: &[u8], b: &[u8], slack: u8, label: &str) {
     assert!(worst <= slack, "{label}: channels differ by up to {worst}");
 }
 
-/// A child sliding out of a still `opacity: 0.5` parent, composed later than
-/// its commit, draws where a fresh commit at that instant draws it: the
-/// parent's group rect holds the whole slide, not the child's committed box.
 #[test]
 fn a_child_sliding_out_of_a_still_opacity_group_composes_as_committed() {
     let mut gpu = headless("a_child_sliding_out_of_a_still_opacity_group_composes_as_committed");
@@ -913,8 +807,6 @@ fn a_child_sliding_out_of_a_still_opacity_group_composes_as_committed() {
         "the slide exports inside the group"
     );
 
-    // Committed at x = 30..70 inside the group's 20..80; at 0.6 s the card
-    // spans x = 80..120, wholly past the group's box.
     let composed = compose_at(&mut gpu, &early, Some(0.6), (200, 100));
     doc.dom.advance_animations(0.6);
     doc.dom.render();
@@ -932,9 +824,6 @@ fn a_child_sliding_out_of_a_still_opacity_group_composes_as_committed() {
     assert_pixels_match(&composed, &committed, 2, "composed at 0.6 s");
 }
 
-/// A blurred group with a sliding child beside a still blurred box, composed
-/// at two instants of one commit: the second re-bakes the sliding group
-/// alone, and both frames draw what fresh commits at those instants draw.
 #[test]
 fn a_blurred_group_with_a_sliding_child_composes_as_committed_beside_a_still_blur() {
     let mut gpu =
@@ -972,8 +861,6 @@ fn a_blurred_group_with_a_sliding_child_composes_as_committed_beside_a_still_blu
         "only the group holding the slide samples the timeline",
     );
 
-    // Both instants of `early` first: a later commit's bakes would replace
-    // its textures.
     let instants = [0.4, 0.6];
     let composed = instants.map(|now| compose_at(&mut gpu, &early, Some(now), (200, 100)));
     for (now, composed) in instants.into_iter().zip(composed) {
@@ -993,10 +880,6 @@ fn a_blurred_group_with_a_sliding_child_composes_as_committed_beside_a_still_blu
     }
 }
 
-/// One element with both `filter: blur()` and `backdrop-filter` beside a
-/// sliding card, composed at two instants of one commit: the second re-bakes
-/// the backdrop, and the blur group that draws it with it, so both frames
-/// draw what fresh commits at those instants draw.
 #[test]
 fn a_blurred_backdrop_beside_a_sliding_card_composes_as_committed() {
     let mut gpu = headless("a_blurred_backdrop_beside_a_sliding_card_composes_as_committed");
@@ -1033,9 +916,6 @@ fn a_blurred_backdrop_beside_a_sliding_card_composes_as_committed() {
         "both sample the timeline: the backdrop reads the slide, the group draws the backdrop",
     );
 
-    // Both instants of `early` first: a later commit's bakes would replace
-    // its textures. The card spans x = 80..110 at 0.4 s and 120..150 at
-    // 0.6 s, both under the element.
     let instants = [0.4, 0.6];
     let composed = instants.map(|now| compose_at(&mut gpu, &early, Some(now), (200, 100)));
     for (now, composed) in instants.into_iter().zip(composed) {
@@ -1050,10 +930,6 @@ fn a_blurred_backdrop_beside_a_sliding_card_composes_as_committed() {
     }
 }
 
-/// A card fading by an exported curve, committed while its opacity reads 1,
-/// is the Backdrop Root of the `backdrop-filter` box inside it: composed
-/// later, the box filters the card alone, as a fresh commit at that instant
-/// does, and not the red page behind the card.
 #[test]
 fn a_backdrop_inside_a_fading_card_composes_as_committed() {
     let mut gpu = headless("a_backdrop_inside_a_fading_card_composes_as_committed");
@@ -1102,9 +978,6 @@ fn a_backdrop_inside_a_fading_card_composes_as_committed() {
     assert_pixels_match(&composed, &committed, 3, "composed at 0.6 s");
 }
 
-/// The same element over a scroller, composed at a second offset of one
-/// commit: the cache re-bakes the backdrop and the group drawing it, so the
-/// frame is the one a cold bake at that offset draws.
 #[test]
 fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
     use terminus::link::Vector2D;
@@ -1166,11 +1039,6 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
     );
 }
 
-/// A page of 4 px black stripes on 8 px centres over white, which any blur
-/// visibly greys: a pixel reading pure black or pure white is one no filter
-/// reached. The page paints its own white ground, so a test over it reads
-/// nothing of the canvas; the canvas tests further down cover a page that
-/// paints none.
 fn striped_page(css: &str, width: f32, height: f32) -> Doc {
     let mut doc = Doc::with_css_sized(
         &format!(
@@ -1197,21 +1065,11 @@ fn striped_page(css: &str, width: f32, height: f32) -> Doc {
     doc
 }
 
-/// A `backdrop-filter` element hanging half out of an `overflow: hidden`
-/// card is cut at the card's edge: past it the page shows unfiltered, the
-/// same pixels a page without the element shows, and hit testing there
-/// answers the page rather than the element.
-///
-/// css-overflow-3 clips everything a box's descendants paint, and
-/// filter-effects-2 composites the filtered backdrop into the element's
-/// parent, inside that clip.
 #[test]
 fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
     use euclid::default::Point2D;
 
     let mut gpu = headless("a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge");
-    // The card spans x 20..100; the frost spans x 60..140, so its right half
-    // lies outside the card.
     let css = ".card { display: flex; position: absolute; left: 20px; top: 20px;
                        width: 80px; height: 60px; overflow: hidden; }
                .frost { display: flex; position: absolute; left: 40px; top: 10px;
@@ -1239,8 +1097,6 @@ fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
         "the frost records a backdrop",
     );
 
-    // Inside the card the backdrop is filtered: x = 81 is a black stripe's
-    // centre, which the blur greys.
     assert_eq!(
         luma(&plain, 200, 81, 50),
         0,
@@ -1251,7 +1107,6 @@ fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
         "the frost greys the stripe inside the card ({})",
         luma(&frosted, 200, 81, 50),
     );
-    // Outside it the page shows exactly as it does with no frost at all.
     for y in (32..=68).step_by(4) {
         for x in 101..140 {
             assert_eq!(
@@ -1275,15 +1130,9 @@ fn a_backdrop_half_outside_an_overflow_hidden_card_stops_at_its_edge() {
     );
 }
 
-/// A blurred box whose right edge meets its `overflow: hidden` parent's shows
-/// its 3σ halo inside the parent and none past the parent's edge — and the
-/// same holds for that box inside a second, outer blurred group, whose own
-/// blur is the only ink allowed past the edge.
 #[test]
 fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
     let mut gpu = headless("a_blur_halo_stops_at_its_ancestors_overflow_clip");
-    // The card spans x 16..80 and the box x 40..80, so the box's right edge
-    // is the card's: a 4 px blur spreads 12 px of halo past it, to x = 92.
     let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
          .outer { display: flex; position: absolute; left: 0px; top: 0px;
                   width: 128px; height: 128px; }
@@ -1316,8 +1165,6 @@ fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
         );
     }
 
-    // The outer group blurs the card's clipped content by 1 px more, so ink
-    // may reach 3 px past the edge and no further.
     let nested = read(&mut gpu, "filter: blur(1px)");
     assert!(
         luma(&nested, 128, 36, 64) < 250,
@@ -1338,19 +1185,9 @@ fn a_blur_halo_stops_at_its_ancestors_overflow_clip() {
     }
 }
 
-/// A blurred box straddling its `overflow: hidden` parent's edge reads, just
-/// inside the edge, what it reads with the parent's overflow visible — the
-/// blur spreads the box's ink from past the edge back inside it — and past
-/// the edge it shows nothing. A box wholly past the edge, but within 3σ of
-/// it, still spreads ink back inside.
-///
-/// CSS clips the blur's *output* by the ancestor's clip, not its input: the
-/// group renders whole, is blurred, and only then is cut.
 #[test]
 fn a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge() {
     let mut gpu = headless("a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge");
-    // The card spans x 16..80. The straddling box spans x 40..120, so 40 px of
-    // it lie past the edge; the outside one spans x 84..124, 4 px past it.
     let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
          .card { display: flex; position: absolute; left: 16px; top: 16px;
                  width: 64px; height: 96px; }
@@ -1406,18 +1243,9 @@ fn a_blur_straddling_an_overflow_clip_reads_its_content_past_the_edge() {
     }
 }
 
-/// A backdrop nested in a `backdrop-filter` root that straddles an
-/// `overflow: hidden` card reads the root's content past the card's edge:
-/// just inside the edge it draws what it draws with the card's overflow
-/// visible, and past the edge the page shows unfiltered.
-///
-/// The root's Backdrop Root Image is its group's content, which the card
-/// clips only when the root's output is composited — after the nested
-/// element has read it.
 #[test]
 fn a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge() {
     let mut gpu = headless("a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge");
-    // The card spans x 20..100; the root and the nested box span x 60..140.
     let css = ".card { display: flex; position: absolute; left: 20px; top: 20px;
                        width: 80px; height: 60px; }
                .root { display: flex; position: absolute; left: 40px; top: 10px;
@@ -1463,11 +1291,6 @@ fn a_nested_backdrop_reads_its_roots_content_past_an_ancestors_edge() {
     }
 }
 
-/// A blurred child inside a blurred parent renders, and blurs more than
-/// either blur alone.
-///
-/// Nested bakes are ordered by op range end, so the child's texture exists
-/// before the parent's bake replays the op that draws it.
 #[test]
 fn a_nested_blur_blurs_more_than_either_alone() {
     let mut gpu = headless("a_nested_blur_blurs_more_than_either_alone");
@@ -1492,8 +1315,6 @@ fn a_nested_blur_blurs_more_than_either_alone() {
     let inner_only = read(&mut gpu, "", "filter: blur(4px)");
     let both = read(&mut gpu, "filter: blur(4px)", "filter: blur(4px)");
 
-    // 6 px outside the box's right border (x = 128), where more blur means
-    // more ink and therefore a lower luminance.
     let probe = |pixels: &[u8]| luma(pixels, 192, 134, 96);
     assert!(
         probe(&both) < probe(&outer_only) - 4 && probe(&both) < probe(&inner_only) - 4,
@@ -1510,11 +1331,6 @@ fn a_nested_blur_blurs_more_than_either_alone() {
     );
 }
 
-/// A group whose bake would exceed the area budget renders unblurred rather
-/// than not at all, and nothing panics.
-///
-/// The group's rect is device pixels, so a large enough device pixel ratio
-/// puts a modest CSS box past `MAX_FILTER_DIMENSION` without a huge viewport.
 #[test]
 fn a_group_over_the_budget_renders_unblurred() {
     let mut gpu = headless("a_group_over_the_budget_renders_unblurred");
@@ -1533,9 +1349,6 @@ fn a_group_over_the_budget_renders_unblurred() {
         "this group is inside the budget",
     );
 
-    // The bake is refused by making the *page* ask for more than the budget
-    // allows: a 3000x3000 blurred box at DPR 2 is 36 Mpx of device area
-    // against a 16.7 Mpx cap.
     let mut wide = Doc::with_css_sized(
         "page { display: flex; position: relative; width: 4000px; height: 4000px; }
          .box { display: flex; position: absolute; left: 0px; top: 0px;
@@ -1571,8 +1384,6 @@ fn a_group_over_the_budget_renders_unblurred() {
     );
     let mut scene = DisplayList::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
-    // Rendered at a viewport-sized target, which is all the retained scene is
-    // valid for; the point is that the unblurred fallback draws.
     let pixels = gpu
         .render(&scene, 256, 256, Color::WHITE)
         .expect("the unblurred fallback renders");
@@ -1583,38 +1394,16 @@ fn a_group_over_the_budget_renders_unblurred() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `backdrop-filter`
-//
-// Every property here is a relationship between what is inside the element's
-// border box and what is beside it, so the assertions compare the two rather
-// than naming absolute colours: the crop is the border box, the source is
-// what was painted before the element inside its Backdrop Root, and the
-// element's own painting composites over the result.
-// ---------------------------------------------------------------------------
-
-/// A page whose left half is black and right half is white, with one
-/// absolutely positioned box carrying `extra` over the seam.
-///
-/// The seam is the subject: a blur turns the step into a gradient, and every
-/// pixel of that gradient is inside the box while every pixel outside it
-/// stays a hard edge. The page paints its own opaque white ground;
-/// [`seam_page`] is the same page with the ground left to the canvas.
 fn backdrop_page(size: f32, box_rect: (f32, f32, f32, f32), extra: &str) -> Doc {
     seam_page(Ground::Painted, size, box_rect, "", extra)
 }
 
-/// What lies under a [`seam_page`]'s black half and its box.
 #[derive(Clone, Copy)]
 enum Ground {
-    /// An opaque white background the page paints itself.
     Painted,
-    /// Nothing: the canvas, which is the render's base colour.
     Canvas,
 }
 
-/// [`backdrop_page`] over `ground`, with the box inside a viewport-sized
-/// wrapper carrying `wrapper`.
 fn seam_page(
     ground: Ground,
     size: f32,
@@ -1646,11 +1435,6 @@ fn seam_page(
     doc
 }
 
-/// [`render_filtered`] with the two facts a backdrop test rests on asserted
-/// first: the frame recorded `entries` of them, and every one of them baked.
-///
-/// Without that, a backdrop test asserting "what is beside the element is
-/// untouched" would pass just as happily with no backdrop drawn at all.
 fn render_baked(
     gpu: &mut terminus::link::render::gpu::Headless,
     doc: &mut Doc,
@@ -1660,7 +1444,6 @@ fn render_baked(
     render_baked_over(gpu, doc, size, entries, Color::WHITE)
 }
 
-/// [`render_baked`] over a canvas of `canvas`.
 fn render_baked_over(
     gpu: &mut terminus::link::render::gpu::Headless,
     doc: &mut Doc,
@@ -1693,9 +1476,6 @@ fn render_baked_over(
         .expect("headless render")
 }
 
-/// Inside the box the black/white seam is a monotone gradient; outside it the
-/// same seam is still one hard step; and the box's own translucent background
-/// composites over the filtered backdrop rather than under it.
 #[test]
 fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
     let mut gpu = headless("a_backdrop_blur_softens_the_seam_only_inside_the_box");
@@ -1706,8 +1486,6 @@ fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
     );
     let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
 
-    // Inside the box (y = 64), across the seam at x = 64: monotone and never
-    // a step, because sigma 6 spreads it over some 36 px.
     let inside: Vec<i32> = (46..=82).map(|x| luma(&pixels, 128, x, 64)).collect();
     for pair in inside.windows(2) {
         assert!(
@@ -1726,7 +1504,6 @@ fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
         "and the seam's own pixel sits inside it",
     );
 
-    // Outside the box (y = 16), the same seam is one step.
     assert!(
         luma(&pixels, 128, 60, 16) < 8,
         "unfiltered black left of it"
@@ -1736,9 +1513,6 @@ fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
         "unfiltered white right of it",
     );
 
-    // The box's own 20% red over the blurred backdrop: on the white side the
-    // red channel stays high while green falls, which an unfiltered backdrop
-    // with no box on top could not produce.
     let over_white = pixel(&pixels, 128, 88, 64);
     assert!(
         over_white[0] > 240 && over_white[1] < 215,
@@ -1746,11 +1520,6 @@ fn a_backdrop_blur_softens_the_seam_only_inside_the_box() {
     );
 }
 
-/// A later sibling overlapping the box is not part of its backdrop.
-///
-/// The Backdrop Root Image is everything painted *before* the element; a box
-/// drawn after it is in front of both the element and its backdrop, and shows
-/// with a hard edge.
 #[test]
 fn a_later_sibling_is_not_in_the_backdrop() {
     let mut gpu = headless("a_later_sibling_is_not_in_the_backdrop");
@@ -1769,14 +1538,11 @@ fn a_later_sibling_is_not_in_the_backdrop() {
     doc.el(root, "over");
     let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
 
-    // `.under` is painted before the box, so inside the box its edges (x = 72
-    // and x = 88) are spread and its centre is no longer solid.
     assert!(
         (40..=190).contains(&luma(&pixels, 128, 80, 64)),
         "the earlier bar is blurred inside the box ({})",
         luma(&pixels, 128, 80, 64),
     );
-    // `.over` is painted after it, so its edges (x = 32 and x = 48) are not.
     assert!(
         luma(&pixels, 128, 40, 64) < 8,
         "the later bar stays opaque ({})",
@@ -1790,12 +1556,6 @@ fn a_later_sibling_is_not_in_the_backdrop() {
     );
 }
 
-/// An `opacity` ancestor is a Backdrop Root: the element behind it is not in
-/// its descendant's backdrop, and the descendant's own sibling is.
-///
-/// filter-effects-2 §2.2. The whole point of the rule is that an ancestor
-/// which flattens its subtree hides everything behind it, so an element
-/// inside it cannot read through.
 #[test]
 fn an_opacity_ancestor_bounds_the_backdrop() {
     let mut gpu = headless("an_opacity_ancestor_bounds_the_backdrop");
@@ -1817,9 +1577,6 @@ fn an_opacity_ancestor_bounds_the_backdrop() {
     doc.el(wrap, "box");
     let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
 
-    // `.outside`'s edge is at x = 64, and it is painted before the Backdrop
-    // Root: inside the box it must still be one step, exactly as it is above
-    // the box.
     for y in [20_u32, 64] {
         let step = luma(&pixels, 128, 65, y) - luma(&pixels, 128, 63, y);
         assert!(
@@ -1833,9 +1590,6 @@ fn an_opacity_ancestor_bounds_the_backdrop() {
         "and nothing of it bleeds inward under the box",
     );
 
-    // `.inside`'s edge is at x = 24, inside the Backdrop Root and before the
-    // box: under the box its white spreads onto the black, above the box it
-    // does not.
     let spread = luma(&pixels, 128, 28, 64) - luma(&pixels, 128, 28, 20);
     assert!(
         spread > 10,
@@ -1843,11 +1597,6 @@ fn an_opacity_ancestor_bounds_the_backdrop() {
     );
 }
 
-/// A `position: fixed` box over a scroller re-bakes as the scroller moves:
-/// its backdrop rides a chain the box itself does not.
-///
-/// This is `inner_chains` on a backdrop entry. The box never moves, so a
-/// bake that ignored the offset would show the same pixels forever.
 #[test]
 fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
     use terminus::link::Vector2D;
@@ -1919,12 +1668,6 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
     );
 }
 
-/// The crop is the element's *rounded* border box: a pixel inside the bounding
-/// box but outside the radius shows the page untouched.
-///
-/// The backdrop is eight-pixel stripes, which a σ = 6 blur washes to mid
-/// gray, so every pixel the crop admits changes and every pixel it refuses
-/// keeps its stripe exactly.
 #[test]
 fn a_rounded_backdrop_crops_to_its_radius() {
     let mut gpu = headless("a_rounded_backdrop_crops_to_its_radius");
@@ -1945,8 +1688,6 @@ fn a_rounded_backdrop_crops_to_its_radius() {
     doc.el(root, "box");
     let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
 
-    // y = 34 is inside the bounding box and outside the circle (the corner
-    // is 42 px from the centre, the radius is 32).
     assert!(
         luma(&pixels, 128, 34, 34) < 12,
         "a black stripe outside the radius is untouched ({})",
@@ -1957,10 +1698,6 @@ fn a_rounded_backdrop_crops_to_its_radius() {
         "and so is the white one beside it ({})",
         luma(&pixels, 128, 44, 34),
     );
-    // y = 64 is the centre line; these two are deep inside the circle and far
-    // enough from the crop's own edges that the mirror is not what they read.
-    // One sits in a black stripe and one in a white gap, and both wash to the
-    // same middle.
     for x in [60_u32, 70] {
         let washed = luma(&pixels, 128, x, 64);
         assert!(
@@ -1970,13 +1707,6 @@ fn a_rounded_backdrop_crops_to_its_radius() {
     }
 }
 
-/// A backdrop that is uniform white inside the crop and black just outside it
-/// stays white to the element's own edge.
-///
-/// The mirror edge mode is what makes that true. A bake that read transparent
-/// black past the crop — which is the edge mode a `filter: blur()` group's
-/// margin deliberately supplies — would leave a dark rim one σ wide all the
-/// way around.
 #[test]
 fn a_backdrop_mirrors_at_its_crop_rather_than_darkening() {
     let mut gpu = headless("a_backdrop_mirrors_at_its_crop_rather_than_darkening");
@@ -2017,8 +1747,6 @@ fn a_backdrop_mirrors_at_its_crop_rather_than_darkening() {
     );
 }
 
-/// A backdrop whose bake would exceed the area budget draws nothing, leaving
-/// the unfiltered backdrop showing.
 #[test]
 fn a_backdrop_over_the_budget_stays_unfiltered() {
     let mut gpu = headless("a_backdrop_over_the_budget_stays_unfiltered");
@@ -2062,8 +1790,6 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
     let pixels = gpu
         .render(&scene, 256, 256, Color::WHITE)
         .expect("the unfiltered fallback renders");
-    // The seam is at device x = 4000, far outside this target; everything
-    // drawn here is the black half, hard-edged and unfiltered.
     assert!(
         luma(&pixels, 256, 128, 128) < 8,
         "the fallback leaves the backdrop showing ({})",
@@ -2071,8 +1797,6 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
     );
 }
 
-/// A colour-only `backdrop-filter` bakes at σ = 0 and still isolates its
-/// copy: the backdrop is darkened inside the element's box and nowhere else.
 #[test]
 fn a_colour_only_backdrop_darkens_only_inside_the_box() {
     let mut gpu = headless("a_colour_only_backdrop_darkens_only_inside_the_box");
@@ -2123,20 +1847,6 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
     );
 }
 
-// The canvas. filter-effects-2's Backdrop Root Image of the document's root
-// element holds the canvas under whatever the page painted, and here the
-// canvas is the render's base colour, which no op of the frame draws. Most of
-// these render one page twice — over the bare canvas, and over an opaque
-// ground of the canvas's colour that the page paints itself — and hold the
-// two to the same pixels, so they need no opinion on what a filter looks
-// like.
-
-/// A box over nothing but the canvas filters the canvas: `brightness(0.5)`
-/// halves the canvas colour inside the border box and leaves it beside it,
-/// and a `blur()` of that one colour is that colour.
-///
-/// Nothing is painted before the box, so its range is empty and the canvas is
-/// its whole backdrop.
 #[test]
 fn a_backdrop_over_the_bare_canvas_filters_the_canvas_colour() {
     let mut gpu = headless("a_backdrop_over_the_bare_canvas_filters_the_canvas_colour");
@@ -2189,9 +1899,6 @@ fn a_backdrop_over_the_bare_canvas_filters_the_canvas_colour() {
     }
 }
 
-/// One committed frame drawn over two canvas colours through one renderer:
-/// the second draw filters the second canvas, not the bake the first left in
-/// the cache.
 #[test]
 fn a_canvas_change_re_bakes_a_backdrop_over_it() {
     let mut gpu = headless("a_canvas_change_re_bakes_a_backdrop_over_it");
@@ -2231,10 +1938,6 @@ fn a_canvas_change_re_bakes_a_backdrop_over_it() {
     }
 }
 
-/// A box straddling the edge of a black half over the bare canvas blurs that
-/// edge on both sides: the profile is symmetric about it, where a bake
-/// without the canvas leaves the black side of the edge unfiltered — the
-/// blurred copy fades to transparency there and the sharp half shows through.
 #[test]
 fn a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides() {
     let mut gpu = headless("a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides");
@@ -2243,7 +1946,6 @@ fn a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides() {
     let mut bare = seam_page(Ground::Canvas, 128.0, rect, "", subject);
     let bare = render_baked(&mut gpu, &mut bare, 128, 1);
 
-    // The seam is at x = 64.0, so 63 and 64 are the symmetric pair.
     for distance in 0..=12_u32 {
         let dark = luma(&bare, 128, 63 - distance, 64);
         let light = luma(&bare, 128, 64 + distance, 64);
@@ -2263,9 +1965,6 @@ fn a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides() {
     assert_pixels_match(&bare, &painted, 1, "the canvas against a painted ground");
 }
 
-/// The same holds under a transform on the box, on an ancestor of it, and on
-/// both, and for a colour pass on either side of the blur: over the bare
-/// canvas each draws what it draws over a ground the page painted.
 #[test]
 fn a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground() {
     let mut gpu = headless("a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground");
@@ -2297,8 +1996,6 @@ fn a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground() {
         let painted = render_baked(&mut gpu, &mut painted, 128, 1);
         assert_pixels_match(&bare, &painted, 1, &label);
 
-        // And the comparison is of a filtered edge: just on the black side
-        // of the seam, at the box's centre row, the blur has let light in.
         assert!(
             luma(&bare, 128, 61, 64) > 20,
             "{label}: the black side of the edge is filtered ({})",
@@ -2307,10 +2004,6 @@ fn a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground() {
     }
 }
 
-/// A box sliding by an exported `transform` curve, composed later than its
-/// commit: over the bare canvas each instant draws what it draws over a
-/// ground the page painted. The bake of a moving box is taken per instant, in
-/// the box's own space, and the canvas is under all of it.
 #[test]
 fn a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground() {
     let mut gpu = headless("a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground");
@@ -2359,13 +2052,6 @@ fn a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground() {
     }
 }
 
-/// A box inside an `opacity` group does not read the canvas: the group is its
-/// Backdrop Root, and the group's own pixels start empty.
-///
-/// Where the group painted nothing a colour pass has nothing to change, so
-/// the canvas shows as it does beside the box; and the bar the group did
-/// paint keeps its full ink under the box, because the blurred copy fades to
-/// transparency over it rather than to the canvas colour.
 #[test]
 fn a_backdrop_inside_an_opacity_group_does_not_read_the_canvas() {
     let mut gpu = headless("a_backdrop_inside_an_opacity_group_does_not_read_the_canvas");
@@ -2402,9 +2088,6 @@ fn a_backdrop_inside_an_opacity_group_does_not_read_the_canvas() {
 
     let mut doc = page("backdrop-filter: blur(5px);");
     let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
-    // The bar's edge is at x = 24. Above the box (y = 20) the half-faded bar
-    // is a step; under it the blur spreads the bar outward, and inside the
-    // bar the ink is what it is above the box.
     assert_eq!(
         pixel(&pixels, 128, 80, 64),
         WHITE,
@@ -2424,12 +2107,6 @@ fn a_backdrop_inside_an_opacity_group_does_not_read_the_canvas() {
     );
 }
 
-/// css-anchor-position-1 at the GPU: an anchored box outside a scroller
-/// follows its anchor through a composed scroll (§3.3's default scroll
-/// shift), and once the anchor is scrolled wholly out of the scroller's clip
-/// `position-visibility: anchor-visible` hides it — its rounded, shadowed,
-/// blurred box and all, through the zero map its anchored node composes,
-/// without a bake through a map with no inverse.
 #[test]
 fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
     use terminus::link::Vector2D;
@@ -2463,7 +2140,6 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
         .expect("render leaves a committed frame retained");
     let green = |pixel: [u8; 4]| pixel[1] > 200 && pixel[0] < 60 && pixel[2] < 60;
 
-    // (offset, where the box's middle is, or `None` when it is hidden)
     for (generation, (offset, middle)) in [(0.0_f32, Some(50)), (30.0, Some(20)), (70.0, None)]
         .into_iter()
         .enumerate()
@@ -2505,7 +2181,6 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
     }
 }
 
-/// A 16 × 16 bitmap of `texel` on a blob of its own, drawn at `x`.
 fn swatch(scene: &mut DisplayList, texel: [u8; 4], x: f64) {
     let image = prime_radiant::rgba8(16, 16, texel.repeat(256));
     scene.fill(
@@ -2520,12 +2195,6 @@ fn swatch(scene: &mut DisplayList, texel: [u8; 4], x: f64) {
     );
 }
 
-/// Every target in a process draws through one device and renderer, from
-/// the thread that owns it. Two targets on two threads, each drawing
-/// bitmaps of its own — a fresh one every frame — and one a third, idle
-/// target drew first, each read back their own pixels every frame, and one
-/// of them going away and coming back mid-run changes nothing the other
-/// draws.
 #[test]
 fn targets_on_two_threads_draw_their_own_bitmaps() {
     const NAME: &str = "targets_on_two_threads_draw_their_own_bitmaps";

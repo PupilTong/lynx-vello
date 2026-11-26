@@ -48,12 +48,6 @@ fn flex_grow_sum_below_one_leaves_part_of_the_free_space() {
     assert_close(tree.layout(second).location.x, 90.0);
 }
 
-/// WPT `css/css-flexbox/flex-grow-009.html`: `flex-grow: calc(infinity)`
-/// is clamped to `f32::MAX` (css-values-4 §10.9). The item's share is its
-/// ratio of the factor sum (§9.7 step 4.4), which stays finite: the item
-/// takes all of the free space, a factor of 1 beside it none, and two such
-/// items split it evenly where the `f32` sum of their factors would be
-/// infinite. The same holds for scaled shrink factors.
 #[test]
 fn a_largest_finite_flex_factor_takes_its_share_without_overflowing() {
     let grow = |factors: &[f32]| {
@@ -544,10 +538,6 @@ mod alignment {
         assert_eq!(output.first_baseline, Some(15.0));
     }
 
-    /// A `linear` column of one fixed-size box, whose first baseline is that
-    /// box's 7px: given only when its caller reads it
-    /// (`LayoutInput::reads_first_baseline`), and synthesized from its own
-    /// 20px bottom edge otherwise.
     fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
         let inner = tree.push_leaf(
             fixed_leaf_style(20.0, 20.0),
@@ -577,8 +567,6 @@ mod alignment {
 
         let output = definite_layout(&tree, root, 100.0, 40.0);
 
-        // The shared baseline is the first item's 15px; the column's 7px
-        // baseline sits on it.
         assert_close(tree.layout(first).location.y, 0.0);
         assert_close(tree.layout(column).location.y, 8.0);
         assert_eq!(output.first_baseline, Some(15.0));
@@ -590,7 +578,6 @@ mod alignment {
             let mut tree = TestTree::default();
             let (column, inner) = linear_column_with_baseline(&mut tree);
             let root = flex_container(&mut tree, TestStyle::default(), &[column]);
-            // A definite width, so the cross sizes are resolved in one pass.
             let output = tree.compute_layout(
                 root,
                 LayoutInput::measure(
@@ -607,7 +594,6 @@ mod alignment {
         let (read, read_probes) = run(true);
         assert_eq!(read.first_baseline, Some(7.0));
         assert_eq!(read_probes, 1);
-        // Unread, the column's fixed-size box is never measured for it.
         let (unread, unread_probes) = run(false);
         assert_eq!(unread.size, read.size);
         assert_eq!(unread_probes, 0);
@@ -676,7 +662,6 @@ fn display_contents_children_flex_as_items_of_the_box_ancestor() {
 
     definite_layout(&tree, root, 300.0, 20.0);
 
-    // The three flattened leaves share the root's free space.
     for (item, x) in [(first, 0.0), (lifted, 100.0), (nested, 200.0)] {
         assert_close(tree.layout(item).size.width, 100.0);
         assert_close(tree.layout(item).location.x, x);
@@ -711,7 +696,6 @@ fn display_contents_items_keep_their_own_order_and_hidden_handling() {
 
     definite_layout(&tree, root, 100.0, 10.0);
 
-    // Lifted items keep their own order and flattened paint slot.
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(last).location.x, 20.0);
     assert_eq!(tree.layout(hidden), Layout::with_order(1));
@@ -923,15 +907,6 @@ fn max_content_container_size_uses_flex_item_contributions() {
     assert_close(flexible_tree.layout(item).size.width, 200.0);
 }
 
-/// A percentage flex basis against an indefinite container behaves as
-/// `content` (css-flexbox-1 §7.2.3), not as the item's `width`: the flex base
-/// size is the 80px content. The item's max-content contribution is still
-/// its definite 50px `width` (css-sizing-3 §5.2), and a flex base size from
-/// the content neither caps nor floors it, so the container is 50 either
-/// way: the item shrinks to it, or, unable to shrink, keeps its 80px flex
-/// base size and overflows. (Chrome gives the same containers; it then
-/// resolves the percentage against the decided 50 and makes the shrinkable
-/// item 25.)
 #[test]
 fn indefinite_percentage_flex_basis_falls_back_to_content_not_width() {
     for (flex_shrink, width) in [(1.0, 50.0), (0.0, 80.0)] {
@@ -1023,8 +998,6 @@ fn aspect_ratio_does_not_disable_cross_axis_stretch() {
     assert_size(tree.layout(item).size, Size::new(50.0, 100.0));
 }
 
-/// A replaced 40x20 leaf: it answers a known axis through its own ratio, the
-/// way `NaturalSize::measure` answers for a decoded bitmap.
 fn bitmap_leaf(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -1035,9 +1008,6 @@ fn bitmap_leaf(input: LeafMeasureInput) -> LeafMetrics {
     })
 }
 
-/// The same leaf standing up: 20x40, ratio 1:2. Every transfer below is
-/// asserted in both ratio directions, because a rule that reads the ratio the
-/// wrong way round still passes on a square-ish one.
 fn tall_bitmap_leaf(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -1048,11 +1018,6 @@ fn tall_bitmap_leaf(input: LeafMeasureInput) -> LeafMetrics {
     })
 }
 
-/// The `40x20` leaf under a replaced element's own natural size, which is what
-/// `terminus` reports for a decoded bitmap. Flexbox never reads it — css-align-3
-/// §6.2.4 makes `normal` behave as `stretch` for flex items with no exception
-/// for replaced content — and the tests carry it anyway so that they prove
-/// that, rather than merely failing to exercise it.
 fn replaced(style: TestStyle) -> TestStyle {
     TestStyle {
         natural_size: Size::new(Some(40.0), Some(20.0)),
@@ -1060,13 +1025,6 @@ fn replaced(style: TestStyle) -> TestStyle {
     }
 }
 
-/// css-flexbox-1 §9.8 makes the cross size of an item the container will
-/// stretch *definite*, and §9.2 steps B/E then produce that item's flex base
-/// size from a measurement that knows it — so an auto-sized replaced item ends
-/// up as large as the stretch made it, not as large as its own pixels.
-///
-/// Both directions are asserted, because the whole of the rule is that the
-/// transfer follows the *cross* axis wherever that is.
 #[test]
 fn a_stretched_cross_size_reaches_the_flex_base_measurement() {
     for (flex_direction, expected) in [
@@ -1089,8 +1047,6 @@ fn a_stretched_cross_size_reaches_the_flex_base_measurement() {
     }
 }
 
-/// The stretched cross size handed to that measurement is the item's own
-/// clamped one, not the line's: a cross-axis `max-*` caps what it sees.
 #[test]
 fn a_stretched_cross_size_is_clamped_before_the_measurement_reads_it() {
     let mut tree = TestTree::default();
@@ -1114,8 +1070,6 @@ fn a_stretched_cross_size_is_clamped_before_the_measurement_reads_it() {
     assert_size(tree.layout(item).size, Size::new(60.0, 30.0));
 }
 
-/// An item the container will *not* stretch measures at its own size, which is
-/// what keeps the rule above from reaching every flex item.
 #[test]
 fn an_unstretched_item_measures_at_its_own_size() {
     let mut tree = TestTree::default();
@@ -1134,10 +1088,6 @@ fn an_unstretched_item_measures_at_its_own_size() {
     assert_size(tree.layout(item).size, Size::new(40.0, 20.0));
 }
 
-/// §9.8 grants the definite stretched cross size to *single-line* containers
-/// alone, so a wrapping one measures its items at their own size and only
-/// stretches them afterwards — the item ends up 100 wide and 20 tall rather
-/// than 100x50.
 #[test]
 fn a_wrapping_container_does_not_pre_impose_the_stretched_cross_size() {
     let mut tree = TestTree::default();
@@ -1156,10 +1106,6 @@ fn a_wrapping_container_does_not_pre_impose_the_stretched_cross_size() {
     assert_size(tree.layout(item).size, Size::new(100.0, 20.0));
 }
 
-/// css-align-3 §6.2.4: `align-self: normal` on a flex item behaves as
-/// `stretch` with no replaced-element exception — unlike a grid item, where
-/// css-grid-1 §6.2 makes `normal` leave replaced content at its natural size.
-/// The item below reports one, and is stretched and transferred all the same.
 #[test]
 fn normal_cross_alignment_stretches_replaced_flex_items() {
     let mut tree = TestTree::default();
@@ -1170,9 +1116,6 @@ fn normal_cross_alignment_stretches_replaced_flex_items() {
     assert_size(tree.layout(item).size, Size::new(200.0, 100.0));
 }
 
-/// The 1:2 leaf takes the same route as the 2:1 one in the cases above: the
-/// stretched cross size divides instead of multiplying. Row: cross 100 → main
-/// 100/2. Column: cross 100 → main 100*2.
 #[test]
 fn a_stretched_cross_size_transfers_through_a_tall_ratio_too() {
     for (flex_direction, expected) in [
@@ -1195,10 +1138,6 @@ fn a_stretched_cross_size_transfers_through_a_tall_ratio_too() {
     }
 }
 
-/// §9.8 only makes the cross size definite for an item the container is going
-/// to *stretch*. Every other cross alignment, and an auto cross margin — which
-/// css-flexbox-1 §8.1 says blocks the stretch outright — leaves the item
-/// measuring at its own 40x20.
 #[test]
 fn an_item_the_container_will_not_stretch_measures_at_its_own_size() {
     let cases = [
@@ -1233,9 +1172,6 @@ fn an_item_the_container_will_not_stretch_measures_at_its_own_size() {
     }
 }
 
-/// §9.8 needs a *definite* container cross size to hand over. A row container
-/// sized by its own content has none while its items are being measured, so
-/// the item reports 40x20 and the line is 20 tall.
 #[test]
 fn an_indefinite_container_cross_size_leaves_the_item_at_its_own_size() {
     let mut tree = TestTree::default();
@@ -1252,9 +1188,6 @@ fn an_indefinite_container_cross_size_leaves_the_item_at_its_own_size() {
     assert_close(output.size.height, 20.0);
 }
 
-/// An authored cross size is the item's own used cross size, so §9.2 step B
-/// transfers from *it* and the container's stretch never applies: 30 wide in a
-/// 100-wide column gives 30/2 = 15 tall.
 #[test]
 fn an_authored_cross_size_outranks_the_containers_stretch() {
     let mut tree = TestTree::default();
@@ -1278,11 +1211,6 @@ fn an_authored_cross_size_outranks_the_containers_stretch() {
     assert_size(tree.layout(item).size, Size::new(30.0, 15.0));
 }
 
-/// The stretched cross size §9.8 hands to the measurement is clamped by the
-/// item's own cross min/max first. A cross-axis minimum above the container's
-/// inner cross size raises it: 160 wide in a 100-wide column gives 80 tall.
-/// (The `max-*` half is `a_stretched_cross_size_is_clamped_before_the_
-/// measurement_reads_it`.)
 #[test]
 fn a_cross_axis_minimum_raises_the_size_the_measurement_reads() {
     let mut tree = TestTree::default();
@@ -1306,10 +1234,6 @@ fn a_cross_axis_minimum_raises_the_size_the_measurement_reads() {
     assert_size(tree.layout(item).size, Size::new(160.0, 80.0));
 }
 
-/// §9.2 reaches step B only when `flex-basis` is `content` and the main size
-/// is `auto`: step A takes a definite `flex-basis`, and a main-axis size
-/// answers `auto` before any measurement runs. Either one outranks the
-/// transfer, which the cross axis still performs around it.
 #[test]
 fn an_authored_main_size_or_flex_basis_outranks_the_transfer() {
     for style in [
@@ -1338,11 +1262,6 @@ fn an_authored_main_size_or_flex_basis_outranks_the_transfer() {
     }
 }
 
-/// A transferred base size cannot be shrunk away: css-flexbox-1 §4.5 gives an
-/// auto-minimum item a content-based minimum, and for a box with a ratio and a
-/// definite cross size that is the transferred size itself. The 100-wide
-/// column stretches the item to a 50-tall base, and a 40-tall container cannot
-/// pull it below 50 — only a `max-height` can, which is the second case.
 #[test]
 fn shrinking_cannot_pull_a_transferred_base_size_below_its_automatic_minimum() {
     for (max_height, expected) in [(max_none(), 50.0), (max_px(40.0), 40.0)] {
@@ -1368,9 +1287,6 @@ fn shrinking_cannot_pull_a_transferred_base_size_below_its_automatic_minimum() {
     }
 }
 
-/// Two ratio items on one line each transfer from the same stretched cross
-/// size and keep their own ratios: 2:1 becomes 200 wide, 1:2 becomes 50, and
-/// 250 fits in 300 so neither is shrunk.
 #[test]
 fn two_ratio_items_on_one_line_transfer_independently() {
     let mut tree = TestTree::default();
@@ -1384,9 +1300,6 @@ fn two_ratio_items_on_one_line_transfer_independently() {
     assert_close(tree.layout(tall).location.x, 200.0);
 }
 
-/// A ratio item beside an item whose main size does not follow from its cross
-/// one: only the ratio item's base size moves with the stretch, and the line
-/// still stretches both.
 #[test]
 fn a_ratio_item_shares_a_line_with_a_content_sized_item() {
     let mut tree = TestTree::default();
@@ -1399,9 +1312,6 @@ fn a_ratio_item_shares_a_line_with_a_content_sized_item() {
     assert_size(tree.layout(text).size, Size::new(30.0, 100.0));
 }
 
-/// The definite cross size travels down: the outer row stretches the inner
-/// container to 100 tall, the inner row is then a single-line container with a
-/// definite cross size of its own, and the leaf ends 200x100 two levels down.
 #[test]
 fn the_transferred_cross_size_reaches_a_nested_containers_item() {
     let mut tree = TestTree::default();
@@ -1414,9 +1324,6 @@ fn the_transferred_cross_size_reaches_a_nested_containers_item() {
     assert_size(tree.layout(inner).size, Size::new(200.0, 100.0));
 }
 
-/// §9.8's definite cross size is a single-line rule in both directions: a
-/// wrapping row leaves the item 40 wide and stretches it to the line's 100
-/// afterwards, the transpose of the column case above.
 #[test]
 fn a_wrapping_row_container_stretches_after_measuring_rather_than_before() {
     let mut tree = TestTree::default();
@@ -1585,9 +1492,6 @@ fn absolute_children_use_order_zero_for_paint_order() {
     assert_eq!(tree.layout(inflow).order, 1);
 }
 
-/// The static position is read only on an axis whose insets are both `auto`,
-/// so a box inset on both axes is never measured for one: it is laid out
-/// once, by its commit.
 #[test]
 fn an_absolute_child_inset_on_both_axes_is_not_measured_for_a_static_position() {
     fn content(_: LeafMeasureInput) -> LeafMetrics {
@@ -1703,7 +1607,6 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
     assert_point(layout.location, Point::new(0.0, 10.0));
 }
 
-/// One `width` × `height` item that neither grows nor shrinks.
 fn rigid_item(tree: &mut TestTree, width: f32, height: f32) -> TestId {
     tree.push_leaf(
         TestStyle {
@@ -1715,9 +1618,6 @@ fn rigid_item(tree: &mut TestTree, width: f32, height: f32) -> TestId {
     )
 }
 
-/// A paragraph whose longest word is 500 wide and whose unbroken line is
-/// 1000: it fills any width between the two, on one 100-tall line at 1000
-/// or more and on two below that.
 fn paragraph_leaf(input: LeafMeasureInput) -> LeafMetrics {
     let width = input
         .known_dimensions
@@ -1747,8 +1647,6 @@ fn inset_zero(style: TestStyle) -> TestStyle {
     }
 }
 
-/// A flex container placed with `inset: 0` in an 800×600 containing block
-/// around the one item `content` pushes.
 fn inset_zero_box(style: TestStyle, content: impl FnOnce(&mut TestTree) -> TestId) -> Layout {
     let mut tree = TestTree::default();
     let child = content(&mut tree);
@@ -1756,8 +1654,6 @@ fn inset_zero_box(style: TestStyle, content: impl FnOnce(&mut TestTree) -> TestI
     place_in_800_by_600(&tree, target)
 }
 
-/// [`paragraph_leaf`] itself placed with `inset: 0` in an 800×600
-/// containing block.
 fn inset_zero_paragraph(style: TestStyle) -> Layout {
     let mut tree = TestTree::default();
     let target = tree.push_measured_leaf(inset_zero(style), paragraph_leaf);
@@ -1784,10 +1680,6 @@ fn sized_auto_margin(width: StyleSize, height: StyleSize) -> TestStyle {
     }
 }
 
-/// css-position-3 §4.1 stretch-fits only an automatic (`auto`) size between
-/// two non-`auto` insets; `fit-content` is css-sizing-3 §3.2's
-/// `min(max-content, max(min-content, stretch-fit))`, and the `auto` margins
-/// then centre the box (HTML's `dialog:modal`).
 #[test]
 fn absolute_fit_content_between_insets_shrinks_to_fit_and_centres() {
     let small = |tree: &mut TestTree| rigid_item(tree, 100.0, 100.0);
@@ -1816,11 +1708,6 @@ fn absolute_fit_content_between_insets_shrinks_to_fit_and_centres() {
     assert_point(layout.location, Point::ZERO);
 }
 
-/// The fit-content clamp's other two arms: content wider than the
-/// stretch-fit size is held to it (and wraps), content whose min-content
-/// width alone exceeds it keeps that width, and the stretch-fit size is what
-/// remains of the inset-modified containing block after the non-`auto`
-/// margins, border and padding.
 #[test]
 fn absolute_fit_content_between_insets_clamps_to_the_stretch_fit_size() {
     let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
@@ -1844,14 +1731,10 @@ fn absolute_fit_content_between_insets_clamps_to_the_stretch_fit_size() {
         ..fit()
     };
     let edged = inset_zero_paragraph(edged);
-    // 800 - 50 (margin) - 30 (padding and border) leaves 720 for the
-    // paragraph; the auto end margins take the rest.
     assert_size(edged.size, Size::new(750.0, 230.0));
     assert_point(edged.location, Point::new(50.0, 20.0));
 }
 
-/// `min-content` and `max-content` between two insets keep sizing from
-/// their own constraint, and the `auto` margins centre what fits.
 #[test]
 fn absolute_intrinsic_keywords_between_insets_ignore_the_stretch_fit_size() {
     let min = inset_zero_box(
@@ -1869,9 +1752,6 @@ fn absolute_intrinsic_keywords_between_insets_ignore_the_stretch_fit_size() {
     assert_point(max.location, Point::new(0.0, 250.0));
 }
 
-/// A flex container with `style` placed with `inset: 0` in an 800×600
-/// containing block around the items `content` pushes; returns the tree for
-/// reading the items back.
 fn inset_zero_flex(
     style: TestStyle,
     content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
@@ -1899,15 +1779,6 @@ fn two_rigid_items(width: f32) -> impl FnOnce(&mut TestTree) -> Vec<TestId> {
     }
 }
 
-/// A `fit-content` flex container's width is css-sizing-3 §3.2's
-/// `min(max-content, max(min-content, stretch-fit))` over css-flexbox-1
-/// §9.9.1's intrinsic main sizes, so content wider than the inset-modified
-/// containing block is held to it. `nowrap`: min-content 500 (the
-/// paragraph's longest word), max-content 1000 (its unbroken line), 800 in
-/// between, where the paragraph wraps onto two lines. Multi-line: two
-/// 500-wide items make max-content 1000 (one line) and min-content 500 (the
-/// largest item), so the container is 800 wide and the items still break
-/// onto two lines.
 #[test]
 fn absolute_fit_content_between_insets_limits_a_flex_container_to_the_stretch_fit_size() {
     let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
@@ -1924,9 +1795,6 @@ fn absolute_fit_content_between_insets_limits_a_flex_container_to_the_stretch_fi
     assert_point(tree.layout(items[1]).location, Point::new(0.0, 100.0));
 }
 
-/// Content narrower than the stretch-fit size keeps its max-content width
-/// (one line, centred by the `auto` margins), where `width: auto` still
-/// stretches to the inset-modified containing block (css-position-3 §4.1).
 #[test]
 fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_content() {
     let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
@@ -1941,8 +1809,6 @@ fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_co
     assert_point(layout.location, Point::new(0.0, 250.0));
 }
 
-/// A flex item around `content` px of 10px-tall content (its min- and
-/// max-content width alike).
 fn content_item(tree: &mut TestTree, style: TestStyle, content: f32) -> TestId {
     tree.push_leaf(style, Size::new(content, 10.0), None)
 }
@@ -1956,8 +1822,6 @@ fn flex_item_style(grow: f32, shrink: f32, basis: FlexBasis) -> TestStyle {
     }
 }
 
-/// A fit-content flex container around one item: the container's width and
-/// the item's.
 fn fit_content_around(style: TestStyle, content: f32) -> (f32, f32) {
     let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
     let (tree, items, layout) =
@@ -1965,11 +1829,6 @@ fn fit_content_around(style: TestStyle, content: f32) -> (f32, f32) {
     (layout.size.width, tree.layout(items[0]).size.width)
 }
 
-/// css-flexbox-1 §9.9.3: a definite flex basis caps a non-growable item's
-/// contribution and floors a non-shrinkable one's — and is no lower bound
-/// otherwise. Three `flex: 0 1 400px` items around 50px of content
-/// contribute 50 each, so the fit-content container is 150, not the 800 its
-/// 1200px of flex bases were held to. Every number here is Chrome's.
 #[test]
 fn absolute_fit_content_between_insets_caps_contributions_at_a_definite_flex_basis() {
     let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
@@ -2019,12 +1878,6 @@ fn absolute_fit_content_between_insets_caps_contributions_at_a_definite_flex_bas
     }
 }
 
-/// css-sizing-3 §5.2: the contribution of a box with a definite preferred
-/// size is that size, clamped by its min/max — for a flex item too, where
-/// css-flexbox-1 §9.9.3 would take the larger of it and the content (Blink's
-/// web-compatible algorithm, so Chrome, takes the box's own). `flex: 1 1
-/// auto; width: 100px` around 300px of content contributes 100; a definite
-/// flex basis then still caps and floors it. Chrome's numbers.
 #[test]
 fn absolute_fit_content_between_insets_takes_a_definite_preferred_size_as_the_contribution() {
     let sized = |style: TestStyle| TestStyle {
@@ -2065,13 +1918,6 @@ fn absolute_fit_content_between_insets_takes_a_definite_preferred_size_as_the_co
     }
 }
 
-/// `flex-basis: content` sizes the item from its content (css-flexbox-1
-/// §9.2.3 step E, `content` as `max-content`), never from its `width`: around
-/// 50px of content a `width: 100px` item is 50 wide, and around 300px of
-/// content an item that cannot shrink is 300 wide. Its contribution is still
-/// its `width` (css-sizing-3 §5.2), which a flex base size from the content
-/// neither caps nor floors, so the fit-content container is 100 each time.
-/// Chrome's numbers.
 #[test]
 fn absolute_fit_content_between_insets_sizes_a_content_flex_basis_from_the_content() {
     let sized = |shrink: f32| TestStyle {
@@ -2115,15 +1961,6 @@ fn two_tall_items(tree: &mut TestTree) -> Vec<TestId> {
         .collect()
 }
 
-/// A vertical main axis is the block axis, where css-sizing-3 §2.1 makes the
-/// min-content size the max-content size, the content's height after layout:
-/// a column `wrap` container with an automatic height takes its max-content
-/// height however little is available, and its items share one line. Two
-/// 100×400 items in 600px of available height make it 100×800 — fit-content
-/// between insets, or `flex-start` in a row container. In a column container
-/// it is an item whose §4.5 automatic minimum is that same 800, so it does
-/// not shrink to the container's 600 unless `min-height: 0` lets it, when its
-/// items break into two columns. Chrome's numbers.
 #[test]
 fn absolute_fit_content_between_insets_sizes_a_column_flex_container_at_its_max_content_height() {
     let one_column = |tree: &TestTree, items: &[TestId]| {
@@ -2179,15 +2016,6 @@ fn absolute_fit_content_between_insets_sizes_a_column_flex_container_at_its_max_
     }
 }
 
-/// A fit-content flex container whose content fits takes its max-content
-/// main size, so it measures no item for anything else. The container runs
-/// twice, its height unknown and then known, and each run asks the rigid
-/// item for its min-content width (its automatic minimum) and nothing more:
-/// its contributions are its own 300 whatever its content, since it neither
-/// grows nor shrinks. The content-sized item with `min-width: 0` shares its
-/// max-content probe with its flex base size, one per run, and is never
-/// asked for its min-content size. Overflowing the stretch-fit size, the
-/// first run, the one that decides the width, reads it after all.
 #[test]
 fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
     let probes = |tree: &TestTree, id: TestId, available: AvailableSpace| {
@@ -2223,13 +2051,6 @@ fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
         );
     }
 
-    // A definite preferred size is the contribution whatever the content
-    // (css-sizing-3 §5.2), so `flex: 1 1 auto; width: 100px` is measured for
-    // nothing with `min-width: 0` and only for its automatic minimum without.
-    // A non-growable item's definite flex basis caps its content (§9.9.3),
-    // which takes one max-content probe, in the run that decides the width,
-    // and nothing else: `flex: 0 1 400px` around 50px, beside its automatic
-    // minimum's min-content probe in each run.
     let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
     let (tree, items, layout) = inset_zero_flex(fit, |tree| {
         let sized = |min_width: StyleSize| TestStyle {
@@ -2245,7 +2066,6 @@ fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
         ]
     });
     assert_close(layout.size.width, 550.0);
-    // Chrome's widths: 550 is less than the 900 of hypothetical main sizes.
     for (item, width) in items.iter().zip([300.0, 30.0, 100.0, 120.0]) {
         assert_close(tree.layout(*item).size.width, width);
     }
@@ -2263,9 +2083,6 @@ fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
     }
 }
 
-/// `min-content` and `max-content` on a multi-line container keep their own
-/// constraint: the largest item's width on one line each, or every item on
-/// one line, whatever the stretch-fit size.
 #[test]
 fn absolute_intrinsic_keywords_between_insets_size_a_multi_line_flex_container() {
     let (_, _, min) = inset_zero_flex(
@@ -2283,11 +2100,6 @@ fn absolute_intrinsic_keywords_between_insets_size_a_multi_line_flex_container()
     assert_point(max.location, Point::new(0.0, 250.0));
 }
 
-/// A flex container whose main size its parent already knows is not
-/// fit-content sized: stretched by a column parent to 300, it stays 300 and
-/// its paragraph overflows at its 500 min-content width. Not stretched
-/// (`align-self: flex-start`), the same container is fit-content sized in
-/// the 300 available (css-flexbox-1 §9.4 step 7): its min-content 500.
 #[test]
 fn in_flow_flex_container_fit_content_follows_its_parents_stretch() {
     for (align_self, container_width) in [
@@ -2612,10 +2424,6 @@ fn intrinsic_keyword_flex_bases_use_contributions() {
     assert_close(width_of(FlexBasis::Size(size_max_content())), 90.0);
 }
 
-/// css-overflow-3 §3.3 scrollable overflow: a scroll container's area takes
-/// in "the margin areas of grid item and flex item boxes for which the box
-/// establishes a containing block". Three unshrinkable 60px items in a 100px
-/// container, the last one (or the first) carrying `margins`.
 fn scrolling_flex_row(
     overflow: Overflow,
     first_margin: Edges<Margin>,
@@ -2661,7 +2469,6 @@ fn a_scroll_container_counts_the_last_flex_item_end_margin() {
         right_margin(20.0),
     );
     let output = definite_layout(&tree, root, 100.0, 20.0);
-    // Border boxes end at 180; the last margin area at 200.
     assert_size(output.content_size, Size::new(200.0, 20.0));
 
     let mut tree = TestTree::default();
@@ -2713,8 +2520,6 @@ fn a_first_item_start_margin_reaches_scrollable_overflow_through_its_location() 
 
 #[test]
 fn a_negative_end_margin_does_not_shrink_scrollable_overflow() {
-    // The area is a union with the border box: a margin area ending at 170
-    // leaves the border box's 180.
     let (tree, root, _) = scrolling_flex_row(
         Overflow::Hidden,
         Edges::uniform(margin_px(0.0)),
@@ -2726,8 +2531,6 @@ fn a_negative_end_margin_does_not_shrink_scrollable_overflow() {
 
 #[test]
 fn an_item_margin_area_and_its_visible_overflow_are_a_union() {
-    // One 60px item whose own content reaches 100px: the margin area and the
-    // content overflow are each a rectangle of the union, not a sum.
     let content_with = |margin: f32| {
         let mut tree = TestTree::default();
         let wide = tree.push_leaf(
@@ -2796,11 +2599,6 @@ fn an_absolutely_positioned_child_counts_its_border_box_only() {
 
 #[test]
 fn a_non_scrolling_container_keeps_its_item_margins_to_itself() {
-    // css-overflow-3 §3.3 defines the area for any box, so read literally a
-    // `visible` flex container would carry the 20px margin up to the scroll
-    // container above it (220). No browser does (csswg-drafts#9194): an item
-    // margin counts only in its own container's area when that container
-    // scrolls, and the engine follows them.
     let (mut tree, inner, _) = scrolling_flex_row(
         Overflow::Visible,
         Edges::uniform(margin_px(0.0)),
@@ -2822,15 +2620,9 @@ fn a_non_scrolling_container_keeps_its_item_margins_to_itself() {
     );
     let output = definite_layout(&tree, root, 100.0, 20.0);
     assert_size(tree.layout(inner).content_size, Size::new(180.0, 20.0));
-    // The inner container's own 10px margin ends at 110, inside its 180.
     assert_size(output.content_size, Size::new(180.0, 20.0));
 }
 
-/// `content_size` is the union of the padding box and the items' reach,
-/// in border-box coordinates: an empty bordered scroll container's ends at
-/// its padding box's far edge, not its border box's; an item that ends
-/// exactly at the padding edge adds nothing; one past it by less than the
-/// far border still shows, which a border-box floor would have hidden.
 #[test]
 fn content_size_floors_at_the_padding_box_not_the_border_box() {
     let container_style = || TestStyle {
@@ -2850,7 +2642,6 @@ fn content_size_floors_at_the_padding_box_not_the_border_box() {
     assert_size(output.size, Size::new(100.0, 100.0));
     assert_size(output.content_size, Size::new(90.0, 90.0));
 
-    // Content origin 15: a 75px item ends at 90, the padding edge.
     let mut fitted = TestTree::default();
     let item = fitted.push_leaf(item_style(75.0), Size::new(75.0, 60.0), None);
     let root = flex_container(&mut fitted, container_style(), &[item]);
@@ -2858,7 +2649,6 @@ fn content_size_floors_at_the_padding_box_not_the_border_box() {
     assert_point(fitted.layout(item).location, Point::new(15.0, 15.0));
     assert_size(output.content_size, Size::new(90.0, 90.0));
 
-    // A 78px item ends at 93: 3px past the padding edge, inside the border.
     let mut overflowing = TestTree::default();
     let item = overflowing.push_leaf(item_style(78.0), Size::new(78.0, 60.0), None);
     let root = flex_container(&mut overflowing, container_style(), &[item]);
@@ -2866,8 +2656,6 @@ fn content_size_floors_at_the_padding_box_not_the_border_box() {
     assert_size(output.content_size, Size::new(93.0, 90.0));
 }
 
-/// A leaf's `content_size` ends at its padding edge too: its measured
-/// contents plus the end padding, never the far border.
 #[test]
 fn leaf_content_size_ends_at_its_padding_edge() {
     let style = TestStyle {
@@ -2889,21 +2677,13 @@ fn leaf_content_size_ends_at_its_padding_edge() {
         &style,
         NaturalSize::from_size(Size::new(120.0, 20.0)),
     );
-    // A 70px content box under 5px padding and a 10px border: 100 wide, and
-    // the 20px contents make it 50 tall.
     assert_size(output.size, Size::new(100.0, 50.0));
-    // Width: the 120px contents from the content origin at 15 reach 135,
-    // plus the end padding, 140 — not the measured border box's 150.
-    // Height: nothing overflows, so the padding edge, 40.
     assert_size(output.content_size, Size::new(140.0, 40.0));
 }
 
-/// `align-self: last baseline` (css-flexbox-1 §8.3 and §9.4 step 8,
-/// css-align-3 §9.3) and the container's own last baseline (§8.5).
 mod last_baseline {
     use super::*;
 
-    /// A fixed-size leaf reporting both baselines from its top edge.
     fn baseline_leaf(
         tree: &mut TestTree,
         style: TestStyle,
@@ -2929,7 +2709,6 @@ mod last_baseline {
     #[test]
     fn a_single_line_aligns_its_items_last_baselines_against_the_line_end() {
         let mut tree = TestTree::default();
-        // Two lines of text and one: the first lines differ from the last.
         let tall = baseline_leaf(
             &mut tree,
             TestStyle::default(),
@@ -2948,14 +2727,10 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 100.0, 60.0);
 
-        // The group reaches 34 above its baseline and 6 below it; it sits
-        // flush with the line's bottom edge, so the baseline is at 54.
         assert_close(tree.layout(tall).location.y, 20.0);
         assert_close(tree.layout(short).location.y, 39.0);
         assert_close(tree.layout(tall).location.y + 34.0, 54.0);
         assert_close(tree.layout(short).location.y + 15.0, 54.0);
-        // With no first-baseline group on the line, the container's first
-        // baseline is the last-baseline group's (§8.5 step 2).
         assert_eq!(output.first_baseline, Some(54.0));
         assert_eq!(output.last_baseline, Some(54.0));
     }
@@ -2992,8 +2767,6 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
         );
 
-        // Line one is 25 + 5 tall, line two 30 + 10, each group's baseline
-        // set by its own members.
         assert_size(output.size, Size::new(50.0, 70.0));
         assert_close(tree.layout(a).location.y + 25.0, 25.0);
         assert_close(tree.layout(b).location.y + 8.0, 25.0);
@@ -3002,8 +2775,6 @@ mod last_baseline {
         assert_eq!(output.first_baseline, Some(25.0));
         assert_eq!(output.last_baseline, Some(60.0));
 
-        // A measurement that reads both baselines reports the same pair as
-        // the commit.
         let constraint = Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent);
         let measured = tree.compute_layout(
             root,
@@ -3059,8 +2830,6 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
 
-        // The 50px item decides the line; the first-baseline group sits at
-        // its top and the last-baseline group at its bottom.
         assert_size(output.size, Size::new(100.0, 50.0));
         assert_close(tree.layout(first).location.y, 0.0);
         assert_close(tree.layout(last).location.y, 30.0);
@@ -3125,8 +2894,6 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
 
-        // Last-baseline group: 28 above its baseline, max(2, 6 + 6) = 12
-        // below — 40, against the first group's 12 + 2.
         assert_size(output.size, Size::new(100.0, 40.0));
         assert_close(tree.layout(high).location.y, 0.0);
         assert_close(tree.layout(low).location.y + 4.0, 28.0);
@@ -3165,23 +2932,14 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
         );
 
-        // The first line (a, b) is the bottom one. Each line is exactly as
-        // tall as its group, so the group's edge does not show here; the
-        // next test shows it.
         assert_size(output.size, Size::new(50.0, 50.0));
         assert_point(tree.layout(a).location, Point::new(0.0, 20.0));
         assert_point(tree.layout(b).location, Point::new(20.0, 32.0));
         assert_point(tree.layout(c).location, Point::new(0.0, 0.0));
-        // The startmost (top) line is the second one, the endmost (bottom)
-        // the first (css-flexbox-1 §8.5, csswg-drafts#995).
         assert_eq!(output.first_baseline, Some(15.0));
         assert_eq!(output.last_baseline, Some(40.0));
     }
 
-    /// css-flexbox-1 §8.3: the first-baseline group sits against the line's
-    /// cross-start edge and the last-baseline group against its cross-end
-    /// edge; `wrap-reverse` makes the cross-start edge the bottom one (WPT
-    /// `css/css-flexbox/multiline-reverse-wrap-baseline.html`).
     #[test]
     fn wrap_reverse_moves_each_group_to_the_other_edge_of_its_line() {
         for (wrap, first_y, last_y) in [
@@ -3209,8 +2967,6 @@ mod last_baseline {
                 Some(5.0),
                 Some(25.0),
             );
-            // One line, 30px for its groups, stretched to the container's
-            // 60px by `align-content: normal`.
             let root = flex_container(
                 &mut tree,
                 TestStyle {
@@ -3224,22 +2980,14 @@ mod last_baseline {
 
             assert_close(tree.layout(first).location.y, first_y);
             assert_close(tree.layout(last).location.y, last_y);
-            // §8.5: the first baseline comes from the first-baseline group and
-            // the last from the last-baseline group, wherever they sit.
             assert_eq!(output.first_baseline, Some(first_y + 15.0));
             assert_eq!(output.last_baseline, Some(last_y + 25.0));
         }
     }
 
-    /// A column container's baselines come from its startmost and endmost
-    /// lines' items (css-flexbox-1 §8.5): the lines nearest the inline-start
-    /// and inline-end edges (css-writing-modes-4 §6.2's "start"), whichever
-    /// way the lines are laid out. `wrap-reverse` lays them out from the
-    /// other edge, so it exchanges which logical line is which.
     #[test]
     fn a_wrapping_column_takes_its_baselines_from_the_lines_nearest_inline_start_and_end() {
         use direction::T::{Ltr, Rtl};
-        // (direction, wrap, C's x, first baseline, last baseline)
         let cases = [
             (Ltr, flex_wrap::T::WRAP, 50.0, 5.0, 17.0),
             (Ltr, flex_wrap::T::WRAP_REVERSE, 30.0, 7.0, 36.0),
@@ -3260,7 +3008,6 @@ mod last_baseline {
             let a = leaf(&mut tree, 5.0, 15.0);
             let b = leaf(&mut tree, 6.0, 16.0);
             let c = leaf(&mut tree, 7.0, 17.0);
-            // Two lines, [a, b] and [c], each stretched to 50px wide.
             let root = flex_container(
                 &mut tree,
                 TestStyle {
@@ -3277,8 +3024,6 @@ mod last_baseline {
 
             let label = format!("{container_direction:?} {wrap:?}");
             assert_close(tree.layout(c).location.x, c_x);
-            // The startmost line holds [a, b] unless `wrap-reverse` moved it
-            // to the inline-end side; then [c]'s line is the startmost.
             assert_eq!(output.first_baseline, Some(first), "{label}");
             assert_eq!(output.last_baseline, Some(last), "{label}");
         }
@@ -3305,8 +3050,6 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 100.0, 50.0);
 
-        // Both baselines are the bottom border edges, so the items end
-        // aligned at the line's end, as `end` would put them.
         assert_close(tree.layout(tall).location.y, 20.0);
         assert_close(tree.layout(short).location.y, 40.0);
         assert_eq!(output.first_baseline, Some(50.0));
@@ -3334,9 +3077,6 @@ mod last_baseline {
 
         definite_layout(&tree, root, 100.0, 20.0);
 
-        // 25 + 5 overflows the 20px line. The group stays flush with the
-        // line's cross-end edge and overflows the top one, as in browsers:
-        // no `safe` alignment moves it back.
         assert_close(tree.layout(tall).location.y, -10.0);
         assert_close(tree.layout(short).location.y, 10.0);
     }
@@ -3369,7 +3109,6 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 100.0, 40.0);
 
-        // Group baseline: max(25, 40 - max(5, 10)) = 30.
         assert_close(tree.layout(shifted).location.y, 30.0 - 25.0 + 7.0);
         assert_close(tree.layout(other).location.y, 20.0);
         assert_eq!(output.last_baseline, Some(30.0));
@@ -3378,7 +3117,6 @@ mod last_baseline {
     #[test]
     fn a_column_container_does_not_share_baselines_and_takes_end_instead() {
         let mut tree = TestTree::default();
-        // The main axis is vertical: the flex basis is the height.
         let mut column_leaf = |align: AlignFlags, size: Size<f32>, first, last| {
             let style = TestStyle {
                 align_self: self_align(align),
@@ -3413,12 +3151,8 @@ mod last_baseline {
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
 
-        // An item's inline axis is the cross axis here, so neither joins a
-        // group: `last baseline` takes `end` and `baseline` the cross-start.
         assert_point(tree.layout(last).location, Point::new(80.0, 0.0));
         assert_point(tree.layout(first).location, Point::new(0.0, 10.0));
-        // The cross-axis baseline sets: the topmost item's first baseline,
-        // the bottommost item's last.
         assert_eq!(output.first_baseline, Some(7.0));
         assert_eq!(output.last_baseline, Some(27.0));
 
@@ -3436,31 +3170,21 @@ mod last_baseline {
             Size::new(Some(100.0), None),
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
         );
-        // `column-reverse` puts the last item on top.
         assert_eq!(output.first_baseline, Some(5.0));
         assert_eq!(output.last_baseline, Some(28.0));
     }
 
-    /// An item that shares no baseline takes css-align-3 §4.2's fallback
-    /// alignment: `safe self-start` for `baseline` and `safe self-end` for
-    /// `last baseline` — its own start or end edge, and the container's start
-    /// edge once it overflows the line. A column container's items share
-    /// none: their inline axis is the cross axis.
     #[test]
     fn an_item_that_shares_no_baseline_takes_the_safe_self_aligned_fallback() {
         use direction::T::{Ltr, Rtl};
         const NOWRAP: flex_wrap::T = flex_wrap::T::NOWRAP;
         const WRAP_REVERSE: flex_wrap::T = flex_wrap::T::WRAP_REVERSE;
         let cases = [
-            // (alignment, item width, item direction, wrap, expected x)
             (AlignFlags::LAST_BASELINE, 20.0, Ltr, NOWRAP, 80.0),
-            // Overflowing: `safe` puts it at the start edge, not at -40.
             (AlignFlags::LAST_BASELINE, 140.0, Ltr, NOWRAP, 0.0),
             (AlignFlags::BASELINE, 140.0, Ltr, NOWRAP, 0.0),
-            // The item's own direction decides self-start and self-end.
             (AlignFlags::LAST_BASELINE, 20.0, Rtl, NOWRAP, 0.0),
             (AlignFlags::BASELINE, 20.0, Rtl, NOWRAP, 80.0),
-            // `wrap-reverse` moves the cross-start edge, not self-start.
             (AlignFlags::BASELINE, 20.0, Ltr, WRAP_REVERSE, 0.0),
             (AlignFlags::LAST_BASELINE, 20.0, Ltr, WRAP_REVERSE, 80.0),
         ];
@@ -3498,10 +3222,6 @@ mod last_baseline {
         }
     }
 
-    /// The same fallbacks place an absolutely positioned child's static
-    /// position; under `wrap-reverse` that is the container's start edge for
-    /// `baseline`, not its cross-start edge, as Chromium's
-    /// `CrossAxisStaticPositionEdge` does.
     #[test]
     fn a_static_position_takes_the_baseline_fallbacks() {
         for (alignment, expected_y) in [
@@ -3535,11 +3255,6 @@ mod last_baseline {
         }
     }
 
-    /// A nested container that is a last-baseline group member is aligned by
-    /// the last baseline its measurement reports, which the group asks for
-    /// exactly (`LayoutInput::reads_last_baseline`): the nested container
-    /// then measures the item it comes from even where its cross pass would
-    /// not — a fixed-height last item — and both cases align by 19.
     #[test]
     fn a_nested_flex_container_aligns_by_the_last_baseline_of_its_last_line() {
         for (content_height, inner_y, beside_y) in [(true, 0.0, 4.0), (false, 0.0, 4.0)] {
@@ -3598,8 +3313,6 @@ mod last_baseline {
                 Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
             );
 
-            // The inner container's last baseline is its last line's last
-            // item's, 10 + 9 = 19 below its top; its first (8) plays no part.
             assert_size(tree.layout(inner).size, Size::new(40.0, 22.0));
             assert_close(tree.layout(inner).location.y, inner_y);
             assert_close(tree.layout(beside).location.y, beside_y);
@@ -3607,13 +3320,6 @@ mod last_baseline {
         }
     }
 
-    /// A measurement takes no extra child probe for its last baseline: the
-    /// item it comes from, which the cross pass did not measure, gives one
-    /// synthesized from its border box's bottom edge, as a stretched item's
-    /// first baseline is. A commit reads the committed children and is exact.
-    /// The measurement reads the first baseline, which is what makes it report
-    /// baselines at all, and not the last, whose request would make it exact
-    /// (`a_last_baseline_request_measures_the_skipped_item_once`).
     #[test]
     fn a_measurement_synthesizes_the_last_baseline_of_an_item_its_cross_pass_skipped() {
         let mut tree = TestTree::default();
@@ -3631,8 +3337,6 @@ mod last_baseline {
             Some(6.0),
             Some(25.0),
         );
-        // Both cross sizes are fixed and nothing aligns by baseline, so the
-        // cross pass measures only the item the first baseline comes from.
         let root = flex_container(&mut tree, row(AlignFlags::FLEX_START), &[first, last]);
         let constraint = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
 
@@ -3646,9 +3350,6 @@ mod last_baseline {
             )
             .reading_first_baseline(true),
         );
-        // The last item's one measurement is the main-axis min-content probe
-        // for its §4.5 automatic minimum; nothing measures it in both axes,
-        // as a cross-size or baseline probe would.
         let probes = tree.measure_inputs(last);
         assert_eq!(probes.len(), 1, "{probes:?}");
         assert_eq!(
@@ -3663,9 +3364,6 @@ mod last_baseline {
         assert_eq!(committed.last_baseline, Some(25.0));
     }
 
-    /// A measurement asked for an exact last baseline measures the item it
-    /// comes from once, where the cross pass would have skipped it, and
-    /// reports that item's own last baseline.
     #[test]
     fn a_last_baseline_request_measures_the_skipped_item_once() {
         let mut tree = TestTree::default();
@@ -3697,8 +3395,6 @@ mod last_baseline {
             .reading_last_baseline(true),
         );
 
-        // The main-axis min-content probe every measurement makes, and one
-        // measurement in both axes for the last baseline.
         let probes = tree.measure_inputs(last);
         assert_eq!(probes.len(), 2, "{probes:?}");
         assert_eq!(
@@ -3736,18 +3432,13 @@ mod last_baseline {
         assert_eq!(committed.last_baseline, None);
         let measured = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
         assert_eq!(measured.last_baseline, None);
-        // The item itself still aligns.
         assert_close(tree.layout(child).location.y, 20.0);
     }
 }
 
-/// The flex containers whose second sizing pass moves their items, for the
-/// measurement comparison below.
 mod unrequested_measurement {
     use super::*;
 
-    /// A 2:1 bitmap stretched beside a paragraph: the second pass gives the
-    /// bitmap the line's cross size, and its main size follows.
     pub(super) fn stretched_ratio_beside_paragraph(
         tree: &mut TestTree,
         direction: flex_direction::T,
@@ -3764,9 +3455,6 @@ mod unrequested_measurement {
         )
     }
 
-    /// An auto-size container holding an auto-width column holding a `width:
-    /// 100%` bitmap: the column's height is the bitmap's only once its width
-    /// is known.
     pub(super) fn percentage_grandchild(
         tree: &mut TestTree,
         direction: flex_direction::T,
@@ -3797,8 +3485,6 @@ mod unrequested_measurement {
         )
     }
 
-    /// Items that carry `aspect-ratio` with automatic sizes, stretched to a
-    /// larger sibling.
     pub(super) fn stretched_aspect_ratio(
         tree: &mut TestTree,
         direction: flex_direction::T,
@@ -3830,8 +3516,6 @@ mod unrequested_measurement {
         )
     }
 
-    /// Percentage margins, padding, sizes and flex bases at two depths, under
-    /// a container whose own padding is a percentage.
     pub(super) fn nested_percentages(tree: &mut TestTree, direction: flex_direction::T) -> TestId {
         let leaf = tree.push_leaf(
             TestStyle {
@@ -3875,8 +3559,6 @@ mod unrequested_measurement {
         )
     }
 
-    /// Stretched items with a `min-height`, one of them a column holding a
-    /// paragraph, in a container that grows to the largest.
     pub(super) fn stretched_min_height(
         tree: &mut TestTree,
         direction: flex_direction::T,
@@ -3911,7 +3593,6 @@ mod unrequested_measurement {
         )
     }
 
-    /// A wrapping line of grown items, baseline-aligned ones among them.
     pub(super) fn wrapping_baselines(tree: &mut TestTree, direction: flex_direction::T) -> TestId {
         let mut children = Vec::new();
         for (width, baseline) in [(80.0, Some(12.0)), (140.0, None), (60.0, Some(30.0))] {
@@ -3940,15 +3621,6 @@ mod unrequested_measurement {
     }
 }
 
-/// A flex container's measurement that reads no baseline returns once its own
-/// size is decided, skipping the second sizing pass that an indefinite width
-/// runs and the alignment only a commit reads. A measurement that reads a
-/// baseline still runs the whole pipeline, and a baseline request never moves
-/// geometry, so the two must agree on the size and the content size of
-/// every container shape whose second pass changes what its items measure
-/// at: stretched items, a ratio transferring a stretched cross size, and
-/// percentages that resolve only once the container's width is known. The
-/// commit that follows must not depend on which of the two warmed the cache.
 #[test]
 fn a_measurement_reading_no_baseline_agrees_with_the_full_pipeline() {
     use unrequested_measurement::*;

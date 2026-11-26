@@ -34,15 +34,8 @@ use crate::view::{
     EventRequester, NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls,
 };
 
-/// How many times the harness lets every ready task run before it gives up on
-/// something happening. A hang detector rather than a schedule: everything
-/// here is on one thread and cooperative, so a step that has not happened in
-/// this many turns is a step that never will.
 const TURNS: usize = 512;
 
-/// Runs one test body as the `main` task of a [`JsThread`], which is the shape
-/// `bobcat-main` itself runs: the body's own turns are scheduler turns, and the
-/// jobs its views queue run between them.
 fn on_a_js_thread<F, B>(body: B)
 where
     F: std::future::Future<Output = ()> + 'static,
@@ -53,9 +46,6 @@ where
     thread.run(body);
 }
 
-/// Opens one page's realm the way [`serve_view`] does — as one job of that
-/// page's, awaited — and then completes its entry the way [`load_entry`] does,
-/// from an answer the fetcher has already given.
 async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
     let startup = RealmStartup {
         entry: url.to_owned(),
@@ -73,9 +63,6 @@ async fn open_realm(page: &Rc<Page>, entry: &str, url: &str) {
     .await;
 }
 
-/// An entry the fetcher answered before the realm opened, which is what every
-/// pin here that is not about the loading itself wants: a card's MTS body, as
-/// the module `bobcat-source` registers for a card's root.
 fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupSource {
     let (completion, answer) = SourceCompletion::new(token.clone());
     completion.complete(Ok(LoadedSource::Module {
@@ -88,14 +75,11 @@ fn answered_entry(entry: &str, url: &str, token: &CancellationToken) -> StartupS
     }
 }
 
-/// One group's shared runtime, with the test holding the worker thread's end
-/// of the factory so a `Start` is observable and no worker ever boots.
 fn group(thread: &JsThreadHandle) -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
     let js = build_main_runtime().expect("the group's runtime builds");
     group_over(thread, Ok(js))
 }
 
-/// The same group over `runtime`, which may be one that was never built.
 fn group_over(
     thread: &JsThreadHandle,
     runtime: Result<ScriptRuntime, ScriptError>,
@@ -111,13 +95,8 @@ fn group_over(
     (Rc::new(context), commands)
 }
 
-/// What every page here is created at, and what the painter these tests play
-/// binds it at unless the test says otherwise.
 const CREATE_VIEWPORT: Viewport = Viewport::new(320.0, 240.0);
 
-/// The metrics a published frame was committed at, as bits: these are values
-/// copied across a channel rather than computed, so exact equality is the
-/// question and `to_bits` is how it is asked.
 fn committed_at(frame: &terminus::link::CommittedFrame) -> (u32, u32, u32) {
     (
         frame.viewport().width.to_bits(),
@@ -126,7 +105,6 @@ fn committed_at(frame: &terminus::link::CommittedFrame) -> (u32, u32, u32) {
     )
 }
 
-/// The same three numbers of a viewport, to compare one against.
 fn metrics_of(viewport: Viewport) -> (u32, u32, u32) {
     (
         viewport.width.to_bits(),
@@ -135,8 +113,6 @@ fn metrics_of(viewport: Viewport) -> (u32, u32, u32) {
     )
 }
 
-/// The screen every view here reports: its own create-time viewport, as a
-/// host with no screen to measure names it. Nothing here reads `SystemInfo`.
 const SCREEN: ScreenMetrics =
     ScreenMetrics::for_viewport(CREATE_VIEWPORT.width, CREATE_VIEWPORT.height, 1.0);
 
@@ -144,24 +120,16 @@ fn ingredients() -> DocumentIngredients {
     DocumentIngredients::for_test(CREATE_VIEWPORT, PageConfig::default())
 }
 
-/// One view served by the real owner, with the test on the host's end of its
-/// link.
 struct Harness {
     workers: mpsc::UnboundedReceiver<WorkerCommand>,
     background: Option<WorkerStart>,
     commands: CommandSender,
-    /// The painter's end of the view's metrics watch. Bound at
-    /// [`CREATE_VIEWPORT`] unless the test asked for a view nothing has
-    /// bound, which is what [`Harness::unbound`] is for.
     metrics: watch::Sender<Option<Viewport>>,
-    /// The painter's end of the view's scroll mailbox.
     scroll: Arc<ScrollMailbox>,
     view: DetachedView,
     events: Vec<EngineEvent>,
     sources: Vec<(SourceRequest, SourceCompletion)>,
     preloads: Vec<SourceRequest>,
-    /// The owner's handle, so a step that never happened because the owner
-    /// trapped is reported as that panic rather than as a deadline.
     owner: task::JoinHandle<()>,
 }
 
@@ -174,9 +142,6 @@ impl Harness {
         )
     }
 
-    /// A view no painter has bound, which is where its first
-    /// `__FlushElementTree` parks. The test binds it by writing
-    /// [`Harness::metrics`].
     fn unbound(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
         Self::binding(
             context,
@@ -186,10 +151,6 @@ impl Harness {
         )
     }
 
-    /// A second view in the same group. The group has one worker channel and
-    /// the first harness holds it, so this one watches a channel of its own:
-    /// the pins that build two views are about which view's *own* work runs,
-    /// and neither of them boots a BTS.
     fn sibling(context: Rc<GroupContext>, sources: ViewSources) -> Self {
         Self::serving(context, mpsc::unbounded_channel().1, sources)
     }
@@ -202,9 +163,6 @@ impl Harness {
         Self::binding(context, workers, sources, Some(CREATE_VIEWPORT))
     }
 
-    /// `bound` is what the view's metrics watch starts at: `Some` for a view
-    /// a painter is already watching — which is what every pin that is not
-    /// about the binding wants — and `None` for one nothing has bound.
     fn binding(
         context: Rc<GroupContext>,
         workers: mpsc::UnboundedReceiver<WorkerCommand>,
@@ -215,13 +173,6 @@ impl Harness {
         let (commands, incoming) = mpsc::unbounded_channel();
         let (metrics, metric_receiver) = watch::channel(bound);
         let scroll = Arc::new(ScrollMailbox::default());
-        // What `create_lynx_view` does on the embedder's thread, which this
-        // test is: the entries are resolved by the same function, and the
-        // startup sources are requested before the view's task exists, so
-        // they are outstanding from the first turn and the sheets are
-        // answered in whatever order the test likes. The detached outbox
-        // resolves synchronous loads against `app:///`, so the view names
-        // that base too.
         let base = resolve_startup_urls(&mut sources).expect("a harness names URLs that resolve");
         assert_eq!(
             base,
@@ -273,13 +224,10 @@ impl Harness {
         }
     }
 
-    /// Posts a frame request the way a painter does: into the mailbox, with
-    /// the marker when it is the first post since main's last take.
     fn post_frame(&self, now: f64, seq: u64) -> Result<(), mpsc::error::SendError<ToMain>> {
         post_frame(&self.scroll, &self.commands, now, seq)
     }
 
-    /// Lets every ready task of the view run, collecting whatever it said.
     async fn turn(&mut self) {
         task::yield_now().await;
         if self.view.token.is_cancelled()
@@ -310,7 +258,6 @@ impl Harness {
         }
     }
 
-    /// Turns until `ready` answers, or fails naming what never happened.
     async fn until(&mut self, what: &str, mut ready: impl FnMut(&mut Self) -> bool) {
         for _ in 0..TURNS {
             if ready(self) {
@@ -318,9 +265,6 @@ impl Harness {
             }
             self.turn().await;
         }
-        // An owner that trapped is why nothing happened, and its payload says
-        // more than the deadline this loop ran out of. Awaiting a handle that
-        // has already finished answers at once.
         if self.owner.is_finished() {
             match (&mut self.owner).await {
                 Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
@@ -330,7 +274,6 @@ impl Harness {
         panic!("{what}");
     }
 
-    /// Answers one outstanding source request, whichever it is.
     fn answer(&mut self, url: &str, source: &str) {
         let (_, completion) = self.sources.pop().expect("a source request is outstanding");
         completion.complete(Ok(LoadedSource::Module {
@@ -339,15 +282,10 @@ impl Harness {
         }));
     }
 
-    /// Answers the outstanding entry request with a card's MTS body, as the
-    /// module `bobcat-source` registers for a card's root: `body` with
-    /// `MTS_CHUNK_PREAMBLE` in front, since the engine adds nothing to it.
     fn answer_entry(&mut self, url: &str, body: &str) {
         self.answer(url, &card_entry(body));
     }
 
-    /// Answers the outstanding request for the stylesheet at `url` with
-    /// author CSS, whatever else is outstanding.
     fn answer_style_sheet_at(&mut self, url: &str, css: &str) {
         let position = self
             .sources
@@ -362,7 +300,6 @@ impl Harness {
         )));
     }
 
-    /// Answers one outstanding stylesheet request with author CSS.
     fn answer_style_sheet(&mut self, css: &str) {
         let position = self
             .sources
@@ -375,7 +312,6 @@ impl Harness {
         )));
     }
 
-    /// Whether this view has asked for a stylesheet and not been answered.
     fn wants_a_style_sheet(&self) -> bool {
         self.sources
             .iter()
@@ -388,13 +324,11 @@ impl Harness {
             .any(|event| matches!(event, EngineEvent::ScriptFinished))
     }
 
-    /// Answers one outstanding source request with a failure.
     fn refuse(&mut self) {
         let (_, completion) = self.sources.pop().expect("a source request is outstanding");
         completion.complete(Err(unanswered_source().into()));
     }
 
-    /// Fails one outstanding stylesheet request, leaving the entry alone.
     fn refuse_style_sheet(&mut self) {
         let position = self
             .sources
@@ -405,7 +339,6 @@ impl Harness {
         completion.complete(Err(unanswered_source().into()));
     }
 
-    /// The startup failure this view reported, if it has.
     fn startup_failure(&self) -> Option<String> {
         self.events.iter().find_map(|event| match event {
             EngineEvent::StartupFailed(error) => Some(error.to_string()),
@@ -413,7 +346,6 @@ impl Harness {
         })
     }
 
-    /// Boots the view over `entry` and returns the commit its boot published.
     async fn boot(&mut self, entry: &str) -> u64 {
         self.until("the view never asked for its entry", |harness| {
             !harness.sources.is_empty()
@@ -438,8 +370,6 @@ impl Harness {
             .expect("boot published a frame")
     }
 
-    /// The `Start` the boot module's BTS `Worker` sent, which nothing on this
-    /// test's side ever boots.
     fn background_worker(&mut self) -> WorkerStart {
         if let Some(background) = self.background.take() {
             return background;
@@ -489,9 +419,6 @@ async fn answer_disposal(background: &mut WorkerStart) {
     panic!("Worker channel closed before dispose");
 }
 
-/// A painter's frame post into `scroll`, fenced behind everything already
-/// sent, and the marker it sends when the post is the first since main's
-/// last take.
 fn post_frame(
     scroll: &ScrollMailbox,
     commands: &CommandSender,
@@ -505,28 +432,12 @@ fn post_frame(
     Ok(())
 }
 
-/// One page over the token that ends it, with the test holding the owner's
-/// tail rather than a task running it.
-///
-/// The pins below that use this are about the owner's own steps — the end it
-/// runs after its wait — and nothing is queued for another task in either of
-/// them, so the cancel is the only wake there is and running that tail inline
-/// is running it where it would have run anyway. A pin about which task the
-/// scheduler picks belongs on [`Harness`] instead.
 struct OwnedPage {
     page: Rc<Page>,
     view: DetachedView,
-    /// The view's end signal, which here the test is the embedder of.
     token: CancellationToken,
-    /// Held, not sent on: the command consumer this page spawned is parked on
-    /// the other end, and dropping this would close the channel and end the
-    /// view by a path neither pin here is about.
     _commands: mpsc::UnboundedSender<ToMain>,
-    /// The painter's end of the metrics watch, bound at [`CREATE_VIEWPORT`]
-    /// from the start: none of these pins is about the binding, and an
-    /// unbound page's first flush would park.
     _metrics: watch::Sender<Option<Viewport>>,
-    /// The painter's end of the page's scroll mailbox.
     scroll: Arc<ScrollMailbox>,
 }
 
@@ -555,8 +466,6 @@ impl OwnedPage {
         }
     }
 
-    /// Posts `offset` for `scroller` the way a painter does and applies the
-    /// marker as one burst.
     async fn scroll_to(
         &self,
         scroller: terminus::link::NodeId,
@@ -576,8 +485,6 @@ impl OwnedPage {
         .await;
     }
 
-    /// Posts `entry` for `scroller` the way a painter does and applies the
-    /// marker as one burst.
     async fn post(&self, scroller: terminus::link::NodeId, entry: ScrollEntry) {
         assert!(
             self.scroll.post([(scroller, entry)], None),
@@ -586,8 +493,6 @@ impl OwnedPage {
         self.page.apply(vec![ToMain::Posted]).await;
     }
 
-    /// Opens the realm over `entry` and turns until its first frame is
-    /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
         open_realm(&self.page, entry, "app:///main.js").await;
         for _ in 0..TURNS {
@@ -599,7 +504,6 @@ impl OwnedPage {
         self.view.published.commit().expect("the page booted")
     }
 
-    /// Every lifecycle event this page has published so far.
     fn events(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         while let Ok(notice) = self.view.notices.try_recv() {
@@ -611,8 +515,6 @@ impl OwnedPage {
     }
 }
 
-/// A page that renders one box, which is enough for a resize to have
-/// something to lay out again.
 const ONE_BOX: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -622,8 +524,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// A page whose entry adopts a stylesheet as it evaluates, which is the one
-/// synchronous wait a realm can make.
 const ADOPTING_BOX: &str = r"
 __AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));
 globalThis.renderPage = function () {
@@ -632,8 +532,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The same page, with an `updatePage` that writes what the host sent onto
-/// the box, so a `PageUpdate` command genuinely dirties the document.
 const ONE_BOX_WITH_UPDATE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -646,8 +544,6 @@ globalThis.updatePage = function (data) {
 };
 ";
 
-/// One host data update carrying `value`, for the pins that need a command
-/// that genuinely changes the document.
 fn update_command(value: u8) -> ToMain {
     ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"value":{value}}}"#),
@@ -656,8 +552,6 @@ fn update_command(value: u8) -> ToMain {
     })
 }
 
-/// The same page, with a timer far enough out that nothing will ever fire it,
-/// so the deadline a live realm publishes is there to be withdrawn.
 const ONE_BOX_WITH_TIMER: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -667,8 +561,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The same page, with a listener on its box so a dispatch into it genuinely
-/// enters JavaScript.
 const LISTENING_BOX: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -678,8 +570,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// A page that is nothing but its sized root, under which the probes below
-/// build elements Rust-side for engine components to hear.
 const SIZED_PAGE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -687,10 +577,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The same scroller and rows as [`build_scrolling_rows`], built by script,
-/// with a JavaScript listener for `contentvisibilityautostatechange` on the
-/// page element, which writes what it heard — each target's id and
-/// `skipped` — to the page's `data-js-heard`.
 const LISTENING_ROWS_PAGE: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -712,17 +598,10 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// How many rows [`build_scrolling_rows`] lays out, how tall each is, and how
-/// tall the scrollport holding them is — all whole CSS pixels, which is what
-/// lets [`admitted_rows`] derive the answer without a float in sight.
 const ROWS: usize = 20;
 const ROW_HEIGHT: usize = 20;
 const SCROLLPORT: usize = 100;
 
-/// The rows the encode window admits at `offset`, derived from the spec of
-/// the margin rather than from the implementation: one scrollport past the
-/// committed offset in each direction, clamped to the scroll range. Touching
-/// the band counts, since the cull test admits whatever it cannot rule out.
 fn admitted_rows(offset: usize) -> Vec<usize> {
     let max_offset = ROWS * ROW_HEIGHT - SCROLLPORT;
     let top = offset.saturating_sub(SCROLLPORT);
@@ -735,16 +614,12 @@ fn admitted_rows(offset: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Where the components below record what they heard.
 type Log = Arc<std::sync::Mutex<Vec<String>>>;
 
 fn take(log: &Log) -> Vec<String> {
     std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
 }
 
-/// An engine component that records every event it hears as
-/// `who:phase:target`, naming the target by its `id` attribute, and — on the
-/// row — writes to the tree from inside the delivery.
 struct Recorder {
     who: &'static str,
     log: Log,
@@ -783,14 +658,10 @@ impl terminus::link::CustomElement<()> for Recorder {
             .lock()
             .expect("the log is never poisoned")
             .push(format!("{}:{phase}:{target}:{state}", self.who));
-        // A handler mutates the tree it was called about: whatever this
-        // leaves dirty is the delivery entry's own commit, never the one that
-        // decided the change.
         document.set_inline_style_property(element, "opacity", "0.5");
     }
 }
 
-/// The three deliveries one row's change owes, in order.
 fn whole_path(row: usize, skipped: bool) -> Vec<String> {
     let state = if skipped { "skipped" } else { "shown" };
     vec![
@@ -800,14 +671,6 @@ fn whole_path(row: usize, skipped: bool) -> Vec<String> {
     ]
 }
 
-/// Installs the two component definitions and builds the scroller and its
-/// rows under the card's page element, as one probe: `Document::define`
-/// requires a definition to precede every element with its tag, and the tree
-/// is built in the same entry so it does.
-///
-/// A probe rather than JavaScript because an engine component is not
-/// script-reachable at all — there is no PAPI for one, and that is the point.
-/// Returns the scroller, which is what a posted offset has to name.
 async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> terminus::link::NodeId {
     let (answer, built) = std::sync::mpsc::channel();
     let log = Arc::clone(log);
@@ -845,7 +708,6 @@ async fn build_scrolling_rows(page: &Rc<Page>, log: &Log) -> terminus::link::Nod
     built.try_recv().expect("the probe ran")
 }
 
-/// What [`LISTENING_ROWS_PAGE`]'s listener heard, as it wrote it.
 async fn js_heard(page: &Rc<Page>) -> Option<String> {
     let (answer, heard) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -860,15 +722,6 @@ async fn js_heard(page: &Rc<Page>) -> Option<String> {
     heard.try_recv().expect("the probe ran")
 }
 
-/// css-contain-2 §4.4: the commit that first determines relevance fires a
-/// `contentvisibilityautostatechange` at every `auto` element whose skipping
-/// state changed — which on a first determination is the on-screen ones
-/// alone, since an undetermined box already skips.
-///
-/// The delivery is an entry of its own, because the spec dispatches the event
-/// "by posting a task at the time when the state change occurs": the commit's
-/// own entry queues it and runs no handler, so the epilogue count moves twice
-/// for one burst.
 #[test]
 fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
@@ -899,9 +752,6 @@ fn a_commit_delivers_its_state_changes_in_an_entry_of_its_own() {
     });
 }
 
-/// A posted offset past the encode window re-determines every row, and the
-/// two directions are one batch: one entry behind the marker's own, one
-/// delivery per row that changed, each exactly once.
 #[test]
 fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_commit() {
     on_a_js_thread(|thread| async move {
@@ -938,10 +788,6 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
     });
 }
 
-/// The event reaches script too (user ruling, 2026-10-27): it bubbles to a
-/// realm's listener on an ancestor of every row, in frame order, with the
-/// state each row changed to as `skipped`, from the entry the page posts
-/// after the commit that decided it.
 #[test]
 fn a_realm_listener_hears_each_state_change_with_skipped() {
     on_a_js_thread(|thread| async move {
@@ -956,24 +802,10 @@ fn a_realm_listener_hears_each_state_change_with_skipped() {
     });
 }
 
-/// How many rows [`build_watched_rows`] observes, how tall each is, and how
-/// tall the scrollport they scroll in is — whole CSS pixels, so every ratio
-/// the tests below expect is an exact quotient of two areas.
 const WATCHED_ROWS: usize = 5;
 const WATCHED_ROW_HEIGHT: usize = 40;
 const WATCHED_SCROLLPORT: usize = 100;
 
-/// Defines `watcher` as `x-watcher` and builds one under the card's page
-/// element, beside a column scroller of [`WATCHED_ROWS`] rows, then creates
-/// the watcher's observer — root the scroller, thresholds `[0, 0.5, 1]` —
-/// and observes every row, in row order, through a `terminus::link::ElementHandler`
-/// bound to the watcher. One probe, because the handler is bound to a live
-/// element and hears only a constructed one, which `create_element` has made
-/// by the time it returns.
-///
-/// The watcher is positioned out of flow, so the scroller and its rows lay
-/// out exactly as they would without it. Returns the scroller, which a
-/// posted offset names, and the observer, which every logged entry names.
 async fn build_watched_rows(
     page: &Rc<Page>,
     watcher: IntersectionWatcher,
@@ -1031,7 +863,6 @@ async fn build_watched_rows(
     built.try_recv().expect("the probe ran")
 }
 
-/// What an [`IntersectionWatcher`] logs for one row's entry.
 fn watched(
     observer: terminus::link::IntersectionObserverId,
     row: usize,
@@ -1041,17 +872,6 @@ fn watched(
     format!("{}:row{row}:{intersecting}:{ratio}", observer.get())
 }
 
-/// The W3C "queue an intersection observer task": the entry whose epilogue
-/// ran the update only queues what it found, and the observer's handler hears
-/// it from an entry of its own — one per batch, whether or not the update's
-/// own entry committed anything.
-///
-/// The rows are 40px in a 100px scrollport, under thresholds `[0, 0.5, 1]`,
-/// so at offset 0 rows 0 and 1 are wholly visible, row 2 is half visible and
-/// rows 3 and 4 are below it; at 30 the scrollport spans 30..130, which
-/// shows a quarter of row 0, all of rows 1 and 2, and a quarter of row 3.
-/// Every offset posted here is inside the encode window and short of half
-/// its headroom, so the retained frame composes it and nothing commits.
 #[test]
 fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
     on_a_js_thread(|thread| async move {
@@ -1082,8 +902,6 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
              whatever its state, in observe order",
         );
 
-        // A scroll the encode window covers: the document adopts the
-        // offset and commits nothing, and the update still runs against it.
         let committed = owned.view.published.commit();
         let settled = owned.page.epilogue_count();
         owned
@@ -1112,7 +930,6 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
              rows 1 and 4 stayed where they were",
         );
 
-        // One pixel more moves every ratio and crosses nothing.
         let settled = owned.page.epilogue_count();
         owned
             .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 31.0))
@@ -1127,10 +944,6 @@ fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
     });
 }
 
-/// A hook that writes to the tree gets a commit of its own: the delivery
-/// entry's epilogue publishes what the hook wrote and runs the update again
-/// against that frame, which finds no observation moved and posts nothing —
-/// the chain ends after one delivery.
 #[test]
 fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery() {
     on_a_js_thread(|thread| async move {
@@ -1147,8 +960,6 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
             .await;
         assert_eq!(take_watched(&log).len(), 3);
 
-        // Back to 0, with the next delivery writing an inline style on the
-        // watcher itself.
         mutate.store(true, std::sync::atomic::Ordering::Relaxed);
         let committed = owned
             .view
@@ -1186,17 +997,6 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
     });
 }
 
-/// A page of [`WATCHED_ROWS`] rows, [`WATCHED_ROW_HEIGHT`] px each, in a
-/// [`WATCHED_SCROLLPORT`] px column scroller — the page element's first child
-/// — every row registered for exposure the way the realm's Lynx layer
-/// registers an element with a `uiappear` handler: the record listener
-/// `bobcat:exposure` beside script listeners for `uiappear` and
-/// `uidisappear`, which the listener table reports to exposure. Row
-/// `exposed` (when it is a row's index) also carries `exposure-id="first"`.
-///
-/// Each listener appends `<event>:row<index>` to the page element's
-/// `data-heard`, which [`heard`] reads back. `updatePage({on, sendEvent})`
-/// is `switchExposure(on, sendEvent, <every row's id>)`.
 fn exposure_page(exposed: Option<usize>) -> String {
     let exposed = exposed.map_or_else(|| "-1".to_owned(), |row| row.to_string());
     format!(
@@ -1235,7 +1035,6 @@ globalThis.updatePage = function (data) {{
     )
 }
 
-/// Everything the rows' listeners have heard, in order.
 async fn heard(page: &Rc<Page>) -> Vec<String> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -1255,7 +1054,6 @@ async fn heard(page: &Rc<Page>) -> Vec<String> {
     read.try_recv().expect("the probe ran")
 }
 
-/// The page element's first child: [`exposure_page`]'s scroller.
 async fn first_page_child(page: &Rc<Page>) -> terminus::link::NodeId {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -1272,8 +1070,6 @@ async fn first_page_child(page: &Rc<Page>) -> terminus::link::NodeId {
         .expect("the card rendered its scroller")
 }
 
-/// `switchExposure(on, sendEvent, <every row's id>)` through `updatePage`,
-/// as one command.
 async fn switch_exposure(page: &Rc<Page>, on: u8, send_event: u8) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"on":{on},"sendEvent":{send_event}}}"#),
@@ -1283,16 +1079,6 @@ async fn switch_exposure(page: &Rc<Page>, on: u8, send_event: u8) {
     .await;
 }
 
-/// Exposure is delivered by the intersection delivery entry: the entry whose
-/// epilogue ran the update only records what moved, and the elements'
-/// `uiappear` and `uidisappear` listeners run in the entry after it — one
-/// per batch, whether or not the update's own entry committed anything.
-///
-/// The rows are 40px in a 100px scrollport, so at offset 0 rows 0 to 2 are
-/// visible (row 2 in part) and at 30 row 3 joins them; the area is 0, so any
-/// visible part exposes a row. Every offset posted here is inside the
-/// encode window, so the marker's own entry commits nothing, and the update
-/// still runs against the offset it adopted.
 #[test]
 fn exposure_events_are_delivered_by_an_entry_after_the_update() {
     on_a_js_thread(|thread| async move {
@@ -1322,7 +1108,6 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
             "row 3 appeared; rows 0 to 2 stayed visible and said nothing",
         );
 
-        // One pixel more moves no row in or out.
         let settled = owned.page.epilogue_count();
         owned
             .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 31.0))
@@ -1334,7 +1119,6 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
         );
         assert_eq!(heard(&owned.page).await.len(), 4);
 
-        // Back to the top: row 3 leaves.
         owned
             .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 0.0))
             .await;
@@ -1342,9 +1126,6 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
     });
 }
 
-/// A 100×50 view with a `layoutchange` closure that appends its detail's
-/// `<width>x<height>` to the page element's `data-heard` ([`heard`]);
-/// `updatePage({width})` writes the view's width.
 const LAYOUT_CHANGE_ENTRY: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -1363,7 +1144,6 @@ globalThis.updatePage = function (data) {
 };
 ";
 
-/// `width` through `updatePage`, as one command.
 async fn resize_box(page: &Rc<Page>, width: u32) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"width":{width}}}"#),
@@ -1373,11 +1153,6 @@ async fn resize_box(page: &Rc<Page>, width: u32) {
     .await;
 }
 
-/// `layoutchange` is delivered by the resize delivery entry the epilogue
-/// posts after its commit (`Page::post_resize_notifications`): boot's own
-/// update reports the box once, the entry that resizes it is followed by one
-/// delivery entry, and an entry that writes the same size again commits a
-/// layout pass and posts no delivery.
 #[test]
 fn layout_changes_are_delivered_by_an_entry_after_the_commit() {
     on_a_js_thread(|thread| async move {
@@ -1393,7 +1168,6 @@ fn layout_changes_are_delivered_by_an_entry_after_the_commit() {
             ["100x50", "140x50"],
             "the resize was reported once, by an entry of its own",
         );
-        // The update, the delivery its update queued, and the probe.
         assert_eq!(owned.page.epilogue_count(), settled + 3);
 
         let settled = owned.page.epilogue_count();
@@ -1407,11 +1181,6 @@ fn layout_changes_are_delivered_by_an_entry_after_the_commit() {
     });
 }
 
-/// `switchExposure` from a script: a stop stops detecting every row and, for
-/// rows that have no `exposure-id`, owes nothing, so its entry posts nothing;
-/// a resume observes every row again, and the update in the resume's own
-/// epilogue posts the delivery entry that tells each visible row it
-/// appeared, since the stop forgot them as exposed.
 #[test]
 fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
@@ -1443,12 +1212,6 @@ fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
     });
 }
 
-/// A change that forms outside any update — here the `disexposure` a
-/// `stopExposure({sendEvent: true})` owes an exposed element with an
-/// `exposure-id` — gets the delivery entry too, although no observer has an
-/// entry queued: the epilogue posts one whenever exposure is owed. What the
-/// realm does with the record lists is not this pin's business; it counts
-/// entries.
 #[test]
 fn a_stop_that_owes_records_posts_a_delivery_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
@@ -1480,7 +1243,6 @@ fn a_stop_that_owes_records_posts_a_delivery_entry_of_its_own() {
     });
 }
 
-/// The document's offset for `scroller`, and its pending request.
 async fn scroll_state(
     page: &Rc<Page>,
     scroller: terminus::link::NodeId,
@@ -1496,11 +1258,6 @@ async fn scroll_state(
     read.try_recv().expect("the probe ran")
 }
 
-/// A post the painter made before it saw a container's pending scroll
-/// request names an older one and is dropped: adopting it would write back
-/// the offset the request replaced. The post that names the request is
-/// adopted and acknowledges it, and a later one naming nothing newer is
-/// adopted as any post is.
 #[test]
 fn a_post_older_than_the_pending_scroll_request_is_dropped() {
     on_a_js_thread(|thread| async move {
@@ -1564,10 +1321,6 @@ fn a_post_older_than_the_pending_scroll_request_is_dropped() {
     });
 }
 
-/// css-scroll-anchoring-1 across the threads: a post the painter made
-/// before it applied an adjustment the document has since made names the
-/// smaller shift, and the document adds the part it lacks. One naming the
-/// whole shift is adopted as it is.
 #[test]
 fn a_post_made_before_an_anchoring_shift_is_completed_by_it() {
     on_a_js_thread(|thread| async move {
@@ -1632,10 +1385,6 @@ fn a_post_made_before_an_anchoring_shift_is_completed_by_it() {
     });
 }
 
-/// A vertical `x-swiper` of three 200px items whose `scrollstart`, `change`
-/// and `scrollend` listeners append `<event>:<current>` to the page
-/// element's `data-heard` ([`heard`]); `updatePage({current})` writes the
-/// swiper's `current` and does not flush.
 const SWIPER_WITH_STATE_LISTENERS: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -1660,12 +1409,6 @@ globalThis.updatePage = function (data) {
 };
 ";
 
-/// A `current` written by an entry that does not flush turns the swiper in
-/// that entry's epilogue commit, and the same epilogue, after the commit,
-/// queues `#content`'s `scroll` for the move: the swiper's `scrollstart`
-/// and `change` reach script in the delivery entries that follow, before
-/// any other command, and its `scrollend` once the painter posts `#content`
-/// at rest on the request.
 #[test]
 fn a_current_written_without_a_flush_fires_the_swipers_events_from_its_epilogue() {
     on_a_js_thread(|thread| async move {
@@ -1727,7 +1470,6 @@ fn a_current_written_without_a_flush_fires_the_swipers_events_from_its_epilogue(
     });
 }
 
-/// A box whose `tap` listener starts an `opacity` transition and flushes.
 const TRANSITION_ON_TAP: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -1741,7 +1483,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The page element's first child, through a probe.
 async fn first_box(page: &Rc<Page>) -> terminus::link::NodeId {
     let (target, found) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -1761,12 +1502,6 @@ fn tap(target: terminus::link::NodeId) -> ToMain {
     }
 }
 
-/// A painter pass dispatches its events before it posts its frame, and main
-/// keeps that order however the marker and the events share a burst: the
-/// frame post is applied after the last command of a burst that reached its
-/// fence. So a transition a
-/// listener starts is anchored by that same frame, and its commit already
-/// exports it.
 #[test]
 fn a_burst_runs_its_listeners_before_the_frame_it_posted() {
     on_a_js_thread(|thread| async move {
@@ -1794,10 +1529,6 @@ fn a_burst_runs_its_listeners_before_the_frame_it_posted() {
     });
 }
 
-/// A frame post rides a marker that can be older than commands sent before
-/// the post — main collected a burst holding only the marker, and a tap
-/// queued behind it before the painter posted. The post waits for them: it
-/// is applied, and acknowledged, only after the burst that holds the tap.
 #[test]
 fn a_frame_post_waits_for_the_commands_sent_before_it() {
     on_a_js_thread(|thread| async move {
@@ -1806,7 +1537,6 @@ fn a_frame_post_waits_for_the_commands_sent_before_it() {
         owned.boot(TRANSITION_ON_TAP).await;
         let target = first_box(&owned.page).await;
         let serviced = owned.view.published.begin_frame_serviced();
-        // The marker is sent first, the tap second, then the post.
         let fence = owned.page.applied.get() + 2;
         assert!(owned.scroll.post(
             [],
@@ -1833,15 +1563,6 @@ fn a_frame_post_waits_for_the_commands_sent_before_it() {
     });
 }
 
-/// A native module's answer to the MTS realm is the one command in neither
-/// count: its sender does not count it, which
-/// `an_answer_to_the_main_thread_is_sent_outside_the_command_count` pins
-/// beside `ModuleReply`, so main does not either. The burst that holds one
-/// applies it, which runs the function the realm kept for the answer, and a
-/// frame post made afterwards still waits for exactly the counted commands
-/// sent before it, as in
-/// [`a_frame_post_waits_for_the_commands_sent_before_it`]. Counting the
-/// answer here would apply that frame one command early, ahead of the tap.
 #[test]
 fn a_frame_post_behind_a_module_callback_still_waits_for_the_commands_sent_before_it() {
     on_a_js_thread(|thread| async move {
@@ -1857,8 +1578,6 @@ callNativeModule('Echo', 'echo', [() => console.log('answered')]);
             .await;
         let target = first_box(&owned.page).await;
         let serviced = owned.view.published.begin_frame_serviced();
-        // What the seat's sender has counted so far. The answer below is not
-        // sent through it.
         let sent = owned.page.applied.get();
         owned
             .page
@@ -1874,7 +1593,6 @@ callNativeModule('Echo', 'echo', [() => console.log('answered')]);
             }),
             "the burst ran the function the realm kept for the answer"
         );
-        // The marker is sent first, the tap second, then the post.
         let fence = sent + 2;
         assert!(owned.scroll.post(
             [],
@@ -1901,9 +1619,6 @@ callNativeModule('Echo', 'echo', [() => console.log('answered')]);
     });
 }
 
-/// Two frame posts the painter made before main took either are one frame:
-/// `begin_frame` runs once, at the later post's clock, and the greater
-/// sequence number is acknowledged.
 #[test]
 fn two_frame_posts_before_a_take_are_one_frame_at_the_latest_clock() {
     on_a_js_thread(|thread| async move {
@@ -1944,9 +1659,6 @@ fn two_frame_posts_before_a_take_are_one_frame_at_the_latest_clock() {
     });
 }
 
-/// Every job starts at the painter's clock, before its operation runs: an
-/// entry reads the timeline there, and so does a due timer's settle — the
-/// epilogue alone — which the later, older clock below cannot rewind.
 #[test]
 fn a_job_entered_at_the_painter_clock_sees_the_timeline_there() {
     on_a_js_thread(|thread| async move {
@@ -1973,12 +1685,6 @@ fn a_job_entered_at_the_painter_clock_sees_the_timeline_there() {
     });
 }
 
-/// The host's page data rides from the view's sources to its realm as the
-/// text it was given, and is parsed there before the entry loads: the entry
-/// sees the global props as it evaluates, and `processData` gets the init
-/// data. Each side checks its own by throwing, and neither throw ends boot —
-/// the entry's is a `ScriptRunError`, and the processor's is caught and
-/// reported as a `ScriptReported` — so the test fails on either event.
 #[test]
 fn page_data_reaches_the_realm_it_was_given_to() {
     on_a_js_thread(|thread| async move {
@@ -2021,13 +1727,6 @@ fn page_data_reaches_the_realm_it_was_given_to() {
     });
 }
 
-/// A host's whole round of input is one entry into the realm, so it is one
-/// commit and one acknowledgement — not one of each per command.
-///
-/// The metrics used to be part of such a burst. They are a watch now, so the
-/// burst is made of page updates instead; what a metrics change coalesces
-/// into is pinned by
-/// [`metrics_that_move_before_the_task_wakes_are_one_commit`] below.
 #[test]
 fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
     on_a_js_thread(|thread| async move {
@@ -2035,9 +1734,6 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
         let mut harness = Harness::new(context, workers);
         let booted = harness.boot(ONE_BOX_WITH_UPDATE).await;
 
-        // Every one of these is queued before the consumer wakes, and every
-        // one of them genuinely writes a different attribute value, so an
-        // entry apiece would be a commit apiece.
         for step in 0..5u8 {
             harness
                 .commands
@@ -2061,15 +1757,6 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
     });
 }
 
-/// A frame committed and held before the binding never replaces a newer one.
-///
-/// The realm's first epilogue commits the empty document before the entry has
-/// arrived, and holds that frame because nothing has bound. Here the entry and
-/// the binding then land together, the entry's task woken first, so the job
-/// that completes the entry runs before the metrics task's settle: its boot
-/// flush finds the binding already made and publishes at once. The held frame
-/// is older than that one, so nothing may publish it afterwards — what the
-/// view ends with is the document's own last commit.
 #[test]
 fn a_frame_held_before_the_binding_never_replaces_a_newer_one() {
     on_a_js_thread(|thread| async move {
@@ -2117,12 +1804,6 @@ fn a_frame_held_before_the_binding_never_replaces_a_newer_one() {
     });
 }
 
-/// Nothing is published and MTS boot does not finish until a painter binds:
-/// boot's own `__FlushElementTree` commits at the create-time viewport, holds
-/// that frame, and parks the job it runs in on the metrics watch.
-///
-/// Binding at the size the view was created at is the cheap path — the held
-/// frame goes out as it is, with no second commit.
 #[test]
 fn an_unbound_view_holds_its_first_frame_and_publishes_it_on_the_binding() {
     on_a_js_thread(|thread| async move {
@@ -2135,8 +1816,6 @@ fn an_unbound_view_holds_its_first_frame_and_publishes_it_on_the_binding() {
             .await;
         harness.answer_entry("app:///main.js", ONE_BOX);
 
-        // Every task of the view goes on running while the flush is parked,
-        // so this is as far as an unbound view ever gets.
         for _ in 0..64 {
             harness.turn().await;
         }
@@ -2165,9 +1844,6 @@ fn an_unbound_view_holds_its_first_frame_and_publishes_it_on_the_binding() {
     });
 }
 
-/// Binding at metrics the view was not created at discards the held frame and
-/// commits again, which is the resize path: the first frame a painter ever
-/// sees is at the painter's own size.
 #[test]
 fn binding_at_other_metrics_recommits_the_held_frame() {
     on_a_js_thread(|thread| async move {
@@ -2208,9 +1884,6 @@ fn binding_at_other_metrics_recommits_the_held_frame() {
     });
 }
 
-/// The view's own token is the parked flush's biased first arm, so a release
-/// ends the wait: the flush throws, boot fails with it, and the view ends
-/// without ever reporting that it started.
 #[test]
 fn a_view_released_while_its_first_flush_is_parked_never_finishes() {
     on_a_js_thread(|thread| async move {
@@ -2225,8 +1898,6 @@ fn a_view_released_while_its_first_flush_is_parked_never_finishes() {
         for _ in 0..64 {
             harness.turn().await;
         }
-        // Taken before the release so the disposal exchange has somewhere to
-        // answer; boot creates the BTS Worker well before its flush.
         harness.background = Some(harness.background_worker());
         assert!(!harness.finished());
 
@@ -2249,13 +1920,6 @@ fn a_view_released_while_its_first_flush_is_parked_never_finishes() {
     });
 }
 
-/// The painter's metrics are a watch, not a command: five moves before the
-/// consuming task wakes are one value and so one commit.
-///
-/// That is the whole of what the new mechanism guarantees here. A watch keeps
-/// the latest rather than a queue, so how many writes a settle stands for is
-/// not something a caller can count on — only that the document ends up at
-/// the last of them, in one commit if nothing else entered the realm between.
 #[test]
 fn metrics_that_move_before_the_task_wakes_are_one_commit() {
     on_a_js_thread(|thread| async move {
@@ -2286,7 +1950,6 @@ fn metrics_that_move_before_the_task_wakes_are_one_commit() {
             "and it was committed at the last of the five"
         );
 
-        // Nothing else is owed: a second settle would be a second commit.
         for _ in 0..8 {
             harness.turn().await;
         }
@@ -2294,8 +1957,6 @@ fn metrics_that_move_before_the_task_wakes_are_one_commit() {
     });
 }
 
-/// A module completion is a task of its own, so what its continuation changed
-/// is committed without a command to carry it.
 #[test]
 fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_flush() {
     on_a_js_thread(|thread| async move {
@@ -2323,12 +1984,6 @@ fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_f
     });
 }
 
-/// One image with a `bindload` that records what it was handed, and an
-/// `updatePage` that writes whichever source the host names.
-///
-/// The handler is a worklet because that is the only `__AddEvent` kind this
-/// realm runs — a string handler is published to the background thread, which
-/// no test here has.
 const LOADING_IMAGE: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
@@ -2351,10 +2006,6 @@ globalThis.renderPage = function () {
 globalThis.updatePage = data => __SetAttribute(image, 'src', String(data.src));
 ";
 
-/// The image's own attributes, read off the document.
-///
-/// A probe is an entry of the page's own, so this is what every other
-/// observation here is: one command, applied and awaited.
 async fn image_attributes(page: &Rc<Page>, name: &'static str) -> Option<String> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -2371,14 +2022,6 @@ async fn image_attributes(page: &Rc<Page>, name: &'static str) -> Option<String>
     read.try_recv().expect("the probe ran")
 }
 
-/// Both producers of an image event, end to end through the real page: a
-/// report from the painting side, and a `src` that settles at the bind
-/// because this document has already seen that URL.
-///
-/// Either way the delivery is an entry of its own, the way a browser fires an
-/// `<img>`'s `load` from a task even for a cached URL, so the epilogue count
-/// moves twice for one report: the entry that settled the source, and the
-/// entry that delivered what it settled.
 #[test]
 fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
@@ -2386,9 +2029,6 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
         let mut owned = OwnedPage::new(context);
         let booted = owned.boot(LOADING_IMAGE).await;
 
-        // Neither source is on the element yet, so the second report settles
-        // the registry alone — nothing owes an event for it, and the entry
-        // that applied it posts none.
         let settled = owned.page.epilogue_count();
         owned
             .page
@@ -2404,7 +2044,6 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
         assert_eq!(owned.page.epilogue_count(), settled + 1);
         assert_eq!(image_attributes(&owned.page, "data-loads").await, None);
 
-        // A source that has not loaded, then the report that settles it.
         owned
             .page
             .apply(vec![ToMain::PageUpdate(PageUpdate::Data {
@@ -2436,9 +2075,6 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
             Some("40x20".to_owned())
         );
 
-        // The other producer: binding a URL this document has already settled
-        // answers at the bind, inside the `__SetAttribute` that wrote it, and
-        // is delivered by an entry of its own rather than from inside it.
         let settled = owned.page.epilogue_count();
         owned
             .page
@@ -2466,16 +2102,11 @@ fn an_image_load_reaches_its_listener_in_an_entry_of_its_own() {
     });
 }
 
-/// An event a listener queues during the drain is a batch of its own, and
-/// owes an entry of its own: the latch is cleared before the walk, so the
-/// delivery entry's epilogue posts one more for what its own handler bound.
 #[test]
 fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        // The handler writes the *other* settled source, so delivering the
-        // first load queues a second one from inside the drain.
         owned
             .boot(&LOADING_IMAGE.replace(
                 "__SetAttribute(image, 'data-loads', String(globalThis.loads));",
@@ -2534,11 +2165,6 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Three `<svg>`s in a row that does not stretch them — one sized by CSS,
-/// one unsized, one `display: none` — each recording every `load` and
-/// `error` it is handed, and an `updatePage` that writes one attribute on
-/// all three. The same shape as [`LOADING_IMAGES`], so [`images_seen`] and
-/// [`write_on_images`] serve both.
 const LOADING_SVGS: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
@@ -2571,10 +2197,6 @@ globalThis.updatePage = (data) => {
 ";
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Three `<image>`s in a row that does not stretch them — one sized by CSS,
-/// one unsized, one `display: none` — each recording every `load` and
-/// `error` it is handed, and an `updatePage` that writes one attribute on
-/// all three.
 const LOADING_IMAGES: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
@@ -2607,8 +2229,6 @@ globalThis.updatePage = (data) => {
 ";
 
 #[cfg(not(target_arch = "wasm32"))]
-/// What each of [`LOADING_IMAGES`]' (or [`LOADING_SVGS`]') three elements
-/// has recorded, in order.
 async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -2633,9 +2253,6 @@ async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`] (or
-/// `<svg>` of [`LOADING_SVGS`]). `value` travels inside a JSON string, so it
-/// holds no `"`.
 async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"name":"{name}","value":"{value}"}}"#),
@@ -2645,15 +2262,11 @@ async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     .await;
 }
 
-/// An SVG document `width` x `height` px with nothing drawable in it.
 fn empty_svg(width: u32, height: u32) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"/>"#)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// What a host reports for `svg` at `source`: the document it parsed with
-/// the engine's parser, or a failure for one that does not parse, in one
-/// batch.
 fn host_report(source: &str, svg: &str) -> ToMain {
     ToMain::ImageEvents(vec![terminus::link::ImageEvent::parse_document(
         Arc::from(source),
@@ -2664,8 +2277,6 @@ fn host_report(source: &str, svg: &str) -> ToMain {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl OwnedPage {
-    /// Every document request this page has handed its host so far, one
-    /// entry per `RequestDocuments` notice. Every other notice is dropped.
     fn document_requests(&mut self) -> Vec<Vec<terminus::link::DocumentRequest>> {
         let mut requests = Vec::new();
         while let Ok(notice) = self.view.notices.try_recv() {
@@ -2676,8 +2287,6 @@ impl OwnedPage {
         requests
     }
 
-    /// Answers `requests` as a host does: parses each document with the
-    /// engine's parser and reports them as one batch.
     async fn answer_documents(&self, requests: Vec<terminus::link::DocumentRequest>) {
         let reports = requests
             .into_iter()
@@ -2690,10 +2299,6 @@ impl OwnedPage {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// An `<image src="x.svg">`'s `load` carries the document's natural size,
-/// as it carries a bitmap's, whatever box the element lays out at. The host
-/// parses the document and reports it; one entry applies the report, and the
-/// `load`s are delivered by an entry of their own.
 #[test]
 fn an_image_load_on_a_parsed_svg_document_carries_its_natural_size() {
     on_a_js_thread(|thread| async move {
@@ -2726,17 +2331,6 @@ fn an_image_load_on_a_parsed_svg_document_carries_its_natural_size() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// An `<svg>`'s `load` carries the element's border-box layout size, not the
-/// document's natural size (ruled: native's detail): the CSS size when it
-/// has one, the natural size when it has none, and 0x0 when it has no box.
-///
-/// A `src` is fetched and parsed by the host and reported as a document. A
-/// `content` is handed to the document as markup: the write's own entry asks
-/// the host to parse it, one `RequestDocuments` for the three elements'
-/// identical markup, and nothing on this thread parses. The host's report is
-/// one entry and the `load`s it settles are delivered by one more, as an
-/// `<image>`'s are. Writing the same markup again asks nothing and fires no
-/// `load`.
 #[test]
 fn an_svg_load_carries_the_layout_size_for_src_and_content() {
     on_a_js_thread(|thread| async move {
@@ -2842,8 +2436,6 @@ fn an_svg_load_carries_the_layout_size_for_src_and_content() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// An `<image>` and an `<svg>` on one source, each recording every `load`
-/// and `error` it is handed.
 const IMAGE_AND_SVG: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
@@ -2868,7 +2460,6 @@ globalThis.renderPage = function () {
 ";
 
 #[cfg(not(target_arch = "wasm32"))]
-/// What each child of the page has recorded, in order.
 async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -2892,9 +2483,6 @@ async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// A document the host could not parse is reported as a failure of its
-/// source: an `<image>` on it is handed an `error`, and an `<svg>` on the
-/// same source nothing, in the same delivery.
 #[test]
 fn a_malformed_svg_document_fails_its_source() {
     on_a_js_thread(|thread| async move {
@@ -2910,8 +2498,6 @@ fn a_malformed_svg_document_fails_its_source() {
                 r#"<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>"#,
             )])
             .await;
-        // The probe's entry is queued behind the delivery the report's
-        // entry posted, so it reads what that delivery left.
         assert_eq!(
             page_children_seen(&owned.page).await,
             vec![Some("error".to_owned()), None]
@@ -2919,8 +2505,6 @@ fn a_malformed_svg_document_fails_its_source() {
     });
 }
 
-/// An entry whose top-level `await` leaves boot before its first flush, with
-/// one `<svg>` written and a listed sheet that sizes it still outstanding.
 const SVG_BEFORE_THE_FIRST_FLUSH: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 const page = __CreatePage('card', 0);
@@ -2934,8 +2518,6 @@ __SetAttribute(svg, 'src', 'app:///a.svg');
 await import('app:///dep.js');
 ";
 
-/// Answers the outstanding module request for `url` with `source`, whatever
-/// else is outstanding.
 fn answer_module_at(harness: &mut Harness, url: &str, source: &str) {
     let position = harness
         .sources
@@ -2949,8 +2531,6 @@ fn answer_module_at(harness: &mut Harness, url: &str, source: &str) {
     }));
 }
 
-/// The `data-seen` attribute of the page's first child, read through a probe
-/// command.
 async fn first_child_seen(harness: &mut Harness) -> Option<String> {
     let (probe, probed) = std::sync::mpsc::channel();
     harness
@@ -2976,11 +2556,6 @@ async fn first_child_seen(harness: &mut Harness) -> Option<String> {
     seen.expect("the probe answered")
 }
 
-/// An `<svg>` source that settles while the epilogue cannot commit — a listed
-/// sheet still outstanding — is held, not delivered: delivering it then would
-/// read a box no layout has produced. The first flush settles the sheet and
-/// commits, and the epilogue of that entry posts the held `load`, which then
-/// reads the size the sheet gave the element.
 #[test]
 fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
     on_a_js_thread(|thread| async move {
@@ -3011,8 +2586,6 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
             })
             .await;
 
-        // Parsed by the host, so the source settles inside this command's
-        // own entry, before any commit: the hold is what this pins.
         harness
             .commands
             .send(ToMain::ImageEvents(vec![
@@ -3033,8 +2606,6 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
         );
         assert!(harness.view.published.commit().is_none());
 
-        // A sheet supplied as text is not mapped (`tree::tag_map`): it names
-        // the document tag.
         harness.answer_style_sheet_at("app:///a.css", "lynx-svg{width:50px;height:40px}");
         answer_module_at(&mut harness, "app:///dep.js", "export const value = 1;");
         harness.until("boot never finished", |h| h.finished()).await;
@@ -3095,10 +2666,6 @@ fn a_module_completion_commits_with_no_command_behind_it() {
     });
 }
 
-/// An import that fails is the app's failure, not the view's: the rejection
-/// it leaves unhandled is reported once, as a `ScriptRunError`, and the view
-/// goes on — a frame post sent after it is acknowledged, a command still
-/// commits, and neither the view's token nor its BTS is ended.
 #[test]
 fn a_failed_module_is_reported_once_and_the_view_goes_on() {
     on_a_js_thread(|thread| async move {
@@ -3172,9 +2739,6 @@ fn a_failed_module_is_reported_once_and_the_view_goes_on() {
     });
 }
 
-/// A page update the realm fails is reported and the burst goes on: the
-/// update behind it in the same burst is applied, and the burst is still one
-/// commit.
 #[test]
 fn a_page_update_that_fails_is_reported_and_the_next_one_applies() {
     on_a_js_thread(|thread| async move {
@@ -3214,13 +2778,6 @@ fn a_page_update_that_fails_is_reported_and_the_next_one_applies() {
     });
 }
 
-/// A failure while boot is still outstanding is not a startup failure: an
-/// animation callback that leaves a rejection behind during boot is reported
-/// as a `ScriptRunError`, and boot then finishes, once.
-///
-/// The entry holds boot open with a top-level await on a `Future`, which
-/// settles on its own clock a second after the entry ran; the `Vsync` is sent
-/// as soon as the entry has asked for its frame, well inside that second.
 #[test]
 fn a_frame_that_fails_during_boot_is_reported_and_boot_still_finishes_once() {
     on_a_js_thread(|thread| async move {
@@ -3303,13 +2860,6 @@ await new Future(testFuture(1000, 'settled', false));
     });
 }
 
-/// A sibling's task ending announces a checkpoint nobody ran: the job queue
-/// it left is this page's too, so the page settles what its own realm owes
-/// rather than staying parked.
-///
-/// Built over the page directly rather than over [`serve_view`], because what
-/// it counts — that the epilogue ran at all — is not something a page with
-/// nothing to publish says out loud.
 #[test]
 fn a_siblings_checkpoint_makes_a_parked_page_settle() {
     on_a_js_thread(|thread| async move {
@@ -3337,14 +2887,11 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
              runtime's checkpoints are one task"
         );
 
-        // Parked: nothing of this page's own is running, and its own entries
-        // are not what the clock task's checkpoint arm is watching for.
         for _ in 0..8 {
             task::yield_now().await;
         }
         let settled = page.epilogue_count();
 
-        // Exactly what `finish_view` does when a sibling's task ends.
         context
             .js
             .borrow()
@@ -3365,9 +2912,6 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
     });
 }
 
-/// `finish_view` announces a checkpoint whenever a view task ends, as a job.
-/// On a runtime that was never built there is no realm to wake, and that job
-/// does nothing rather than trapping the thread.
 #[test]
 fn finishing_a_task_on_a_failed_runtime_marks_nothing() {
     on_a_js_thread(|thread| async move {
@@ -3385,9 +2929,6 @@ fn finishing_a_task_on_a_failed_runtime_marks_nothing() {
             task::yield_now().await;
         }
 
-        // Jobs are one FIFO, so a job answered after it is one the bump's job
-        // ran ahead of — and a job that panicked would have unwound this
-        // thread instead.
         assert_eq!(
             thread.run(|| ()).await,
             Some(()),
@@ -3396,8 +2937,6 @@ fn finishing_a_task_on_a_failed_runtime_marks_nothing() {
     });
 }
 
-/// A page's own entries do not wake its clock task: the generation it records
-/// at the end of every entry is what tells its own bumps from a sibling's.
 #[test]
 fn a_pages_own_entries_never_wake_its_clock_task() {
     on_a_js_thread(|thread| async move {
@@ -3410,8 +2949,6 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             Arc::default(),
             view.token.clone(),
         );
-        // The listener is what makes the dispatch below a real entry into
-        // JavaScript rather than a walk that meets nobody.
         open_realm(&page, LISTENING_BOX, "app:///main.js").await;
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
@@ -3419,8 +2956,6 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             }
             task::yield_now().await;
         }
-        // A boot that failed says why, which is a better report than the
-        // assertion below and than every step after it.
         while let Ok(notice) = view.notices.try_recv() {
             if let ViewNotice::Engine(EngineEvent::StartupFailed(error)) = notice {
                 panic!("the page never booted: {error}");
@@ -3428,7 +2963,6 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         }
         assert!(view.published.commit().is_some(), "the page booted");
 
-        // The probe is how the test learns which node to aim the dispatch at.
         let (target, listening) = std::sync::mpsc::channel();
         page.apply(vec![ToMain::Probe(Box::new(move |document| {
             let page = document.document_element().id();
@@ -3442,8 +2976,6 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         }
         let settled = page.epilogue_count();
 
-        // One entry of this page's own, which enters JavaScript and so bumps
-        // the generation every realm on the runtime shares.
         page.apply(vec![ToMain::DispatchEvent {
             target,
             name: "tap",
@@ -3462,14 +2994,6 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
     });
 }
 
-/// A panic in one task of a view ends the view during the unwind, before any
-/// other task of it runs: the guard the page wraps every task in is what does
-/// it, and the owner — which is woken by the same cancellation and therefore
-/// polled behind the sibling — is what reports the payload.
-///
-/// The seam spawns the panicking task first and the recorder behind it, so
-/// what the recorder saw is what a sibling polled between the unwind and the
-/// owner's turn would have seen.
 #[test]
 fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
     on_a_js_thread(|thread| async move {
@@ -3512,10 +3036,6 @@ fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
     });
 }
 
-/// A panic inside an entry is the view's, whatever the entry was doing:
-/// [`run_job`] catches it, one `Panicked` is reported, and the view ends. A
-/// panicking input dispatch takes this same path: nothing inside a burst
-/// catches a panic any more.
 #[test]
 fn a_command_that_panics_is_reported_once_as_panicked_and_ends_the_view() {
     on_a_js_thread(|thread| async move {
@@ -3549,13 +3069,6 @@ fn a_command_that_panics_is_reported_once_as_panicked_and_ends_the_view() {
     });
 }
 
-/// The end acknowledges whatever frame post was applied and not yet
-/// answered, and withdraws the deadline the realm had armed — both of them on
-/// the owner's own turn, because a release cancels the token from another
-/// thread and nothing on this one has run since.
-///
-/// A painter blocked on that sequence number is waiting for a frame that will
-/// never come, so releasing it is the last thing the view owes it.
 #[test]
 fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
     on_a_js_thread(|thread| async move {
@@ -3568,8 +3081,6 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
         );
         owned.page.arm_begin_frame_for_test(11);
 
-        // The embedder's release, with nothing else touched: the command
-        // channel stays open, so the owner's wait is the token alone.
         let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
             panic!("BTS starts")
         };
@@ -3588,13 +3099,6 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
     });
 }
 
-/// The end acknowledges a frame post a marker took and no burst has applied,
-/// as it does one a burst applied: the post is fenced behind a command the
-/// view was sent before it and has not applied, and with the view over that
-/// command never will be.
-///
-/// A painter blocked on that sequence number is released by the end either
-/// way.
 #[test]
 fn the_end_acknowledges_a_frame_post_that_has_not_reached_its_fence() {
     on_a_js_thread(|thread| async move {
@@ -3602,8 +3106,6 @@ fn the_end_acknowledges_a_frame_post_that_has_not_reached_its_fence() {
         let mut owned = OwnedPage::new(context);
         owned.boot(ONE_BOX).await;
         let serviced = owned.view.published.begin_frame_serviced();
-        // The marker is sent first, a second command behind it, then the
-        // post.
         let fence = owned.page.applied.get() + 2;
         assert!(owned.scroll.post(
             [],
@@ -3634,18 +3136,6 @@ fn the_end_acknowledges_a_frame_post_that_has_not_reached_its_fence() {
     });
 }
 
-/// A startup failure's end acknowledges the pending frame post as the
-/// embedder's release does: the acknowledgement is the end's, whichever path
-/// reached it.
-///
-/// A listed sheet's load failed before the realm opened, under an entry that
-/// holds boot open until its first animation frame. A painter pass sends the
-/// vsync, posts its frame fenced behind it and sends the post's marker, and
-/// the page takes all of it as one burst: the vsync resumes the entry, boot's
-/// own `__FlushElementTree` settles the sheet and throws, boot's module
-/// rejects, and the end of the burst applies the post. The epilogue then
-/// reports one `StartupFailed` and ends the view before its own
-/// acknowledgement step, so the acknowledgement seen here is the end's.
 #[test]
 fn a_startup_failure_acknowledges_the_frame_post_a_painter_is_blocked_on() {
     on_a_js_thread(|thread| async move {
@@ -3679,7 +3169,6 @@ await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
             ),
         )
         .await;
-        // The vsync is sent first, then the post, then the post's marker.
         let fence = owned.page.applied.get() + 1;
         assert!(owned.scroll.post(
             [],
@@ -3728,10 +3217,6 @@ await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
     });
 }
 
-/// A panic's end acknowledges the pending frame post too. The view has taken
-/// a post that is still waiting for its fence when one of its tasks panics:
-/// the `Panicked` ends it, and its end acknowledges the post no burst had
-/// applied.
 #[test]
 fn a_panic_acknowledges_the_frame_post_a_painter_is_blocked_on() {
     on_a_js_thread(|thread| async move {
@@ -3742,8 +3227,6 @@ fn a_panic_acknowledges_the_frame_post_a_painter_is_blocked_on() {
             panic!("BTS starts")
         };
         let serviced = owned.view.published.begin_frame_serviced();
-        // The marker is sent first, a second command behind it, then the
-        // post.
         let fence = owned.page.applied.get() + 2;
         assert!(owned.scroll.post(
             [],
@@ -3781,14 +3264,8 @@ fn a_panic_acknowledges_the_frame_post_a_painter_is_blocked_on() {
     });
 }
 
-/// What a [`RecordingRequester`] saw, in the order the view asked its host
-/// for a turn.
 enum Seen {
-    /// A notice the view sent. Held rather than dropped, so a request it
-    /// carries is not answered by its completion's drop.
     Notice(ViewNotice),
-    /// What the view had published when it asked: the newest commit, and the
-    /// newest frame post acknowledged.
     Published { commit: Option<u64>, serviced: u64 },
 }
 
@@ -3800,8 +3277,6 @@ impl Seen {
         )
     }
 
-    /// One line of a log, for a failure message: `ViewNotice` itself has no
-    /// `Debug`.
     fn describe(&self) -> String {
         match self {
             Self::Notice(ViewNotice::Engine(event)) => format!("{event:?}"),
@@ -3813,10 +3288,6 @@ impl Seen {
     }
 }
 
-/// A host's wakeup that records, at each request for a turn, what that turn
-/// would find: every notice sent since the last request, in order, and then
-/// what the view has published. Publishing a frame and acknowledging a
-/// frame post both ask for a turn, as sending a notice does.
 struct RecordingRequester {
     link: Mutex<(
         mpsc::UnboundedReceiver<ViewNotice>,
@@ -3841,19 +3312,6 @@ impl EventRequester for RecordingRequester {
     }
 }
 
-/// A frame post taken while boot is still open is acknowledged by the
-/// epilogue of the entry that finishes boot, and only after that entry's
-/// commit and its `ScriptFinished`: a host blocked on the sequence number is
-/// blocked on the frame it implies, and on the event that says the page has
-/// booted.
-///
-/// The entry holds boot open until its first animation frame. The post is
-/// fenced behind the vsync that delivers that frame, and its marker reaches
-/// the page in a burst of its own first: the post is taken there, and the
-/// burst that carries the vsync both finishes boot and applies it.
-///
-/// The three happen in one job, so only a host's own wakeup can tell their
-/// order apart, which is why this page's outbox has one that records.
 #[test]
 fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_its_commit() {
     on_a_js_thread(|thread| async move {
@@ -3875,8 +3333,6 @@ fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_it
             detached_base(),
             crate::performance::PipelineRegistry::detached(),
         );
-        // Bound from the start, and no listed sheets: boot's own flush parks
-        // on neither.
         let (_metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
         let scroll = Arc::new(ScrollMailbox::default());
         let page = Page::new(
@@ -3908,7 +3364,6 @@ await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
             ),
         )
         .await;
-        // The marker is sent first, the vsync second, then the post.
         let fence = page.applied.get() + 2;
         assert!(scroll.post(
             [],
@@ -3919,8 +3374,6 @@ await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
             })
         ));
         page.apply(vec![ToMain::Posted]).await;
-        // What was published while boot was still open: the document as it
-        // stood before the entry rendered anything.
         let before_boot = {
             let seen = seen.lock().expect("no recording panicked");
             let log: Vec<String> = seen.iter().map(Seen::describe).collect();
@@ -3964,19 +3417,6 @@ await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
     });
 }
 
-/// A burst queued behind the embedder's release is discarded rather than
-/// applied: the consumer reads the token once per burst, at the wake
-/// boundary, and a token already cancelled there ends the view instead of
-/// serving what is queued.
-///
-/// The order this pins is the order production has, which is why it runs over
-/// the real [`serve_view`] rather than the owner's tail alone: the command is
-/// sent first, so it wakes the consumer, and the cancel that follows wakes the
-/// owner *behind* it. The consumer is what runs first, so nothing here can
-/// rest on the owner being woken first.
-///
-/// The channel is left open, which is also the shape a fatal event's cancel in
-/// `LynxView::pump` leaves.
 #[test]
 fn a_burst_queued_behind_a_release_is_never_applied() {
     on_a_js_thread(|thread| async move {
@@ -3984,8 +3424,6 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
         let mut harness = Harness::new(context, workers);
         let booted = harness.boot(ONE_BOX_WITH_UPDATE).await;
 
-        // Genuinely dirtying: the same command applied on its own is what the
-        // burst pin above counts a commit for.
         harness
             .commands
             .send(update_command(1))
@@ -4005,13 +3443,6 @@ fn a_burst_queued_behind_a_release_is_never_applied() {
     });
 }
 
-/// An entry the fetcher could not load fails the view's startup with the
-/// fetcher's own error, reported once and before any of the entry ran:
-/// nothing is committed after it, and boot never reports that it finished.
-///
-/// The realm opens, and its first epilogue commits the empty document boot
-/// created, before the entry's answer is read; that commit is the one the
-/// view is left with.
 #[test]
 fn an_entry_that_fails_to_load_fails_the_startup_with_the_fetchers_error() {
     on_a_js_thread(|thread| async move {
@@ -4048,11 +3479,6 @@ fn an_entry_that_fails_to_load_fails_the_startup_with_the_fetchers_error() {
     });
 }
 
-/// An entry answered from a response URL that is not an absolute URL fails
-/// the startup naming both URLs, before any of the entry runs. That URL
-/// would be `__Card__`, the base every `new Worker` URL is joined to, boot's
-/// own `bobcat:bts` included, so nothing past it could start: no BTS `Start`
-/// is sent and nothing is reported as the app's.
 #[test]
 fn an_entry_answered_from_a_url_that_is_not_absolute_fails_the_startup_naming_it() {
     on_a_js_thread(|thread| async move {
@@ -4088,10 +3514,6 @@ fn an_entry_answered_from_a_url_that_is_not_absolute_fails_the_startup_naming_it
     });
 }
 
-/// A group whose runtime could not be built still serves its views: each
-/// one fails its startup with that runtime's error, and opens nothing — no
-/// document, no BTS `Start`, and no request past the ones `create_lynx_view`
-/// already made.
 #[test]
 fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
     on_a_js_thread(|thread| async move {
@@ -4101,7 +3523,6 @@ fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
         harness
             .until("the view never finished", |h| h.owner.is_finished())
             .await;
-        // Whatever the view said before its owner returned.
         harness.turn().await;
 
         let failures: Vec<_> = harness
@@ -4129,10 +3550,6 @@ fn a_view_on_a_runtime_that_was_never_built_fails_its_startup() {
     });
 }
 
-/// A panic is reported whatever the view was told before it. The report-once
-/// latch a startup failure spends is not the one a panic goes through: the
-/// lifetime holds a latch of its own for the payload-bearing report, so a view
-/// that failed and then trapped says both.
 #[test]
 fn a_view_that_already_failed_still_reports_a_task_that_traps() {
     on_a_js_thread(|thread| async move {
@@ -4144,8 +3561,6 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
         owned
             .page
             .spawn(async { panic!("a task of the view trapped") });
-        // Let the panicking task run: the owner aborts what has not been
-        // polled, so a task that never ran is a task that never trapped.
         for _ in 0..8 {
             task::yield_now().await;
         }
@@ -4183,9 +3598,6 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
 
 #[test]
 fn script_finished_is_published_once_without_any_bts_acknowledgement() {
-    // Boot is the MTS entry's: the module evaluated and its first flush
-    // committed. The BTS Worker here is taken and never booted, so it says
-    // nothing at all — and the view is ready anyway, exactly once.
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut sources = ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US");
@@ -4208,7 +3620,6 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
                     .any(|e| matches!(e, EngineEvent::ScriptFinished))
             })
             .await;
-        // And nothing later adds a second one.
         for _ in 0..4 {
             harness.turn().await;
         }
@@ -4228,10 +3639,6 @@ fn script_finished_is_published_once_without_any_bts_acknowledgement() {
 
 #[test]
 fn disposal_finishes_behind_a_job_heavy_worker_event() {
-    // A checkpoint runs the job queue dry however long it is. When it did
-    // not, the jobs one worker event queued were finished out of the *next*
-    // event's entry — and the reply disposal was waiting for was spent
-    // there instead of reaching JavaScript, so the view never ended.
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
         let mut harness = Harness::new(context, workers);
@@ -4250,9 +3657,6 @@ lynx.getJSContext().addEventListener('flood', () => {
                 h.view.published.commit().is_some()
             })
             .await;
-        // Held here rather than in `harness.background`, so the harness's own
-        // turns do not acknowledge disposal before the flood is queued behind
-        // the `dispose` post.
         let mut background = harness.background_worker();
         harness
             .until("MTS boot did not finish", |h| {
@@ -4275,9 +3679,6 @@ lynx.getJSContext().addEventListener('flood', () => {
                 })
                 .await;
         }
-        // One event whose listener floods the job queue, then the reply the
-        // owner is waiting for. Both are due in this order on the one worker
-        // event stream.
         background
             .events
             .send(crate::background::WorkerEvent {
@@ -4295,9 +3696,6 @@ lynx.getJSContext().addEventListener('flood', () => {
     });
 }
 
-/// The worker events read in one turn are one entry, each delivered on its
-/// own; a release served while one of their handlers waits ends the view,
-/// and the events behind that handler are not delivered.
 #[test]
 fn a_release_served_while_a_worker_event_waits_drops_the_rest_of_its_burst() {
     on_a_js_thread(|thread| async move {
@@ -4325,8 +3723,6 @@ lynx.getJSContext().addEventListener('after', () => {
         harness
             .until("MTS boot did not finish", |h| h.finished())
             .await;
-        // Both queued before the view's worker-event task polls again: one
-        // burst.
         for kind in ["park", "after"] {
             background
                 .events
@@ -4387,8 +3783,6 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
             crate::esm::BTS_MODULE_SPECIFIER,
             "boot's worker is the one at the URL that names the background thread"
         );
-        // Boot is already settled when the failure arrives: it is the MTS
-        // entry's own, and the BTS Worker is no part of it.
         harness
             .until("MTS boot did not finish", |h| {
                 h.events
@@ -4450,8 +3844,6 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
                 .count(),
             1
         );
-        // The failed Worker was forgotten when MTS heard `__bobcat:close`, so
-        // disposal has no acknowledgement to wait for.
         drop(background);
         harness.view.token.cancel();
         for _ in 0..TURNS {
@@ -4491,11 +3883,6 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
     });
 }
 
-/// A view that names a card URL names *it* as `__Card__`, rather than its
-/// entry's response URL: a container page's entry is one of the container's
-/// sections, and the container is what its chunks, its named stylesheets and
-/// its relative `new Worker` URLs hang off. The card URL is relative here, and
-/// `create_lynx_view` resolves it against the base like the entry.
 #[test]
 fn a_card_url_is_what_the_card_is_named_by() {
     on_a_js_thread(|thread| async move {
@@ -4532,8 +3919,6 @@ fn a_card_url_is_what_the_card_is_named_by() {
                 if url == "app:///cards/card.bundle/custom_section/CSS.css"),
             "{request:?}"
         );
-        // The entry's own `Worker` and boot's BTS, in whichever order: the
-        // relative one is joined to the card URL, not to the entry's.
         let mut started = Vec::new();
         harness
             .until("the entry never started its Worker", |h| {
@@ -4558,8 +3943,6 @@ fn a_card_url_is_what_the_card_is_named_by() {
     });
 }
 
-/// A card URL that does not resolve against the base fails the view's
-/// construction, naming it, like an entry that does not.
 #[test]
 fn a_card_url_that_does_not_resolve_is_an_invalid_url() {
     let mut sources = ViewSources {
@@ -4634,8 +4017,6 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
             harness.turn().await;
         }
         assert!(requested, "the explicit engine event starts JS disposal");
-        // Both wakes are ready before the normal event consumer runs again.
-        // Its cancellation must leave the reply in the inbox for the owner.
         harness.view.token.cancel();
         acknowledge_disposal(&background);
         harness
@@ -4651,14 +4032,6 @@ fn a_disposal_reply_queued_with_view_release_is_not_discarded() {
     });
 }
 
-/// An entry the fetcher has not answered parks nothing.
-///
-/// Boot's `import` of the entry stays pending while the entry is
-/// outstanding: the answer is awaited on a task of this view's owner, and the
-/// job boot ran in has already returned. So this view's realm is live with a
-/// document in it, its frame post is acknowledged by a job of its own, and
-/// the task completing the entry's module when the answer arrives is what
-/// finishes the boot.
 #[test]
 fn an_outstanding_entry_leaves_the_view_serving() {
     on_a_js_thread(|thread| async move {
@@ -4676,8 +4049,6 @@ fn an_outstanding_entry_leaves_the_view_serving() {
                 |h| h.view.published.begin_frame_serviced() == 7,
             )
             .await;
-        // The realm is open and holds a document: only a live realm answers a
-        // probe, and only a document answers `document_element`.
         let (probe, probed) = std::sync::mpsc::channel();
         harness
             .commands
@@ -4708,7 +4079,6 @@ fn an_outstanding_entry_leaves_the_view_serving() {
     });
 }
 
-/// A page whose one box carries the class both listed sheets style.
 const CLASSED_BOX: &str = r"
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
@@ -4718,9 +4088,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// The width and height the classed box of [`CLASSED_BOX`] was laid out at,
-/// read through a probe command, so it is the document's layout after every
-/// entry queued before the probe has run.
 async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
     let (probe, probed) = std::sync::mpsc::channel();
     harness
@@ -4742,9 +4109,6 @@ async fn classed_box_size(harness: &mut Harness) -> (f32, f32) {
     size.expect("the probe answered")
 }
 
-/// Answers the entry request with [`CLASSED_BOX`] as a card's root, leaving
-/// every stylesheet request where it is. The entry is picked out by its URL,
-/// since it is a module request like any import the view has made.
 fn answer_classed_entry(harness: &mut Harness) {
     let entry = harness
         .sources
@@ -4760,11 +4124,6 @@ fn answer_classed_entry(harness: &mut Harness) {
     }));
 }
 
-/// Whether boot has created its BTS `Worker`, keeping the `Start` it sent.
-///
-/// Boot creates the Worker after the entry has evaluated and flushes right
-/// behind it, in the same checkpoint of the same job, so a `Start` seen while
-/// that job has not finished boot is a job parked inside boot's flush.
 fn started_background(harness: &mut Harness) -> bool {
     if harness.background.is_none()
         && let Ok(WorkerCommand::Start(start)) = harness.workers.try_recv()
@@ -4774,15 +4133,6 @@ fn started_background(harness: &mut Harness) -> bool {
     harness.background.is_some()
 }
 
-/// Listed author sheets cascade in the order the view listed them, whatever
-/// order the fetcher answered them in, and boot finishes only once all of
-/// them have.
-///
-/// The view lists `a.css` then `b.css`; the test answers `b.css`, then the
-/// entry, and `a.css` last. Boot does not finish, and publishes nothing,
-/// while `a.css` is outstanding: its first flush is waiting for it. Both end
-/// up mounted — the height is `b.css`'s alone — and the width both declare is
-/// `b.css`'s, because it is listed later, although it arrived first.
 #[test]
 fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
     on_a_js_thread(|thread| async move {
@@ -4830,15 +4180,6 @@ fn author_sheets_cascade_in_listed_order_and_boot_waits_for_all_of_them() {
     });
 }
 
-/// Nothing of a view is styled, laid out or published while a listed sheet is
-/// outstanding, and the first frame it publishes carries that sheet.
-///
-/// The entry is answered and the sheet is withheld, so boot runs to its own
-/// `__FlushElementTree` and parks there. While it is parked the view publishes
-/// no frame and reports no `ScriptFinished`, and a frame post sent meanwhile
-/// is a job queued behind the parked one, so it is acknowledged only after the
-/// sheet's answer arrives. Once it does, the frame boot publishes is styled
-/// by the sheet, and `ScriptFinished` follows it.
 #[test]
 fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
     on_a_js_thread(|thread| async move {
@@ -4902,10 +4243,6 @@ fn boot_publishes_nothing_until_a_withheld_sheet_arrives() {
     });
 }
 
-/// A listed sheet that fails to load fails boot's own flush, which is the
-/// boot failing: one `StartupFailed` carrying the `Script` error
-/// `__FlushElementTree` threw, whose message names the sheet. Nothing was
-/// published first.
 #[test]
 fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
     on_a_js_thread(|thread| async move {
@@ -4957,18 +4294,6 @@ fn a_listed_sheet_that_fails_to_load_fails_the_boot_naming_it() {
     });
 }
 
-/// A listed sheet that app code settles first still fails the boot.
-///
-/// The entry's `adoptStyleSheet` settles the listed sheets ahead of its own,
-/// so it is the first to meet `a.css` failing, and the error is thrown to the
-/// entry. Whether the entry catches it or not, the failure is kept and boot's
-/// own flush throws it again: exactly one `StartupFailed` naming the sheet,
-/// no `ScriptFinished`, and nothing published.
-///
-/// Before it, one `ScriptRunError` with the same message: the entry that
-/// completed the module reports the one rejection its checkpoint returned —
-/// the entry's own throw where it was not caught, and boot's rejection where
-/// it was — and drops the rest.
 #[test]
 fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
     for caught in [false, true] {
@@ -5037,14 +4362,6 @@ fn a_listed_sheet_that_app_code_settles_first_still_fails_the_boot() {
     }
 }
 
-/// An entry whose top-level `await` a worker event resumes, and which then
-/// throws, is reported as that entry's failure — `ListenerFailed`, the kind of
-/// the entry it threw in — before boot's own failure in the same entry.
-///
-/// The listed sheet is refused, so boot's flush, which runs in that entry
-/// right after the entry's throw, fails the boot. The entry reports the first
-/// rejection its checkpoint returned, which is the entry's own throw, and
-/// only then does its epilogue report boot's failure as `StartupFailed`.
 #[test]
 fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
     on_a_js_thread(|thread| async move {
@@ -5072,8 +4389,6 @@ fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
             throw Error('the entry threw');
             ",
         );
-        // The entry's own `Worker`, which nothing on this test's side boots:
-        // the message below is the only thing it says.
         let mut worker = None;
         harness
             .until("the entry never started its Worker", |h| {
@@ -5131,20 +4446,6 @@ fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
     });
 }
 
-/// What a synchronous adoption stops and what it does not.
-///
-/// View A's entry adopts a stylesheet and the test withholds the answer, so
-/// A's job is parked inside [`crate::jobs::JsThread::wait`] for the whole of
-/// this test's middle. While it is:
-///
-/// - the scheduler keeps running, so a second view B attaches, its own tasks start and its startup
-///   sources are answered — the routing a load needs is a task's, not a job's;
-/// - nothing of B's reaches its realm: B's own `open_realm` is a job, and jobs are one FIFO, so B
-///   has no document and its frame post is not acknowledged either. That is the cost of the loading
-///   phase having gone: an acknowledgement now waits for the queue, and what bounds it is that the
-///   only wait boot itself makes is for sources the view already asked for;
-/// - once A's answer arrives the queue drains in order, B opens its realm, boots, and answers the
-///   frame post that was queued behind it.
 #[test]
 fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running() {
     on_a_js_thread(|thread| async move {
@@ -5158,8 +4459,6 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
             .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
             .await;
 
-        // A's job is parked from here to the answer below. Everything that
-        // follows happens while it is.
         let mut loading = Harness::sibling(
             context,
             ViewSources {
@@ -5167,9 +4466,6 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
                 ..ViewSources::new("app:///", "app:///b.js", SCREEN, "en-US")
             },
         );
-        // Both of B's startup requests are outstanding from its construction,
-        // the way `create_lynx_view` issues them, so both can be answered
-        // while A holds the thread.
         loading
             .until("B never asked for its stylesheet", |h| {
                 h.wants_a_style_sheet()
@@ -5212,15 +4508,6 @@ fn a_synchronous_adoption_parks_javascript_and_leaves_a_siblings_tasks_running()
     });
 }
 
-/// Releasing a view whose job is parked in an adoption ends the wait, and the
-/// realm is released afterwards without a panic.
-///
-/// The wait's `select!` is biased on this view's own token, so the cancel wins
-/// over an answer that never comes; the message it throws with is pinned in
-/// `runtime/tests.rs`. What this pins is the rest: the owner runs its tail
-/// — the disposal exchange and the release job — behind the job that was
-/// parked, so nothing re-borrows a realm that is still under a JavaScript
-/// stack.
 #[test]
 fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() {
     on_a_js_thread(|thread| async move {
@@ -5239,8 +4526,6 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
             .await;
 
         harness.view.token.cancel();
-        // Boot catches what the released wait threw in its entry and goes on
-        // to connect the BTS, whose disposal the owner then waits for.
         harness
             .until("boot never went on to start the BTS", |h| {
                 !h.workers.is_empty()
@@ -5252,9 +4537,6 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
                 h.owner.is_finished()
             })
             .await;
-        // A panic in any job of the view — a `BorrowMutError` from a release
-        // landing on a realm still under a JavaScript stack, above all — would
-        // come back here.
         (&mut harness.owner).await.expect("the owner did not trap");
 
         let (_, withheld) = harness
@@ -5277,27 +4559,10 @@ fn releasing_a_view_whose_job_is_waiting_ends_the_wait_and_releases_its_realm() 
     });
 }
 
-/// A clock task whose deadline passed while another view's job holds the
-/// thread queues **one** settle and then waits for it.
-///
-/// It awaits the settle because the deadline its epilogue republishes is not
-/// visible until that job has run: a turn that looped without waiting would
-/// re-read the deadline it just passed, re-arm an already-expired sleep, and go
-/// on queueing settles for as long as the other view stayed parked. What this
-/// pins is that the queue does not grow with how long the park lasts — the
-/// second reading is taken after twice the wait of the first.
 #[test]
 fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
     on_a_js_thread(|thread| async move {
         let (context, workers) = group(&thread);
-        // The timer view boots first, because a boot is itself a job. It is an
-        // `OwnedPage` rather than a `Harness` because what this reads — the
-        // armed deadline, and that the epilogue ran at all — is not something a
-        // page with nothing to publish says out loud.
-        //
-        // A repeat rather than a one-shot, so that however long this view's own
-        // boot took, a deadline is always at most one period away when the
-        // sibling parks below.
         let mut ticking = OwnedPage::new(Rc::clone(&context));
         ticking
             .boot(
@@ -5325,9 +4590,6 @@ fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
             .until("A never adopted a stylesheet", |h| h.wants_a_style_sheet())
             .await;
 
-        // Both sleeps are spent inside A's job, and tokio's own timer is driven
-        // by the `block_on` that job's wait re-entered — which is why the
-        // deadline passes at all while a job holds the thread.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let parked = thread.queued();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5358,7 +4620,6 @@ fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
     });
 }
 
-/// Every `ConsoleMessage` text among `events`.
 fn console_messages(events: &[EngineEvent]) -> Vec<String> {
     events
         .iter()
@@ -5369,14 +4630,10 @@ fn console_messages(events: &[EngineEvent]) -> Vec<String> {
         .collect()
 }
 
-/// How many `ShadowRealm` children the page's realm holds.
 async fn child_realms(page: &Rc<Page>) -> Option<usize> {
     owner::enter(page, JobKind::Command, |runtime, _| runtime.child_realms()).await
 }
 
-/// A `ShadowRealm` child's timer is the owner's to fire: armed in the child's
-/// own table, it wakes the page's clock and runs in a later epilogue of the
-/// page, where its callback calls a function of the parent's it was handed.
 #[test]
 fn a_shadow_realm_timer_fires_in_a_later_epilogue_of_its_owner() {
     on_a_js_thread(|thread| async move {
@@ -5418,10 +4675,6 @@ console.log('armed');
     });
 }
 
-/// What a child leaves unhandled is reported once, after the entry that ran
-/// its code, as a `ScriptRunError` named for the `ShadowRealm`; the view goes
-/// on. The child, which nothing refers to any more, is released by the same
-/// epilogue, after the report.
 #[test]
 fn a_shadow_realm_rejection_is_reported_once_and_ends_nothing() {
     on_a_js_thread(|thread| async move {
@@ -5460,10 +4713,6 @@ new ShadowRealm().evaluate('Promise.reject(new Error(\"the child failed\")); und
     });
 }
 
-/// A child goes once nothing needs it: no `ShadowRealm` or wrapped function
-/// of the parent's refers to it and it has no timer armed. The epilogue that
-/// first sees that releases it; one with a timer still armed stays, as a
-/// browser's realm stays while its timer list holds a callback of its.
 #[test]
 fn a_shadow_realm_nothing_needs_is_released_by_its_owners_epilogue() {
     on_a_js_thread(|thread| async move {
@@ -5487,8 +4736,6 @@ globalThis.updatePage = () => {{
         assert_eq!(child_realms(&owned.page).await, Some(2));
 
         owned.page.apply(vec![update_command(1)]).await;
-        // A collection, for a `ShadowRealm` object that is only cyclic
-        // garbage: the epilogue after it is what releases the child.
         owner::enter(&owned.page, JobKind::Command, |runtime, js| {
             runtime.core().engine.collect_garbage(js)
         })
@@ -5508,9 +4755,6 @@ globalThis.updatePage = () => {{
     });
 }
 
-/// A closed child goes in the epilogue of the entry that closed it, though
-/// the page still holds its `ShadowRealm` and the wrapped function it
-/// called.
 #[test]
 fn a_closed_child_is_freed_by_the_closing_entrys_epilogue() {
     on_a_js_thread(|thread| async move {
@@ -5546,10 +4790,6 @@ globalThis.updatePage = () => {{
     });
 }
 
-/// A child's module request goes to the view's host like the owner's own and
-/// is completed in the child, and a future a `.then` in the child asked to
-/// settle is delivered into the child: both by tasks the owner's epilogue
-/// spawned, which enter the owner's realm to reach the child.
 #[test]
 fn a_shadow_realms_module_loads_and_future_settles_land_in_the_child() {
     on_a_js_thread(|thread| async move {
@@ -5604,9 +4844,6 @@ realm.evaluate(`report => {{
     });
 }
 
-/// The epilogue of each entry that drew replays what the canvas recorded:
-/// entries that draw and never read leave nothing recorded behind each one,
-/// and an entry that drew nothing settles nothing.
 #[test]
 fn the_epilogue_replays_the_canvases_an_entry_drew() {
     on_a_js_thread(|thread| async move {

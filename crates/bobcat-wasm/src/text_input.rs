@@ -15,27 +15,6 @@
 
 use bobcat_core::editing::{Command, EnterKeyHint, InputMode, InputType};
 
-/// The [`Command`] one `bobcat-edit` message names: `kind` is the
-/// `EditCommand.kind` of `js/protocol.d.ts`, and `first` and `second` carry
-/// its numbers —
-///
-/// | `kind` | `text` | `first` | `second` |
-/// |---|---|---|---|
-/// | `setComposition` | the composition | selection start | selection end |
-/// | `commitText` | the committed text | relative cursor | — |
-/// | `finishComposition` | — | `1` keeps the selection | — |
-/// | `insert` | the text | — | — |
-/// | `insertLineBreak`, `deleteBackward`, `deleteForward`, `deleteWordBackward`, `deleteWordForward` | — | — | — |
-///
-/// The selection is in UTF-16 units relative to the start of the
-/// composition, as [`Command::SetComposition`] takes it; `terminus` clamps one
-/// past the text's end.
-///
-/// # Errors
-///
-/// A name this table does not hold, a command that needs text and has none,
-/// or a selection that is negative or reversed: each is a facade that sent
-/// something its protocol does not describe.
 pub(crate) fn edit_command(
     kind: &str,
     text: Option<String>,
@@ -78,8 +57,6 @@ pub(crate) fn edit_command(
     })
 }
 
-/// HTML's `inputmode` keyword for `mode`, or `""` for the default (the
-/// attribute absent).
 #[must_use]
 pub(crate) const fn input_mode_name(mode: InputMode) -> &'static str {
     match mode {
@@ -95,8 +72,6 @@ pub(crate) const fn input_mode_name(mode: InputMode) -> &'static str {
     }
 }
 
-/// HTML's `enterkeyhint` keyword for `hint`, or `""` for the default (the
-/// attribute absent).
 #[must_use]
 pub(crate) const fn enter_key_hint_name(hint: EnterKeyHint) -> &'static str {
     match hint {
@@ -111,8 +86,6 @@ pub(crate) const fn enter_key_hint_name(hint: EnterKeyHint) -> &'static str {
     }
 }
 
-/// HTML's `<input type>` keyword for `kind`. `InputType` is non-exhaustive:
-/// a kind a later engine adds is reported as `"text"` until it is named here.
 #[must_use]
 pub(crate) const fn input_type_name(kind: InputType) -> &'static str {
     match kind {

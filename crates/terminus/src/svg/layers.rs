@@ -10,7 +10,6 @@ use crate::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
 use crate::peniko::Fill;
 use crate::tree::document::NodeId;
 
-/// Elements whose content is drawn where they stand.
 pub(super) fn is_rendered(name: &str) -> bool {
     matches!(
         name,
@@ -37,26 +36,16 @@ pub(super) fn is_shape(name: &str) -> bool {
     )
 }
 
-/// A `clipPath` resolved to one shape.
 pub(super) struct ClipDef {
     shape: Arc<BezPath>,
     rule: Fill,
-    /// The `clipPath`'s own `transform`, after the units mapping.
     transform: Affine,
     object_units: bool,
-    /// Whether the shape is one child's, so it can double as a
-    /// compositing layer's shape.
     single: bool,
-    /// The `clipPath`'s own `clip-path`.
     outer: Option<Box<ClipDef>>,
 }
 
 impl ClipDef {
-    /// A `clipPath` from its children's shapes, each already under its own
-    /// transform, with their `clip-rule`s: one shape clips under its own
-    /// rule and can double as a layer's shape; several clip with their
-    /// concatenation under `nonzero`. `transform` is the `clipPath`'s own,
-    /// `object_units` its `clipPathUnits`, `outer` its own `clip-path`.
     pub(super) fn new(
         mut parts: SmallVec<[(BezPath, Fill); 2]>,
         transform: Affine,
@@ -84,43 +73,24 @@ impl ClipDef {
     }
 }
 
-/// Which layer items an element opened, and how to fix them up once its
-/// content is known.
 pub(super) struct OpenLayers {
-    /// How many `Pop`s the element owes.
     count: usize,
-    /// The compositing layer whose bounds the content decides.
     bounds_layer: Option<usize>,
-    /// Clip items whose transform awaits the element's bounding box
-    /// (`clipPathUnits="objectBoundingBox"`), with their pre-bbox transform.
     object_clips: SmallVec<[(usize, Affine, Affine); 1]>,
 }
 
 impl OpenLayers {
-    /// Maps the transforms the opened layers recorded by `by`, applied
-    /// after them: what a recorder does to the items it already pushed when
-    /// it learns the element's own transform only after its content
-    /// (`transform-box: fill-box`).
     pub(super) fn map_groups(&mut self, by: Affine) {
         for (_, group, _) in &mut self.object_clips {
             *group = by * *group;
         }
     }
 
-    /// Whether what the layers draw depends on the extent of the content:
-    /// a compositing layer shaped by its bounds, or a clip in
-    /// `objectBoundingBox` units.
     pub(super) fn binds_content(&self) -> bool {
         self.bounds_layer.is_some() || !self.object_clips.is_empty()
     }
 }
 
-/// Opens the layers the group effects of element `node` need around its
-/// content, at the element's transform `transform`: a compositing layer for
-/// `opacity` below one, or at any opacity when `fades` (an animated
-/// `opacity`, which a curve may fade), shaped by `clip` when that is one
-/// shape, else by the content's bounds, patched in by [`close_layers`];
-/// then the clip chain, outermost first. Every layer is `Normal`.
 pub(super) fn open_layers(
     items: &mut Vec<Item>,
     node: NodeId,
@@ -136,8 +106,6 @@ pub(super) fn open_layers(
     let composite = opacity < 1.0 || fades;
     let mut own_clip_pushed = false;
     if composite {
-        // A one-shape clip doubles as the layer's shape (the clips
-        // clipping it are pushed inside, as clip layers).
         match &clip {
             Some(clip) if clip.single => {
                 let index = items.len();
@@ -175,7 +143,6 @@ pub(super) fn open_layers(
     open
 }
 
-/// Pushes `clip` and every `clipPath` clipping it, outermost first.
 fn push_clip_chain(
     items: &mut Vec<Item>,
     node: NodeId,
@@ -189,8 +156,6 @@ fn push_clip_chain(
     push_clip(items, node, clip, group, open);
 }
 
-/// Pushes one clip layer for `clip`, placed by the transform `group` of
-/// the clipped element `node`.
 fn push_clip(
     items: &mut Vec<Item>,
     node: NodeId,
@@ -211,10 +176,6 @@ fn push_clip(
     open.count += 1;
 }
 
-/// Closes an element's layers and patches what its content, the items
-/// from `content_start` on, decided: the compositing layer's bounds and
-/// bounding-box clip transforms, both in the element's own coordinates,
-/// which `transform` maps to the document's.
 pub(super) fn close_layers(
     items: &mut Vec<Item>,
     open: OpenLayers,
@@ -262,8 +223,6 @@ pub(super) fn close_layers(
     }
 }
 
-/// A kurbo stroke from SVG's stroke properties, `dashes` already doubled
-/// to an even count (`None` or empty for a solid stroke).
 pub(super) fn stroke(
     width: f64,
     cap: Cap,
@@ -282,9 +241,6 @@ pub(super) fn stroke(
     }
 }
 
-/// The bounding box of every path in `items`, mapped by `into` (the
-/// inverse of the target space's transform), strokes included when asked.
-/// Text is not counted: its extent is known only once shaped.
 pub(super) fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
     for item in items {
@@ -299,7 +255,6 @@ pub(super) fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -
         };
         let mut local = *local;
         if include_stroke && let Some(stroke) = stroke {
-            // Half the width on each side, plus the reach of a miter join.
             let reach = stroke_reach(&stroke.style, 1.0);
             local = local.inflate(reach, reach);
         }
@@ -309,11 +264,6 @@ pub(super) fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -
     bounds
 }
 
-/// How far a stroke of `style` reaches past its path's bounding box: half
-/// its width times its join's factor (a miter join's limit, a bevel's √2),
-/// and at least `least` times half its width. A layer's bounds pass 1, the
-/// reach of a round join and a butt or round cap; an item's ink extent
-/// passes √2, the reach of a square cap.
 fn stroke_reach(style: &Stroke, least: f64) -> f64 {
     style.width / 2.0
         * match style.join {
@@ -323,18 +273,6 @@ fn stroke_reach(style: &Stroke, least: f64) -> f64 {
         }
 }
 
-/// The rectangle one recorded path or text item can put ink in, in the
-/// coordinates its own transform maps from, or `None` for a layer push, a
-/// pop and a text item that was not shaped: a path's bounding box grown by
-/// the farthest its stroke reaches past it (a miter join to its limit, a
-/// square cap or a bevel by √2 of half the width), a text item's shaped
-/// chunk boxes, which glyph outlines can still leave (side bearings,
-/// synthetic oblique).
-///
-/// What the paint walk sizes an `svg` element's paint item by
-/// (`visual::svg`), so the cull test and the group bounds hold every pixel
-/// a path draws. A layer's bounds ([`items_bounds`]) use the join alone, as
-/// the recording always has ([`stroke_reach`]).
 pub(crate) fn ink_extent(item: &Item) -> Option<Rect> {
     match item {
         Item::Path { bounds, stroke, .. } => Some(stroke.as_ref().map_or(*bounds, |stroke| {

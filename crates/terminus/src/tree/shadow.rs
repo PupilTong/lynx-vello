@@ -52,13 +52,8 @@ pub(crate) fn is_slot_assignment_attribute(name: &str) -> bool {
     matches!(name, "slot" | "name")
 }
 
-/// The `pseudo` attribute value that makes an element of a shadow tree its
-/// host's `::placeholder` (`Node::implemented_pseudo_element`): Blink's name
-/// for the element behind `::placeholder` in its UA shadow trees, which
-/// `::placeholder` is an alias of there.
 pub const PLACEHOLDER_PSEUDO_ID: &str = "-webkit-input-placeholder";
 
-/// Whether `name` is the `pseudo` attribute.
 #[must_use]
 pub(crate) fn is_pseudo_attribute(name: &str) -> bool {
     name == "pseudo"
@@ -70,15 +65,11 @@ pub enum ShadowRootMode {
     Closed,
 }
 
-/// State owned by a shadow-root node.
 pub(crate) struct ShadowRootData {
     pub(crate) host: NodeSlot,
     pub(crate) mode: ShadowRootMode,
     pub(crate) styles: AuthorStyles<ShadowStyleSheet>,
     slots: Option<Vec<NodeId>>,
-    /// The host is an SVG `use` element, so this tree is its instance
-    /// ([`crate::svg`]), which takes no style rules of its own. Decided at
-    /// attachment: a host never changes its tag or namespace.
     pub(crate) svg_use_instance: bool,
 }
 
@@ -94,7 +85,6 @@ impl ShadowRootData {
     }
 }
 
-/// Optional host, slot, and assignment links.
 #[derive(Default)]
 pub(crate) struct ShadowLinks {
     pub(crate) shadow_root: Option<NodeSlot>,
@@ -105,7 +95,6 @@ pub(crate) struct ShadowLinks {
 impl<T> Node<T> {
     #[must_use]
     pub(crate) fn is_slot(&self) -> bool {
-        // HTML's `<slot>`; an SVG element named `slot` is not one.
         !self.in_svg_namespace() && self.local_name.as_ref().is_some_and(|name| *name == *SLOT)
     }
 
@@ -199,19 +188,6 @@ impl<T> Node<T> {
         None
     }
 
-    /// The tree a tree-scoped name cascaded for this element at `scope`
-    /// belongs to: a shadow root, or `None` for the document tree. Stylo
-    /// records the scope relative to the element (css-scoping §3.5), and
-    /// this reads it back the way stylo's rule collector writes it:
-    /// - 0: the element's own tree;
-    /// - `-j`: `::slotted` rules from the tree of the `j`-th slot outward along the element's
-    ///   assigned-slot chain, and `-(1 + the chain's length)`: `:host` rules from the element's own
-    ///   shadow tree;
-    /// - `n > 0`: `::part` rules from the `n`-th tree outward that has any `::part` rule, the trees
-    ///   without one not counted.
-    ///
-    /// Shared by every tree-scoped name this engine resolves: timeline names
-    /// (`style::timeline`) and anchor names (`layout::anchors`).
     #[must_use]
     pub(crate) fn scoped_name_tree(&self, scope: stylo::rule_tree::CascadeLevel) -> Option<NodeId> {
         use stylo::rule_tree::ShadowCascadeOrder;
@@ -234,7 +210,6 @@ impl<T> Node<T> {
             }
             return self.shadow_root_id();
         }
-        // Past the last shadow tree is the document tree.
         let mut root = own?;
         let mut step = ShadowCascadeOrder::for_innermost_containing_tree();
         loop {
@@ -316,7 +291,6 @@ impl<T> Node<T> {
 }
 
 impl<T> Document<T> {
-    /// Attaches and returns a shadow root.
     pub fn attach_shadow(&mut self, host: NodeId, mode: ShadowRootMode) -> NodeId {
         assert!(
             self.get(host).is_some_and(Node::is_element),
@@ -342,20 +316,17 @@ impl<T> Document<T> {
         self.note_shadow_root_added();
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
-        // The host's flat children are its shadow root's children now.
         self.note_loose_text_change(host);
         self.invalidate_layout(host);
         self.invalidate_hoisted_under(host);
         root
     }
 
-    /// The shadow root `host` hosts, in either mode.
     #[must_use]
     pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
         self.get(host)?.shadow_root_id()
     }
 
-    /// The element a shadow root is attached to.
     #[must_use]
     pub fn shadow_host(&self, shadow_root: NodeId) -> Option<NodeId> {
         self.get(shadow_root)?.shadow_host_id()
@@ -366,23 +337,16 @@ impl<T> Document<T> {
         self.get(shadow_root)?.shadow_root_mode()
     }
 
-    /// The slot a host's light child was assigned to, if any claimed it.
     #[must_use]
     pub fn assigned_slot(&self, node: NodeId) -> Option<NodeId> {
         self.get(node)?.assigned_slot_id()
     }
 
-    /// The nodes a slot renders, in the host's child order. Empty when the
-    /// slot shows its fallback content instead.
     #[must_use]
     pub fn assigned_nodes(&self, slot: NodeId) -> &[NodeId] {
         self.get(slot).map_or(&[][..], Node::assigned_node_ids)
     }
 
-    /// The shadow root `node`'s tree is rooted at — `node` itself for a
-    /// shadow root — or `None` for a node of the document tree or of a
-    /// detached tree: DOM's `getRootNode()`, answered only when that is a
-    /// `ShadowRoot`.
     #[must_use]
     pub fn shadow_root_of(&self, node: NodeId) -> Option<NodeId> {
         if self.get(node)?.is_shadow_root() {
@@ -424,9 +388,6 @@ impl<T> Document<T> {
         self.note_slot_set_change(parent, child);
     }
 
-    /// *insert* and *remove*: "If parent's root is a shadow root, and parent
-    /// is a slot whose assigned nodes is the empty list, then run signal a
-    /// slot change for parent" — the fallback content it renders changed.
     fn signal_fallback_change(&mut self, parent: NodeId) {
         let shows_fallback = self
             .get(parent)
@@ -447,23 +408,13 @@ impl<T> Document<T> {
         let Some(root) = self.shadow_root_of(parent) else {
             return;
         };
-        // One walk answers both questions this removal has: which slots left
-        // (they must drop what they were assigning), and whether any left at
-        // all (only then does the shadow root need reassigning).
         let departed = self.slots_in_subtree(child);
         if departed.is_empty() {
             return;
         }
-        // `assign_slots` only rewrites the slots it can still reach from the
-        // shadow root, so a departed slot would otherwise keep whatever it was
-        // holding — entries naming nodes that can be freed while the detached
-        // slot is still alive and readable. An unassigned slot renders its
-        // fallback content anyway, so empty is also the right answer.
         for slot in departed {
             let assigned: Vec<NodeId> = self.live(slot).assigned_node_ids().to_vec();
             if !assigned.is_empty() {
-                // *remove*'s "assign slottables for a tree with node": the
-                // departed slot finds nothing, which differs from what it had.
                 self.signal_slot_change(slot);
             }
             for node in assigned {
@@ -477,7 +428,6 @@ impl<T> Document<T> {
         self.assign_slots(root);
     }
 
-    /// Every slot element in a subtree, in the walk's order.
     fn slots_in_subtree(&self, root: NodeId) -> Vec<NodeId> {
         let Some(root_slot) = self.slot(root) else {
             return Vec::new();
@@ -694,8 +644,6 @@ impl<T> Document<T> {
                 node.links_mut().assigned_nodes = nodes;
                 changed = true;
                 self.note_loose_text_change(slot);
-                // *assign slottables*: "If slottables and slot's assigned
-                // nodes are not identical, then run signal a slot change".
                 self.signal_slot_change(slot);
             }
         }

@@ -187,20 +187,15 @@ use terminus::link::{
 
 use super::tree::LynxDocument;
 
-/// The attribute whose presence, non-empty, asks for global records.
 const EXPOSURE_ID: &str = "exposure-id";
-/// What a record names besides the id; `""` when absent.
 const EXPOSURE_SCENE: &str = "exposure-scene";
-/// The visible share an element needs, as `parseFloat(value) / 100`.
 const EXPOSURE_AREA: &str = "exposure-area";
-/// The screen margins, top, right, bottom, left.
 const SCREEN_MARGINS: [&str; 4] = [
     "exposure-screen-margin-top",
     "exposure-screen-margin-right",
     "exposure-screen-margin-bottom",
     "exposure-screen-margin-left",
 ];
-/// The element's own margins, top, right, bottom, left.
 const UI_MARGINS: [&str; 4] = [
     "exposure-ui-margin-top",
     "exposure-ui-margin-right",
@@ -208,83 +203,42 @@ const UI_MARGINS: [&str; 4] = [
     "exposure-ui-margin-left",
 ];
 
-/// Whether writing or removing `name` can change an element's exposure
-/// registration: every `exposure-` attribute.
-///
-/// A prefix test rather than the list, because it is asked on every
-/// attribute write and a name that matches without meaning anything only
-/// costs a re-arm of an element that is registered, and nothing for one that
-/// is not.
 pub(crate) fn is_exposure_attribute(name: &str) -> bool {
     name.starts_with("exposure-")
 }
 
-/// One element's exposure moving: it became visible (`appeared`) or stopped
-/// being so, or a teardown took it out of the exposed record.
-///
-/// The id and the scene are the registration's own, shared rather than
-/// copied when the change forms: the element may be freed, or its
-/// attributes rewritten, before the delivery entry runs, and a rewrite
-/// replaces the registration's strings rather than editing them, so a
-/// `disexposure` still names what the element was exposed under.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExposureChange {
     pub(crate) node: NodeId,
     pub(crate) appeared: bool,
-    /// The `exposure-id` this change is recorded under: `None` for an
-    /// element registered only by its listener, which gets no record.
     pub(crate) exposure_id: Option<Rc<str>>,
-    /// The `exposure-scene`: `None` when absent or empty, which the record
-    /// carries as `""`.
     pub(crate) scene: Option<Rc<str>>,
-    /// Whether the element hears `uiappear`/`uidisappear` for it: false for
-    /// a teardown and for `stopExposure`, which send records only.
     pub(crate) element_event: bool,
 }
 
-/// One registered element.
 #[derive(Debug)]
 struct Entry {
-    /// The options it is armed with: which observer it is a target of.
     options: Options,
-    /// The element hears `uiappear`/`uidisappear`: some realm has filed a
-    /// handler for one of them on it.
     element_event: bool,
-    /// `exposure-id` when present and non-empty, copied so that a freed
-    /// element still names it, and shared with every change it forms.
     exposure_id: Option<Rc<str>>,
-    /// `exposure-scene` when present and non-empty, the same way.
     scene: Option<Rc<str>>,
-    /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
-    /// Recorded as exposed: the last change this registration queued was an
-    /// appearance.
     exposed: bool,
-    /// Between a switch that stopped it and one that resumes it
-    /// ([`Exposure::switch`]): its observer stays, and the handler ignores
-    /// what it reports.
     stopped: bool,
 }
 
-/// What [`Exposure`] and every [`ExposureHandler`] share.
 #[derive(Debug, Default)]
 struct Shared {
     entries: FxHashMap<NodeId, Entry>,
-    /// Pending, in the order they formed.
     changes: Vec<ExposureChange>,
 }
 
-/// Queues `change` unless it can say nothing: one with no id and no
-/// element event would deliver neither a record nor an event, and queued it
-/// would still cost a delivery entry.
 fn queue(changes: &mut Vec<ExposureChange>, change: ExposureChange) {
     if change.exposure_id.is_some() || change.element_event {
         changes.push(change);
     }
 }
 
-/// Records `entry` as exposed, queueing the appearance, unless it already
-/// is. `element_event` is whether the element hears it.
 fn expose(changes: &mut Vec<ExposureChange>, node: NodeId, entry: &mut Entry, element_event: bool) {
     if entry.exposed {
         return;
@@ -293,9 +247,6 @@ fn expose(changes: &mut Vec<ExposureChange>, node: NodeId, entry: &mut Entry, el
     queue(changes, change(node, entry, true, element_event));
 }
 
-/// Records `entry` as not exposed, queueing the disappearance, if it was
-/// exposed; answers whether that queued a change. `element_event` is whether
-/// the element hears it.
 fn disexpose(
     changes: &mut Vec<ExposureChange>,
     node: NodeId,
@@ -310,7 +261,6 @@ fn disexpose(
     changes.len() > before
 }
 
-/// `entry`'s change, with the id and scene it carries now.
 fn change(node: NodeId, entry: &Entry, appeared: bool, element_event: bool) -> ExposureChange {
     ExposureChange {
         node,
@@ -321,18 +271,12 @@ fn change(node: NodeId, entry: &Entry, appeared: bool, element_event: bool) -> E
     }
 }
 
-/// The handler of the observer of one set of [`Options`], shared state and
-/// nothing else: each entry it is handed names its target.
 #[derive(Debug)]
 struct ExposureHandler {
     shared: Rc<RefCell<Shared>>,
 }
 
 impl IntersectionEventHandler<()> for ExposureHandler {
-    /// Compares each entry with its target's recorded state and queues a
-    /// change where they differ, unless the registration is stopped.
-    /// Touches no `Document` method, which is what lets it hold the shared
-    /// borrow for the whole call.
     fn notify(
         &mut self,
         _document: &mut LynxDocument,
@@ -345,12 +289,6 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             changes,
         } = &mut *shared;
         for observed in entries {
-            // Every target is registered under this observer's options: a
-            // re-arm and a teardown take the target out of the observer, its
-            // queued entries with it, and a free lets the registration go as
-            // the primitive forgets the target. A stopped element is not
-            // detected: what the primitive reports is ignored, and the
-            // resume re-arms it.
             let node = observed.target;
             let Some(entry) = registered.get_mut(&node) else {
                 continue;
@@ -358,8 +296,6 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             if entry.stopped {
                 continue;
             }
-            // A ratio is never negative, so an area of 0 asks for nothing
-            // but intersection.
             let visible = observed.is_intersecting && observed.intersection_ratio >= entry.area;
             let element_event = entry.element_event;
             if visible {
@@ -370,29 +306,17 @@ impl IntersectionEventHandler<()> for ExposureHandler {
         }
     }
 
-    /// The element was freed: its registration goes, and nothing is queued,
-    /// whether or not it is stopped: a freed element is no target, so there
-    /// is nothing to dispatch a record at.
     fn target_freed(&mut self, node: NodeId) {
         self.shared.borrow_mut().entries.remove(&node);
     }
 }
 
-/// A length one margin attribute names, before it is folded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Length {
     Px(f32),
-    /// As written: `20.0` is `20%`.
     Percent(f32),
 }
 
-/// One margin attribute's value: `<n>px`, `<n>rpx`, `<n>%`, or a bare `<n>`
-/// as px, with surrounding white space ignored. What does not parse, and an
-/// absent attribute, is `0px`.
-///
-/// `rpx` is resolved here, against `viewport_width`: stylo's rule, one rpx is
-/// the viewport width over 750 (`vendor/stylo/style/values/specified/length.rs`,
-/// `rpx_to_computed_value`), without its truncation to the app-unit grid.
 fn parse_length(value: Option<&str>, viewport_width: f32) -> Length {
     let Some(value) = value.map(str::trim) else {
         return Length::Px(0.0);
@@ -416,27 +340,18 @@ fn parse_length(value: Option<&str>, viewport_width: f32) -> Length {
 }
 
 impl Length {
-    /// Whether the length moves no edge, in either unit.
     fn is_zero(self) -> bool {
         match self {
             Self::Px(number) | Self::Percent(number) => number == 0.0,
         }
     }
 
-    /// Whether the length moves an edge out: a positive number in either
-    /// unit.
     fn is_positive(self) -> bool {
         match self {
             Self::Px(number) | Self::Percent(number) => number > 0.0,
         }
     }
 
-    /// Two lengths that land on one side of one margin.
-    ///
-    /// Two lengths of one unit add. A percentage and a length together are
-    /// not one [`MarginLength`], and the element's size they would meet in
-    /// is only known at each update, so then the length is kept and the
-    /// percentage counts as 0.
     fn plus(self, other: Self) -> Self {
         if self.is_zero() {
             return other;
@@ -459,35 +374,17 @@ impl Length {
     }
 }
 
-/// The two margins an element's exposure margins fold into: the observer's
-/// root margin, which dilates the viewport, and its target margin, which
-/// dilates the element's own border box before any clip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Margins {
     root: IntersectionMargin,
     target: IntersectionMargin,
 }
 
-/// Folds an element's margins, each array top, right, bottom, left, into
-/// the observer's two. `ui` is all zero when ui margins do not apply.
-///
-/// - A ui margin lands on the target margin of its own side, either sign.
-/// - A positive screen margin lands on the target margin of the opposite side: growing the screen
-///   down by `b` is growing the element up by `b`, native's `frameOfUIInWindow:` without the
-///   switch.
-/// - A negative screen margin lands on the root margin of its own side, native's
-///   `borderOfExposureScreen:`.
-///
-/// A percentage is of the rect it lands on, which the primitive resolves at
-/// every update: on the target, of the element's own height (top, bottom)
-/// or width (left, right); on the root, of the viewport's.
 fn fold_margins(screen: [Length; 4], ui: [Length; 4]) -> Margins {
     let mut root = [Length::Px(0.0); 4];
     let mut target = ui;
     for (side, length) in screen.into_iter().enumerate() {
         if length.is_positive() {
-            // Top (0) and bottom (2) face each other, as right (1) and left
-            // (3) do.
             let opposite = (side + 2) % 4;
             target[opposite] = target[opposite].plus(length);
         } else if !length.is_zero() {
@@ -506,8 +403,6 @@ fn fold_margins(screen: [Length; 4], ui: [Length; 4]) -> Margins {
     }
 }
 
-/// `exposure-area` as a ratio: `parseFloat(value) / 100` (absent is `"0"`),
-/// clamped to `[0, 1]`, and 0 for what does not parse.
 fn parse_area(value: Option<&str>) -> f64 {
     let ratio = parse_float(value.unwrap_or("0")) / 100.0;
     if ratio.is_nan() {
@@ -517,9 +412,6 @@ fn parse_area(value: Option<&str>) -> f64 {
     }
 }
 
-/// ECMAScript's `parseFloat`: the longest prefix of `text`, past leading
-/// white space, that is a decimal literal or `Infinity`, and `NaN` when there
-/// is none — so `"50%"` reads as 50.
 fn parse_float(text: &str) -> f64 {
     let text = text.trim_start();
     let bytes = text.as_bytes();
@@ -544,7 +436,6 @@ fn parse_float(text: &str) -> f64 {
     let mut fraction = 0;
     if bytes.get(end) == Some(&b'.') {
         fraction = digits(end + 1);
-        // A lone `.` with no digit on either side is not part of a number.
         if integer + fraction > 0 {
             end += 1 + fraction;
         }
@@ -565,23 +456,14 @@ fn parse_float(text: &str) -> f64 {
     text[..end].parse().unwrap_or(f64::NAN)
 }
 
-/// What an exposure observer is made with besides its handler — the root
-/// and target margins an element's margins fold into, and its
-/// `exposure-area`, the one threshold — as the key that elements asking for
-/// the same share one observer under. Compared by bits, `-0` read as `0`,
-/// since the two observe alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Options {
-    /// The root margin's sides, then the target margin's, each top, right,
-    /// bottom, left: whether it is a percentage, and its number's bits.
     margins: [(bool, u32); 8],
     area: u64,
 }
 
 impl Options {
     fn new(margins: &Margins, area: f64) -> Self {
-        // Adding `+0` turns `-0` into `+0` and leaves every other number as
-        // it is.
         let side = |length: MarginLength| match length {
             MarginLength::Px(px) => (false, (px + 0.0).to_bits()),
             MarginLength::Percent(percent) => (true, (percent + 0.0).to_bits()),
@@ -600,7 +482,6 @@ impl Options {
     }
 }
 
-/// What one element's attributes ask for, read at an arm.
 struct Attributes {
     exposure_id: Option<Rc<str>>,
     scene: Option<Rc<str>>,
@@ -609,7 +490,6 @@ struct Attributes {
 }
 
 impl Attributes {
-    /// Reads `node`'s exposure attributes.
     fn read(document: &LynxDocument, node: NodeId) -> Self {
         let element = document
             .get(node)
@@ -631,22 +511,13 @@ impl Attributes {
     }
 }
 
-/// A document's exposure registrations, each stopped or not, and the
-/// changes waiting for a delivery entry.
-///
-/// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
 pub(crate) struct Exposure {
-    /// Shared with every observer's [`ExposureHandler`].
     shared: Rc<RefCell<Shared>>,
-    /// The observer of each set of options an arm has asked for. Kept once
-    /// made: registrations come and go with a list's cells, and the
-    /// observer of their options is what the next one is armed under.
     observers: FxHashMap<Options, IntersectionObserverId>,
 }
 
 impl Exposure {
-    /// No registrations.
     pub(crate) fn new() -> Self {
         Self {
             shared: Rc::default(),
@@ -654,10 +525,6 @@ impl Exposure {
         }
     }
 
-    /// An `exposure-*` attribute of the live element `node` was written or
-    /// removed: a registered element is re-armed from its attributes as they
-    /// are now. An element that is not registered stays so — no attribute
-    /// registers one by itself.
     pub(crate) fn attribute_changed(&mut self, document: &mut LynxDocument, node: NodeId) {
         let element_event = self
             .shared
@@ -671,15 +538,6 @@ impl Exposure {
         }
     }
 
-    /// What the document's listener table says of the live element `node`,
-    /// told on each change of either answer: `registered`, whether some realm
-    /// has filed the exposure record listener on it, and `element_event`,
-    /// whether some realm has filed a `uiappear`/`uidisappear` handler on it.
-    ///
-    /// The element is registered while `registered` holds: the first time,
-    /// it is armed from its attributes; after that, a change of
-    /// `element_event` alone only changes what its next changes say. When
-    /// `registered` stops holding, it is torn down.
     pub(crate) fn set_registered(
         &mut self,
         document: &mut LynxDocument,
@@ -699,16 +557,6 @@ impl Exposure {
         self.arm(document, node, attributes, element_event);
     }
 
-    /// Registers `node`, or re-arms it, with `attributes`.
-    ///
-    /// A registered element is first taken out of its observer, the
-    /// entries already queued for it included. A registration recorded as
-    /// exposed under another id than the one it now has sends a
-    /// `disexposure` under the old id and is recorded as not exposed, so the
-    /// new id gets an exposure of its own. The observer of the options the
-    /// attributes ask for, made now if no arm asked for them before, then
-    /// observes the element afresh, whether or not the registration is
-    /// stopped: the handler ignores what it reports while it is.
     fn arm(
         &mut self,
         document: &mut LynxDocument,
@@ -775,10 +623,6 @@ impl Exposure {
         document.observe_intersection(observer, node);
     }
 
-    /// Unregisters `node`: it is taken out of its observer, the entries
-    /// already queued for it included, and if it was recorded as exposed it
-    /// sends a `disexposure` under the id it was exposed under, with no
-    /// element event.
     fn teardown(&mut self, document: &mut LynxDocument, node: NodeId) {
         let options = {
             let mut shared = self.shared.borrow_mut();
@@ -792,27 +636,6 @@ impl Exposure {
         document.forget_intersection_target(self.observers[&options], node);
     }
 
-    /// `lynx.stopExposure({sendEvent})` (`on` false) and
-    /// `lynx.resumeExposure()` (`on` true) for the elements `nodes`, the ones
-    /// the calling realm registered, as native runs them for one card.
-    /// Answers how many records the call queued: one per listed element
-    /// recorded as exposed under an `exposure-id` for a stop with
-    /// `send_event`, and 0 for anything else.
-    ///
-    /// Stopping marks each listed registration stopped: it stays observed,
-    /// and what its observer reports for it is ignored. With `send_event` each listed
-    /// registration recorded as exposed sends one `disexposure` (records
-    /// only) and is recorded as not exposed, whatever an earlier stop did;
-    /// without it nothing is sent and the record is kept, so a resume that
-    /// finds the element still visible sends nothing for it. Resuming clears
-    /// the mark of each listed stopped registration and arms it again from
-    /// its attributes as they are now, so its first report after is judged
-    /// against the record: one whose element did not move queues nothing. A listed registration
-    /// that is not stopped is running already and is left alone.
-    ///
-    /// A listed node that is not registered — never, no longer, or freed,
-    /// which lets its registration go, sending nothing — is skipped. Registrations are visited in
-    /// the order listed, so the records one call sends come in the caller's order.
     pub(crate) fn switch(
         &mut self,
         document: &mut LynxDocument,
@@ -849,33 +672,25 @@ impl Exposure {
         0
     }
 
-    /// Every pending change, in the order they formed, leaving none.
     pub(crate) fn take_changes(&self) -> Vec<ExposureChange> {
         std::mem::take(&mut self.shared.borrow_mut().changes)
     }
 
-    /// Whether a change waits for a delivery entry: the epilogue's cue to
-    /// post one even when no observer has entries queued, for a teardown or
-    /// a `stopExposure` that sent records.
     pub(crate) fn has_changes(&self) -> bool {
         !self.shared.borrow().changes.is_empty()
     }
 
-    /// The observer `node`'s registration is a target of, if it is
-    /// registered — for the tests that read what an arm asked for.
     #[cfg(test)]
     pub(crate) fn observer_of(&self, node: NodeId) -> Option<IntersectionObserverId> {
         let options = self.shared.borrow().entries.get(&node)?.options;
         self.observers.get(&options).copied()
     }
 
-    /// Whether `node` is registered at all.
     #[cfg(test)]
     fn is_registered(&self, node: NodeId) -> bool {
         self.shared.borrow().entries.contains_key(&node)
     }
 
-    /// Whether `node` is registered and recorded as exposed.
     #[cfg(test)]
     fn is_exposed(&self, node: NodeId) -> bool {
         self.shared
@@ -885,7 +700,6 @@ impl Exposure {
             .is_some_and(|entry| entry.exposed)
     }
 
-    /// Whether `node` is registered and stopped.
     #[cfg(test)]
     fn is_stopped(&self, node: NodeId) -> bool {
         self.shared

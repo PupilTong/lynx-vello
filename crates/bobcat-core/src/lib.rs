@@ -39,8 +39,6 @@
 mod alarm;
 #[path = "background/lib.rs"]
 mod background;
-/// The private script boundary, exposed only so this crate's own benchmarks
-/// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
 mod canvas;
@@ -57,8 +55,6 @@ mod main;
 pub mod native_module;
 #[path = "paint/lib.rs"]
 mod paint;
-/// Lynx's performance entries: what [`EngineEvent::Performance`] carries,
-/// and the clock it is measured on.
 pub mod performance;
 mod realm;
 mod require;
@@ -73,8 +69,6 @@ mod timers;
 #[path = "view/lib.rs"]
 mod view;
 
-/// Normalized host input vocabulary. No document or hit-test result crosses
-/// this boundary.
 pub mod input {
     pub use terminus::link::Point2D;
     pub use terminus::link::input::{
@@ -82,42 +76,16 @@ pub mod input {
     };
 }
 
-/// The editing vocabulary a host speaks to a view in: the commands
-/// [`LynxView::edit`] takes and the state
-/// [`EngineEvent::TextInputStateChanged`] reports.
 pub mod editing {
-    /// The rectangle [`TextInputState`]'s geometry is in (viewport CSS px).
     pub use terminus::link::Rect;
     pub use terminus::link::editing::{
         Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
     };
 
-    /// Where a view's typed text, deletions and line breaks come from, which
-    /// decides what a `keydown`'s editing default action does at a focused
-    /// editing host. Set per view with
-    /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source).
-    ///
-    /// Movement (the arrows, Home and End, by character, word, line or to an
-    /// edge) and select-all are the `keydown`'s in both: a platform text
-    /// proxy reports no input event for them.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub enum TextInputSource {
-        /// The keys: a `keydown` nobody canceled inserts the text the host
-        /// reported with the key ([`InputEvent::with_text`](crate::input::InputEvent::with_text)),
-        /// and Enter, Backspace and Delete insert a line break and delete. A
-        /// host whose input method composes sends its compositions and
-        /// commits as [`Command`]s beside them. The default, and what a
-        /// window that reads keys from the platform (the macOS host, a test
-        /// driver) is.
         #[default]
         Keys,
-        /// The host's edit commands: the host owns a platform text proxy
-        /// (the browser host's hidden `<textarea>`) that reports every
-        /// insertion, deletion and line break as an input event of its own,
-        /// which the host forwards as [`Command::Insert`],
-        /// [`Command::DeleteBackward`], [`Command::InsertLineBreak`] and the
-        /// rest. A `keydown` then performs only movement and select-all, so
-        /// the proxy's Backspace deletes once rather than once per path.
         Commands,
     }
 }
@@ -130,9 +98,6 @@ pub use native_module::{
 };
 pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-/// The engine's monotonic clock, which a picture's next change
-/// ([`FrameImage::next_change`]) is read on: a host whose store knows when
-/// an animated picture next changes answers on it.
 pub use terminus::link::clock::ClockInstant;
 pub use terminus::link::{
     DocumentKind, FontBlob, FrameImage, FrameImages, FrameTarget, FrameWriter, ImageDescriptor,

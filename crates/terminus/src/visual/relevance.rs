@@ -127,51 +127,23 @@ use crate::paint::walker::CullPlan;
 use crate::tree::document::{Document, NodeId};
 use crate::visual::{AutoBox, PaintOrder};
 
-/// How many times one render may build the paint order.
-///
-/// Every pass past the first answers a move the one before made: a nested
-/// `auto` box a reveal gave an item, or a skipped box a reveal's size change
-/// brought into the region. The cap bounds what one commit spends on them;
-/// past it the frame is published, and asks for the next frame tick to go on
-/// ([`Document::relevance_pending`]).
 pub(crate) const RELEVANCE_PASSES: u32 = 4;
 
-/// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)'s
-/// event type, which engine components observe by this name.
 const CONTENT_VISIBILITY_AUTO_STATE_CHANGE: &str = "contentvisibilityautostatechange";
 
-/// One element whose skipping state changed in a commit: what
-/// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)
-/// fires `contentvisibilityautostatechange` for.
-///
-/// The queue is published as well as dispatched: it is the record of one
-/// commit, so a caller that wants the facts without the walk drains it with
-/// [`Document::take_content_visibility_changes`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentVisibilityChange {
-    /// The element the state change happened to, which is the event's target.
     pub node: NodeId,
-    /// The state it changed **to**, which is the event's `skipped`
-    /// attribute: `true` when the element now skips its contents.
     pub skipped: bool,
 }
 
-/// Reusable per-render storage, so a settled page determines relevance with
-/// zero allocation.
 #[derive(Debug, Default)]
 pub(crate) struct RelevanceScratch {
     plan: CullPlan,
-    /// The nodes whose bit moved in the pass just run.
     flips: Vec<NodeId>,
 }
 
 impl<T: Sync> Document<T> {
-    /// Runs one determination pass over `frame`, applies whatever moved, and
-    /// answers whether the frame is now stale.
-    ///
-    /// `false` means the render is finished: either no `auto` box is in the
-    /// frame at all, or every one of them is already in the state this frame
-    /// was built under.
     pub(crate) fn determine_relevance(
         &mut self,
         scratch: &mut RelevanceScratch,
@@ -186,10 +158,6 @@ impl<T: Sync> Document<T> {
             let Some(slot) = self.slot(auto.node) else {
                 continue;
             };
-            // Decided by an earlier pass of *this* render: a reveal or a new
-            // skip stands, whatever a later layout moved; a confirmed skip is
-            // asked again only whether it is now relevant. That is what
-            // bounds the loop.
             let freshness = self.arenas().relevance_freshness(slot);
             if freshness == Freshness::Final {
                 continue;
@@ -201,11 +169,6 @@ impl<T: Sync> Document<T> {
             let state = Relevance::of(relevant);
             if self.arenas_mut().determine_relevance(slot, state) {
                 scratch.flips.push(auto.node);
-                // css-contain-2 §4.4: the skipping state changed, so this
-                // element owes a `contentvisibilityautostatechange`. The
-                // freshness guard above is what makes one commit push at
-                // most one change per element, and the loop is over
-                // `auto_boxes()`, so they queue in frame order.
                 self.content_visibility_changes
                     .push(ContentVisibilityChange {
                         node: auto.node,
@@ -216,20 +179,12 @@ impl<T: Sync> Document<T> {
         if scratch.flips.is_empty() {
             return false;
         }
-        // Every bit is in place before the first invalidation, because the
-        // walk `invalidate_layout` makes reads `skips_contents` on the way
-        // up: a half-applied set would stop at an ancestor still claiming to
-        // skip.
         for &node in &scratch.flips {
             self.invalidate_layout(node);
         }
         true
     }
 
-    /// Whether a pass over `frame` would reveal a box: one this render has
-    /// not decided for good, still skipping, that the region now admits.
-    /// Asked of the frame a render publishes at [`RELEVANCE_PASSES`], whose
-    /// own determination never ran.
     pub(crate) fn relevance_pending(
         &mut self,
         scratch: &mut RelevanceScratch,
@@ -248,42 +203,18 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    /// css-contain-2 §4.1's relevance of one `auto` box: the region admits
-    /// it, or one of the conditions that hold wherever it is.
-    ///
-    /// css-anchor-position-1 §2.5: an `auto` box holding the target anchor of
-    /// a positioned box outside it that is itself shown is relevant, wherever
-    /// it is — asked only of a box the region rejects, and only on a page
-    /// with anchor-positioned boxes. css-contain-2 §4: an element in the top
-    /// layer is relevant.
     fn is_relevant(&self, plan: &CullPlan, frame: &PaintOrder, auto: &AutoBox) -> bool {
         plan.admits_auto_box(frame, auto)
             || self.anchor_keeps_relevant(auto.node)
             || self.in_top_layer(auto.node)
     }
 
-    /// Ends the render: the determinations it made stop being *this*
-    /// render's, so the next one asks again.
     pub(crate) fn settle_relevance(&mut self) {
         self.arenas_mut().settle_relevance();
     }
 }
 
 impl<T> Document<T> {
-    /// Takes the `content-visibility: auto` skipping changes the commits
-    /// since the last call produced, in frame order, and leaves the queue
-    /// empty.
-    ///
-    /// One entry per element per commit, because a commit moves an element's
-    /// bit at most once; two commits without a drain between them leave two
-    /// entries for an element that changed in both, in the order the commits
-    /// ran, because both are events a listener is owed.
-    ///
-    /// A commit that changed nothing hands back an empty `Vec`: no
-    /// allocation, and the queue's own storage is left where it is rather
-    /// than moved out and rebuilt. A drain that does carry changes hands the
-    /// queue's storage over with them, which is the one allocation a batch of
-    /// events costs.
     #[must_use]
     pub fn take_content_visibility_changes(&mut self) -> Vec<ContentVisibilityChange> {
         if self.content_visibility_changes.is_empty() {
@@ -292,44 +223,12 @@ impl<T> Document<T> {
         std::mem::take(&mut self.content_visibility_changes)
     }
 
-    /// Whether any commit since the last drain changed an element's skipping
-    /// state — the cheap question a host asks once per entry, before it
-    /// decides to post the task that delivers them.
     #[must_use]
     pub fn has_pending_content_visibility_changes(&self) -> bool {
         !self.content_visibility_changes.is_empty()
     }
 
-    /// Fires one `contentvisibilityautostatechange` per queued change, in
-    /// frame order, and leaves the queue empty.
-    ///
-    /// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)
-    /// dispatches the event "by posting a task at the time when the state
-    /// change occurs": the queue is this crate's half of that, and calling
-    /// this from the task is the host's. Nothing here checks *when* it is
-    /// called, so a host that called it inside the commit would merely be
-    /// wrong rather than refused — which is why the rule is stated where the
-    /// call site is.
-    ///
-    /// Each change is one [`Document::dispatch_element_event`], so it reaches
-    /// engine components alone and never script: `bubbles` is `true` (a
-    /// recorded choice where the spec is silent — Chromium bubbles while Safari
-    /// and Firefox do not, and w3c/csswg-drafts#11310 is open), `composed` is
-    /// `false`, and nothing is cancelable. An element freed between the
-    /// commit and this call dispatches nothing at all.
-    ///
-    /// The queue is drained whether or not anything listens, because it is
-    /// the record of one commit rather than a mailbox: a document that
-    /// observes no `contentvisibilityautostatechange` pays the drain and one
-    /// set lookup per change.
-    ///
-    /// `timestamp` is what each delivery reports as
-    /// [`ElementEvent::timestamp`](crate::event::ElementEvent::timestamp):
-    /// the host's clock reading for the task, in milliseconds.
     pub fn dispatch_content_visibility_changes(&mut self, timestamp: f64) {
-        // Taken first, so a handler that renders — and queues changes of its
-        // own — leaves them for the next drain instead of extending this
-        // walk.
         for change in self.take_content_visibility_changes() {
             self.dispatch_element_event(
                 change.node,

@@ -32,7 +32,6 @@ fn tight_realm() -> Context {
     .unwrap()
 }
 
-/// The realm's own answer to an expression, as a Rust `String`.
 fn text(realm: &mut Context, source: &str) -> String {
     let value = realm
         .evaluate(EvalSource::new(source), EvalOptions::default())
@@ -170,9 +169,6 @@ fn rejected_argument_path_does_not_leak() {
     realm
         .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
         .unwrap();
-    // The serializer refuses a function, and does so partway through an object
-    // it has already written most of — so this drives the trampoline's own
-    // cleanup of a half-built argument list as well as the refusal itself.
     let value = realm
         .evaluate(
             EvalSource::new(
@@ -190,8 +186,6 @@ fn rejected_argument_path_does_not_leak() {
 #[test]
 fn an_object_comes_back_from_the_host_as_a_deep_copy() {
     let mut realm = realm();
-    // Hands whatever it was given straight back, which for a non-primitive
-    // means the realm reads its own structured clone back as a deep copy.
     realm
         .define_global_function("echo", 1, |arguments| {
             Ok(arguments
@@ -286,8 +280,6 @@ fn a_structured_clone_written_in_one_runtime_reads_in_another() {
         .unwrap();
     let kept = captured.borrow_mut().take().expect("the host kept it");
 
-    // A second runtime, so a second heap and a second atom table. The stream
-    // carries every atom as a string, which is what lets it be read here.
     let mut reader = realm();
     let host = reader
         .evaluate(
@@ -342,7 +334,6 @@ fn a_function_argument_throws_a_type_error_and_never_reaches_the_host() {
         0,
         "the serializer refuses before the host is dispatched to"
     );
-    // And the realm is unharmed: the pending exception was the only thing left.
     assert_eq!(text(&mut realm, "String(take({ ok: 1 }))"), "undefined");
     assert_eq!(calls.get(), 1);
 }
@@ -350,8 +341,6 @@ fn a_function_argument_throws_a_type_error_and_never_reaches_the_host() {
 #[test]
 fn structured_round_trip_does_not_leak() {
     let mut realm = tight_realm();
-    // Hands whatever it was given straight back, which for a non-primitive
-    // means the realm reads its own structured clone back as a deep copy.
     realm
         .define_global_function("echo", 1, |arguments| {
             Ok(arguments
@@ -677,15 +666,11 @@ mod release {
             .unwrap();
         assert_eq!(drops.get(), 0);
 
-        // The runtime outlives the realm here, so this asserts what releasing
-        // one realm does, not what tearing the runtime down does.
         drop(realm);
         assert_eq!(drops.get(), 1, "teardown must release the remainder");
     }
 }
 
-/// Installs `handler` as the global `name`, made by
-/// [`Context::function_reentrant`].
 fn define_reentrant(
     realm: &mut Context,
     name: &str,
@@ -697,22 +682,14 @@ fn define_reentrant(
     realm.set_property(&global, name, &function).unwrap();
 }
 
-/// A realm its own host functions can reach while one of them runs: the
-/// handle the test holds, and the weak one each function is given once the
-/// realm is shared. Weak, as a host would hold it, since a function of the
-/// realm holding the realm would never let it be freed.
 type Reentry = Rc<OnceCell<Weak<Context>>>;
 
-/// Shares `realm` and points `reentry` at it.
 fn share(realm: Context, reentry: &Reentry) -> Rc<Context> {
     let realm = Rc::new(realm);
     assert!(reentry.set(Rc::downgrade(&realm)).is_ok());
     realm
 }
 
-/// Evaluates `source` in the realm `reentry` names, from inside a host
-/// function of that realm, as a host function calling back into its realm
-/// does.
 fn evaluate_again(reentry: &Reentry, source: &str) -> Result<Value, HostFunctionError> {
     let realm = reentry
         .get()
@@ -723,7 +700,6 @@ fn evaluate_again(reentry: &Reentry, source: &str) -> Result<Value, HostFunction
         .map_err(|error| HostFunctionError::new(error.message))
 }
 
-/// [`text`] over a shared realm.
 fn shared_text(realm: &Context, source: &str) -> String {
     let value = realm
         .evaluate(EvalSource::new(source), EvalOptions::default())
@@ -731,11 +707,6 @@ fn shared_text(realm: &Context, source: &str) -> String {
     String::from_utf16(&value.to_utf16().unwrap()).unwrap()
 }
 
-/// A re-entrant host function runs again inside its own call: `nest(n)`
-/// evaluates `nest(n - 1)` in the realm it was called from before it answers,
-/// so each answer is written while every outer call is still running. Each
-/// inner string is read by the call that asked for it before the outer one
-/// writes its own, so every level reads its own and the answers compose.
 #[test]
 fn a_reentrant_host_function_runs_again_inside_its_own_call() {
     let mut realm = realm();
@@ -759,9 +730,6 @@ fn a_reentrant_host_function_runs_again_inside_its_own_call() {
     );
 }
 
-/// The same for structured clones: each level answers the object it was
-/// handed after a nested call has answered a different one, and every level
-/// reads back exactly its own.
 #[test]
 fn nested_host_calls_each_return_their_own_structured_clone() {
     let mut realm = realm();
@@ -796,10 +764,6 @@ fn nested_host_calls_each_return_their_own_structured_clone() {
     );
 }
 
-/// A host function made by [`Context::function`] is borrowed for its call,
-/// so a call that reaches it again while it runs is refused with an
-/// exception in the realm, which the outer call sees as the inner
-/// evaluation's failure.
 #[test]
 fn an_exclusive_host_function_refuses_a_nested_call() {
     let mut realm = realm();
@@ -825,12 +789,8 @@ fn an_exclusive_host_function_refuses_a_nested_call() {
     );
 }
 
-/// What a host function was handed for its first argument, kept: the bytes
-/// of a `Bytes` argument, or `None` for any other kind.
 type SeenBytes = Rc<RefCell<Vec<Option<Vec<u8>>>>>;
 
-/// Installs `take(value, ...)`, which records what its first argument
-/// arrived as and answers the number of bytes it saw, or -1.
 fn define_take(realm: &mut Context, seen: &SeenBytes) {
     let sink = Rc::clone(seen);
     realm
@@ -866,8 +826,6 @@ fn a_bare_array_buffer_argument_arrives_as_its_bytes() {
     );
 }
 
-/// A typed array's bytes are reached by passing its `buffer` with the view's
-/// own offset and length; the host slices them.
 #[test]
 fn a_view_is_passed_as_its_buffer_with_its_offset_and_length() {
     let mut realm = realm();
@@ -940,10 +898,6 @@ fn returned_bytes_become_an_array_buffer() {
     );
 }
 
-/// A returned buffer's storage is the host's allocation; what `QuickJS` does
-/// with an external buffer's storage — write it, refuse to resize it, keep it
-/// across a same-length transfer, copy and free it on a transfer to another
-/// length, free it when detached — all works on it.
 #[test]
 fn a_returned_buffer_can_be_written_transferred_and_detached() {
     let mut realm = realm();
@@ -978,9 +932,6 @@ fn a_returned_buffer_can_be_written_transferred_and_detached() {
     );
 }
 
-/// A typed array, an `ArrayBuffer` inside another value and a resizable
-/// `ArrayBuffer` all keep the structured path and come back as the same kind
-/// of value; a `DataView` is still the serializer's refusal.
 #[test]
 fn views_nested_and_resizable_buffers_keep_the_structured_path() {
     let mut realm = realm();
@@ -1028,8 +979,6 @@ fn views_nested_and_resizable_buffers_keep_the_structured_path() {
     );
 }
 
-/// An `ArrayBuffer` subclass instance is an `ArrayBuffer` to `QuickJS`, so it
-/// crosses as bytes; the structured path also made it a plain one.
 #[test]
 fn an_array_buffer_subclass_instance_crosses_as_bytes() {
     let mut realm = realm();
@@ -1046,9 +995,6 @@ fn an_array_buffer_subclass_instance_crosses_as_bytes() {
     assert_eq!(*seen.borrow(), [Some(vec![0, 0])]);
 }
 
-/// Whether a buffer is resizable is read with the realm's intrinsic getter,
-/// so a getter the realm's code installed is never run by describing an
-/// argument and cannot change how it crosses.
 #[test]
 fn describing_a_buffer_runs_no_getter_of_the_realm() {
     let mut realm = realm();
@@ -1067,9 +1013,6 @@ fn describing_a_buffer_runs_no_getter_of_the_realm() {
     assert_eq!(*seen.borrow(), [Some(vec![0, 0, 0])]);
 }
 
-/// A detached buffer is refused at the call with the `TypeError` the
-/// structured path throws for one, bare or nested, and the host function is
-/// not called.
 #[test]
 fn a_detached_buffer_is_a_type_error_at_the_call() {
     let mut realm = realm();
@@ -1095,11 +1038,6 @@ fn a_detached_buffer_is_a_type_error_at_the_call() {
     assert_eq!(text(&mut realm, "String(take(new ArrayBuffer(1)))"), "1");
 }
 
-/// The bytes are the trampoline's copy, so code of the realm that a host
-/// function runs while it holds them — writing the buffer, detaching it,
-/// freeing its storage with a transfer to another length — leaves them as
-/// they were. This holds for a host function made by `Context::function`
-/// as much as for a reentrant one: either can call into its realm.
 #[test]
 fn bytes_held_across_a_call_into_the_realm_are_unchanged() {
     for reentrant in [false, true] {
@@ -1117,7 +1055,6 @@ fn bytes_held_across_a_call_into_the_realm_are_unchanged() {
                  globalThis.held = globalThis.held.transfer(4096); \
                  globalThis.held.transfer();",
             )?;
-            // A second allocation, to make reuse of freed storage likely.
             evaluate_again(&again, "globalThis.other = new Uint8Array(64).fill(7);")?;
             assert_eq!(bytes, before.as_slice(), "the lent bytes did not change");
             Ok(HostValue::Bytes(Box::from(bytes)))
@@ -1141,9 +1078,6 @@ fn bytes_held_across_a_call_into_the_realm_are_unchanged() {
     }
 }
 
-/// What a host function keeps of a `Bytes` argument is `Send`, and lent into
-/// a call of a realm of another runtime on another thread it arrives as an
-/// `ArrayBuffer` with the same bytes: what `postMessage(arrayBuffer)` does.
 #[test]
 fn kept_bytes_arrive_in_another_realm_as_an_array_buffer() {
     let captured: Rc<RefCell<Option<HostValue>>> = Rc::default();
@@ -1196,7 +1130,6 @@ fn kept_bytes_arrive_in_another_realm_as_an_array_buffer() {
     );
 }
 
-/// Lending empty bytes into a call makes an empty `ArrayBuffer`.
 #[test]
 fn empty_bytes_lent_into_a_call_make_an_empty_buffer() {
     let mut realm = realm();
@@ -1222,8 +1155,6 @@ fn empty_bytes_lent_into_a_call_make_an_empty_buffer() {
     );
 }
 
-/// Every argument copy the trampoline makes is released: 20 000 calls with a
-/// 64 KiB buffer would need over a gigabyte in a 2 MB realm otherwise.
 #[test]
 fn bytes_arguments_do_not_leak() {
     let mut realm = tight_realm();

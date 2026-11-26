@@ -19,11 +19,6 @@ use super::{PaintItem, PaintItemKind, PaintOrder, ScrollSlot, SpaceSamples, geom
 use crate::kurbo::{Affine, Point};
 use crate::tree::document::{Document, NodeId};
 
-/// Where a hit query's scroll offsets come from: `None` falls back to the
-/// slot's committed offset. The frame is baked unscrolled, so a query
-/// carries the point *into* each item's space before inverting its
-/// transform — the inverse of the map composition applies, snapped the same
-/// way.
 pub(crate) type OffsetSource<'a> = dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'a;
 
 impl PaintOrder {
@@ -71,10 +66,6 @@ impl PaintOrder {
         self.hits_at(document, point, &samples).next()
     }
 
-    /// Items whose node died since the frame was built are skipped, not
-    /// answered as their id: the frame's geometry for them is gone, and the
-    /// id names nothing a caller could do anything with. A hit on an
-    /// anonymous box answers its container (`tree::anonymous`).
     fn hits_at<'frame, T>(
         &'frame self,
         document: &'frame Document<T>,
@@ -98,9 +89,6 @@ impl PaintOrder {
         if !item.hit_testable {
             return None;
         }
-        // The frame is baked unscrolled: carry the screen point back through
-        // the item's space before inverting its own transform. A degenerate
-        // space paints the item collapsed; nothing to hit.
         let unmoved = unmap(samples.css(item.space), point)?;
         let local = self
             .matrix(item.transform)
@@ -146,8 +134,6 @@ impl PaintOrder {
     }
 }
 
-/// `point` carried back through a space's live map, or `None` when the map
-/// is degenerate.
 fn unmap(map: Affine, point: Point2D<f32>) -> Option<Point2D<f32>> {
     if map.determinant().abs() < f64::EPSILON {
         return None;

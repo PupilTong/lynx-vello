@@ -20,8 +20,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use terminus::link::clock::alignment_channel;
-/// View metrics, copied across the view's one thread boundary: the
-/// presenting painter's own.
 pub(crate) use terminus::link::painter::Viewport;
 pub use terminus::link::painter::{DrawTarget, FrameSize, PainterError, Screenshot, WindowTarget};
 use terminus::link::{FontBlob, FrameImages, ImageInbox, StylePool};
@@ -44,38 +42,14 @@ use crate::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
 
-/// The screen metrics `SystemInfo` reports: `pixelRatio`, `pixelWidth`,
-/// `pixelHeight`.
-///
-/// A screen, not a view. What Lynx calls `SystemInfo` describes the display
-/// the page is shown on — natively the process-wide physical screen size,
-/// and in web-core `devicePixelRatio` with `screen.availWidth`/`availHeight`
-/// multiplied by it — so a view's own viewport is not an answer to it. The
-/// embedder measures it and names it in
-/// [`ViewSources::screen`](ViewSources::screen).
-///
-/// Read once, as the realm opens, and never updated afterwards — the same
-/// standing web-core gives the values it reads at module load. A view resized
-/// later, or a painter that binds at other metrics, changes nothing here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenMetrics {
-    /// Physical pixels per CSS pixel, reported as `pixelRatio`.
     pub pixel_ratio: f32,
-    /// The screen's width in physical pixels, reported as `pixelWidth`.
     pub pixel_width: f32,
-    /// The screen's height in physical pixels, reported as `pixelHeight`.
     pub pixel_height: f32,
 }
 
 impl ScreenMetrics {
-    /// The metrics of a viewport `width`×`height` CSS pixels at
-    /// `device_pixel_ratio`, in physical pixels: `pixel_ratio` is the ratio
-    /// and the two sizes are the CSS size multiplied by it.
-    ///
-    /// Not a screen, and not meant to be one. It is what a host that has no
-    /// screen to measure — a headless or offscreen capture — reports, named
-    /// explicitly at the call that builds its [`ViewSources`]: nothing in the
-    /// engine derives a screen on a host's behalf.
     #[must_use]
     pub const fn for_viewport(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
         Self {
@@ -99,61 +73,26 @@ pub enum EngineError {
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
-    /// The default family a view named is one neither its own font
-    /// containers nor the platform provides. A construction failure rather
-    /// than a startup one: [`LynxGroup::create_lynx_view`] validates the
-    /// fonts before it hands the fetcher anything, so a view that fails this
-    /// is never built and never fetches.
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
-    /// The locale a view named is not a well-formed BCP-47 language tag. A
-    /// construction failure of the same kind as [`Self::UnknownFontFamily`]:
-    /// [`LynxGroup::create_lynx_view`] validates it before it hands the
-    /// fetcher anything, so a view that fails this is never built and never
-    /// fetches.
     #[error("`{0}` is not a BCP-47 language tag")]
     InvalidLocale(String),
-    /// A script a host asked [`LynxGroup::preload_text`] for is not an ISO
-    /// 15924 code, spelled as the standard spells it (`Hani`), that the
-    /// platform's font fallback can be asked for.
     #[error("`{0}` is not a script whose font fallback can be preloaded")]
     UnknownScript(String),
-    /// A view's [`base_url`](ViewSources::base_url) is not an absolute URL,
-    /// or its entry or BTS entry does not resolve against it; `url` is the
-    /// string that failed. A construction failure of the same kind as
-    /// [`Self::UnknownFontFamily`]: [`LynxGroup::create_lynx_view`] resolves
-    /// the entries before it builds the fetcher, so a view that fails this is
-    /// never built and requests nothing.
     #[error("cannot resolve `{url}`: {message}")]
     InvalidUrl { url: String, message: String },
     #[error(
         "this painter presents into a window; `post_frame` and `draw_posted` advance an offscreen one"
     )]
     NotOffscreen,
-    /// One view has at most one interactive painter, and one painter observes
-    /// at most one *live* view. A link whose view has been released is not an
-    /// attachment and never has to be detached by hand: attaching releases it.
-    /// Two live pairings are what this refuses, and detaching whichever one is
-    /// in the way is what clears it.
     #[error("a painter is already attached")]
     PainterAttached,
-    /// Two of a view's native modules answer to one `NativeModules` key. The
-    /// realm's object has one property per name, so there is no second module
-    /// for a name to reach and nothing to arbitrate between them; naming the
-    /// clash where the view is built is the whole of the resolution.
     #[error("two native modules are named `{0}`")]
     DuplicateNativeModule(String),
-    /// A native module's ES module ([`NativeModule::esm`]) is not bytecode
-    /// in this build's frame: another build's, cut short, or not bytecode at
-    /// all. A construction failure of the same kind as
-    /// [`Self::DuplicateNativeModule`], decided before anything is requested.
-    /// The name is the module's.
     #[error("the ES module of native module `{0}` is not bytecode this build of the engine wrote")]
     InvalidNativeModuleEsm(String),
 }
 
-/// The presenting painter's failures, one variant each: its metrics, its
-/// GPU work and its rendering.
 impl From<PainterError> for EngineError {
     fn from(error: PainterError) -> Self {
         match error {
@@ -164,18 +103,6 @@ impl From<PainterError> for EngineError {
     }
 }
 
-/// A view construction or startup failure. Construction reports target,
-/// URL, font, native-module and attachment errors directly; loading and boot
-/// report through [`EngineEvent::StartupFailed`] on the returned view.
-///
-/// **An entry that fails to load reports as the fetcher's own error.** The
-/// view's entry task reads the fetcher's answer before any script runs, so a
-/// load that failed reaches the embedder as the error the fetcher answered
-/// with, and an answer that is not a script as a `Script` error naming the
-/// entry's URL. **A listed stylesheet that fails to load reports as
-/// `Script`**: boot's own `__FlushElementTree` is what reads the listed
-/// sheets, so what reaches the embedder is the exception that flush threw,
-/// carrying the URL and the host's own reason in its message.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LynxViewError {
@@ -185,14 +112,8 @@ pub enum LynxViewError {
     Resource(#[from] crate::resource::ResourceError),
     #[error(transparent)]
     Script(#[from] ScriptError),
-    /// What a fetcher answers a source request with when the bytes are not
-    /// UTF-8. The view's entry task reports this answer to the entry as it
-    /// is, as [`EngineEvent::StartupFailed`]; any other script load reads it
-    /// as the text of the exception its own read threw, never as this
-    /// variant.
     #[error("script `{url}` is not valid UTF-8: {message}")]
     InvalidScriptEncoding { url: String, message: String },
-    /// The same for a stylesheet.
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
 }
@@ -200,199 +121,49 @@ pub enum LynxViewError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    /// MTS boot completed: the entry module evaluated — its top-level await
-    /// settled — and its first flush committed. The BTS Worker plays no part
-    /// in it: it may still be importing its entry, may have thrown (reported
-    /// separately as [`EngineEvent::WorkerThrew`]), or may have ended
-    /// ([`EngineEvent::WorkerEnded`]).
-    /// `LynxView::pump` records the view as ready before returning this
-    /// notification.
-    ///
-    /// An entry that throws does not stop it: the entry is the app's code,
-    /// so its failure is reported first, as [`EngineEvent::ScriptRunError`],
-    /// and boot goes on to connect the BTS, render and flush, which is what
-    /// this still follows.
     ScriptFinished,
-    /// The view could not start. Fatal: the view ends. Exactly four causes:
-    ///
-    /// - the view's realm could not be opened — the group's script runtime could not be built,
-    ///   which fails every view the group serves, or the realm's own construction failed;
-    /// - the entry could not be loaded: the fetcher's own error, or a `Script` error naming the
-    ///   entry's URL for an answer that is not a script;
-    /// - a listed stylesheet could not be loaded, or was answered with something other than a
-    ///   stylesheet. Boot's own `__FlushElementTree` is what reads the listed sheets, so this
-    ///   always arrives before [`EngineEvent::ScriptFinished`], as the `Script` error that flush
-    ///   threw, naming the sheet — also when app code met the failure first and caught it;
-    /// - the engine's own boot code failed: page data that is not JSON, the document's
-    ///   construction, connecting the BTS, or boot's own flush.
-    ///
-    /// A failure of boot's own code after the entry's import — most often a
-    /// listed sheet's — arrives right after an
-    /// [`EngineEvent::ScriptRunError`] with the same message: the entry into
-    /// the realm that resumed boot reports the rejection its checkpoint
-    /// returned before boot's failure is reported as this.
-    ///
-    /// The view's URLs and fonts are not among them: a base URL or entry that
-    /// does not resolve and an unknown default family are refused by
-    /// [`LynxGroup::create_lynx_view`] itself, before any source is
-    /// requested.
     StartupFailed(LynxViewError),
-    /// App code in the view's main-thread realm threw, or a host call into
-    /// it failed: the entry's evaluation or a module it imports, a module
-    /// load or a `Future` settle, a page update, an animation frame. Not
-    /// fatal, whether boot has finished or not: the realm goes on, and so
-    /// does whatever entry it was in.
-    ///
-    /// Reported by the kind of entry the failure happened in: a timer
-    /// callback's is [`EngineEvent::TimerFailed`] and a listener's
-    /// [`EngineEvent::ListenerFailed`], also where the code that failed was
-    /// the continuation of an import or `await` those entries resumed.
     ScriptRunError(ScriptError),
-    /// The engine panicked while it served this view. Fatal: the view ends.
-    ///
-    /// Not a script failure: it is a bug in the engine, reported with the
-    /// panic's own message.
     Panicked(ScriptError),
-    /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
-    /// A `setTimeout` or `setInterval` callback threw when it came due.
-    /// Not fatal either: only the timer that threw is affected, a repeating
-    /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
-    /// Code in a worker's realm threw, and the worker is still running: its
-    /// script, a message delivered to it, a timer, animation or native module
-    /// callback, a module it imported or a `Future` it awaited. The BTS
-    /// Worker included. Not fatal: HTML reports an uncaught exception at the
-    /// worker and then at the creating realm's `Worker` object without
-    /// ending either, and the owning view remains usable.
-    ///
-    /// A script or an imported module that could not be loaded, or was not a
-    /// script, is reported here as well: the load rejects in the worker's
-    /// realm, and the worker stays until it is terminated or collected. HTML
-    /// differs for the worker's own script: it never runs a worker whose
-    /// script fetch failed (`docs/tracking/deviations.md`).
-    ///
-    /// `source` is a [`ScriptSource::Worker`], whose URL is `bobcat:bts` for
-    /// the BTS Worker. Both worker events are reported before the
-    /// creating realm's `Worker` object dispatches its `error` event, so a
-    /// listener there, `preventDefault()` included, has no effect on them.
-    /// Neither is reported for a worker its script has already let go of,
-    /// through `terminate()` or the collection of its `Worker` object, and a
-    /// worker that ends itself with `close()` reports neither.
     WorkerThrew {
         source: ScriptSource,
         error: ScriptError,
     },
-    /// A worker ended without being told to: its realm could not be built,
-    /// or the thread workers run on has trapped, including before this
-    /// worker was started. Nothing more arrives from it. Not fatal: the
-    /// owning view remains usable, and a view whose BTS Worker ended goes on
-    /// without a BTS.
-    ///
-    /// Reported under the same rules as [`EngineEvent::WorkerThrew`].
     WorkerEnded {
         source: ScriptSource,
         error: ScriptError,
     },
-    /// An application reported an error through `lynx.reportError`, or the
-    /// runtime reported a recoverable operation failure.
-    /// Reporting does not throw into its caller or end the view.
-    ///
-    /// `level` is `"warn"`, `"error"` or `"fatal"`: `lynx.reportError`'s
-    /// `'warning'` spelled as the console method, its `'fatal'` as it is, and
-    /// `"error"` for `'error'`, for a level it does not know and for none.
-    /// The engine does nothing more for `"fatal"` than for the other two: the
-    /// view and the realm that reported it go on.
-    ///
-    /// The realm that reported it sends it to the view's host itself, and
-    /// `source` names that realm: a report of the BTS or of a `Worker` does
-    /// not pass through the main-thread realm. One realm's diagnostics arrive
-    /// in the order it made them. Two realms' diagnostics have no order
-    /// between them, and a worker's diagnostics have none relative to its
-    /// [`EngineEvent::WorkerThrew`] and [`EngineEvent::WorkerEnded`], which
-    /// the creating realm reports.
     ScriptReported {
         source: ScriptSource,
         level: String,
         message: String,
     },
-    /// The focused editing host's [`TextInputState`](crate::editing::TextInputState)
-    /// changed: its value, selection or composition, the geometry of the
-    /// commit that showed them, or the focus itself — a default state means
-    /// nothing editable is focused any more. Sent once per main-thread entry
-    /// that changed it, after that entry's commit, so the geometry is the
-    /// frame's; never repeated for a state equal to the last one. Not sent
-    /// once the view has failed or been released.
-    ///
-    /// The host keeps the latest one and answers every synchronous platform
-    /// input-method query (the candidate window's rectangle, the text around
-    /// the caret) from it; the commands it sends back go through
-    /// [`LynxView::edit`].
     TextInputStateChanged(Box<terminus::link::editing::TextInputState>),
-    /// A realm's console output, delivered to the embedder that owns the view.
-    /// `level` is the name of the console method that was called: `"log"`,
-    /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
-    /// rules as [`EngineEvent::ScriptReported`].
     ConsoleMessage {
         source: ScriptSource,
         level: String,
         message: String,
     },
-    /// One performance entry of a type the embedder subscribed to with
-    /// [`LynxView::observe_performance`]: a load, a reload, or a pipeline
-    /// that carried a `__lynx_timing_flag`, reported once the frame that
-    /// carried it was presented; a paint mark; or a monitor's entry.
-    /// Assembled in the [`LynxView::pump`] that returns it, on the
-    /// embedder's thread; nothing is built for a view that subscribed to
-    /// nothing. Not fatal, and nothing a view does depends on it being read.
     Performance(PerformanceEntry),
 }
 
 impl EngineEvent {
-    /// Whether this event ends the view: [`LynxView::pump`] ends it on
-    /// exactly these, and every other event leaves it running. An embedder
-    /// that stops on a failed view asks this rather than matching variants.
     #[must_use]
     pub const fn is_fatal(&self) -> bool {
         matches!(self, Self::StartupFailed(_) | Self::Panicked(_))
     }
 
-    /// The event a caught panic is reported as, whichever place caught it: a
-    /// job or a task of the view's, the group thread reaping the view's task,
-    /// or the panic hook under `panic = "abort"`. Each of them reaches it
-    /// through the Panic row of the main-thread policy table.
     pub(crate) const fn from_panic(error: ScriptError) -> Self {
         Self::Panicked(error)
     }
 }
 
-/// The realm of a view that a script event came from.
-///
-/// A view runs script in its main-thread realm and in workers. The view's
-/// background thread (BTS) is a worker like any other: the one boot creates
-/// over the URL `bobcat:bts`. This type has no variant for it and the engine
-/// has no check that tells it apart, so an embedder that needs to know
-/// whether an event came from the background thread compares `url` with
-/// `bobcat:bts`. A worker the view's script constructs over that URL carries
-/// the same `url` and an `id` of its own.
-///
-/// Printed as `main`, or as `worker <id> <url>`: `worker 1 bobcat:bts`,
-/// `worker 4 app:///nested/worker.js`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptSource {
-    /// The view's main-thread realm.
     Main,
-    /// A worker's realm: the view's background thread, or a `Worker` the
-    /// view's main-thread script constructed.
-    Worker {
-        /// Tells this worker from every other of its group, including one
-        /// constructed over the same URL.
-        id: WorkerId,
-        /// The worker's script URL as `new Worker` resolved it: the
-        /// specifier joined by URL rules to the response URL of the view's
-        /// entry. A script answered from another URL leaves it as it is.
-        url: Arc<str>,
-    },
+    Worker { id: WorkerId, url: Arc<str> },
 }
 
 impl fmt::Display for ScriptSource {
@@ -404,12 +175,6 @@ impl fmt::Display for ScriptSource {
     }
 }
 
-/// Names one `Worker` for the life of its group.
-///
-/// Opaque: ids are compared, hashed and printed, and nothing else. No two
-/// workers of one group share an id, including one that has ended. The
-/// printed form is the integer key the constructing realm's `Worker` object
-/// holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WorkerId(u64);
 
@@ -425,24 +190,10 @@ impl fmt::Display for WorkerId {
     }
 }
 
-/// Wakes the embedder's thread, which parks on an event loop the engine does
-/// not own.
-///
-/// One implementation per platform — a winit event-loop proxy, an `AppKit`
-/// source, a Worker's signal — and [`LynxGroup::new`] is generic over it, so
-/// the wake is a direct call rather than a virtual one. One serves a whole
-/// group: its views live on the thread that created it, and so wake one
-/// event loop. The Lynx main thread holds the only handle to it, and calls it
-/// whenever it has published something a view's next [`LynxView::pump`] would
-/// find: a committed frame, a lifecycle event. It must never call back into a
-/// view, which it could not anyway — a view never leaves the thread that
-/// built it.
 pub trait EventRequester: Send + Sync + 'static {
     fn request_event(&self);
 }
 
-/// The requester for a host with no event loop to wake: an offscreen view
-/// that polls for its frames, a benchmark, a test.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoWakeup;
 
@@ -450,50 +201,20 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
-/// How large a style pool one [`LynxGroup`]'s traversals get, `bobcat-main`
-/// included: it is index zero of that pool, so a group starts one fewer
-/// thread than the count says.
-///
-/// The threads are the group's, shared by every view in it and by no view
-/// outside it. Two groups restyle at the same time; two views in one group
-/// never do, because the single thread that drives them both is already
-/// inside whichever traversal is running. A host multiplies workers by
-/// groups rather than by views, which is why the count is a group's
-/// construction-time choice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StyleThreads {
-    /// Stylo's own heuristic for this machine, under [`terminus::link::MAX_STYLE_THREADS`].
-    /// A machine whose parallelism the platform cannot answer for — Wasm,
-    /// where the embedder passes it to [`StyleThreads::for_parallelism`]
-    /// instead — resolves to [`StyleThreads::Sequential`].
     #[default]
     Auto,
-    /// Exactly this many threads, `bobcat-main` included, so `Fixed(3)` is
-    /// the group's `bobcat-main` and two more. More than [`terminus::link::MAX_STYLE_THREADS`] is a
-    /// construction error rather than a silent clamp: Stylo indexes its
-    /// per-traversal thread-local storage by rayon thread index into an
-    /// array that long.
     Fixed(NonZeroUsize),
-    /// No pool: traversal runs on `bobcat-main` alone.
     Sequential,
 }
 
 impl StyleThreads {
-    /// The policy a machine with this much parallelism gets, by the same
-    /// heuristic and the same arithmetic [`StyleThreads::Auto`] applies to a
-    /// machine that can answer for its own.
-    ///
-    /// For an embedder on a target where the standard library cannot answer —
-    /// Wasm, which has `navigator.hardwareConcurrency` instead. Passing the
-    /// raw number here rather than a count worked out by hand is what keeps a
-    /// Wasm view and a native view on comparable hardware on the same pool.
     #[must_use]
     pub fn for_parallelism(available: usize) -> Self {
         StylePool::thread_count_for(available).map_or(Self::Sequential, Self::Fixed)
     }
 
-    /// The thread count this policy resolves to on this machine, the flushing
-    /// thread included.
     pub(crate) fn resolve(self) -> Option<NonZeroUsize> {
         match self {
             Self::Auto => StylePool::default_thread_count(),
@@ -503,128 +224,25 @@ impl StyleThreads {
     }
 }
 
-/// Everything one view is built from.
-///
-/// Everything *shared* is the group's instead: the script runtime, the style
-/// pool and the thread they live on are named once, at
-/// [`LynxGroup::new`], and no field here could name them a second time.
-///
-/// It carries no resource system either, and has no field that could hold
-/// one: the host's fetcher belongs to the view, is passed to
-/// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
-///
-/// Seven of these fields are spent where the value is handed over rather than
-/// crossing to `bobcat-main`: [`Self::base_url`] resolves the entries,
-/// [`Self::fonts`], [`Self::default_font_family`], [`Self::fallback_fonts`]
-/// and [`Self::locale`] become the view's text
-/// context, and [`Self::style_sheets`] and [`Self::entry`] become the
-/// requests `create_lynx_view` hands the fetcher before it returns. What
-/// crosses of them is the parsed base, the built context and the answers. The
-/// rest crosses as it stands, and the view's task on `bobcat-main` stages the
-/// document inputs out of it.
 #[derive(Debug)]
 pub struct ViewSources {
-    /// The absolute URL this view's relative URLs resolve against, by URL
-    /// rules rather than import-specifier rules: `main.js`, `./main.js` and
-    /// `/main.js` are all relative URLs. A directory base needs its trailing
-    /// `/`, since `app:///page` resolves `main.js` to `app:///main.js`.
-    /// `create_lynx_view` resolves the entries against it, and every realm of
-    /// the view — MTS, BTS and each Worker — resolves the URL of a
-    /// synchronous load (`loadModuleSync`) against it.
-    ///
-    /// It is not handed to the fetcher, which resolves the stylesheets and
-    /// fetches it is asked for against a base of its own. An embedder
-    /// that installs lazy containers must give its fetcher this same base, so
-    /// that a container's URL resolves alike on both sides: the container is
-    /// fetched and its sections registered by the fetcher's resolution, and
-    /// each section is loaded by the realm's.
     pub base_url: String,
     pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
-    /// Font containers whose families are appended to every script's fallback
-    /// list, in order: what shapes text no family of its own `font-family`
-    /// covers. For an embedder without a system-font backend, which has no
-    /// fallback otherwise; a script listed here stops asking the platform for
-    /// its own.
     pub fallback_fonts: Vec<FontBlob>,
-    /// The language of the view's text, as a BCP-47 tag: `zh-Hant`, `ja`,
-    /// `en-US`. Required: every host names one ([`Self::new`]). What the
-    /// platform's per-script font fallback is asked with, so that a Han
-    /// cluster no family of its own `font-family` covers is set in the
-    /// Traditional, Japanese or Korean face the language calls for rather
-    /// than in the platform's default one, and so is the CJK punctuation of a
-    /// run with no Han character in it. Lynx's `LynxEnv.locale`: a value the
-    /// host sets for the process, from the OS's preferred language unless it
-    /// names its own, which Lynx iOS reads for this same choice. The engine
-    /// derives none, and script is not told it, since Lynx's `SystemInfo`
-    /// has no language field. A tag that does not parse is refused by
-    /// `create_lynx_view` as [`EngineError::InvalidLocale`], before anything
-    /// is requested.
     pub locale: String,
     pub style_sheets: Vec<String>,
-    /// The MTS entry's URL, which may be relative: `create_lynx_view`
-    /// resolves it against [`Self::base_url`], and both the fetcher's request
-    /// and the realm's boot import name the result, in its WHATWG
-    /// serialization. The fetcher may answer from another URL, which becomes
-    /// the entry's `import.meta.url`.
-    ///
-    /// The entry is the module the fetcher answers, with nothing added to it.
-    /// A card's MTS body is registered prefixed with
-    /// [`crate::MTS_CHUNK_PREAMBLE`] by `bobcat-source`; any other entry
-    /// imports what it uses itself.
     pub entry: String,
-    /// The URL `__Card__` names: the container this view's entry came out
-    /// of, which every section, named stylesheet and Lepus chunk of the page
-    /// hangs under and every relative `new Worker` URL is joined to. Resolved
-    /// against [`Self::base_url`] like [`Self::entry`].
-    ///
-    /// `None` names the entry's response URL — what a raw entry or an XML
-    /// page has, whose entry *is* the page. A container page names its own
-    /// URL here, because its entry is one of its sections
-    /// (`<container>/root.js`) rather than the container itself.
     pub card_url: Option<String>,
-    /// Optional URL of the BTS application module the engine's `bobcat:bts`
-    /// bootstrap imports, resolved against [`Self::base_url`] like
-    /// [`Self::entry`]. The MTS realm posts it to the BTS in the BTS's first
-    /// message, `initialize`, and the BTS imports it once that message has
-    /// initialized it. The view always starts a BTS context;
-    /// without this it runs only the built-in environment. The entry and its
-    /// imports load through the view's resource fetcher.
-    /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
-    /// a host update accepted while the BTS entry is still importing is
-    /// forwarded to the Worker, which queues it behind that import. An entry
-    /// that throws is reported as [`EngineEvent::WorkerThrew`] from the
-    /// [`ScriptSource::Worker`] whose URL is `bobcat:bts`, like any worker
-    /// script, and leaves the view and the BTS Worker running.
     pub background_entry: Option<String>,
-    /// Initial page data, as JSON text. The engine hands it to the view's
-    /// realm unread, as a plain string; `bobcat:runtime` parses it there and
-    /// boot passes it to `processData`. `None` is `{}`, which is what web-core
-    /// gives a page that was handed none, and text that is not JSON fails boot
-    /// with [`EngineEvent::StartupFailed`].
     pub init_data: Option<String>,
-    /// Initial global properties, as JSON text handed over like
-    /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
-    /// the entry's `__globalProps` before the entry loads.
     pub global_props: Option<String>,
-    /// Processor selected for initial data; empty selects the default.
     pub initial_processor: String,
-    /// The screen this view's `SystemInfo` describes, as the embedder
-    /// measured it: the web-core algorithm in a browser, the monitor the
-    /// window is on natively.
-    ///
-    /// Required: every host names one. A host with no screen to measure — a
-    /// headless or offscreen capture — names
-    /// [`ScreenMetrics::for_viewport`] of its capture size. Read once as the
-    /// realm opens and never updated.
     pub screen: ScreenMetrics,
 }
 
 impl ViewSources {
-    /// The sources of a view over `entry`, resolved against `base_url`,
-    /// reporting `screen` as its `SystemInfo`, its text in `locale`'s
-    /// language, with every other field at its default.
     #[must_use]
     pub fn new(
         base_url: impl Into<String>,
@@ -651,47 +269,14 @@ impl ViewSources {
     }
 }
 
-/// The views that share one Lynx main thread.
-///
-/// A group owns that thread, and with it the one `QuickJS` runtime every
-/// view's realm is opened on and the one Stylo pool every view's document
-/// restyles with. [`Self::create_lynx_view`] is the only way to build a
-/// view, because naming the group is the only way to say which thread a
-/// view runs on.
-///
-/// One group per thread, and one thread per group. The handle is `!Send` and
-/// `!Sync` — it hands out `Rc`s of what it owns — so the embedder thread
-/// that creates a group is the thread every view in it lives on. That is
-/// also why one [`EventRequester`] serves the whole group rather than one
-/// per view: its views wake one event loop, the one belonging to the thread
-/// they were all created on.
-///
-/// Views in a group take turns rather than run at once. Every entry into a
-/// realm is synchronous on that one thread, so a second view costs no second
-/// heap, no second module graph and no second set of Stylo workers, at the
-/// price of the two never restyling in parallel. What buys that is the
-/// assumption that a person drives one view at a time; a host that needs two
-/// pages genuinely parallel gives them a group each, on a thread each.
-///
-/// Dropping the group does not end its views: its threads are joined once the
-/// group and the last view built from it are both gone.
 pub struct LynxGroup {
     inner: Rc<GroupInner>,
 }
 
-/// What a group owns, and what its views hold it alive by.
-///
-/// **The field order is the teardown, and it must stay in this order.**
-/// `bobcat-main` is waited for before the group's own worker sender closes,
-/// because its view tasks and its `WorkerFactory` hold senders on the worker
-/// thread's channel and it takes them with it.
 struct GroupInner {
     attach: mpsc::UnboundedSender<GroupCommand>,
     #[expect(dead_code, reason = "held to wait for bobcat-main on drop")]
     home: ThreadJoin,
-    /// The group's other thread, held here rather than by `bobcat-main`:
-    /// `bobcat-workers` is a runtime of the group's own, and all `bobcat-main`
-    /// is given of it is one sender and the flag it sets when it traps.
     #[expect(dead_code, reason = "held to end and wait for bobcat-workers on drop")]
     workers: WorkerHome,
 }
@@ -703,38 +288,12 @@ impl fmt::Debug for LynxGroup {
 }
 
 impl LynxGroup {
-    /// Starts this group's two threads — `bobcat-main` and `bobcat-workers` —
-    /// and waits until each has aligned its clock to this thread's
-    /// and the style pool `bobcat-main` shares out is up.
-    ///
-    /// All of it is ready before views attach. A thread or a style worker that
-    /// cannot start fails the group here, rather than whichever view or
-    /// `Worker` happened to ask for it first. A `QuickJS` runtime that cannot
-    /// be built does not: it fails what asks it for a realm instead, with its
-    /// own error. Every view created from the group reports
-    /// [`EngineEvent::StartupFailed`] when `bobcat-main`'s runtime is the one,
-    /// and every `Worker` fails when it is `bobcat-workers`'.
-    ///
-    /// # Errors
-    ///
-    /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers`, a style
-    /// worker or, on wasm32, the process's alarm thread will not start —
-    /// asking for more workers than Stylo indexes is one such refusal.
     pub async fn new<R: EventRequester>(
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
-        // On wasm32 the process's alarm thread, which serves every engine
-        // thread's timers there (`crate::alarm`), is started by the first
-        // group, here on the embedder's thread rather than by `bobcat-main`:
-        // a Worker does not start until the thread that created it returns to
-        // its event loop, which this thread does at its first await and
-        // `bobcat-main`, parked in its scheduler, never does.
         #[cfg(target_arch = "wasm32")]
         let alarm_clock = crate::alarm::start()?;
-        // On wasm32 a canvas's GPU steps are queued for this thread, which
-        // holds the device; queuing one wakes it, and its painter applies
-        // the queue at the start of each turn (`Painter::pump`).
         #[cfg(target_arch = "wasm32")]
         {
             let requester = Arc::clone(&event_requester);
@@ -742,12 +301,6 @@ impl LynxGroup {
                 requester.request_event();
             }));
         }
-        // The group's second runtime, started here beside `bobcat-main`
-        // rather than by it: `bobcat-main` is handed one sender on it and its
-        // trap flag, and nothing else. First, because a `bobcat-main` that
-        // will not spawn leaves this local to end the worker thread — its
-        // sender drops before its own `ThreadJoin` — rather than a thread
-        // parked on a channel nobody holds.
         let (workers_clock, workers_clock_end) = alignment_channel();
         let workers = WorkerHome::start(workers_clock_end)?;
         let (attach, attachments) = mpsc::unbounded_channel();
@@ -764,8 +317,6 @@ impl LynxGroup {
                 clock: main_clock_end,
             },
         )?;
-        // Into the handle before the first await, so every exit path from
-        // here on closes both threads and joins them — including this one.
         let group = Self {
             inner: Rc::new(GroupInner {
                 attach,
@@ -773,12 +324,6 @@ impl LynxGroup {
                 workers,
             }),
         };
-        // Each thread's first statement waits for this one to answer its
-        // clock alignment ([`crate::clock`]): without blocking until it runs,
-        // since a Worker does not start until its creator returns to its event
-        // loop, then blocking for one round trip. `bobcat-main` cannot report
-        // startup before its answer, so the order is the one it would wait in
-        // anyway. A thread whose alignment fails runs on its own clock.
         #[cfg(target_arch = "wasm32")]
         if let Some(answer) = alarm_clock {
             answer.await;
@@ -796,34 +341,6 @@ impl LynxGroup {
         }
     }
 
-    /// Asks the platform, on the calling thread and before any view exists,
-    /// for the font fallback of the `scripts` the host names, in `locale`'s
-    /// language.
-    ///
-    /// For a host whose first view comes later than its group, or only on
-    /// some condition: the group is what it builds up front, so the group is
-    /// where this work can be done ahead of that view. A view asks the
-    /// platform for a script's fallback only when a character of it is
-    /// missing from its run's own families, and the first view in the
-    /// process to miss a (script, language) pays for the lookup: on a Mac up
-    /// to a few milliseconds, about 8 ms for the first lookup in the process
-    /// that names no language. Every later view, in this group or any other,
-    /// takes the answer from the process's one table. This pays that first
-    /// lookup here instead, for the scripts the host names — ISO 15924 codes
-    /// such as `Hani`, `Arab` or `Thai`; nothing is asked that it did not
-    /// name. It runs [`preload_system_fonts`] first.
-    ///
-    /// Process-wide and idempotent like [`preload_system_fonts`]; nothing of
-    /// it is the group's own. Tens to hundreds of milliseconds the first time
-    /// in a process, so a host calls it where that wait is not in front of a
-    /// frame.
-    ///
-    /// # Errors
-    ///
-    /// Having done nothing: [`EngineError::InvalidLocale`] if `locale` is not
-    /// a BCP-47 language tag, the same refusal
-    /// [`Self::create_lynx_view`] gives it, and [`EngineError::UnknownScript`]
-    /// if a script is not one the platform can be asked for.
     pub fn preload_text(&self, locale: &str, scripts: &[&str]) -> Result<(), LynxViewError> {
         if !terminus::link::TextContext::is_locale(locale) {
             return Err(EngineError::InvalidLocale(locale.to_owned()).into());
@@ -840,75 +357,6 @@ impl LynxGroup {
         Ok(())
     }
 
-    /// Returns a loading view on the calling thread.
-    ///
-    /// Synchronous, and it builds nothing that could block: the view is a set
-    /// of channels, the host's resource system, and the group handle that
-    /// keeps its thread alive. Where its pixels go is a separate question,
-    /// answered by attaching a [`Painter`](crate::Painter) to it — which may
-    /// be before boot, after it, or never.
-    ///
-    /// `width`, `height` and `device_pixel_ratio` are the **create-time
-    /// viewport**: the metrics this view's document is built at and works at
-    /// — styling, layout and the encoding of its first frame — until a
-    /// painter binds to it. They are not validated here, because no draw
-    /// target is built from them; an attached painter's metrics, which
-    /// [`Painter::new`](crate::Painter::new) and
-    /// [`Painter::resize`](crate::Painter::resize) do validate, supersede
-    /// them. If the two differ, the first frame is discarded and recomputed
-    /// at the painter's size, so a create-time viewport equal to the
-    /// painter's is the one that costs nothing.
-    ///
-    /// **No frame is published before a painter binds**, and the first
-    /// `__FlushElementTree` waits for that binding — so a view no painter
-    /// ever attaches to never reports
-    /// [`EngineEvent::ScriptFinished`] and never becomes ready.
-    ///
-    /// **The view's startup sources are handed to the fetcher here**, on this
-    /// thread and before this returns: each author stylesheet in cascade
-    /// order, by the string the view listed it by, then the entry module, by
-    /// its URL resolved against [`ViewSources::base_url`]. The BTS entry is
-    /// resolved here too, and requested later by the BTS Worker's import. The
-    /// fetcher is built in this same call, resolves the stylesheets and loads
-    /// on whatever executor it owns, and answers the one-shot each request
-    /// was minted with — so its IO and `bobcat-main`'s
-    /// boot run while the embedder builds this view's painter, which is what
-    /// it does next. Every *later* request rides an ordinary
-    /// [`LynxView::pump`] turn instead: imports, adopted stylesheets, worker
-    /// scripts, fonts and plain fetches. Boot completion is
-    /// [`EngineEvent::ScriptFinished`], and loading, configuration, or boot
-    /// failure is [`EngineEvent::StartupFailed`].
-    ///
-    /// Dropping a loading view cancels this view's own cancellation token,
-    /// which marks its source work cancelled and prevents boot from entering
-    /// `QuickJS`. An IO operation or synchronous JavaScript already
-    /// executing may finish; late source results are discarded. Other views continue.
-    /// The fetcher needs neither `Send` nor `Sync`; only the concrete source
-    /// completion and the fetcher's own job inputs leave this thread.
-    ///
-    /// The embedder's [`NativeModule`]s are injected here, beside its
-    /// fetcher and for the same reason: both are host capabilities that stay
-    /// on this thread and are served inside [`LynxView::pump`]. Their names
-    /// and methods are read once, here, and cross to the realm as data — so a
-    /// module is never asked a question while script is running, and
-    /// `NativeModules` carries exactly the methods declared at this call.
-    ///
-    /// A module's ES module ([`NativeModule::esm`]) is read here too, and
-    /// its bytecode is kept in one table the view's worker realms share: a
-    /// worker realm completes its import of `lynx:<name>` from it, and
-    /// nothing is requested for it.
-    ///
-    /// # Errors
-    ///
-    /// [`LynxViewError`] if two native modules answer to one name, if a
-    /// module's ES module is not bytecode in this build's frame
-    /// ([`EngineError::InvalidNativeModuleEsm`]), if the base URL is not an absolute URL or the
-    /// entry or BTS entry does not resolve against it ([`EngineError::InvalidUrl`]), if the
-    /// default font family is one neither this view's containers nor the platform provides
-    /// ([`EngineError::UnknownFontFamily`]), or if the group's main thread
-    /// cannot accept the attachment. All of the first four are decided
-    /// before the fetcher is built and before anything is requested, so a
-    /// view that fails any one of them fetches nothing.
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
@@ -922,25 +370,10 @@ impl LynxGroup {
         F: ResourceFetcher + 'static,
         B: FnOnce(terminus::link::ImageReports) -> F,
     {
-        // First, before anything else this call does: the two clocks every
-        // performance timestamp of the view is placed by, and the start of
-        // its `createLynx` span.
         let time_origin = TimeOrigin::now();
         let registry = Arc::new(PipelineRegistry::new(time_origin));
-        // Read once, before anything is sent: the table is what crosses, and
-        // the modules themselves stay here.
         let (table, native_esms) = read_native_modules(&native_modules)?;
-        // The entries' URLs, before the fetcher exists for the same reason as
-        // the fonts below: a URL that does not resolve refuses the view
-        // before anything is requested. The parsed base goes on to every
-        // realm of the view, which resolves its synchronous loads against it.
         let base_url = Arc::new(resolve_startup_urls(&mut sources)?);
-        // The fonts next, and before the fetcher exists: a view whose
-        // containers cannot serve the family it named will never render, and
-        // the requests below go out in this same call, so a check made
-        // anywhere later would already be behind them. It needs no document —
-        // fonts and the default family are a `terminus::link::TextContext`'s business,
-        // and a document only ever adopts a finished one.
         let worker_fonts = Arc::new(WorkerFonts::of(&sources));
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
@@ -950,41 +383,16 @@ impl LynxGroup {
             &sources.locale,
         )?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        // One view, one set of channels and one end signal: nothing here is
-        // shared with a sibling, so nothing has to be addressed or deferred.
-        // The token is minted here because the embedder's own thread is where
-        // a release happens.
         let cancel = CancellationToken::new();
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        // `None` until a painter attaches, which is what "no painter has bound
-        // this view yet" is: the document works at the create-time viewport
-        // until then, and its first `__FlushElementTree` parks on this.
         let (metrics, metric_receiver) = watch::channel(None);
         let scroll = Arc::new(ScrollMailbox::default());
         let canvases = Arc::new(crate::paint::CanvasPictures::default());
         let to_main = commands.downgrade();
-        // The sink comes first and the store is built *from* it, so a store
-        // without its report channel is unrepresentable and the two are paired
-        // by construction. That pairing is per view: a host whose registry
-        // outlives the view returns a per-view value holding a shared handle
-        // on it, and that value — not the registry — is what carries the sink.
-        // A load in flight when a view is replaced therefore reports to the
-        // queue it was started for, which teardown has already detached,
-        // rather than into its successor's document.
-        //
-        // Built before the attachment goes out, because the attachment
-        // carries one thing out of it: the fetcher's `fetch_probe`, the only
-        // part of a host's resource system that crosses to an engine thread.
         let (reports, inbox) = ImageInbox::new();
         let fetcher = Rc::new(resources(reports));
-        // The startup sources, issued rather than waited for: every author
-        // stylesheet in the order the view listed them, then the entry. Nothing here waits —
-        // the fetcher takes each request and answers the one-shot minted with
-        // it — so the load overlaps whatever this thread does next, which is
-        // building this view's painter. Only the receivers cross; the fetcher
-        // stays on this thread, as it must.
         let sheets: Vec<StartupSource> = std::mem::take(&mut sources.style_sheets)
             .into_iter()
             .map(|url| {
@@ -1009,8 +417,6 @@ impl LynxGroup {
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
-                // What is left of the view's sources: the base URL, the
-                // fonts, the sheets and the entry were spent above.
                 sources,
                 text_context,
                 worker_fonts,
@@ -1034,13 +440,9 @@ impl LynxGroup {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
             })?;
-        // The end of `createLynx`: what is left is building the handle.
         registry.set_root_create_lynx(time_origin.instant().instant(), ClockInstant::now());
         Ok(LynxView {
             cancel,
-            // The seat a painter observes this view through: both halves of it
-            // are this view's, and the view is the only holder of a strong
-            // reference to it.
             seat: Rc::new(ViewSeat {
                 frame_demand: RefCell::new(crate::link::FrameDemand::new(Arc::clone(&registry))),
                 commands: crate::link::CommandSender::new(commands),
@@ -1055,15 +457,11 @@ impl LynxGroup {
             frames: frame_receiver,
             inbox,
             fetcher,
-            // Each module beside the methods it declared, as read once above:
-            // `pump` checks a call against these rather than asking again.
             native_modules: native_modules
                 .into_iter()
                 .zip(table.into_iter().map(|module| module.methods))
                 .collect(),
             state: ViewState::Loading,
-            // The view's one origin: its animations' timeline and its
-            // performance timestamps start at the same instant.
             timeline_epoch: time_origin.instant().instant(),
             time_origin,
             performance_generation: 0,
@@ -1072,10 +470,6 @@ impl LynxGroup {
     }
 }
 
-/// Reads a view's native modules once, before anything is requested: the
-/// table the realm is told about them in, and the bytecode of the ES modules
-/// they supply. Two modules of one name, and an ES module whose bytes are not
-/// this build's whole frame, refuse the view.
 fn read_native_modules(
     native_modules: &[Box<dyn NativeModule>],
 ) -> Result<(NativeModuleTable, crate::native_module::NativeModuleEsms), EngineError> {
@@ -1086,9 +480,6 @@ fn read_native_modules(
         if table.iter().any(|existing| existing.name == name) {
             return Err(EngineError::DuplicateNativeModule(name.to_owned()));
         }
-        // The ES module's frame is checked here, beside the names: bytes
-        // another build wrote, or cut short, refuse the view before anything
-        // is requested, rather than failing an import later.
         let esm = module.esm();
         if let Some(esm) = &esm {
             if !quickjs_rust_bridge::is_framed_bytecode(&esm.bytecode) {
@@ -1107,81 +498,22 @@ fn read_native_modules(
     Ok((table, crate::native_module::NativeModuleEsms::new(esms)))
 }
 
-/// A loading or running Lynx view: a page's worth of Lynx, on a thread its
-/// [`LynxGroup`] owns.
-///
-/// The view stays on the thread that built it. It owns the host's resource
-/// system — sources and images both — and services it in [`Self::pump`], the
-/// one call that advances the resource protocol at all. Nothing here is a
-/// queue: every call applies immediately, and the facts the realm has to hand
-/// back arrive on the [`EventRequester`] wakeup the group was built with.
-///
-/// It owns no pixels and no draw target. A [`Painter`](crate::Painter)
-/// attached to it observes the frames it publishes and reads images out of
-/// its fetcher; dropping the view leaves that painter showing the last frame
-/// it drew, and dropping the painter leaves the view running with nothing
-/// watching it.
 pub struct LynxView<F: ResourceFetcher> {
-    /// This view's end signal, cancelled the instant it is released, before
-    /// anything else is, so a host still holding one of its source completions
-    /// sees it cancelled without waiting for a turn of its own. The view's
-    /// task holds a clone.
     cancel: CancellationToken,
-    /// What a painter observes this view through, and the goodbye with it:
-    /// dropping this closes the view's task's inbox, which is what ends it —
-    /// so it is declared before the fetcher whose completions that task may
-    /// still be holding, and before the share of that fetcher the seat itself
-    /// carries for the painter.
-    ///
-    /// The only strong reference there is. `Painter::attach` downgrades it,
-    /// and a live weak handle on it is what "this view already has an
-    /// interactive painter" means.
     seat: Rc<ViewSeat<F::PlatformFrame>>,
     notices: mpsc::UnboundedReceiver<ViewNotice>,
     frames: watch::Receiver<Published>,
-    /// Where the host's completed image loads land. Detached in `Drop` before
-    /// the fetcher goes, so a loader still in flight finds it closed rather
-    /// than queueing into a released view.
     inbox: ImageInbox,
-    /// The host's whole resource system, as this view itself speaks to it. An
-    /// `Rc` because the seat above carries a second, erased handle on it for
-    /// an attached painter to read pixels through — so this view dropping
-    /// both is what releases it.
     fetcher: Rc<F>,
-    /// The embedder's native modules, each beside the methods it declared:
-    /// the realm was told those names at construction, these are what serves
-    /// a call under one of them, and the list is what a call's method is
-    /// checked against — [`NativeModule::methods`] is read once, in
-    /// [`LynxGroup::create_lynx_view`]. Called only from [`Self::pump`], on
-    /// this thread, which is why they need be neither `Send` nor `Sync`.
     native_modules: Vec<(Box<dyn NativeModule>, Vec<String>)>,
-    /// Updated by pump from boot/failure notices on the host thread.
     state: ViewState,
-    /// When this view's document started, which is the epoch its animations
-    /// are timed against. A painter adopts it at `attach`, so a painter that
-    /// changes views does not restart the new one's timeline.
     timeline_epoch: ClockInstant,
-    /// Where this view's monotonic clock sits on the Unix timeline: the
-    /// conversion every performance timestamp of the view reports through.
     time_origin: TimeOrigin,
-    /// The registry's completion count as of the last [`Self::pump`] that
-    /// took its entries: a turn with nothing completed takes no lock.
     performance_generation: u64,
-    /// The group whose thread carries this view. Held rather than read: it is
-    /// what keeps that thread — and the runtime and pool on it — alive for as
-    /// long as any view built from the group is, in whatever order the
-    /// embedder drops them.
-    ///
-    /// **Last field, and it must stay last.** Fields drop in declaration
-    /// order, so this view's command sender — which is what ends its task —
-    /// goes first, and the handle that joins the thread goes after there is
-    /// nothing left on it.
     #[expect(dead_code, reason = "held to keep the group's thread alive")]
     group: Rc<GroupInner>,
 }
 
-/// What one turn's notices asked of the host's images, in the order each
-/// kind was asked.
 #[derive(Default)]
 struct ImageRequests {
     images: Vec<Arc<str>>,
@@ -1197,11 +529,6 @@ enum ViewState {
 }
 
 impl<F: ResourceFetcher> LynxView<F> {
-    /// Whether pump has observed successful MTS boot — the entry module
-    /// evaluated and its first flush committed — and this view has not ended.
-    /// An entry that threw still boots the view, once its failure has been
-    /// reported as [`EngineEvent::ScriptRunError`]. The BTS Worker's own
-    /// state is not part of it. Keep calling pump while loading.
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.state == ViewState::Ready && !self.cancel.is_cancelled()
@@ -1220,39 +547,12 @@ impl<F: ResourceFetcher> fmt::Debug for LynxView<F> {
 
 impl<F: ResourceFetcher> Drop for LynxView<F> {
     fn drop(&mut self) {
-        // Cancellation first: a host still holding one of this view's source
-        // completions must see it before the fetcher that holds it is
-        // released. It is this view's token alone — the group's other views go
-        // on booting. Cancelling before the command sender below drops is also
-        // what gets a burst queued behind this release discarded: such a
-        // command wakes the view's command consumer ahead of this cancel
-        // waking its owner, and the consumer reads the token at that wake, so
-        // what it finds there has to already say released.
         self.cancel.cancel();
-        // Then the sink, before the store it reports into drops: a loader
-        // still in flight must find it detached rather than queue into a
-        // released view.
         self.inbox.detach();
-        // The fields then drop in declaration order — the seat first, and
-        // inside it the command sender whose closing is the goodbye, then the
-        // fetcher whose other handle that seat carried. `bobcat-main`
-        // answers that by releasing this view's document and realm and going
-        // on serving its siblings, and the group is what joins the thread
-        // once the last of them is gone.
     }
 }
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// Reload the page without fetching or evaluating its entry again. The
-    /// framework recreates component state; global properties remain unchanged.
-    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
-    /// An empty `processor_name` selects the default processor.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] until [`Self::pump`] reports
-    /// [`EngineEvent::ScriptFinished`] — MTS boot, not the BTS Worker's — or
-    /// after the view ends. No update is queued.
     pub fn reload(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Reload {
             data,
@@ -1260,15 +560,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         })
     }
 
-    /// Merge data through the MTS update entry and BTS `updateCardData` hook.
-    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
-    /// An empty `processor_name` selects the default processor.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
-    /// MTS boot, not the BTS Worker's startup.
-    /// Rejected updates are not queued.
     pub fn update_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
             data,
@@ -1277,16 +568,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         })
     }
 
-    /// Replace page data using RESET semantics. The framework owns merging,
-    /// notification and React rerendering. The embedder serializes `data` as
-    /// JSON; JavaScript parses it on delivery. An empty `processor_name`
-    /// selects the default processor.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
-    /// MTS boot, not the BTS Worker's startup.
-    /// Rejected resets are not queued.
     pub fn reset_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::Data {
             data,
@@ -1295,29 +576,10 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         })
     }
 
-    /// Merge literal top-level global-property keys into host values, then
-    /// notify BTS before updating MTS bindings and invoking its current hook.
-    /// Script mutations do not alter the host values.
-    /// The embedder serializes `data` as a JSON object; JavaScript parses it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true —
-    /// MTS boot, not the BTS Worker's startup.
-    /// Supply initial properties through [`ViewSources::global_props`]; rejected
-    /// updates are not retained as initial properties or queued for replay.
     pub fn update_global_props(&self, data: String) -> Result<(), EngineError> {
         self.send_page_update(crate::link::PageUpdate::GlobalProps(data))
     }
 
-    /// Deliver a global event. The embedder serializes the listener argument
-    /// list as a JSON array in `arguments`; JavaScript parses it on delivery.
-    /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
-    /// the view ends. Rejected events are not queued for later delivery.
     pub fn send_global_event(
         &self,
         name: impl Into<String>,
@@ -1329,27 +591,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         })
     }
 
-    /// Applies one editing command to the focused editing host: what a
-    /// platform input method asks for (a composition, a commit, a deletion
-    /// around the caret, a selection) and the keyboard editing actions a
-    /// host decided itself.
-    ///
-    /// Queued behind every command sent before it — the painter's routed
-    /// input among them — so a `keydown` dispatched first is delivered
-    /// first, and a frame post the painter makes after this call is
-    /// acknowledged only once it has been applied, as
-    /// [`Painter::dispatch_input`](crate::Painter::dispatch_input)'s events
-    /// are. On the main thread the command dispatches the events it owes at
-    /// the host — `beforeinput`, `compositionstart`/`update`/`end`, `input`
-    /// — around the change, which no listener can stop (none of them is
-    /// cancelable from script). A command with nothing focused, or one the
-    /// editing host refuses, does nothing at all. What it did reaches the
-    /// host as [`EngineEvent::TextInputStateChanged`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
-    /// the view ends, like the page updates; the command is not queued.
     pub fn edit(&self, command: terminus::link::editing::Command) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
@@ -1360,25 +601,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             .map_err(|_| EngineError::NotReady)
     }
 
-    /// Says where this view's typed text, deletions and line breaks come
-    /// from, and so what a `keydown`'s editing default action does at a
-    /// focused editing host from the next key on
-    /// ([`TextInputSource`](crate::editing::TextInputSource)). A view starts
-    /// at [`TextInputSource::Keys`](crate::editing::TextInputSource::Keys); a
-    /// host that owns a platform text proxy and forwards its input events as
-    /// [`Self::edit`] commands — the browser host — sets
-    /// [`TextInputSource::Commands`](crate::editing::TextInputSource::Commands)
-    /// right after it builds the view.
-    ///
-    /// Unlike [`Self::edit`] this is taken before boot as well: it is a
-    /// setting of the view's main thread, not an operation on a document, and
-    /// it is queued like every command, so a key the painter routes after
-    /// this call is decided by it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::NotReady`] once the view has ended; nothing is
-    /// queued.
     pub fn set_text_input_source(
         &self,
         source: crate::editing::TextInputSource,
@@ -1402,17 +624,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             .map_err(|_| EngineError::NotReady)
     }
 
-    /// Runs one view turn: hand the host's resource system everything the
-    /// document asked for, take back what it has finished, and hand back
-    /// every lifecycle event the engine has produced since the last call.
-    ///
-    /// **This is the only call that advances the resource protocol**, past
-    /// the startup sources [`LynxGroup::create_lynx_view`] handed the fetcher
-    /// as it built this view. A painter observing this view asks the host
-    /// for no load — it draws what has already been published from pixels
-    /// the fetcher already holds, and names the pictures it wants back —
-    /// so a host that wants an image to arrive, or to come back, takes this
-    /// turn.
     #[must_use]
     pub fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
@@ -1431,9 +642,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     }
                 }
                 ViewNotice::Engine(event) => {
-                    // A fatal event ends the view the same way its release
-                    // does, and by the same signal: the token this view was
-                    // built with, which its own task is waiting on.
                     if event.is_fatal() {
                         self.state = ViewState::Failed;
                         *self.seat.frame_demand.borrow_mut() =
@@ -1458,9 +666,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 ViewNotice::RequestImages(sources) => requests.images.extend(sources),
                 ViewNotice::RequestDocuments(documents) => requests.documents.extend(documents),
                 ViewNotice::Playback(playback) => requests.playback.extend(playback),
-                // A view that failed or was released asks its host for
-                // nothing more: the completion is dropped instead, which is
-                // what tells whoever was awaiting it that no source is coming.
                 ViewNotice::RequestSource {
                     request,
                     completion,
@@ -1469,21 +674,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         self.fetcher.request_source(request, completion);
                     }
                 }
-                // Assembled here, because here is where the handle a callback
-                // answers through already is: the view's own command sender
-                // for a call the MTS realm made, and for a worker's the
-                // handle `WorkerCreated` registered, which precedes every
-                // call that worker makes on this one FIFO — so a handle this
-                // turn cannot find is a worker that has since gone, and there
-                // is nobody left to answer.
-                //
-                // A module nothing here is named for, or a method its module
-                // did not declare, is no error either: the realm's
-                // `NativeModules` object never carried that name, so such a
-                // call can only come from a script calling
-                // `bobcat:native-modules` directly. The call is assembled and
-                // dropped rather than invoked, and dropping it releases each
-                // of its functions in the realm that is waiting on them.
                 ViewNotice::NativeModuleCall {
                     caller,
                     call,
@@ -1493,9 +683,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     callbacks,
                 } => {
                     if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
-                        // A statement of its own, so the borrow ends here: a
-                        // module may drive this view's painter inside
-                        // `invoke`, and the painter borrows the same cell.
                         let reply = self
                             .seat
                             .frame_demand
@@ -1524,9 +711,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         }
         self.serve_images(requests);
         self.take_performance_entries(&mut events);
-        // Drained either way, so what a host reported before the failure is
-        // discarded here rather than left to accumulate behind a view that
-        // will never commit again.
         let reports = self.inbox.drain();
         if self.state != ViewState::Failed && !reports.is_empty() {
             let _ = self.seat.commands.send(ToMain::ImageEvents(reports));
@@ -1534,15 +718,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         events
     }
 
-    /// The host's moment in a turn for images: its own service, then the
-    /// sources, documents and playbacks this turn's notices asked for.
-    ///
-    /// The host's own moment comes before the sources this turn discovered
-    /// are named, so a load that finished between turns is reported whether
-    /// or not this turn asked for anything. A view that has failed asks its
-    /// host for nothing at all, images and documents included: the document
-    /// those pictures were for is finished with, and the same rule already
-    /// governs the source requests.
     fn serve_images(&self, requests: ImageRequests) {
         if self.state == ViewState::Failed {
             return;
@@ -1554,16 +729,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         for (source, bytes, kind) in requests.documents {
             self.fetcher.request_document(&source, bytes, kind);
         }
-        // After the images: a picture plays only a source already reported
-        // loaded, so no request here waits on one above.
         for request in requests.playback {
             self.fetcher.request_playback(request);
         }
     }
 
-    /// Hands `events` the performance entries completed since the last turn,
-    /// and tells each BTS worker owed some that they are ready. One atomic
-    /// read on a turn where nothing completed.
     fn take_performance_entries(&mut self, events: &mut Vec<EngineEvent>) {
         let registry = &self.seat.registry;
         let generation = registry.generation();
@@ -1578,16 +748,12 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 demand.notify_performance(key);
             }
         }
-        // Each `<frame>` card's completed load, owed to its realm as
-        // `loadmetrics` whoever observes: written here, on the embedder's
-        // thread, so the main thread only dispatches what it is handed.
         let frame_loads = registry.take_frame_loads();
         if self.state != ViewState::Failed {
             for (card, load) in frame_loads {
                 let mut json = String::new();
                 PerformanceEntry::LoadBundle(Box::new(load))
                     .write_lynx_json(&self.time_origin, &mut json);
-                // A send that fails is a view that has ended.
                 let _ = self
                     .seat
                     .commands
@@ -1602,27 +768,10 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         }
     }
 
-    /// Which performance entries [`Self::pump`] reports, as
-    /// [`EngineEvent::Performance`]: the types in `types`, replacing what
-    /// was asked before. A view starts with none, and assembles nothing for
-    /// a type nobody asked for. A record completed before the call is
-    /// reported only to the audiences it had then; a load completes once
-    /// its first frame is presented and its BTS has loaded its entry, so a
-    /// call right after [`LynxGroup::create_lynx_view`] receives it.
     pub fn observe_performance(&self, types: EntryTypes) {
         self.seat.registry.observe_rust(types);
     }
 
-    /// The host's marks around this view (Lynx's `setExtraTiming`): when
-    /// its container was opened and initialized and its template prepared,
-    /// on the wall clock. Each key is taken once; a key set again changes
-    /// nothing. A load already reported is reported again — to the
-    /// embedder and to the BTS observers — with `fcp` and `totalFcp`
-    /// filled, as Lynx re-sends its load entry.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::NotReady`] once the view has ended.
     pub fn set_extra_timing(&self, timing: ExtraTiming) -> Result<(), EngineError> {
         if self.cancel.is_cancelled() {
             return Err(EngineError::NotReady);
@@ -1631,32 +780,12 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         Ok(())
     }
 
-    /// Turns the long task monitor on with `config`, or off with `None`
-    /// (Lynx's `enable_long_task_timing`; off by default): every job of
-    /// this view's realms, on either engine thread, that runs at least
-    /// `config.threshold` is a [`PerformanceEntry::LongTask`], reported to
-    /// an embedder that observes [`EntryTypes::LONG_TASK`] and dropped
-    /// otherwise. Off, a job reads one atomic and no clock.
     pub fn set_long_task_monitor(&self, config: Option<LongTaskConfig>) {
         self.seat
             .registry
             .set_long_task_threshold(config.map(|config| config.threshold));
     }
 
-    /// Turns the JS blocking monitor on with `config`, or off with `None`
-    /// (Lynx's `enable_js_blocking_monitor`; off by default). While it is
-    /// on, each message sent to one of this view's workers carries its send
-    /// instant, and a wait for the worker thread of at least
-    /// `config.threshold` adds to running totals, reported as
-    /// [`PerformanceEntry::JsBlocking`] to an embedder that observes
-    /// [`EntryTypes::JS_BLOCKING`]: at the view's load (`loadBundle`), then
-    /// 1, 3, 6, 10 … intervals after it (`timer`). A monitor turned on after
-    /// the load makes no `loadBundle` report and counts its timer from the
-    /// call. Every worker of the view is counted, the BTS among them.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::NotReady`] once the view has ended.
     pub fn set_js_blocking_monitor(
         &self,
         config: Option<JsBlockingConfig>,
@@ -1667,7 +796,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         let now = crate::clock::ClockInstant::now();
         let epoch = self.seat.registry.set_js_blocking_monitor(config, now);
         if let (Some(epoch), Some(config)) = (epoch, config) {
-            // A task of the view's on `bobcat-main`, so it ends with it.
             let _ =
                 self.seat
                     .commands
@@ -1679,37 +807,12 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         Ok(())
     }
 
-    /// Turns the memory monitor on with `config`, or off with `None`
-    /// (Lynx's `enable_memory_monitor`; off by default). While it is on, a
-    /// task of the view's samples `config.acquisition_delay` after the call
-    /// and then every `config.report_interval`: the main thread reads the
-    /// script runtime its realm runs on (`mainThreadScriptingEngine`) and
-    /// the document's elements (`lynxTasmElement`), the view's BTS worker
-    /// the runtime of `bobcat-workers` (`backgroundThreadScriptingEngine`).
-    /// Each reading replaces its category's last one, and when it moved the
-    /// total by at least `config.change_threshold` bytes — or is the first
-    /// since the call — a [`PerformanceEntry::Memory`] carries every
-    /// category's latest reading, as Lynx's `MemoryMonitor` reports. Both
-    /// script runtimes are shared by every realm on their thread, so their
-    /// readings cover the group's other views too.
-    ///
-    /// The entries reach an embedder that also observes
-    /// [`EntryTypes::MEMORY`] through [`Self::observe_performance`], and no
-    /// BTS observer, as Lynx reports them to the platform alone. Each call
-    /// starts the readings afresh, and the next call, or the view's end,
-    /// stops the sampling task. Off, nothing is read and no clock is
-    /// touched.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::NotReady`] once the view has ended.
     pub fn set_memory_monitor(&self, config: Option<MemoryConfig>) -> Result<(), EngineError> {
         if self.cancel.is_cancelled() {
             return Err(EngineError::NotReady);
         }
         let epoch = self.seat.registry.set_memory_monitor(config);
         if let (Some(epoch), Some(config)) = (epoch, config) {
-            // A task of the view's on `bobcat-main`, so it ends with it.
             let _ = self
                 .seat
                 .commands
@@ -1721,22 +824,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         Ok(())
     }
 
-    /// Where this view's clock sits on the Unix timeline, which every
-    /// [`crate::performance::Timestamp`] it reports converts through.
     #[must_use]
     pub const fn time_origin(&self) -> TimeOrigin {
         self.time_origin
     }
 
-    /// Warms `sources` in the store, ahead of any paint walk meeting them.
-    ///
-    /// There is no matching "load and tell me when it is done": discovery is
-    /// automatic. The paint walk reports every source it meets, this view
-    /// names it against the store, and the document relayouts when the pixels
-    /// and their intrinsic size arrive. This only moves that work earlier.
-    ///
-    /// Applies immediately, like every other call here — the fetcher is on
-    /// this thread.
     pub fn prefetch_images<I, S>(&mut self, sources: I)
     where
         I: IntoIterator<Item = S>,
@@ -1748,47 +840,26 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     }
 }
 
-/// What a painter reaches a view through. None of it is a second way to drive
-/// a view: every one is something the view already publishes, handed over
-/// without a copy.
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// A second receiver on this view's publication watch.
     pub(crate) fn frames(&self) -> watch::Receiver<Published> {
         self.frames.clone()
     }
 
-    /// The seat a painter observes this view from: its command sender and its
-    /// handle on the host's resource system, as one thing.
-    ///
-    /// The view owns the only strong reference, so the `Weak`
-    /// [`Painter::attach`](crate::Painter::attach) takes of it can never keep
-    /// a released view's task alive or hold its store open — and the weak
-    /// count here is what says whether a painter has taken the seat.
     pub(crate) const fn seat(&self) -> &Rc<ViewSeat<F::PlatformFrame>> {
         &self.seat
     }
 
-    /// When this view's document started, which is the epoch its animations
-    /// are timed against.
     pub(crate) const fn timeline_epoch(&self) -> ClockInstant {
         self.timeline_epoch
     }
 }
 
-/// What an in-crate test reaches a live view through.
-///
-/// Every one of these is an observation the engine already makes somewhere;
-/// none of them is a second way to drive a view.
 #[cfg(test)]
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// This view's end signal, which is what a source completion the host
-    /// still holds is answered against.
     pub(crate) const fn cancel(&self) -> &CancellationToken {
         &self.cancel
     }
 
-    /// Runs `probe` against the document on the thread that owns it,
-    /// answering `None` if that thread never got to it.
     pub(crate) fn probe_document<T: Send + 'static>(
         &mut self,
         probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
@@ -1796,10 +867,6 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         self.probe_document_within(std::time::Duration::from_secs(30), probe)
     }
 
-    /// [`Self::probe_document`], giving up after `patience`: for a test
-    /// whose document thread may be parked on a source only this thread's
-    /// next `pump` answers. A probe given up on still runs later, into a
-    /// receiver nobody holds.
     pub(crate) fn probe_document_within<T: Send + 'static>(
         &mut self,
         patience: std::time::Duration,
@@ -1815,114 +882,47 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         receiver.recv_timeout(patience).ok()
     }
 
-    /// The newest committed frame this view has published.
     pub(crate) fn published_frame(&mut self) -> Option<Arc<terminus::link::CommittedFrame>> {
         self.frames.borrow_and_update().frame.clone()
     }
 }
 
-/// Everything a group's thread is ever told.
 pub(crate) enum GroupCommand {
-    /// Serve one more view on the group's runtime and style pool.
     Attach(Box<ViewAttachment>),
 }
 
-/// A view for a group's thread to adopt: everything that view needs which is
-/// not already the group's, and both ends of the link it will speak through.
-///
-/// Nothing here is generic over the embedder's [`EventRequester`]. The one
-/// part of a view's link that knows it is the requester itself, and that is
-/// the group's — every view in a group paints on the thread that created the
-/// group, and so wakes one event loop.
 pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
-    /// This view's fonts, default family and locale, already registered and
-    /// validated on the embedder's thread.
     pub(crate) text_context: terminus::link::TextContext,
-    /// The same fonts, family and locale, for the view's worker realms.
     pub(crate) worker_fonts: Arc<WorkerFonts>,
-    /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
-    /// The embedder's native modules as the BTS realm hears about them: one
-    /// `<utf16Length>:<text>` record of names and comma-joined method lists,
-    /// which the MTS realm reads as a startup member and posts to its BTS
-    /// Worker in the `initialize` message.
-    /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
-    /// The ES modules those native modules supplied, as bytecode, which
-    /// every worker realm of the view completes `lynx:<name>` from.
     pub(crate) native_esms: Arc<crate::native_module::NativeModuleEsms>,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
-    /// The reading end of the seat's metrics watch: what an attached painter
-    /// names, `None` until one does.
     pub(crate) metrics: watch::Receiver<Option<Viewport>>,
-    /// Main's handle on the seat's scroll mailbox.
     pub(crate) scroll: Arc<ScrollMailbox>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,
-    /// The view's end signal, minted on the embedder's thread. The task that
-    /// serves this view ends on it, and cancels it again on every exit.
     pub(crate) cancel: CancellationToken,
-    /// The one part of the host's resource system that leaves the embedder's
-    /// thread: the fetcher's answer to "already fetched?", which every realm
-    /// of this view asks before making a fetch. `None` for a host that gave
-    /// none.
     pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
-    /// The fetcher's answer to "is a stylesheet held here?", which only the
-    /// view's MTS realm asks, from `__LoadStyleSheet`. `None` for a host that
-    /// gave none.
     pub(crate) style_sheet_probe: Option<crate::resource::StyleSheetProbe>,
-    /// [`ViewSources::base_url`], parsed by `create_lynx_view`: what every
-    /// realm of this view resolves a synchronous load's URL against.
     pub(crate) base_url: Arc<url::Url>,
-    /// The view's pipeline registry, shared with its seat.
     pub(crate) registry: Arc<PipelineRegistry>,
-    /// The view's placeholder canvases, shared with its seat.
     pub(crate) canvases: Arc<crate::paint::CanvasPictures>,
-    /// The view's command channel, held weakly and outside the seat's
-    /// count, for a canvas presenter's `ToMain::CanvasResized`.
     pub(crate) to_main: mpsc::WeakUnboundedSender<ToMain>,
 }
 
-/// The answers to the requests [`LynxGroup::create_lynx_view`] made on the
-/// embedder's thread.
-///
-/// The entry is read by a task of the view's owner when its answer arrives,
-/// which completes the module boot imports by the entry's URL. The sheets go
-/// to the realm's document slot, and the first `__FlushElementTree` waits
-/// for each and mounts it, in the order the view listed them, before the
-/// document is styled: order of *use* rather than of completion, so the
-/// cascade order between several sheets is the listed order whatever order
-/// the fetcher answered them in.
 pub(crate) struct StartupSources {
-    /// One per author stylesheet, in the order the view listed them.
     pub(crate) sheets: Vec<StartupSource>,
     pub(crate) entry: StartupSource,
 }
 
-/// One startup source: the URL it was requested by, and the answer to the
-/// request [`LynxGroup::create_lynx_view`] already made for it. For the entry
-/// that URL is the one `create_lynx_view` resolved against
-/// [`ViewSources::base_url`]; for a sheet it is the string the view listed,
-/// which the fetcher resolves.
-///
-/// The URL travels beside the answer because it is what a failure is named
-/// by: a sheet whose load failed makes `__FlushElementTree` throw
-/// `loading stylesheet <url>: <reason>` with the listed string, which fails
-/// boot's own flush, and an entry answered with something other than a
-/// script fails the startup with a message naming the resolved URL.
 pub(crate) struct StartupSource {
     pub(crate) url: String,
     pub(crate) answer: SourceAnswer,
 }
 
-/// Hands the fetcher one startup request and keeps the answer.
-///
-/// The token is the view's own, minted a few statements above: a host holding
-/// one of these completions reads the embedder's release without waiting for
-/// a turn, exactly as it does for a request that left through
-/// `ViewNotice::RequestSource`.
 fn request_startup_source<F: ResourceFetcher>(
     fetcher: &F,
     cancel: &CancellationToken,
@@ -1933,15 +933,6 @@ fn request_startup_source<F: ResourceFetcher>(
     answer
 }
 
-/// Resolves a view's entry, BTS entry and card URL against its base URL, by
-/// URL rules, and replaces each with the serialization of the result. Returns
-/// the parsed base.
-///
-/// Run in `create_lynx_view` before the fetcher is built, so a URL that does
-/// not resolve is a construction failure that requested nothing. Each
-/// [`EngineError::InvalidUrl`] names the string that failed: the base when
-/// it is not an absolute URL, otherwise the entry or card URL that does not
-/// resolve.
 pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url, EngineError> {
     let invalid = |url: &str, error: url::ParseError| EngineError::InvalidUrl {
         url: url.to_owned(),
@@ -1966,47 +957,10 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
     Ok(base)
 }
 
-/// Discovers the platform's fonts before any view needs them.
-///
-/// The first text context built in a process discovers the platform's fonts
-/// (fontique enumerates every installed font file and reads its name table,
-/// tens to hundreds of milliseconds on a desktop), and every view of the
-/// process shares that one discovery. Without this call it happens inside the
-/// first call that needs a context: [`LynxGroup::create_lynx_view`], on the
-/// embedder's thread, for a view that names [`ViewSources::fonts`],
-/// [`ViewSources::default_font_family`], [`ViewSources::fallback_fonts`] or
-/// [`ViewSources::locale`]; otherwise the first layout that shapes text, on
-/// the group's Lynx main thread, where it delays that view's first frame and
-/// every entry of every other view of the group.
-///
-/// An embedder calls this once, early, on a thread of its own, so the
-/// discovery overlaps the rest of its startup; the group and the views need
-/// not exist yet. Process-wide and idempotent: a call after the discovery
-/// returns at once, from any thread, and one that overlaps the discovering
-/// call waits for it, so a view built before the preload finishes is correct
-/// and merely waits. Not covered: a view's own fonts and `@font-face` sources,
-/// which are registered per view, and the platform's per-script fallback,
-/// which [`LynxGroup::preload_text`] asks for the scripts the host names and
-/// each view otherwise asks for the first time it shapes a script.
 pub fn preload_system_fonts() {
     terminus::link::TextContext::preload_system_fonts();
 }
 
-/// Registers a view's fonts, selects its default family and sets its
-/// locale, before any document exists and before anything has been fetched.
-///
-/// None of them needs a document: fonts, the default family and the locale
-/// are a [`TextContext`](terminus::link::TextContext)'s business, and a
-/// document only ever adopts a finished one. Running it here, in
-/// `create_lynx_view`, is what keeps a family nothing provides, or a tag that
-/// is not a language, a zero-fetch failure — the startup requests go out in
-/// that same call, so there is no later point at which this check would
-/// still be ahead of them.
-///
-/// `Err` is a default family neither the containers nor the platform has, or
-/// a locale that is not a BCP-47 tag: a failure to build the view rather than
-/// to run it. The locale is set last, after the fallback containers, so that
-/// the language's own fallback keys reach the families those containers hold.
 pub(crate) fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
@@ -2031,11 +985,6 @@ pub(crate) fn stage_text_context(
     Ok(text)
 }
 
-/// A view's [`ViewSources::fonts`], [`ViewSources::default_font_family`],
-/// [`ViewSources::fallback_fonts`] and [`ViewSources::locale`], which a
-/// worker realm of the view shapes its canvas text with: the host's fonts,
-/// and on wasm32, which has no system fonts, the only ones there are. Not
-/// the document's `@font-face` faces.
 #[derive(Debug, Default)]
 pub(crate) struct WorkerFonts {
     fonts: Vec<FontBlob>,
@@ -2054,9 +1003,6 @@ impl WorkerFonts {
         }
     }
 
-    /// A text context over these fonts and the system's. The view staged
-    /// the same set once already, so only the default value, which no view
-    /// holds, takes the fallback: the system fonts alone.
     pub(crate) fn text_context(&self) -> terminus::link::TextContext {
         stage_text_context(
             self.fonts.clone(),

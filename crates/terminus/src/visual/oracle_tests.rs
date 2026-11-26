@@ -38,10 +38,6 @@ use crate::visual::{CommittedFrame, PaintItemKind, ScrollOffsets, ScrollSlot, Sp
 
 const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// The Lynx UA rules the fixtures depend on: every box clips (`<text>`
-/// included, as `overflow: clip`) except `page` and `view`, which the default
-/// page config resets to `visible`. A `<text>` is a Lynx text element by its
-/// definition ([`Fixture::new`]), not by a rule here.
 const UA: &str = "page, view, text { display: flex; box-sizing: border-box;
                                      position: relative; overflow: clip;
                                      min-width: 0; min-height: 0; }
@@ -56,42 +52,25 @@ const KEYFRAMES: &str = "
 
 const CURVES: [&str; 4] = ["translate", "rotate", "scale", "opacity"];
 
-/// Where the timeline stands when `early` is committed, and the later
-/// instants it is composed at — the last one in the next iteration, at a
-/// progress before `EARLY`'s.
 const EARLY: f64 = 0.1;
 const LATER: [f64; 3] = [0.35, 0.8, 1.05];
 
-/// Group rects hold composed positions to this many CSS px.
 const TOLERANCE: f64 = 1e-3;
 
-/// How far apart two composed positions near `magnitude` CSS px may be: the
-/// worlds agree bit for bit, so what is left is the f32 rounding of each
-/// frame's own bake, a couple of ulps of the coordinate.
 fn composed_tolerance(magnitude: f64) -> f64 {
     1e-6 + 2.0 * f64::from(f32::EPSILON) * magnitude
 }
 
-/// One fixture: its document, the scroll offsets both frames compose at, the
-/// number of curves it exports, elements the hit sweep must reach, and
-/// whether `early`'s walk must cull something for the coverage check to
-/// prove anything.
 struct Fixture {
     doc: Doc,
     offsets: Vec<(NodeId, Vector2D<f32>)>,
     exported: usize,
     probes: Vec<NodeId>,
     culls: bool,
-    /// Main-thread ticks, each rendered, between the restyles and `early`.
     ticks: Vec<f64>,
-    /// When `early` is committed.
     early: f64,
-    /// The instants `early` is composed at.
     later: Vec<f64>,
-    /// Inline styles set once the timeline has started, each followed by a
-    /// render and a tick at 0: how restyled animation lists start.
     restyles: Vec<(NodeId, String)>,
-    /// The animations the first slot's curve must carry.
     entries: Option<usize>,
 }
 
@@ -141,8 +120,6 @@ impl Fixture {
         }
     }
 
-    /// Commits `early` with every curve running, then checks it against a
-    /// fresh commit at each of the later instants.
     fn check(mut self, label: &str) {
         let dom = &mut self.doc.dom;
         dom.render();
@@ -205,8 +182,6 @@ impl Fixture {
                 "{label}: the hand-back instant"
             );
             if early.animation_boundary_passed(t) {
-                // The main thread's commit takes over from here; until it is
-                // adopted each curve holds its domain's last instant.
                 assert!(late.animation_slots().len() <= self.exported, "{label}");
                 Self::compare_hold(&early, t, &label);
                 continue;
@@ -219,10 +194,6 @@ impl Fixture {
         }
     }
 
-    /// Commits `early` with `source` scrolled to `from` and every curve on a
-    /// scroll timeline of it, then checks `early` composed with `source` at
-    /// each of `offsets` against a fresh commit after the document scrolled
-    /// there. The clock never moves.
     fn check_scroll(mut self, label: &str, source: NodeId, from: f32, offsets: &[f32]) {
         let dom = &mut self.doc.dom;
         dom.render();
@@ -258,8 +229,6 @@ impl Fixture {
             let offset = Vector2D::new(0.0, offset);
             let dom = &mut self.doc.dom;
             dom.scroll_to(source, offset);
-            // A scroll the main thread adopts re-cascades no painted curve;
-            // the next commit's resolution re-samples it.
             dom.note_scroll_windows_stale();
             dom.render();
             let late = dom.committed_frame().expect("a frame is committed");
@@ -274,9 +243,6 @@ impl Fixture {
         }
     }
 
-    /// Whether `node`'s committed style takes `property` from the animations
-    /// or the transitions origin: whether the main thread's cascade sampled
-    /// an animation or a transition for it.
     fn animated_by_cascade(&self, node: NodeId, property: LonghandId) -> bool {
         let dom = &self.doc.dom;
         let style = dom
@@ -295,8 +261,6 @@ impl Fixture {
         })
     }
 
-    /// At the commit instant and offsets every curve composes the committed
-    /// frame: an identity delta and the committed opacity.
     fn compare_commit_instant(&self, early: &CommittedFrame, label: &str) {
         let mut values = AnimationValueMap::default();
         for slot in early.animation_slots() {
@@ -332,7 +296,6 @@ impl Fixture {
         }
     }
 
-    /// Past its domain's end a curve holds the domain's last instant.
     fn compare_hold(early: &CommittedFrame, t: f64, label: &str) {
         let (mut held, mut last) = (AnimationValueMap::default(), AnimationValueMap::default());
         for slot in early.animation_slots() {
@@ -354,10 +317,6 @@ impl Fixture {
         }
     }
 
-    /// `early`'s curves sample a property at `at` and the fixture's offsets
-    /// exactly when `late`'s cascade animated it, every sampled value is the
-    /// one `late` committed, bit for bit, and a sampled transform folds to
-    /// `late`'s world exactly relative to the parent's committed world.
     fn compare_values(
         &self,
         early: &CommittedFrame,
@@ -413,8 +372,6 @@ impl Fixture {
                     .expect("the element paints its box");
                 (item.space, frame.order.matrix(item.transform))
             };
-            // An ancestor's curve moves the parent world the track holds
-            // still; the geometry comparison covers that composition.
             let movers = super::space::path(early.order.spaces(), own(early).0)
                 .filter(|kind| {
                     matches!(kind, SpaceKind::Animation(index)
@@ -427,9 +384,6 @@ impl Fixture {
         }
     }
 
-    /// Every grid point inside the viewport where `late` shows an item lies
-    /// inside `early`'s rect of every group holding that item, composed at
-    /// `at`.
     fn compare_groups(
         &self,
         rects: &[Rect],
@@ -475,7 +429,6 @@ impl Fixture {
             if groups.is_empty() {
                 continue;
             }
-            // The whole 800 × 600 viewport, 7 px apart.
             for row in 0_u16..86 {
                 for column in 0_u16..115 {
                     let point = Point2D::new(f32::from(column) * 7.0, f32::from(row) * 7.0);
@@ -500,9 +453,6 @@ impl Fixture {
         }
     }
 
-    /// Every item `late` shows at a grid point inside the viewport is one
-    /// `early` encodes. Items pair by index, as [`Self::compare_geometry`]
-    /// checked.
     fn compare_coverage(&self, encoded: &[bool], late: &CommittedFrame, label: &str) {
         let offset_of = self.offset_of();
         let animations = late.order.sample_animations(None, &offset_of);
@@ -517,7 +467,6 @@ impl Fixture {
             if encoded[index] {
                 continue;
             }
-            // The whole 800 × 600 viewport, 7 px apart.
             for row in 0_u16..86 {
                 for column in 0_u16..115 {
                     let point = Point2D::new(f32::from(column) * 7.0, f32::from(row) * 7.0);
@@ -532,8 +481,6 @@ impl Fixture {
         }
     }
 
-    /// Every paired item's and clip's composed box, and every exported
-    /// opacity, agree.
     fn compare_geometry(
         &self,
         early: &CommittedFrame,
@@ -628,7 +575,6 @@ impl Fixture {
                 .expect("an animated element is styled")
                 .get_effects()
                 .opacity;
-            // Paint clamps the committed opacity.
             assert_eq!(
                 alpha.to_bits(),
                 committed.clamp(0.0, 1.0).to_bits(),
@@ -637,8 +583,6 @@ impl Fixture {
         }
     }
 
-    /// `early` hit at `at` answers what `late` answers at `None` at every
-    /// grid point clear of the edges `late` draws.
     fn compare_hits(
         &self,
         early: &CommittedFrame,
@@ -650,13 +594,10 @@ impl Fixture {
         let late_hit = |x: f32, y: f32| late.hit(Point2D::new(x, y), &offset_of, None);
         let mut reached = Vec::new();
         let mut compared = 0_usize;
-        // The whole 800 × 600 viewport, 7 px apart.
         for row in 0_u16..86 {
             for column in 0_u16..115 {
                 let (x, y) = (f32::from(column) * 7.0 + 0.25, f32::from(row) * 7.0 + 0.25);
                 let expected = late_hit(x, y);
-                // Four neighbors half a pixel away answering alike put the
-                // point at least 0.35 px from any straight edge.
                 let stable = [(0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5)]
                     .into_iter()
                     .all(|(dx, dy)| late_hit(x + dx, y + dy) == expected);
@@ -686,9 +627,6 @@ impl Fixture {
     }
 }
 
-/// `a` and `b`, each a space's map after a baked local map, put `box_`'s
-/// corners within [`composed_tolerance`] of each other, at the magnitude
-/// either bake rounded them at.
 fn assert_same_box(
     (a_space, a_local): (Affine, Affine),
     (b_space, b_local): (Affine, Affine),
@@ -712,8 +650,6 @@ fn assert_same_box(
     }
 }
 
-/// A card holding a `<text>` whose run overflows it: the text's UA
-/// `overflow: clip` clips the run inside the moving card.
 #[test]
 fn a_card_with_a_text_child_composes_as_committed() {
     for curve in CURVES {
@@ -732,9 +668,6 @@ fn a_card_with_a_text_child_composes_as_committed() {
     }
 }
 
-/// An `overflow: hidden` rounded card — a programmatic scroll container
-/// under the Lynx grammar — scrolled by an offset override, with content
-/// overflowing it and a box over its rounded corner.
 #[test]
 fn an_overflow_hidden_rounded_card_composes_as_committed() {
     for curve in CURVES {
@@ -756,8 +689,6 @@ fn an_overflow_hidden_rounded_card_composes_as_committed() {
     }
 }
 
-/// An animated card holding a scroller at a non-zero offset override: the
-/// scroll node sits inside the animation node.
 #[test]
 fn a_scroller_inside_an_animated_card_composes_as_committed() {
     for curve in CURVES {
@@ -780,8 +711,6 @@ fn a_scroller_inside_an_animated_card_composes_as_committed() {
     }
 }
 
-/// A sticky header inside an animated card, stuck by the outer scroller's
-/// offset: the sticky node sits inside the animation node.
 #[test]
 fn a_sticky_box_inside_an_animated_card_composes_as_committed() {
     for curve in CURVES {
@@ -808,8 +737,6 @@ fn a_sticky_box_inside_an_animated_card_composes_as_committed() {
     }
 }
 
-/// An animated box inside a stuck sticky header: the animation node sits
-/// inside the sticky node.
 #[test]
 fn an_animated_box_inside_a_sticky_box_composes_as_committed() {
     for curve in CURVES {
@@ -835,8 +762,6 @@ fn an_animated_box_inside_a_sticky_box_composes_as_committed() {
     }
 }
 
-/// A rotating card holding an animated child: two animation nodes on one
-/// path, the inner one running each curve.
 #[test]
 fn nested_animated_elements_compose_as_committed() {
     for curve in CURVES {
@@ -856,10 +781,6 @@ fn nested_animated_elements_compose_as_committed() {
     }
 }
 
-/// A 1600 px arm along the viewport's top edge turning a quarter about a
-/// point 400 px in: cells past the right edge at the commit swing down into
-/// view later, and the far end, which only enters below the bottom edge, is
-/// culled.
 #[test]
 fn a_rotating_arm_encodes_every_cell_its_turn_shows() {
     let mut fixture = Fixture::new(
@@ -875,10 +796,6 @@ fn a_rotating_arm_encodes_every_cell_its_turn_shows() {
     fixture.check("rotating arm");
 }
 
-/// A 4000 px card shrinking to half about its top inside a scroller composed
-/// 600 px down: the rows that come into view need the scroll window crossed
-/// before the curve's reach, and the far end, which no instant shows, is
-/// culled.
 #[test]
 fn a_shrinking_card_in_a_scrolled_list_encodes_every_row_it_shows() {
     let mut fixture = Fixture::new(
@@ -900,9 +817,6 @@ fn a_shrinking_card_in_a_scrolled_list_encodes_every_row_it_shows() {
     fixture.check("shrinking card in a scrolled list");
 }
 
-/// A card sliding, turning or growing out of the static group holding it,
-/// with a `<text>` inside it: the group's rect holds every place the card
-/// can show.
 #[test]
 fn an_animated_card_inside_an_opacity_group_composes_as_committed() {
     for curve in CURVES {
@@ -923,7 +837,6 @@ fn an_animated_card_inside_an_opacity_group_composes_as_committed() {
     }
 }
 
-/// The same inside a blurred group, whose rect is also its bake's.
 #[test]
 fn an_animated_card_inside_a_blurred_group_composes_as_committed() {
     for curve in CURVES {
@@ -941,8 +854,6 @@ fn an_animated_card_inside_a_blurred_group_composes_as_committed() {
     }
 }
 
-/// A fading card — a group its own opacity curve forces — holding an
-/// animated child: two exports, the inner one inside the outer's group.
 #[test]
 fn an_animated_child_of_a_fading_card_composes_as_committed() {
     for curve in CURVES {
@@ -962,8 +873,6 @@ fn an_animated_child_of_a_fading_card_composes_as_committed() {
     }
 }
 
-/// A `backdrop-filter` panel with an animated sibling behind it, one in
-/// front of it, and an animated child of its own.
 #[test]
 fn a_backdrop_among_animated_boxes_composes_as_committed() {
     for curve in CURVES {
@@ -991,9 +900,6 @@ fn a_backdrop_among_animated_boxes_composes_as_committed() {
     }
 }
 
-/// A group committed mostly off the viewport's left edge that slides in by
-/// its own curve: its rect is the viewport pulled back through the slide,
-/// which must hold every place the slide later shows it.
 #[test]
 fn a_group_sliding_in_from_off_the_viewport_composes_as_committed() {
     for effect in ["opacity: 0.5;", "filter: blur(3px);"] {
@@ -1011,9 +917,6 @@ fn a_group_sliding_in_from_off_the_viewport_composes_as_committed() {
     }
 }
 
-/// A blurred `overflow: hidden` toast shrinking toward `scale(0)` holding a
-/// sliding ticker: no viewport pulls back through the toast's curve, and
-/// the toast's own clip holds the ticker's slide.
 #[test]
 fn a_ticker_in_a_shrinking_clipped_toast_composes_as_committed() {
     let mut fixture = Fixture::new(
@@ -1034,16 +937,6 @@ fn a_ticker_in_a_shrinking_clipped_toast_composes_as_committed() {
     fixture.check("ticker in a shrinking clipped toast");
 }
 
-/// A card holding a fixed box under a child. Under a transform curve the
-/// card's committed transform contains the box, so it moves with the curve;
-/// under an opacity curve it escapes the card and stays put, fading inside
-/// the card's group. The card's base transform is `none`; the curves start
-/// at an identity function, so an exported transform curve here always
-/// commits a non-empty list and the
-/// `animates_transform` bit is not observable here (the delay case in
-/// `visual/tests.rs` covers it). (`position: static` is outside the Lynx
-/// grammar and the UA makes every `view` relative, so an absolute box never
-/// escapes its parent here.)
 #[test]
 fn a_fixed_box_inside_an_animated_card_composes_as_committed() {
     let fixture = |curve: &str| {
@@ -1087,7 +980,6 @@ fn a_fixed_box_inside_an_animated_card_composes_as_committed() {
     }
 }
 
-/// A card running `animation` beside `css`, composed at `later`.
 fn card(css: &str, animation: &str, later: &[f64]) -> (Fixture, NodeId) {
     let mut fixture = Fixture::new(&format!(
         ".card {{ width: 120px; height: 80px; margin: 60px 0 0 80px; font-size: 20px;
@@ -1103,11 +995,8 @@ fn card(css: &str, animation: &str, later: &[f64]) -> (Fixture, NodeId) {
     (fixture, card)
 }
 
-/// Mid-segment instants, keyframe and iteration boundaries of a 1 s curve.
 const GRID: [f64; 7] = [0.25, 0.5, 0.75, 1.0, 1.375, 2.0, 2.625];
 
-/// Two opacity animations: the later one in the set's order wins, as the
-/// cascade inserts them.
 #[test]
 fn the_later_of_two_opacity_animations_wins_as_committed() {
     let (mut fixture, _) = card(
@@ -1119,7 +1008,6 @@ fn the_later_of_two_opacity_animations_wins_as_committed() {
     fixture.check("two opacity animations");
 }
 
-/// Timing functions stylo evaluates and the old exporter refused.
 #[test]
 fn step_and_square_bezier_easings_compose_as_committed() {
     for easing in ["steps(4, jump-both)", "square-bezier(0.3, 1.4)"] {
@@ -1128,10 +1016,6 @@ fn step_and_square_bezier_easings_compose_as_committed() {
     }
 }
 
-/// An interior keyframe with its own timing function: running forward, a
-/// segment eases by its lower keyframe's function; running reversed, by its
-/// upper keyframe's, so the overshooting ease moves from the second half to
-/// the first on alternate iterations.
 #[test]
 fn an_interior_keyframe_easing_composes_as_committed() {
     for direction in ["normal", "alternate"] {
@@ -1147,8 +1031,6 @@ fn an_interior_keyframe_easing_composes_as_committed() {
     }
 }
 
-/// `%` resolves against the border box and `em` against the font size the
-/// keyframes were computed with.
 #[test]
 fn relative_lengths_compose_as_committed() {
     let (fixture, _) = card(
@@ -1160,8 +1042,6 @@ fn relative_lengths_compose_as_committed() {
     fixture.check("% and em");
 }
 
-/// Lists stylo interpolates by matrix decomposition or by padding:
-/// mismatched functions, `none` against a list, and `matrix()` keyframes.
 #[test]
 fn mismatched_and_matrix_lists_compose_as_committed() {
     for keyframes in [
@@ -1179,9 +1059,6 @@ fn mismatched_and_matrix_lists_compose_as_committed() {
     }
 }
 
-/// A delayed animation filling backwards exports while still pending — the
-/// driver anchored it — showing its first keyframe, not the base value,
-/// until it starts.
 #[test]
 fn a_backwards_filled_delay_composes_as_committed() {
     let (mut fixture, _) = card(
@@ -1194,10 +1071,6 @@ fn a_backwards_filled_delay_composes_as_committed() {
     fixture.check("backwards-filled delay");
 }
 
-/// A delayed animation without a backwards fill exports while pending too:
-/// before its start nothing contributes, so the committed base value is
-/// what both sides show; it runs once, and past its end the frame hands
-/// back while the curve holds its last instant.
 #[test]
 fn an_unfilled_delay_composes_as_committed() {
     let (mut fixture, _) = card(
@@ -1210,8 +1083,6 @@ fn an_unfilled_delay_composes_as_committed() {
     fixture.check("unfilled delay");
 }
 
-/// An alternating curve crosses several iteration boundaries between the
-/// commit and each sample.
 #[test]
 fn an_alternate_reverse_curve_crosses_iterations_as_committed() {
     let (fixture, _) = card(
@@ -1222,11 +1093,6 @@ fn an_alternate_reverse_curve_crosses_iterations_as_committed() {
     fixture.check("alternate-reverse");
 }
 
-/// A finished animation holding its end value beside a running one on the
-/// same property: the driver puts the held one back last, so it wins. It
-/// does so after the traversal of the tick the animation finishes on, whose
-/// commit still takes the running one; a tick in between lets `early` commit
-/// the order the curve clones.
 #[test]
 fn a_held_animation_beside_a_running_one_composes_as_committed() {
     let (mut fixture, _) = card(
@@ -1241,8 +1107,6 @@ fn a_held_animation_beside_a_running_one_composes_as_committed() {
     fixture.check("held beside running");
 }
 
-/// A held `opacity` and a running `transform`: two animations contributing
-/// different properties, both sampled.
 #[test]
 fn a_held_fade_beside_a_running_turn_composes_as_committed() {
     let (mut fixture, _) = card(
@@ -1255,9 +1119,6 @@ fn a_held_fade_beside_a_running_turn_composes_as_committed() {
     fixture.check("held fade beside running turn");
 }
 
-/// `animation-name: translate` restyled to `translate, opacity`: servo's
-/// `maybe_start_animations` returns after updating the first, so `opacity`
-/// never starts — on the main thread, and so in the curve.
 #[test]
 fn a_restyled_animation_list_mirrors_servo_as_committed() {
     let (mut fixture, card) = card("", "translate 1s linear infinite", &GRID);
@@ -1269,8 +1130,6 @@ fn a_restyled_animation_list_mirrors_servo_as_committed() {
     fixture.check("restyled list");
 }
 
-/// A paused animation beside a running one: the paused one holds its
-/// progress on both sides.
 #[test]
 fn a_paused_animation_composes_as_committed() {
     let (mut fixture, _) = card(
@@ -1282,8 +1141,6 @@ fn a_paused_animation_composes_as_committed() {
     fixture.check("paused beside running");
 }
 
-/// A card moving along an `offset-path` while its transform animates: the
-/// motion-path sample is one of the fold's constant factors.
 #[test]
 fn a_transform_curve_on_a_motion_path_composes_as_committed() {
     for curve in ["translate", "rotate", "scale"] {
@@ -1297,8 +1154,6 @@ fn a_transform_curve_on_a_motion_path_composes_as_committed() {
     }
 }
 
-/// A planar curve on a child of a `perspective` parent: the parent's
-/// perspective is a constant factor, and a planar list stays planar under it.
 #[test]
 fn a_planar_curve_under_a_perspective_parent_composes_as_committed() {
     for curve in CURVES {
@@ -1316,11 +1171,6 @@ fn a_planar_curve_under_a_perspective_parent_composes_as_committed() {
     }
 }
 
-/// A `transform` transition started by a restyle: sampled through
-/// `Transition::calculate_value`, it composes as committed until its end,
-/// where the frame hands back. Its reach runs from its `from` to its `to`
-/// over its timing function's eased range, and the coverage check holds
-/// over the whole viewport.
 #[test]
 fn a_transform_transition_composes_as_committed() {
     let fixture = || {
@@ -1345,8 +1195,6 @@ fn a_transform_transition_composes_as_committed() {
     fixture().check("transform transition");
 }
 
-/// An `opacity` transition beside a `transform` animation on one element:
-/// both export in one curve, each property from its own entry.
 #[test]
 fn an_opacity_transition_beside_a_transform_animation_composes_as_committed() {
     let (mut fixture, card) = card(
@@ -1362,9 +1210,6 @@ fn an_opacity_transition_beside_a_transform_animation_composes_as_committed() {
     fixture.check("opacity transition beside a transform animation");
 }
 
-/// A transition in its delay exports once a frame anchors its start: the
-/// anchoring owes that frame a commit although no style moves until the
-/// delay ends, and the commit hands the element to the painter.
 #[test]
 fn a_delayed_transition_exports_once_anchored() {
     let (mut fixture, card) = card(
@@ -1392,8 +1237,6 @@ fn a_delayed_transition_exports_once_anchored() {
     assert!(!anchored.needs_main_ticks(), "and main stops ticking");
 }
 
-/// The value `frame`'s first curve samples for `property` at `t`: what the
-/// painter shows then.
 fn painted(frame: &CommittedFrame, property: LonghandId, t: f64) -> AnimationValue {
     let mut values = AnimationValueMap::default();
     frame.animation_slots()[0]
@@ -1405,12 +1248,6 @@ fn painted(frame: &CommittedFrame, property: LonghandId, t: f64) -> AnimationVal
         .expect("the curve samples the property")
 }
 
-/// A tap mid-flight whose listener restyles the card back: the job that
-/// runs it syncs the main thread's clock to the painter's first, so the
-/// reversed transition starts from the value the painter showed at that
-/// instant, shortened by the factor css-transitions-1 §3 computes — the
-/// progress the old one had reached — rather than from the last tick's. The
-/// next frame anchors it, and the export resumes from that value.
 #[test]
 fn a_retarget_mid_flight_reverses_from_the_painted_value() {
     let (mut fixture, card) = card(
@@ -1455,7 +1292,6 @@ fn a_retarget_mid_flight_reverses_from_the_painted_value() {
         "from the painted value"
     );
     drop(sets);
-    // Pending until a frame anchors its start, as any new transition is.
     assert!(late.animation_slots().is_empty() && late.needs_main_ticks());
     let frame = tap + 0.0625;
     dom.advance_animations(frame);
@@ -1468,9 +1304,6 @@ fn a_retarget_mid_flight_reverses_from_the_painted_value() {
     assert_eq!(painted(&anchored, LonghandId::Transform, frame), shown);
 }
 
-/// `animation-play-state: paused` applied by a restyle while a curve covers
-/// the element holds the progress the painter had reached, not the progress
-/// at the last tick.
 #[test]
 fn a_pause_mid_flight_holds_the_painted_progress() {
     let (mut fixture, card) = card("", "translate 1s linear infinite", &[]);
@@ -1498,7 +1331,6 @@ fn a_pause_mid_flight_holds_the_painted_progress() {
     assert_eq!(held, shown, "and it holds there");
 }
 
-/// Commits `fixture` at [`EARLY`] after its restyles, without checking it.
 fn commit_early(fixture: &mut Fixture) -> std::sync::Arc<CommittedFrame> {
     let dom = &mut fixture.doc.dom;
     dom.render();
@@ -1512,11 +1344,6 @@ fn commit_early(fixture: &mut Fixture) -> std::sync::Arc<CommittedFrame> {
     dom.commit()
 }
 
-/// What the painter could not reproduce stays on the main thread: an
-/// `!important` transform the animation cannot move, a transition on a
-/// property other than `opacity` and `transform`, and keyframes some
-/// interpolation takes out of the plane: `matrix3d` with a perspective term,
-/// and `rotateX` under a perspective parent.
 #[test]
 fn what_the_painter_cannot_reproduce_refuses_the_export() {
     let keyframes = "@keyframes persp {
@@ -1568,9 +1395,6 @@ fn what_the_painter_cannot_reproduce_refuses_the_export() {
     }
 }
 
-/// A row sheared by `skewX` keyframes has no reach, so the fading group
-/// holding it cannot bound it: the row stays on the main thread while the
-/// group's own fade exports.
 #[test]
 fn a_row_without_a_reach_inside_a_fading_group_refuses_the_export() {
     let mut fixture = Fixture::new(
@@ -1594,8 +1418,6 @@ fn a_row_without_a_reach_inside_a_fading_group_refuses_the_export() {
     assert!(frame.needs_main_ticks(), "the row ticks on the main thread");
 }
 
-/// A 300 px scroller holding a `.lead` when `lead`, then a card animating
-/// `curve` with `fill` on `timeline`, then a `.filler`.
 fn scroll_fixture(
     extra: &str,
     lead: bool,
@@ -1625,14 +1447,9 @@ fn scroll_fixture(
     (fixture, scroller, card)
 }
 
-/// `scroll()`: the card rides its scroller and animates across the whole
-/// scroll range — at the range's start, inside it, and at its end, which is
-/// the scroll limit.
 #[test]
 fn a_scroll_timeline_composes_as_committed() {
     for curve in CURVES {
-        // 200 px of lead, 120 px of card and 260 px of filler: a 280 px
-        // scroll range, over which some of the card stays in view.
         let (fixture, scroller, _) = scroll_fixture(
             ".lead { flex-shrink: 0; width: 280px; height: 200px; }
              .filler { height: 260px; }",
@@ -1649,14 +1466,9 @@ fn a_scroll_timeline_composes_as_committed() {
     }
 }
 
-/// `view()` on the card over its `entry` range, 80 px to 160 px of a 300 px
-/// scroll range: before it, exactly at its start and end, inside it, past
-/// it, and at the scroll limit.
 #[test]
 fn a_view_timeline_composes_as_committed() {
     for curve in CURVES {
-        // The card's border box spans 380 px to 460 px of 600 px content,
-        // out of view before its range; the sweep reaches the scroller.
         let (mut fixture, scroller, _) = scroll_fixture(
             ".filler { height: 120px; }
              .lead { flex-shrink: 0; width: 280px; height: 360px; }",
@@ -1674,10 +1486,6 @@ fn a_view_timeline_composes_as_committed() {
     }
 }
 
-/// The same `view()` range with no fill, committed before it, where the
-/// cascade has no effect: the curve contributes exactly where the cascade
-/// does — at the range's start and inside it, not before it, at its end, or
-/// past it.
 #[test]
 fn a_view_timeline_without_a_fill_composes_its_presence_as_committed() {
     for curve in CURVES {
@@ -1698,13 +1506,6 @@ fn a_view_timeline_without_a_fill_composes_its_presence_as_committed() {
     }
 }
 
-/// Range keyframes (scroll-animations-1 Appendix A, "Named Timeline Range
-/// Keyframe Selectors") on the same `view()` range: `entry` is `[80, 160]`, so
-/// `entry 0%` and `entry 100%` sit at 0 and 1, `contain 50%` at 2.375,
-/// `cover -10%` at -0.475 and `cover 150%` at 7.125 of the attachment range.
-/// The opacity segment straddles the whole range, the transform track runs
-/// past its end, and the before phase stands between opacity keyframes. The
-/// curve samples the keyframes the commit placed, as the cascade does.
 #[test]
 fn range_keyframes_on_a_view_timeline_compose_as_committed() {
     let (mut fixture, scroller, card) = scroll_fixture(
@@ -1720,9 +1521,6 @@ fn range_keyframes_on_a_view_timeline_compose_as_committed() {
         ("ranged", "both"),
         "animation-timeline: view(); animation-range: entry",
     );
-    // Halfway through `entry` the keyframes are in place: the transform
-    // halfway to `entry 100%`, the opacity 0.975 / 2.85 of the way from
-    // `cover -10%` to `contain 50%`.
     fixture.doc.flush();
     fixture
         .doc
@@ -1743,12 +1541,6 @@ fn range_keyframes_on_a_view_timeline_compose_as_committed() {
     );
 }
 
-/// `to` and `entry 100%` tied at offset 1 on the card's `entry` range, with
-/// no keyframe above: from 160 on the card takes the later one's value,
-/// `translate(-1000px, 0px)`, which lies on no segment of positive length.
-/// The zero-length segment between the two is in the curve, so the reach
-/// carries the 120px card over the whole 1000px, and composition matches
-/// the cascade there.
 #[test]
 fn range_keyframes_tied_at_the_end_reach_the_later_value() {
     let fixture = || {
@@ -1792,9 +1584,6 @@ fn range_keyframes_tied_at_the_end_reach_the_later_value() {
     );
 }
 
-/// A keyframe some interpolation takes out of the plane refuses the export
-/// even where it only ties another keyframe at offset 1: the zero-length
-/// segment is checked like any other.
 #[test]
 fn a_projective_keyframe_tied_at_the_end_refuses_the_export() {
     let (mut fixture, scroller, _) = scroll_fixture(
@@ -1817,9 +1606,6 @@ fn a_projective_keyframe_tied_at_the_end_refuses_the_export() {
     assert!(frame.animation_slots().is_empty(), "refused");
 }
 
-/// A named scroll timeline on a list painted after the header it drives:
-/// its slot is allocated after the header's animation slot, and the header,
-/// outside the list, does not move with it.
 #[test]
 fn a_named_timeline_on_a_later_painted_list_composes_as_committed() {
     let fixture = |curve: &str| {

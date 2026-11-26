@@ -9,9 +9,6 @@
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-/// Declares the `StyleInfo` property-id wire enum together with the
-/// id-indexed CSS name table, so the two stay one ordered list. Declaration
-/// order is serialized ABI.
 macro_rules! css_properties {
     ($($variant:ident = $id:literal => $css:literal,)*) => {
         #[expect(missing_docs, reason = "self-describing CSS property variants")]
@@ -25,11 +22,9 @@ macro_rules! css_properties {
             $($variant = $id,)*
         }
 
-        /// CSS property names indexed by [`CssPropertyId`].
         pub const STYLE_PROPERTY_MAP: &[&str] = &[$($css,)*];
 
         impl CssPropertyId {
-            /// Converts a wire/property-table discriminant to its enum value.
             #[must_use]
             pub fn from_u32(id: u32) -> Option<Self> {
                 match id {
@@ -267,8 +262,6 @@ impl CssPropertyId {
     }
 }
 
-/// A CSS property reference: an interned id, or `Unknown` plus the raw name.
-/// Mirrors web-core's `CSSProperty`.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct CssProperty {
@@ -277,7 +270,6 @@ pub struct CssProperty {
 }
 
 impl CssProperty {
-    /// Builds a property reference from its canonical or custom name.
     #[must_use]
     pub fn from_name(name: impl Into<String>) -> Self {
         let name = name.into();
@@ -293,7 +285,6 @@ impl CssProperty {
         }
     }
 
-    /// Builds an interned property reference from its numeric wire id.
     #[must_use]
     pub fn from_u32(id: u32) -> Option<Self> {
         CssPropertyId::from_u32(id).map(|id| Self {
@@ -302,7 +293,6 @@ impl CssProperty {
         })
     }
 
-    /// The property name as written in the source CSS.
     #[must_use]
     pub fn name(&self) -> &str {
         if self.id == CssPropertyId::Unknown {
@@ -313,8 +303,6 @@ impl CssProperty {
     }
 }
 
-/// One token of a declaration value, as produced by web-core's CSS tokenizer.
-/// Mirrors web-core's `ValueToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct ValueToken {
@@ -322,8 +310,6 @@ pub struct ValueToken {
     pub value: String,
 }
 
-/// A single `property: value` declaration. Mirrors web-core's
-/// `ParsedDeclaration`.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct ParsedDeclaration {
@@ -333,12 +319,6 @@ pub struct ParsedDeclaration {
 }
 
 impl ParsedDeclaration {
-    /// The declaration's value, exactly as authored.
-    ///
-    /// Value tokens partition the original value text without loss — they
-    /// carry their own delimiters, quotes and separating whitespace — so
-    /// concatenating them reproduces it byte for byte. That includes a
-    /// trailing `!important`; see [`Self::value_and_importance`].
     #[must_use]
     pub fn value_text(&self) -> String {
         let mut text = String::with_capacity(self.value_text_len());
@@ -346,44 +326,23 @@ impl ParsedDeclaration {
         text
     }
 
-    /// Appends [`Self::value_text`] to `out`, without allocating a temporary.
     pub fn write_value_text(&self, out: &mut String) {
         DeclarationRead::write_value_text(self, out);
     }
 
-    /// The value with any trailing `!important` removed, plus whether the
-    /// declaration carries one.
-    ///
-    /// [`Self::is_important`] alone is not enough. The producing toolchain
-    /// leaves that field `false` and appends ` !important` to the *value*
-    /// instead (`@lynx-js/css-serializer` builds the value as
-    /// `toString(node.value) + (node.important ? ' !important' : '')`), so on
-    /// the wire the marker arrives as ordinary value tokens. A consumer that
-    /// hands the raw value to a CSS value parser does not merely lose the
-    /// importance: the marker is not part of any value grammar, so the whole
-    /// declaration fails to parse and is dropped.
-    ///
-    /// The match is on the token sequence — an `important` ident preceded by a
-    /// `!` delimiter, either side of which may carry whitespace or comments —
-    /// so a value that merely ends in the ident `important`, or in a string
-    /// containing the word, is left alone.
     #[must_use]
     pub fn value_and_importance(&self) -> (String, bool) {
         DeclarationRead::value_and_importance(self)
     }
 }
 
-/// Read access to one declaration, which the owned model and its archived
-/// form both give (`style_info::StyleInfoRead`).
 pub(crate) trait DeclarationRead {
     type Token: TokenRead;
     fn property_id(&self) -> CssPropertyId;
-    /// The raw name of an `Unknown` property.
     fn unknown_name(&self) -> Option<&str>;
     fn tokens(&self) -> &[Self::Token];
     fn is_important(&self) -> bool;
 
-    /// [`CssProperty::name`].
     fn name(&self) -> &str {
         match self.property_id() {
             CssPropertyId::Unknown => self.unknown_name().unwrap_or(""),
@@ -391,7 +350,6 @@ pub(crate) trait DeclarationRead {
         }
     }
 
-    /// [`ParsedDeclaration::write_value_text`].
     fn write_value_text(&self, out: &mut String) {
         out.reserve(self.value_text_len());
         for token in self.tokens() {
@@ -399,7 +357,6 @@ pub(crate) trait DeclarationRead {
         }
     }
 
-    /// [`ParsedDeclaration::value_and_importance`].
     fn value_and_importance(&self) -> (String, bool) {
         let end = self.value_end_before_important();
         let tokens = self.tokens();
@@ -415,8 +372,6 @@ pub(crate) trait DeclarationRead {
         self.tokens().iter().map(|token| token.value().len()).sum()
     }
 
-    /// The token count remaining once a trailing `!important` is removed, or
-    /// the full count when there is none.
     fn value_end_before_important(&self) -> usize {
         let tokens = self.tokens();
         let significant = |index: usize| {
@@ -444,12 +399,10 @@ pub(crate) trait DeclarationRead {
         if token.token_type() != token_types::DELIM_TOKEN || token.value() != "!" {
             return all;
         }
-        // Drop the whitespace that separated the marker from the value too.
         significant(bang).map_or(0, |last| last + 1)
     }
 }
 
-/// Read access to one value token.
 pub(crate) trait TokenRead {
     fn token_type(&self) -> u8;
     fn value(&self) -> &str;
@@ -600,14 +553,12 @@ mod tests {
 
     #[test]
     fn a_value_that_only_looks_like_the_marker_is_left_alone() {
-        // The `!` delimiter is required, so a bare keyword is a value...
         let keyword = declaration(&[(IDENT, "important")]);
         assert_eq!(
             keyword.value_and_importance(),
             ("important".to_owned(), false)
         );
 
-        // ...as is the word inside a string, which keeps its quotes.
         let quoted = declaration(&[(STRING, "\"x !important\"")]);
         assert_eq!(
             quoted.value_and_importance(),
@@ -615,10 +566,6 @@ mod tests {
         );
     }
 
-    /// CSS whitespace is only U+0009/000A/000C/000D/0020. A code point such as
-    /// U+00A0 is an ident code point, so it belongs to the value and must not
-    /// be trimmed away — matching the token boundaries is what keeps that
-    /// distinction, which trimming the concatenated text would lose.
     #[test]
     fn a_non_ascii_space_stays_part_of_the_value() {
         let declaration = declaration(&[

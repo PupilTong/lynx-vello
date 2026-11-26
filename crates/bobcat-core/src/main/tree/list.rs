@@ -197,64 +197,6 @@ use super::{
 };
 use crate::main::record::write_record_field;
 
-/// The `list` and `list-item` policy, in `x-list.css`'s own order.
-///
-/// # Why a list is a size query container
-///
-/// `container-type: size` (`x-list.css:9`) is what makes
-/// `contain-intrinsic-size: none auto 100cqh`
-/// mean anything: with no estimate supplied, a cell that has never been
-/// rendered is one scrollport tall, which is the best guess a sheet can make
-/// and the one web-core makes. css-contain-3 §2.1 makes a size query
-/// container a *contained* box, so a list's own size never answers to its
-/// cells — it must come from the author or from its parent, exactly as in a
-/// browser, where `x-list` carries the same declaration
-/// (`docs/style-assumptions.md` §19).
-///
-/// # Why a cell skips
-///
-/// `content-visibility: auto` plus `contain: layout paint` is web-core's
-/// whole virtualization (`x-list.css:65-69`), and it is this engine's too:
-/// relevance is the painter's encode window, determined inside
-/// `Document::render`, and a cell no rendering update has reached yet skips
-/// and is sized by its estimate. `recyclable="false"` opts a cell out
-/// (`x-list.css:72-75`); web-core writes `contain: initial`, which is
-/// `contain: none` spelled the way a browser's author-origin sheet has to
-/// spell it.
-///
-/// # A list whose cells are built lazily
-///
-/// `packages/bobcat-element/src/element-papi.ts` writes `l-lazy-cells` onto a
-/// list the first time `update-list-info` inserts placeholders into it: an
-/// empty `list-item` per cell, which becomes the cell `componentAtIndex`
-/// builds once it stops skipping. Under that attribute the estimate belongs
-/// to the placeholder alone. A built cell is built because its placeholder,
-/// or one near it in the run the protocol builds with it (`fillAround`), was
-/// relevant, so the next commit lays it out at its own size, or at 0 if it
-/// lies past the relevance region until the region reaches it; standing at
-/// `100cqh` first would push every box after it down by a scrollport per cell
-/// before any determination took it back, and scroll anchoring would follow.
-/// Skipped later, it keeps its last remembered size (`auto`). A placeholder
-/// is no anchor (`overflow-anchor: none`): it shows nothing to keep in place.
-/// A list whose cells a card appends itself never gets the attribute and
-/// keeps the estimate for every cell, so its first commit reveals only the
-/// rows the window holds.
-///
-/// # The initial cell
-///
-/// `list[initial-scroll-index] > *` is [`super::scroll_container`]'s
-/// `initial-scroll-to-index` child rule over `--list-initial-index`, whose
-/// value is the hint [`List`] writes at connect, not the live attribute;
-/// the module documentation's "The initial cell" says why.
-///
-/// # Cascade notes
-///
-/// `list > *:not(list-item):not(wrapper)` is specificity (0,0,3), so it
-/// outranks the container block's own `display` (0,0,1) and hides a `view`,
-/// an `image` or a `scroll-view` written directly inside a list. It hides a
-/// `text` there too: [`super::text`] gives a `text` no `display` of its own,
-/// since a text is a Lynx paragraph by its kind, so nothing stands against
-/// this rule's `none`.
 pub(super) const UA_RULES: &str = r#"
 @property --list-item-span-count { syntax: "<integer>"; inherits: false; initial-value: 1; }
 @property --list-item-sticky-offset { syntax: "<length>"; inherits: true; initial-value: 0px; }
@@ -322,38 +264,22 @@ list[list-type="waterfall"] list-item[full-span]:not([full-span="false"]) { grid
 list[list-type="waterfall"][scroll-orientation="horizontal"] list-item[full-span]:not([full-span="false"]) { grid-row: 1 / -1; }
 "#;
 
-/// The tag native registers and web-core defines as `x-list`.
 pub(super) const LIST_TAG: &str = "list";
 
-/// The cell tag: a list's element children of this tag are what
-/// `getVisibleCells` reports and indexes.
 const CELL_TAG: &str = "list-item";
 
-/// How many element children from the start the upper zone reaches: while
-/// the last of them overlaps the scrollport the list is at its upper edge.
 const UPPER_THRESHOLD_ITEM_COUNT: &str = "upper-threshold-item-count";
 
-/// How many element children from the end the lower zone reaches.
 const LOWER_THRESHOLD_ITEM_COUNT: &str = "lower-threshold-item-count";
 
-/// The attribute naming the cell the list starts on, read at connect.
 const INITIAL_SCROLL_INDEX: &str = "initial-scroll-index";
 
-/// The registered property the child rule tests, which the component sets
-/// as a presentational hint at connect.
 const INITIAL_INDEX_PROPERTY: &str = "--list-initial-index";
 
-/// `initial-scroll-index` as `attr(initial-scroll-index type(<integer>), -1)`
-/// reads it: an integer with an optional sign and surrounding whitespace,
-/// else `-1`, which names no child.
 fn initial_index(value: &str) -> i32 {
     value.trim().parse().unwrap_or(-1)
 }
 
-/// Freezes the list's `initial-scroll-index` into the
-/// `--list-initial-index` hint the UA child rule reads; a list without the
-/// attribute keeps whatever it has, as web-core's `connectedCallback` reads
-/// nothing then.
 fn freeze_initial_index(document: &mut LynxDocument, list: NodeId) {
     let Some(index) = document
         .get(list)
@@ -365,9 +291,6 @@ fn freeze_initial_index(document: &mut LynxDocument, list: NodeId) {
     document.set_presentational_hint(list, INITIAL_INDEX_PROPERTY, &index.to_string());
 }
 
-/// Installs the `list` component, which queues its threshold events on
-/// `events`. Must run before any element could carry the tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         LIST_TAG,
@@ -378,10 +301,6 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     );
 }
 
-/// The `list` component: `scrollToPosition`, `scrollBy`, `autoScroll`,
-/// `getScrollContainerInfo` and `getVisibleCells`, the `scrolltoupper`
-/// and `scrolltolower` events, and `initial-scroll-index` read once at
-/// connect.
 struct List {
     events: ComponentEvents,
     edges: ScrollEdges,
@@ -440,19 +359,12 @@ impl CustomElement<()> for List {
     }
 }
 
-/// Whether `list` scrolls x rather than y: `scroll-orientation="horizontal"`,
-/// the one attribute [`UA_RULES`] select the horizontal rule by. A list has
-/// no `scroll-x`.
 fn is_horizontal(document: &LynxDocument, list: NodeId) -> bool {
     document
         .get(list)
         .is_some_and(|node| node.attribute("scroll-orientation").as_deref() == Some("horizontal"))
 }
 
-/// The zones the offset `scroll_box` holds lies in, on `list`'s scrolling
-/// axis: per edge, the item-count rule when its count attribute names a
-/// positive count ([`item_count`]), else `scroll-view`'s px rule with the
-/// list's own `upper-threshold`/`lower-threshold`.
 fn zones(document: &LynxDocument, list: NodeId, scroll_box: &ScrollBox) -> Zones {
     let horizontal = is_horizontal(document, list);
     let offset = along(scroll_box.offset, horizontal);
@@ -478,11 +390,6 @@ fn zones(document: &LynxDocument, list: NodeId, scroll_box: &ScrollBox) -> Zones
     Zones { upper, lower }
 }
 
-/// `list`'s item-count attribute `name` as a whole number of children:
-/// JavaScript's `parseInt` of it ([`parse_int`]), and 0 — the px rule —
-/// when it is missing, unreadable or not positive. web-core `parseFloat`s
-/// it and indexes `children` with the result, so a fractional count names
-/// no child there and fires nothing, where here it is truncated.
 fn item_count(document: &LynxDocument, list: NodeId, name: &str) -> usize {
     #[expect(
         clippy::cast_possible_truncation,
@@ -497,10 +404,6 @@ fn item_count(document: &LynxDocument, list: NodeId, name: &str) -> usize {
         .map_or(0, |count| count as usize)
 }
 
-/// Whether `child`, an element child of `list`, overlaps the scrollport on
-/// the scrolling axis at the offset `scroll_box` holds: its border box
-/// starts before the scrollport's end and ends after its start. A child
-/// that generates no box ([`generates_box`]) overlaps nothing.
 fn overlaps_scrollport(
     document: &LynxDocument,
     list: NodeId,
@@ -521,11 +424,6 @@ fn overlaps_scrollport(
     start < offset + scrollport && end > offset
 }
 
-/// Whether `cell`, an element child of a list that has a box, generates one
-/// itself: its computed `display` is neither `none` (which the UA sheet
-/// gives every child that is no cell and no `wrapper`) nor `contents`.
-/// Shared with `refresh_view`, for a header or footer under its rendered
-/// `#container`.
 pub(super) fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
     document
         .get(cell)
@@ -536,56 +434,13 @@ pub(super) fn generates_box(document: &LynxDocument, cell: NodeId) -> bool {
         })
 }
 
-/// Where `scrollToPosition` puts the cell in the scrollport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlignTo {
-    /// The cell's start edge at the scrollport's start edge.
     Top,
-    /// The cell's centre at the scrollport's centre.
     Middle,
-    /// The cell's end edge at the scrollport's end edge.
     Bottom,
 }
 
-/// `scrollToPosition({position, index?, itemKey?, offset = 0, alignTo =
-/// "top", smooth = false})` on `list`, with `params` as the JSON text the
-/// realm serialized.
-///
-/// - `params` must be a JSON object, else code 4.
-/// - The cell: `itemKey`, when it is a string that equals the `item-key` attribute of one of the
-///   list's element children, names the first such child, and `index` and `position` are then not
-///   read, as both natives let a resolved `itemKey` win (iOS `LynxUIListContainer.mm:1107-1215`,
-///   Android `UIListContainer.java:815-1042`); web-core ignores `itemKey`. Otherwise the number is
-///   `index` when present, else `position`: the iOS list container reads `index` after `position`
-///   as an alias, Android reads `index` first; here `index` is read first and `position` only when
-///   there is no `index`. The number is truncated toward zero and names that element child of the
-///   list ([`element_child`]), cell or not, as web-core's `children.item(position)` does.
-/// - A missing number (with no `itemKey` match), a non-numeric one, a negative one or one past the
-///   last element child is code 4 and moves nothing: this engine's index rule, which
-///   `scroll-view`'s `scrollTo` and the pager's `selectTab` follow, and the iOS older list's answer
-///   (`LynxUICollection+Delegate.m:323-480`). The iOS list container and Android answer code 8
-///   (`OPERATION_ERROR`); web-core moves nothing and answers 0 (`XList.ts:89-107`); Android reads a
-///   missing number as 0.
-/// - `offset` is read as `scroll-view`'s `scrollTo` reads it ([`offset_px`]): a JSON number in CSS
-///   px, or a string in `px`, `rpx` or `ppx` or with no unit; missing is 0, anything else is code
-///   4. web-core `parseFloat`s a string and ignores its unit (`XList.ts:81-87`).
-/// - `alignTo` is `"middle"` or `"bottom"` as both natives read them, and anything else, a missing
-///   one included, is `"top"`. web-core ignores it. The target on the scrolling axis is the cell's
-///   start in the list's scroll coordinates ([`rect_in_scroller`]); `middle` subtracts half of what
-///   the scrollport has beyond the cell, `bottom` all of it. Then `offset` is added and the result
-///   clamped to the scroll range. The cross axis keeps its offset, where web-core writes `offset`
-///   to both axes (`XList.ts:84-87`).
-/// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'auto'` reads
-///   it, and a missing one is `false` (Android's default). A smooth scroll is the painter's to
-///   animate; an instant one moves the document at once
-///   ([`terminus::link::Document::scroll_to_with`]). Either way the call answers at once.
-///
-/// The params are read in full before any box is looked at. Then a list
-/// with no box, or that is no scroll container, or a cell with no box (any
-/// element child that is no cell and no `wrapper`, which the UA sheet hides,
-/// or a `display: none` cell), moves nothing and answers code 0. web-core
-/// reads such a cell's `offsetTop` as 0 and scrolls to `offset`; here
-/// nothing moves.
 pub(super) fn scroll_to_position(
     document: &mut LynxDocument,
     list: NodeId,
@@ -635,9 +490,6 @@ pub(super) fn scroll_to_position(
     Ok(())
 }
 
-/// The element child of `list` that `scrollToPosition`'s params name: the
-/// first one whose `item-key` equals a string `itemKey`, else element child
-/// number `index`, else number `position`, or code 4.
 fn target_cell(
     document: &LynxDocument,
     list: NodeId,
@@ -663,19 +515,13 @@ fn target_cell(
     element_child(document, list, number.trunc()).ok_or(InvalidParams)
 }
 
-/// What `getScrollContainerInfo` reports, in CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ScrollContainerInfo {
-    /// The scroll offset: `scrollLeft` and `scrollTop`.
     pub(super) offset: Vector2D<f32>,
-    /// The scrolling area ([`ScrollBox::scroll_size`]): `scrollWidth` and
-    /// `scrollHeight`.
     pub(super) scroll_size: Size2D<f32>,
 }
 
 impl ScrollContainerInfo {
-    /// The data fields, in the order `element-papi.ts` reads them, which is
-    /// web-core's: `scrollTop`, `scrollLeft`, `scrollHeight`, `scrollWidth`.
     fn record(self) -> String {
         let mut record = String::new();
         for value in [
@@ -690,12 +536,6 @@ impl ScrollContainerInfo {
     }
 }
 
-/// `getScrollContainerInfo()` on `list`: web-core's
-/// `{scrollTop, scrollLeft, scrollHeight, scrollWidth}` (`XList.ts:211-218`),
-/// the CSSOM-View values of the list's scroll offset and scrolling area,
-/// which is never smaller than the scrollport. Neither native has the
-/// method. `params` is unread. A list with no box, or that is no scroll
-/// container, answers zeros.
 pub(super) fn scroll_container_info(document: &LynxDocument, list: NodeId) -> ScrollContainerInfo {
     rendered_scroll_box(document, list).map_or(
         ScrollContainerInfo {
@@ -709,41 +549,14 @@ pub(super) fn scroll_container_info(document: &LynxDocument, list: NodeId) -> Sc
     )
 }
 
-/// One cell `getVisibleCells` reports.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct VisibleCell {
-    /// The cell's `id` attribute, empty when it carries none.
     pub(super) id: String,
-    /// The cell's `item-key` attribute, empty when it carries none.
     pub(super) item_key: String,
-    /// The cell's position among the list's `list-item` element children.
     pub(super) index: usize,
-    /// The cell's border box relative to the list's padding-box origin less
-    /// the scroll offset: where it stands in the scrollport.
     pub(super) rect: Rect<f32>,
 }
 
-/// `getVisibleCells()` on `list`: each `list-item` element child whose
-/// border box overlaps the list's scrollport, in child order.
-///
-/// - A cell is a `list-item` element child of the list. A cell held in a `wrapper` is not reported,
-///   and does not count toward `index`.
-/// - "Overlaps" is a positive area in common: a cell whose edge only touches the scrollport's is
-///   not reported. web-core's fallback test is inclusive of touching edges (`XList.ts:228-238`),
-///   and its usual path reports every cell `content-visibility: auto` has found relevant, which is
-///   a wider set than the scrollport; the natives report the cells their recycler holds in view.
-/// - `index` is the cell's position among the list's `list-item` element children, counting cells
-///   with no box and skipping children that are no cell, as web-core's `children.indexOf(cell)`
-///   over the filtered list does.
-/// - `left`, `top`, `right` and `bottom` are the border box in CSS px relative to the list's
-///   padding-box origin less the scroll offset, which is the docs' "relative to the list" and what
-///   iOS (`visibleCellsInfo`, `:1704`, each frame less the content offset) and Android
-///   (`:966-1002`) report. web-core reports viewport coordinates (`getBoundingClientRect`).
-/// - A cell whose contents `content-visibility: auto` skips still has a box, and is reported when
-///   that box overlaps. A cell with no box is not.
-///
-/// A list with no box, or that is no scroll container, answers no cells.
-/// `params` is unread.
 pub(super) fn visible_cells(document: &LynxDocument, list: NodeId) -> Vec<VisibleCell> {
     let Some(scroll_box) = rendered_scroll_box(document, list) else {
         return Vec::new();
@@ -774,9 +587,6 @@ pub(super) fn visible_cells(document: &LynxDocument, list: NodeId) -> Vec<Visibl
         .collect()
 }
 
-/// The data fields of `getVisibleCells`, in the order `element-papi.ts`
-/// reads them: the number of cells, then per cell `id`, `itemKey`, `index`,
-/// `left`, `top`, `right`, `bottom`.
 fn cells_record(cells: &[VisibleCell]) -> String {
     let mut record = String::new();
     write_record_field(&mut record, &cells.len().to_string());
@@ -798,7 +608,7 @@ fn cells_record(cells: &[VisibleCell]) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Ahem and explicit lane sizes have exact metrics.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::scroll::ScrollBehavior;
     use terminus::link::stylo::computed_values::{flex_direction, linear_direction};
@@ -819,13 +629,6 @@ mod tests {
 
     const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
-    /// A 200x200 list under the page, with the font every cell's label is
-    /// measured in already registered.
-    ///
-    /// The size is inline because a list is a size query container: its own
-    /// box never answers to its cells, so a list with no declared size is a
-    /// zero-height scroller in this engine exactly as `x-list` is in a
-    /// browser.
     fn list_page(style: &str) -> (LynxDocument, NodeId) {
         let mut document = document();
         assert_eq!(
@@ -840,8 +643,6 @@ mod tests {
         element_under(document, list, "list-item", style)
     }
 
-    /// The label whose shaped paragraph reports whether its cell skipped:
-    /// `text_block_size` is `None` for a paragraph no layout ever reached.
     fn labelled_cell(document: &mut LynxDocument, list: NodeId) -> (NodeId, NodeId) {
         let cell = cell(document, list, "");
         let label = element_under(document, cell, "text", "");
@@ -860,7 +661,6 @@ mod tests {
         )
     }
 
-    /// One computed longhand or custom property, as a string.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -871,8 +671,6 @@ mod tests {
         style_of(document, element).computed_value_to_string(declaration)
     }
 
-    /// Sets or removes an attribute the way the runtime does: the DOM write
-    /// alone. Stylo tracks the `attr()` dependency and recascades the rule.
     fn set_attribute(
         document: &mut LynxDocument,
         element: NodeId,
@@ -885,8 +683,6 @@ mod tests {
             document.remove_attribute(element, name);
         }
     }
-
-    // --- the scrolling half, moved out of `scroll_container` -------------
 
     #[test]
     fn a_list_scrolls_one_axis_and_clips_the_other() {
@@ -967,17 +763,8 @@ mod tests {
         }
     }
 
-    // --- virtualization ---------------------------------------------------
-
-    /// A 200x200 list of 40 labelled cells, each carrying an estimate that
-    /// matches the height its label really occupies — Ahem's line box at
-    /// `font-size: 20px` with `line-height: 20px` is exactly 20px tall — so a
-    /// reveal never moves anything and every cell's geometry is known whether
-    /// or not this render admitted it.
     const CELLS: usize = 40;
     const CELL_HEIGHT: f32 = 20.0;
-    /// The content the 40 cells fill, and so the offset that scrolls the
-    /// list past its own end and clamps to the bottom.
     const CELLS_EXTENT: f32 = 800.0;
 
     fn virtualized_list() -> (LynxDocument, NodeId, Vec<(NodeId, NodeId)>) {
@@ -999,9 +786,6 @@ mod tests {
         (document, list, cells)
     }
 
-    /// The whole point of the two rules: a cell the frame does not reach lays
-    /// nothing out and stands at the size its estimate names, while a cell
-    /// inside the window shapes its label.
     #[test]
     fn a_cell_past_the_window_skips_its_contents_and_stands_at_its_estimate() {
         let (mut document, list, cells) = virtualized_list();
@@ -1025,7 +809,6 @@ mod tests {
             "a skipped cell still has the box its estimate names",
         );
 
-        // Scrolling to the end reveals the last cell in the same commit.
         document.scroll_to(list, Vector2D::new(0.0, CELLS_EXTENT));
         assert!(document.render(), "a scroll past the window owes a frame");
         assert!(
@@ -1056,8 +839,6 @@ mod tests {
         );
     }
 
-    /// `recyclable="false"` is the opt-out, and it has to work from outside
-    /// the window — that is the only place it is observable.
     #[test]
     fn a_non_recyclable_cell_never_skips() {
         let (mut document, _list, cells) = virtualized_list();
@@ -1077,9 +858,6 @@ mod tests {
         );
     }
 
-    /// The intrinsic-size fallback: with no attribute a
-    /// cell is one scrollport of the list it is in, and the attribute wins
-    /// over it when there is one.
     #[test]
     fn the_cell_estimate_falls_back_to_one_scrollport_of_its_list() {
         let (mut document, list) = list_page("width: 300px; height: 200px");
@@ -1123,8 +901,6 @@ mod tests {
         );
     }
 
-    /// A horizontal list estimates along the inline axis instead, off
-    /// `100cqw`.
     #[test]
     fn a_horizontal_lists_cell_estimates_along_the_inline_axis() {
         let (mut document, list) = list_page("width: 300px; height: 200px");
@@ -1147,9 +923,6 @@ mod tests {
         assert_eq!(rect(&document, estimated).2, 42.0);
     }
 
-    /// Under `l-lazy-cells` the estimate is the placeholder's alone: an
-    /// empty cell keeps it and is no scroll anchor, a built one has none. A
-    /// list without the attribute keeps the estimate on every cell.
     #[test]
     fn a_lazy_lists_built_cells_carry_no_estimate_and_its_placeholders_anchor_nothing() {
         let (mut document, lazy) = list_page("width: 300px; height: 200px");
@@ -1194,8 +967,6 @@ mod tests {
         );
     }
 
-    // --- what generates a box inside a list -------------------------------
-
     #[test]
     fn only_a_cell_or_a_wrapper_generates_a_box_inside_a_list() {
         let (mut document, list) = list_page("width: 200px; height: 200px");
@@ -1221,10 +992,6 @@ mod tests {
         );
     }
 
-    // --- list-type placement ----------------------------------------------
-
-    /// `flow` is CSS Grid over `--list-item-span-count` columns, and a
-    /// full-span cell spans all of them.
     #[test]
     fn flow_places_cells_in_span_count_columns() {
         let (mut document, list) = list_page("width: 200px; height: 400px");
@@ -1260,8 +1027,6 @@ mod tests {
         assert_eq!(rect(&document, cells[4]), (100.0, 100.0, 100.0, 50.0));
     }
 
-    /// With no `span-count` a `flow` list is one column wide, because the UA
-    /// default is one lane. web-core's `0` would be an invalid track list.
     #[test]
     fn the_span_count_default_is_one_lane() {
         let (mut document, list) = list_page("width: 200px; height: 400px");
@@ -1280,8 +1045,6 @@ mod tests {
         assert_eq!(rect(&document, cells[1]), (0.0, 50.0, 200.0, 50.0));
     }
 
-    /// `waterfall` is `display: grid-lanes` with `fit-tolerance: 0`, so each
-    /// cell lands at the running end of the strictly shortest lane.
     #[test]
     fn waterfall_stacks_each_cell_into_the_shortest_lane() {
         let (mut document, list) = list_page("width: 200px; height: 400px");
@@ -1308,8 +1071,6 @@ mod tests {
         );
     }
 
-    /// A full-span waterfall cell is a definite span, which seldon's lanes
-    /// honour: it starts below the longest lane and leaves all of them level.
     #[test]
     fn a_full_span_waterfall_cell_levels_every_lane() {
         let (mut document, list) = list_page("width: 200px; height: 400px");
@@ -1328,9 +1089,6 @@ mod tests {
         assert_eq!(rect(&document, cells[3]), (0.0, 70.0, 100.0, 15.0));
     }
 
-    /// The horizontal variants put the tracks on the block axis, which for
-    /// `grid-lanes` only happens when the column template is `none` — the one
-    /// place this sheet has to correct `x-list.css` rather than translate it.
     #[test]
     fn a_horizontal_list_type_puts_its_tracks_on_the_block_axis() {
         for list_type in ["flow", "waterfall"] {
@@ -1378,8 +1136,6 @@ mod tests {
         }
     }
 
-    // --- attribute mapping ------------------------------------------------
-
     #[test]
     fn span_count_and_column_count_both_map_to_the_lane_count() {
         for name in ["span-count", "column-count"] {
@@ -1388,10 +1144,7 @@ mod tests {
             for (written, expected) in [
                 ("3", "3"),
                 ("2.0", "1"),
-                // A unit suffix is not a lane count.
                 ("+4px", "1"),
-                // Neither a fraction nor zero nor a negative can be a track
-                // count, so the effective track count remains one.
                 ("2.5", "1"),
                 ("calc(2)", "1"),
                 ("2 trailing", "1"),
@@ -1528,14 +1281,12 @@ mod tests {
         }
     }
 
-    /// UA attribute rules only apply to the tag that owns the attribute.
     #[test]
     fn list_attribute_rules_are_scoped_to_their_tags() {
         let (mut document, list) = list_page("width: 200px; height: 200px");
         document.set_attribute(list, "list-type", "flow");
         let cell = cell(&mut document, list, "");
 
-        // Each tag's own names, written on the other one.
         set_attribute(
             &mut document,
             list,
@@ -1545,8 +1296,6 @@ mod tests {
         for name in ["span-count", "column-count", "sticky-offset"] {
             set_attribute(&mut document, cell, name, Some("2"));
         }
-        // And a name neither numeric rule reads: `list-type` is a selector rule, whose
-        // rules name the `list` tag, so it selects nothing on a cell.
         let untouched = self::cell(&mut document, list, "");
         set_attribute(&mut document, cell, "list-type", Some("waterfall"));
         document.layout();
@@ -1575,16 +1324,8 @@ mod tests {
         );
     }
 
-    // --- the component ------------------------------------------------------
-
-    /// The cells of [`methods_list`], along the scrolling axis.
     const SIZES: [f32; 6] = [100.0, 80.0, 40.0, 80.0, 70.0, 100.0];
 
-    /// A 200x200 list with a 10px border, so a 180px scrollport, of six cells
-    /// [`SIZES`] long along the scrolling axis: they start at 0, 100, 180,
-    /// 220, 300 and 370 in the list's scroll coordinates and end at 470, so
-    /// the range is 290. `attribute` is written on the list before the
-    /// layout.
     fn methods_list(attribute: Option<(&str, &str)>) -> (LynxDocument, NodeId, Vec<NodeId>) {
         let (mut document, list) = list_page("width: 200px; height: 200px; border: 10px solid");
         if let Some((name, value)) = attribute {
@@ -1615,7 +1356,6 @@ mod tests {
         document.invoke_element_method(list, MethodCall { name, params })
     }
 
-    /// The request the committed frame carries to the painter for `list`.
     fn carried(
         document: &mut LynxDocument,
         list: NodeId,
@@ -1649,10 +1389,6 @@ mod tests {
         assert_eq!(LIST_TAG, "list");
     }
 
-    /// Cell 2 starts at 180 and is 40 long in a 180px scrollport: `top` puts
-    /// its start at the scrollport's (180), `middle` its centre at the
-    /// scrollport's (180 - 140 / 2), `bottom` its end at the scrollport's
-    /// (180 - 140). Any other `alignTo` is `top`, and the target clamps.
     #[test]
     fn scroll_to_position_aligns_the_cell() {
         for (params, expected) in [
@@ -1701,7 +1437,6 @@ mod tests {
                 "{params}"
             );
         }
-        // `1rpx` is the viewport width over 750, 393px here.
         let (mut document, list, _) = methods_list(None);
         scroll_to_position(&mut document, list, r#"{"position":2,"offset":"10rpx"}"#)
             .expect("valid params");
@@ -1709,9 +1444,6 @@ mod tests {
         assert!((offset - 185.24).abs() < 1e-3, "{offset}");
     }
 
-    /// A string `itemKey` that names a cell wins over `index` and
-    /// `position`; one that names none, or is no string, leaves them to
-    /// name the cell.
     #[test]
     fn an_item_key_that_names_a_cell_wins() {
         for (params, expected) in [
@@ -1740,8 +1472,6 @@ mod tests {
         }
     }
 
-    /// `index` is read first, and `position` only without one; the number is
-    /// truncated toward zero.
     #[test]
     fn index_is_an_alias_read_before_position_and_truncated() {
         for (params, expected) in [
@@ -1803,8 +1533,6 @@ mod tests {
         }
     }
 
-    /// Instant by default; a truthy `smooth` is the painter's to animate, so
-    /// only the request records the target.
     #[test]
     fn scroll_to_position_is_instant_unless_smooth_is_truthy() {
         for (smooth, behavior) in [
@@ -1838,7 +1566,6 @@ mod tests {
         }
     }
 
-    /// A horizontal list moves x, by the same arithmetic.
     #[test]
     fn a_horizontal_list_scrolls_to_a_position_along_x() {
         for (params, expected) in [
@@ -1860,8 +1587,6 @@ mod tests {
         }
     }
 
-    /// `enable-scroll="false"` stops the user, not script: the axis is
-    /// `overflow: hidden`, which a script scroll still moves.
     #[test]
     fn a_list_the_user_cannot_scroll_still_scrolls_from_script() {
         let (mut document, list, _) = methods_list(Some(("enable-scroll", "false")));
@@ -1881,8 +1606,6 @@ mod tests {
         assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 230.0));
     }
 
-    /// A `display: none` list moves nothing and reports nothing, though its
-    /// params are still read first.
     #[test]
     fn a_list_with_no_box_moves_nothing_and_reports_zeros() {
         let (mut document, list) = list_page("display: none; width: 200px; height: 200px");
@@ -1910,8 +1633,6 @@ mod tests {
             "consumedX 0, consumedY 0, unconsumedX 10, unconsumedY 10"
         );
         assert_eq!(document.scroll_offset(list), Vector2D::zero());
-        // `scrollBy` is `scroll-view`'s, which records its request to offset
-        // 0 whether or not the scroller has a box; no frame carries it.
         let frame = document.commit();
         assert_eq!(frame.slot_of(list), None);
         assert_eq!(document.pending_scroll_request(list), None);
@@ -1925,8 +1646,6 @@ mod tests {
         );
     }
 
-    /// An element child with no box, a non-cell the UA sheet hides or a
-    /// `display: none` cell, is in range and moves nothing.
     #[test]
     fn a_child_with_no_box_moves_nothing() {
         let (mut document, list) = list_page("width: 200px; height: 200px");
@@ -1961,8 +1680,6 @@ mod tests {
         );
     }
 
-    /// `scrollBy` is `scroll-view`'s on the list's axis: the axis consumes
-    /// what it moved, the cross axis nothing.
     #[test]
     fn scroll_by_answers_what_it_consumed_up_to_the_end() {
         let (mut document, list, _) = methods_list(None);
@@ -2033,11 +1750,6 @@ mod tests {
         );
     }
 
-    /// [`methods_list`]'s cells, with a `view` after the first (hidden by the
-    /// UA sheet, so no cell) and a `display: none` cell after the third,
-    /// which no position moves. The first cell's `id` holds a comma and
-    /// its `item-key` is `k0`; the second carries an empty `item-key` and
-    /// no `id`.
     fn cells_list() -> (LynxDocument, NodeId) {
         let (mut document, list) = list_page("width: 200px; height: 200px; border: 10px solid");
         for (at, size) in SIZES.iter().enumerate() {
@@ -2072,8 +1784,6 @@ mod tests {
         }
     }
 
-    /// At offset 0 the first two cells fill the 180px scrollport, and the
-    /// third, whose start touches its end, is not visible.
     #[test]
     fn get_visible_cells_reports_the_cells_in_the_scrollport() {
         let (mut document, list) = cells_list();
@@ -2093,9 +1803,6 @@ mod tests {
         );
     }
 
-    /// After a 150px scroll the rects are relative to the scrollport, and
-    /// `index` counts `list-item` children only: the hidden cell counts, the
-    /// `view` does not.
     #[test]
     fn get_visible_cells_follows_the_scroll_offset() {
         let (mut document, list) = cells_list();
@@ -2132,8 +1839,6 @@ mod tests {
         );
     }
 
-    /// A cell whose contents `content-visibility: auto` still skips has its
-    /// box, and is reported when the box is in the scrollport.
     #[test]
     fn a_cell_that_skips_its_contents_is_still_visible() {
         let (mut document, list, cells) = virtualized_list();
@@ -2157,7 +1862,6 @@ mod tests {
         );
     }
 
-    /// `autoScroll` is `scroll-view`'s, on the list's own axis.
     #[test]
     fn auto_scroll_runs_on_the_lists_axis() {
         for (attribute, horizontal) in [
@@ -2188,8 +1892,6 @@ mod tests {
         }
     }
 
-    /// `getScrollInfo` is left to the natives, `scrollTo` and the rest are
-    /// the base set's or no one's.
     #[test]
     fn methods_not_built_are_not_found() {
         let (mut document, list, _) = methods_list(None);
@@ -2210,12 +1912,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(list), None);
     }
 
-    // --- the threshold events ----------------------------------------------
-
-    /// [`methods_list`]'s list, with the document's component events and
-    /// `attributes` written before the layout: a 180px scrollport over six
-    /// cells at 0, 100, 180, 220, 300 and 370, ending at 470, so a range of
-    /// 290.
     fn edge_list(attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
         let (mut document, events) = with_component_events(PageConfig::default());
         let list = child(
@@ -2264,7 +1960,6 @@ mod tests {
     fn an_upper_item_count_watches_that_child_from_the_start() {
         let (mut document, events, list) = edge_list(&[("upper-threshold-item-count", "2")]);
         listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
-        // The second cell spans 100..180.
         scrolled(&mut document, list, y(0.0));
         assert_eq!(heard(&events, list), [(SCROLL_TO_UPPER_EVENT, y(0.0))]);
         scrolled(&mut document, list, y(150.0));
@@ -2283,7 +1978,6 @@ mod tests {
     fn a_lower_item_count_watches_that_child_from_the_end() {
         let (mut document, events, list) = edge_list(&[("lower-threshold-item-count", "2")]);
         listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
-        // The second cell from the end spans 300..370.
         scrolled(&mut document, list, y(120.0));
         assert_eq!(
             heard(&events, list),
@@ -2305,8 +1999,6 @@ mod tests {
         listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
         scrolled(&mut document, list, y(290.0));
         assert_eq!(heard(&events, list), [(SCROLL_TO_LOWER_EVENT, y(290.0))]);
-        // A new last cell, 470..570: at 280 the old last one (370..470)
-        // still overlaps the scrollport, the new one does not.
         cell(&mut document, list, "height: 100px");
         document.layout();
         scrolled(&mut document, list, y(280.0));
@@ -2324,7 +2016,6 @@ mod tests {
             ("upper-threshold-item-count", "7"),
             ("lower-threshold-item-count", "1"),
         ]);
-        // A `view` written directly in a list generates no box.
         element_under(&mut document, list, "view", "height: 50px");
         document.layout();
         listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
@@ -2349,7 +2040,6 @@ mod tests {
             ("upper-threshold-item-count", "3"),
         ]);
         listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
-        // The third cell spans 180..220 along x.
         scrolled(&mut document, list, Vector2D::zero());
         assert_eq!(
             heard(&events, list),
@@ -2374,8 +2064,6 @@ mod tests {
         assert_eq!(heard(&events, list), []);
     }
 
-    // --- `initial-scroll-index` ---------------------------------------------
-
     fn targets(document: &LynxDocument, cells: &[NodeId]) -> Vec<String> {
         cells
             .iter()
@@ -2383,9 +2071,6 @@ mod tests {
             .collect()
     }
 
-    /// The style of a list [`indexed_list`] builds, and of its cells: 300x600
-    /// with cells 300px tall, or 300x300 with cells 300px wide — each as
-    /// wide as the scrollport — when `horizontal`.
     fn indexed_styles(horizontal: bool) -> (&'static str, &'static str) {
         if horizontal {
             ("width: 300px; height: 300px", "width: 300px")
@@ -2394,10 +2079,6 @@ mod tests {
         }
     }
 
-    /// A list with `attributes`, written before it connects — the order a
-    /// compiled page creates an element in — and `count` cells
-    /// ([`indexed_styles`]), horizontal when
-    /// `scroll-orientation="horizontal"` is among the attributes.
     fn indexed_list(
         attributes: &[(&str, &str)],
         count: usize,
@@ -2418,13 +2099,6 @@ mod tests {
         (document, list, cells)
     }
 
-    /// The first commit starts the list with the indexed cell at the
-    /// scrollport's start on either axis, web-core's
-    /// `scrollToPosition({position})` from `connectedCallback`
-    /// (`XListAttributes.ts:45-63`, `XList.ts:89-115`), and carries the
-    /// position to the painter as an instant request. Cells as long as the
-    /// scrollport or longer start at their start on x as on y, where the
-    /// initial target aligns the inline axis `nearest`.
     #[test]
     fn initial_scroll_index_starts_the_list_on_the_cell() {
         for orientation in [None, Some(("scroll-orientation", "horizontal"))] {
@@ -2463,9 +2137,6 @@ mod tests {
         }
     }
 
-    /// No attribute, or one that names no cell — negative, past the last
-    /// cell (web-core's `position < childElementCount`), or no integer —
-    /// scrolls nothing and records no request.
     #[test]
     fn an_initial_scroll_index_naming_no_cell_scrolls_nothing() {
         for index in [None, Some("-1"), Some("4"), Some("10")]
@@ -2483,9 +2154,6 @@ mod tests {
         }
     }
 
-    /// The index counts the list's element children, web-core's
-    /// `children.item(position)`, so a child the list does not render still
-    /// takes a place.
     #[test]
     fn the_initial_scroll_index_counts_every_element_child() {
         let (mut document, list, _) = indexed_list(&[("initial-scroll-index", "2")], 0);
@@ -2499,13 +2167,10 @@ mod tests {
         assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 300.0));
     }
 
-    /// A list started on cell 1 whose first request the painter has
-    /// carried out and which the user then scrolled to 50, as main sees it.
     fn scrolled_away_list() -> (LynxDocument, NodeId, Vec<NodeId>) {
         let (mut document, list, cells) = indexed_list(&[("initial-scroll-index", "1")], 4);
         document.commit();
         assert_eq!(document.scroll_offset(list).y, 300.0);
-        // Where main writes the offset the painter posted for a drag.
         document.scroll_to(list, Vector2D::new(0.0, 50.0));
         let serial = document
             .pending_scroll_request(list)
@@ -2514,10 +2179,6 @@ mod tests {
         (document, list, cells)
     }
 
-    /// The attribute is read once, at connect (user ruling 2026-10-21), as
-    /// web-core's `connectedCallback` and native
-    /// (`list_container_impl.cc:543-548`) read it: a later write names no
-    /// new target and moves nothing, and neither does an unrelated commit.
     #[test]
     fn a_later_initial_scroll_index_write_does_not_scroll_the_list() {
         let (mut document, list, cells) = scrolled_away_list();
@@ -2538,9 +2199,6 @@ mod tests {
         }
     }
 
-    /// Removing the attribute after connect leaves no target and moves
-    /// nothing; writing it again brings back the frozen target, already
-    /// honoured, so nothing moves then either.
     #[test]
     fn removing_initial_scroll_index_after_connect_does_not_scroll_the_list() {
         let (mut document, list, cells) = scrolled_away_list();
@@ -2558,9 +2216,6 @@ mod tests {
         );
     }
 
-    /// An attribute first written after the list connected is not read, as
-    /// web-core reads nothing then: the list's own `-1` stands, not an outer
-    /// list's number.
     #[test]
     fn an_initial_scroll_index_written_after_connect_is_not_read() {
         let (mut document, outer, outer_cells) = indexed_list(&[("initial-scroll-index", "1")], 3);
@@ -2577,9 +2232,6 @@ mod tests {
         assert_eq!(document.scroll_offset(outer).y, 300.0);
     }
 
-    /// Connect is when the list joins the document, not when it joins its
-    /// parent: a list built inside a detached subtree reads its attribute
-    /// when the subtree is attached.
     #[test]
     fn a_list_in_a_subtree_attached_later_reads_the_attribute_then() {
         let mut document = document();

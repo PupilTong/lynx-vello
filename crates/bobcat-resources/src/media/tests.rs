@@ -19,18 +19,14 @@ use vant::{NoStore, Parts, Platform};
 
 use crate::{NativeDecoder, NativeFetch, Resources, ResourcesConfig, ViewResources};
 
-/// What a test player's sink is reached through, the sink's type erased.
 struct Handed {
     frame: Box<dyn Fn(PictureFrame, ImageDescriptor) + Send + Sync>,
     event: Box<dyn Fn(MediaEvent) + Send + Sync>,
     wants: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
-/// What the test player was asked, and the sinks it was handed.
 #[derive(Default)]
 struct Log {
-    /// Each open: whether it was handed bytes (and how many), and its
-    /// settings.
     opens: Vec<(Option<usize>, MediaSettings)>,
     commands: Vec<MediaCommand>,
     sinks: Vec<Handed>,
@@ -40,7 +36,6 @@ struct Log {
 #[derive(Clone, Default)]
 struct TestMedia {
     log: Arc<Mutex<Log>>,
-    /// Every open fails with this, when set.
     failing: Arc<Mutex<Option<MediaError>>>,
 }
 
@@ -137,8 +132,6 @@ impl Platform for TestPlatform {
 
 const CLIP: &str = "app:///clip.mp4";
 
-/// A resource system over the test player, counting the host's wakeups,
-/// with one view of it.
 struct Rig {
     media: TestMedia,
     resources: Resources<TestPlatform>,
@@ -180,7 +173,6 @@ impl Rig {
         }
     }
 
-    /// Opens `CLIP` into a new picture and waits for its player.
     fn open(&self, settings: MediaSettings) -> PictureId {
         let picture = PictureId::new();
         self.view.request_playback(PlaybackRequest::Open {
@@ -195,7 +187,6 @@ impl Rig {
         picture
     }
 
-    /// Takes host turns until `done` holds.
     fn settle(&self, what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -208,7 +199,6 @@ impl Rig {
         }
     }
 
-    /// What the view was reported for its videos since the last call.
     fn reported(&self) -> Vec<(PictureId, MediaEvent)> {
         self.view.service_images();
         self.inbox
@@ -224,8 +214,6 @@ impl Rig {
             .collect()
     }
 
-    /// The player's sink, `index`th opened, hands over a 1x1 frame of
-    /// `value`.
     fn hand(&self, index: usize, value: u8) {
         let pixels = ImageData {
             data: Blob::new(Arc::new(vec![value, value, value, 255])),
@@ -243,7 +231,6 @@ impl Rig {
         (self.media.log.lock().unwrap().sinks[index].wants)()
     }
 
-    /// The value of the frame `picture`'s slot holds, taken.
     fn take(&self, picture: PictureId) -> Option<u8> {
         self.view
             .take_frame(picture)
@@ -251,9 +238,6 @@ impl Rig {
     }
 }
 
-/// A registered video is fetched by this crate and handed to the player as
-/// its bytes, under the settings asked for; commands made while the bytes
-/// were in flight reach the player once it is open, in order.
 #[test]
 fn a_registered_video_is_handed_over_as_its_bytes() {
     let rig = Rig::new();
@@ -282,9 +266,6 @@ fn a_registered_video_is_handed_over_as_its_bytes() {
     );
 }
 
-/// A frame the player hands over while a view draws the picture is
-/// published into its slot, wakes the host, and is taken once; a describe is
-/// a draw.
 #[test]
 fn a_drawn_picture_publishes_its_player_frames() {
     let rig = Rig::new();
@@ -313,9 +294,6 @@ fn a_drawn_picture_publishes_its_player_frames() {
     assert_eq!(rig.take(picture), None, "taken once");
 }
 
-/// While no view's drawn set includes the picture its player is told so and
-/// nothing it hands over is published; the newest frame is kept, and is
-/// published again when the painter wants the picture.
 #[test]
 fn an_undrawn_picture_publishes_nothing_and_keeps_its_newest_frame() {
     let rig = Rig::new();
@@ -342,8 +320,6 @@ fn an_undrawn_picture_publishes_nothing_and_keeps_its_newest_frame() {
     );
 }
 
-/// What a player reports reaches the view that opened the picture in order,
-/// in the host's turn, each report waking it.
 #[test]
 fn reports_reach_the_view_in_order() {
     let rig = Rig::new();
@@ -376,8 +352,6 @@ fn reports_reach_the_view_in_order() {
     assert!(rig.reported().is_empty(), "reported once");
 }
 
-/// An open that fails is reported in the turn that asked for it, and a
-/// `play` of that picture reports it again; nothing else reaches a player.
 #[test]
 fn a_failed_open_is_reported_and_reported_again_on_play() {
     let rig = Rig::new();
@@ -407,8 +381,6 @@ fn a_failed_open_is_reported_and_reported_again_on_play() {
     assert_eq!(rig.reported(), [(picture, MediaEvent::Failed(error))]);
 }
 
-/// A source that does not resolve is the element's `-1`: a failure of the
-/// source, reported at once, with nothing opened.
 #[test]
 fn a_source_that_cannot_be_fetched_fails_as_a_source() {
     let rig = Rig::new();
@@ -431,8 +403,6 @@ fn a_source_that_cannot_be_fetched_fails_as_a_source() {
     assert_eq!(rig.media.log.lock().unwrap().opens, []);
 }
 
-/// An end closes the player and lets go of the picture; so does dropping
-/// the view, for every picture it opened.
 #[test]
 fn an_end_or_a_dropped_view_closes_the_player() {
     let rig = Rig::new();
@@ -455,8 +425,6 @@ fn an_end_or_a_dropped_view_closes_the_player() {
     assert_eq!(resources.media.borrow().len(), 0);
 }
 
-/// Linux has no player: the native platform's every open fails, as the
-/// `error` the element fires.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn the_native_platform_without_a_player_fails_every_open() {
@@ -492,9 +460,6 @@ fn the_native_platform_without_a_player_fails_every_open() {
     assert_eq!(error.message, vant::media::NO_MEDIA_MESSAGE);
 }
 
-/// On macOS the native platform plays a registered clip with `AVFoundation`
-/// through a view: its first frame is reported with the clip's size, and
-/// published into the picture's slot once the picture is drawn.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_native_platform_plays_a_registered_clip() {

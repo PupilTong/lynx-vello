@@ -88,40 +88,22 @@ use crate::layout::{DisplayMode, StyleView, box_parent};
 use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
 
-/// The share of the scrollport, per axis, within which `proximity` snaps.
 pub(crate) const PROXIMITY_RATIO: f32 = 1.0 / 3.0;
 
-/// How far from a snap position, in CSS px, an offset still stands on it
-/// ([`SnapAxis::snapped_area`]). An offset at rest on a position is that
-/// position's own number, except on a circular axis, where normalizing it
-/// into the period rounds; no container comes to rest this near a position
-/// without being on it.
 pub(crate) const SNAPPED_TOLERANCE: f32 = 0.5;
 
-/// How strictly a container snaps on an axis (`scroll-snap-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapStrictness {
-    /// The scroll position must rest on a snap position.
     Mandatory,
-    /// It snaps only when it comes to rest within the proximity range.
     Proximity,
 }
 
-/// One snap position on one axis: the offset range `min..=max` at which
-/// the snapport rests aligned with a snap area. A point when the two are
-/// equal; a range for an area larger than the snapport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnapPoint {
     pub min: f32,
     pub max: f32,
-    /// `scroll-snap-stop: always` on the area.
     pub stop: bool,
-    /// The element whose snap area this position aligns: what a container
-    /// standing here is snapped to, and what it follows through a layout
-    /// change (§4.1.3).
     pub area: NodeId,
-    /// The area's place among its container's areas in flat-tree order,
-    /// which chooses between areas aligned at one offset (§6.2.1).
     pub order: u32,
 }
 
@@ -143,48 +125,19 @@ impl SnapPoint {
     }
 }
 
-/// One axis's snap data, borrowed from wherever its points live: the
-/// document's [`SnapPositions`] or the committed frame's slot table.
 #[derive(Debug, Clone, Copy)]
 pub struct SnapAxis<'a> {
     pub strictness: SnapStrictness,
-    /// Sorted by `min`.
     pub points: &'a [SnapPoint],
-    /// The period of a circular axis (`overscroll-behavior: circular`): the
-    /// extent of the whole scrolling area on that axis. With a period every
-    /// point also exists shifted by every whole multiple of it, because the
-    /// painter's offset on such an axis stands anywhere on an unbounded
-    /// line that repeats the scrolling area; a query searches only the
-    /// copies in the period holding it and the one on either side. `None`
-    /// on a bounded axis.
     pub period: Option<f32>,
 }
 
 impl SnapAxis<'_> {
-    /// The distance within which `proximity` snaps, for a scrollport of
-    /// `extent` on this axis.
     #[must_use]
     pub fn proximity_threshold(extent: f32) -> f32 {
         extent * PROXIMITY_RATIO
     }
 
-    /// The points a query at `value` may choose among.
-    ///
-    /// On a bounded axis these are the points themselves. On a circular one
-    /// `value` is first normalized into one period: its base is the whole
-    /// multiple of the period at or below it (`value` less its Euclidean
-    /// remainder; a non-finite `value` counts as `0`), and the points are
-    /// yielded shifted by that base and by one period either side of it.
-    /// Every point lies inside one period of the scrolling area, so these
-    /// three copies hold the nearest position on either side of `value` and
-    /// every position within one period of it, and the work stays the same
-    /// however far `value` lies from the origin.
-    ///
-    /// The copies are anchored at the caller's own `value`, so every result
-    /// stays in the caller's unwrapped coordinate frame: settling `560` on
-    /// points `0`, `200` and `400` with a period of `600` answers `600`,
-    /// not `0`, because the painter's glide from `560` must move forward
-    /// `40` px rather than jump back across the seam.
     fn copies_around(&self, value: f32) -> impl Iterator<Item = SnapPoint> + '_ {
         let period = self
             .period
@@ -192,8 +145,6 @@ impl SnapAxis<'_> {
         let base = period.map_or(0.0, |period| {
             let value = if value.is_finite() { value } else { 0.0 };
             let remainder = value.rem_euclid(period);
-            // `rem_euclid` rounds up to `period` itself for a value just
-            // below a multiple of it; that value belongs to the period above.
             if remainder < period {
                 value - remainder
             } else {
@@ -221,14 +172,6 @@ impl SnapAxis<'_> {
             .min_by(|a, b| a.distance(offset).total_cmp(&b.distance(offset)))
     }
 
-    /// The first `always` stop strictly between `from` and `to`, in travel
-    /// order: the position an operation from `from` to `to` may not pass.
-    ///
-    /// On a circular axis the stops repeat every period, so the first one
-    /// the travel meets lies within one period of `from`, and the copies
-    /// around `from` hold every position within one period of it on either
-    /// side. The nearest qualifying copy is therefore the first stop met
-    /// however far `to` lies.
     fn stop_between(&self, from: f32, to: f32) -> Option<f32> {
         if to > from {
             self.copies_around(from)
@@ -245,10 +188,6 @@ impl SnapAxis<'_> {
         }
     }
 
-    /// Where an operation that began at `start` and ended at `end` settles
-    /// (§7, intended end position): the nearest snap position to `end` —
-    /// always under `mandatory`, within `threshold` under `proximity` — or
-    /// the first `always` stop the operation would have passed.
     #[must_use]
     pub fn settle(&self, start: f32, end: f32, threshold: f32) -> f32 {
         if let Some(stop) = self.stop_between(start, end) {
@@ -264,24 +203,6 @@ impl SnapAxis<'_> {
         }
     }
 
-    /// Where a discrete step with a direction and no end position of its own
-    /// (§7, intended direction — a wheel tick) lands, or `None` when snapping
-    /// has nothing to say and the step keeps its `natural` end. `current` is
-    /// where the container stands and `natural` where the step would put it
-    /// unsnapped.
-    ///
-    /// Only positions ahead of `current` in the step's direction count, so a
-    /// tick never snaps back behind where it started and a run of small
-    /// ticks still makes progress. `mandatory` moves to the next such
-    /// position, however far, and stays put when there is none; a `natural`
-    /// end that is already a valid position (inside a range) is kept.
-    /// `proximity` keeps the natural end unless the next position is within
-    /// `threshold` of it. Either way an `always` stop between the two ends
-    /// the step there. A `Some` equal to `current` means the container
-    /// refuses the step: it stays, and `resolve_step` lets the delta
-    /// chain on to the container above. A circular axis always has a next
-    /// position, so it never refuses: a tick at the last page moves on to
-    /// the first page's next copy.
     #[must_use]
     #[allow(
         clippy::float_cmp,
@@ -317,12 +238,6 @@ impl SnapAxis<'_> {
         }
     }
 
-    /// The area a container standing at `offset` is snapped to on this axis
-    /// (§4.1.3), or `None` when it stands on no position: of the areas whose
-    /// position holds `offset`, within `SNAPPED_TOLERANCE`, the first in
-    /// tree order (§6.2.1). The strictness does not enter: a `proximity`
-    /// container that came to rest on a position is snapped to it. A
-    /// non-finite offset stands nowhere.
     #[must_use]
     pub fn snapped_area(&self, offset: f32) -> Option<NodeId> {
         if !offset.is_finite() {
@@ -334,11 +249,6 @@ impl SnapAxis<'_> {
             .map(|point| point.area)
     }
 
-    /// Where a container at `offset` rests on `area`'s position, or `None`
-    /// when `area` contributes none to this axis: the position itself, or
-    /// for an area larger than the snapport the offset in its range nearest
-    /// `offset`. On a circular axis it is the copy nearest `offset`, in the
-    /// caller's own frame as every other result here is.
     #[must_use]
     pub fn position_of(&self, area: NodeId, offset: f32) -> Option<f32> {
         self.copies_around(offset)
@@ -347,28 +257,16 @@ impl SnapAxis<'_> {
             .map(|point| point.nearest(offset))
     }
 
-    /// Where a container that stood at `stood` over `before` — this axis as
-    /// the previous commit published it — stands now, when it was snapped
-    /// to an area that still contributes a position (§4.1.3); `None` leaves
-    /// it to the caller's own rule. `offset` is where it stands against the
-    /// new geometry, which picks the copy on a circular axis and the offset
-    /// inside a range.
     #[must_use]
     pub fn resnap(&self, before: &SnapAxis<'_>, stood: f32, offset: f32) -> Option<f32> {
         self.position_of(before.snapped_area(stood)?, offset)
     }
 }
 
-/// One axis's snap positions, owned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapAxisPositions {
     pub strictness: SnapStrictness,
-    /// Sorted by `min`.
     pub points: Vec<SnapPoint>,
-    /// The axis's wrap period on a circular axis with content to scroll
-    /// ([`ScrollBox::wrap_period`](super::ScrollBox::wrap_period)), `None`
-    /// on a bounded one. With a period every point's `min` lies in
-    /// `[0, period)`.
     pub period: Option<f32>,
 }
 
@@ -383,7 +281,6 @@ impl SnapAxisPositions {
     }
 }
 
-/// A scroll container's snap positions on the axes it snaps on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SnapPositions {
     pub x: Option<SnapAxisPositions>,
@@ -402,34 +299,12 @@ impl SnapPositions {
     }
 }
 
-/// What kind of scrolling operation a chain step belongs to (§7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollKind {
-    /// One step of a continuing gesture — a drag. Applied raw; the gesture
-    /// settles onto a snap position when it ends.
     Gesture,
-    /// A discrete step with a direction and no end position of its own — a
-    /// wheel tick. Snaps as it lands.
     Directed,
 }
 
-/// Resolves one container's chain step: where the `admitted` delta lands,
-/// and how much of it the container absorbs — which is what the chain
-/// subtracts before moving outward.
-///
-/// A gesture step and an unsnapped directed step absorb exactly what they
-/// move. A directed step that snapping moved absorbs the whole admitted
-/// delta on that axis even when the snap moved it less: the tick was spent
-/// on this container, and does not chain on. One snapping refused — a
-/// `mandatory` axis with no position ahead — absorbs nothing, so the tick
-/// chains on the way any boundary does.
-///
-/// An axis in `wrap` has no boundary (`overscroll-behavior: circular` with
-/// content to scroll, [`ScrollBox::wrap_axes`](super::ScrollBox::wrap_axes)):
-/// its natural end is not clamped, so the step absorbs its whole delta, and
-/// the caller normalizes the result into the period where it consumes it —
-/// the document through [`Document::scroll_to`], the painter at compose and
-/// at each rebase.
 #[must_use]
 #[allow(
     clippy::float_cmp,
@@ -474,11 +349,6 @@ pub(crate) fn resolve_step(
     (Vector2D::new(x, y), Vector2D::new(absorbed_x, absorbed_y))
 }
 
-/// Where a container standing at `offset` settles after a scrolling
-/// operation that began at `start` (§7, intended end position), per axis.
-/// With `start == offset` this is the at-rest rule: a `mandatory` axis
-/// moves to its nearest snap position, a `proximity` one only when within
-/// range.
 #[must_use]
 pub(crate) fn settle_offset(
     start: Vector2D<f32>,
@@ -498,15 +368,6 @@ pub(crate) fn settle_offset(
     )
 }
 
-/// The snap position one area contributes on one axis, as the `min` and
-/// `max` of its [`SnapPoint`], given the area's and the snapport's extents
-/// in the container's scrolling coordinates.
-///
-/// On a bounded axis the position is clamped into the scrollable range
-/// `0..=max`. On an axis that wraps with `period` nothing is clamped: a
-/// single position is normalized into `[0, period)`, and a range moves its
-/// `min` into `[0, period)` and its `max` by the same shift, so the range
-/// keeps its length and starts inside one period.
 fn snap_range(
     align: ScrollSnapAlignKeyword,
     area: (f32, f32),
@@ -518,8 +379,6 @@ fn snap_range(
     let (area_start, area_end) = area;
     let (port_start, port_end) = snapport;
     if area_end - area_start > port_end - port_start {
-        // Larger than the snapport: every offset that keeps the snapport
-        // inside the area is valid, whatever the alignment asked for.
         let (min, max) = (area_start - port_start, area_end - port_end);
         if let Some(period) = period {
             let start = wrap_axis(min, period);
@@ -543,9 +402,6 @@ fn snap_range(
     (offset, offset)
 }
 
-/// The axes `style`'s `scroll-snap-type` snaps on, `(x, y)`; neither when
-/// its strictness is `none`. The physical axes, as this engine lays out
-/// horizontal-tb only.
 pub(super) fn snapping_axes(style: &ComputedValues) -> (bool, bool) {
     let snap_type = style.get_scroll_snap_type();
     if snap_type.strictness() == ScrollSnapStrictness::None {
@@ -568,12 +424,6 @@ pub(crate) fn scroll_padding(value: &NonNegativeLengthPercentageOrAuto, basis: f
 }
 
 impl<T> Document<T> {
-    /// This scroll container's snap positions, from the last layout, or
-    /// `None` when it is not a scroll container or its `scroll-snap-type`
-    /// is `none`. Each returned axis is one the container snaps on, even
-    /// when no area contributes a point to it. On an axis with a
-    /// [`ScrollBox::wrap_period`](super::ScrollBox::wrap_period) the axis
-    /// carries the period and its positions are normalized into it.
     #[must_use]
     pub fn snap_positions(&self, id: NodeId) -> Option<SnapPositions> {
         let style = self.paint_style(id)?;
@@ -583,9 +433,6 @@ impl<T> Document<T> {
         self.snap_positions_of(id, style, &self.scroll_box(id)?)
     }
 
-    /// [`Self::snap_positions`] for a container whose computed style and
-    /// scroll geometry the caller already resolved — the paint build, which
-    /// resolves both for the container's scroll slot.
     pub(crate) fn snap_positions_of(
         &self,
         id: NodeId,
@@ -614,10 +461,7 @@ impl<T> Document<T> {
 
         let mut x = Vec::new();
         let mut y = Vec::new();
-        // Counts the areas as the walk meets them, which is tree order.
         let mut order = 0_u32;
-        // The flat tree: a snap area is a box, and a scroll container in a
-        // shadow tree holds its slotted descendants' boxes.
         let mut pending: Vec<NodeId> = node.flat_children().iter().rev().copied().collect();
         while let Some(child_id) = pending.pop() {
             let Some(child) = self.get(child_id) else {
@@ -668,8 +512,6 @@ impl<T> Document<T> {
                 }
             }
             if is_scroll_container(values) {
-                // Its subtree snaps to it, not to us; the container itself
-                // may still be one of our areas.
                 continue;
             }
             pending.extend(child.flat_children().iter().rev());
@@ -689,12 +531,6 @@ impl<T> Document<T> {
         })
     }
 
-    /// Settles `id` after a scrolling operation that began at `start` —
-    /// `settle_offset` over live geometry — and returns the offset it
-    /// rests at. A container that does not snap keeps its offset. On a
-    /// circular axis the positions repeat every period, so the nearest one
-    /// may lie across the seam; [`Self::scroll_to`] admits it into the
-    /// period.
     pub fn settle_scroll(&mut self, id: NodeId, start: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return Vector2D::zero();
@@ -712,27 +548,6 @@ impl<T> Document<T> {
         self.scroll_to(id, settled)
     }
 
-    /// css-scroll-snap-1 §4.1.3 for the document's own offsets: each
-    /// container of `frame` — the paint order just built — that stood on an
-    /// area's snap position in the committed frame it replaces moves to
-    /// that area's position in `frame`. Answers whether any offset moved, in
-    /// which case `frame` no longer carries the offsets the document holds
-    /// and the render builds it again.
-    ///
-    /// Both sets of positions are tables a build has already filled, so a
-    /// render that moves nothing pays one scan of each snapping container's
-    /// points and no walk of the tree.
-    ///
-    /// Only an offset that stood on a position moves. The at-rest rule for
-    /// the others — a `mandatory` container whose area is gone, say — needs
-    /// to know the container is at rest, which the runtime's painter does
-    /// and the document does not: its offset under a drag is whatever that
-    /// drag last posted. The write is a plain [`Self::scroll_to`] and no
-    /// request, because a painter holding an offset of its own applies the
-    /// same rule to it when it adopts the commit, and must not be moved
-    /// while a drag or a glide has the container. A container with a
-    /// pending request ([`Self::pending_scroll_request`]) is left to it: its
-    /// position is the request's until the painter has carried it out.
     pub(crate) fn resnap(&mut self, frame: &PaintOrder) -> bool {
         if frame.snap_points().is_empty() {
             return false;
@@ -754,8 +569,6 @@ impl<T> Document<T> {
             }
             let (before_x, before_y) =
                 committed.snap_axes(&committed.scroll_slots()[before as usize]);
-            // As it was written, against the geometry it was written for;
-            // `slot.offset` is the same offset admitted against the new one.
             let stood = self.stored_scroll_offset(slot.node);
             let axis = |after: Option<SnapAxis<'_>>,
                         before: Option<SnapAxis<'_>>,
@@ -778,7 +591,6 @@ impl<T> Document<T> {
         moved
     }
 
-    /// The first scroll container above `id` on its containing-block chain.
     pub(crate) fn nearest_scroll_container(&self, id: NodeId) -> Option<NodeId> {
         let mut current = self.scroll_parent(id);
         while let Some(node_id) = current {
@@ -790,9 +602,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// `id`'s border box in `container`'s scrolling coordinates: relative to
-    /// the container's padding-box origin, unscrolled. `None` when `id` is
-    /// not laid out under `container`.
     pub(crate) fn rect_in_scroll_container(
         &self,
         id: NodeId,
@@ -827,12 +636,10 @@ mod tests {
     use crate::style::engine::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
-    /// The area named `key` in the axis tests, which read no tree.
     fn area(key: u64) -> NodeId {
         NodeId::from_bits(key).expect("a well-formed handle")
     }
 
-    /// The position `min..=max` of area `key`, the `key`th in tree order.
     fn range(min: f32, max: f32, key: u32) -> SnapPoint {
         SnapPoint {
             min,
@@ -1006,8 +813,6 @@ mod tests {
         );
     }
 
-    /// Three pages of 200px in a 200px scrollport: offsets `0..=400`, so
-    /// the circular period is the whole 600px scrolling area.
     fn periodic(strictness: SnapStrictness, points: &[SnapPoint]) -> SnapAxis<'_> {
         SnapAxis {
             strictness,
@@ -1304,11 +1109,6 @@ mod tests {
         );
     }
 
-    /// A circular snapping axis carries its period and normalizes each
-    /// position into it instead of clamping. Four 50px pages centred in a
-    /// 100px scrollport: `max` 100, period 200. The first page's centre
-    /// needs −25, which is 175 on the circle; the last page's needs 125,
-    /// past `max`, and keeps it.
     #[test]
     fn a_circular_axis_publishes_its_period_and_positions_across_the_seam() {
         let (document, scroller) = snapping_page(
@@ -1354,11 +1154,6 @@ mod tests {
         assert_eq!(positions.y.expect("y axis").period, None, "bounded");
     }
 
-    /// The document settles and steps across the seam on a circular axis,
-    /// as the painter does. Standing just past `max` (110 of `max` 100,
-    /// period 200), the nearest position is the last page's 125, not the
-    /// clamped 100; a wheel tick forward from the first page's 175 moves on
-    /// to the second page's 25, one period on.
     #[test]
     fn the_document_settles_and_steps_across_the_seam() {
         let (mut document, scroller) = snapping_page(
@@ -1406,8 +1201,6 @@ mod tests {
         );
     }
 
-    /// §6.2.1: of the areas whose position holds the offset, the first in
-    /// tree order — not the first in the table, which is sorted by position.
     #[test]
     fn a_container_is_snapped_to_the_first_area_in_tree_order_at_its_offset() {
         let points = [
@@ -1431,8 +1224,6 @@ mod tests {
         }
     }
 
-    /// §4.1.3 over two commits' positions: the area the container stood on
-    /// decides, not the position nearest the offset it was left with.
     #[test]
     fn a_resnap_follows_the_area_to_its_new_position() {
         let before = [
@@ -1463,16 +1254,12 @@ mod tests {
         let gone = axis(SnapStrictness::Mandatory, &gone);
         assert_eq!(gone.resnap(&before, 200.0, 150.0), None, "its area is gone");
 
-        // Grown past the snapport, the area is a range: the offset in it
-        // nearest where the container stands.
         let grown = [range(0.0, 0.0, 1), range(150.0, 400.0, 3)];
         let grown = axis(SnapStrictness::Mandatory, &grown);
         assert_eq!(grown.resnap(&before, 200.0, 200.0), Some(200.0));
         assert_eq!(grown.resnap(&before, 200.0, 100.0), Some(150.0));
     }
 
-    /// On a circular axis the offset may stand any number of periods away,
-    /// and the area's new position is the copy nearest it.
     #[test]
     fn a_periodic_resnap_reads_the_offset_modulo_the_old_period() {
         let before = [
@@ -1510,7 +1297,6 @@ mod tests {
         );
     }
 
-    /// The pages of a snapping scroller: its element children.
     fn pages(document: &Document<()>, scroller: NodeId) -> Vec<NodeId> {
         document
             .get(scroller)
@@ -1519,18 +1305,12 @@ mod tests {
             .to_vec()
     }
 
-    /// Where the newest commit publishes `scroller`.
     fn committed_offset(document: &mut Document<()>, scroller: NodeId) -> Vector2D<f32> {
         let frame = document.commit();
         let slot = frame.slot_of(scroller).expect("the scroller has a slot");
         frame.scroll_slots()[slot as usize].offset
     }
 
-    /// §4.1.3 when the container itself is resized. Four pages, each as tall
-    /// as the scrollport, so every position moves with it: 0, 100, 200, 300
-    /// at 100px. Standing on the third page (200), a scrollport of 150px
-    /// puts that page at 300 — where the position nearest the old offset is
-    /// the second page's 150 — and one of 60px puts it at 120.
     #[test]
     fn a_resized_container_stays_on_the_area_it_was_snapped_to() {
         for strictness in ["mandatory", "proximity"] {
@@ -1545,7 +1325,6 @@ mod tests {
                 document.append_child(scroller, page);
             }
             document.commit();
-            // As the runtime adopts a painter's post: no request.
             document.scroll_to(scroller, Vector2D::new(0.0, 200.0));
 
             document.set_inline_style(scroller, "height: 150px");
@@ -1565,13 +1344,6 @@ mod tests {
         }
     }
 
-    /// §4.1.3 when an area ahead of the snapped one is resized, and the two
-    /// strictnesses' difference: none while the container is snapped. Four
-    /// 100px pages in a 100px scrollport, positions 0, 100, 200, 300; the
-    /// first page grows to 300px, which moves the second to 300. A container
-    /// standing on the second page follows it under `proximity` too, though
-    /// 300 is six proximity ranges from 100 (the specification's own
-    /// example: a log that stays at its end as lines are added).
     #[test]
     fn a_resized_area_carries_the_container_snapped_past_it() {
         for strictness in ["mandatory", "proximity"] {
@@ -1592,10 +1364,6 @@ mod tests {
         }
     }
 
-    /// A container that stood on no position is not the document's to move:
-    /// whether it is at rest, and so owes the at-rest rule, is the painter's
-    /// knowledge. 150 is half-way between two pages, where a `proximity`
-    /// container may rest and a `mandatory` one is only ever passing.
     #[test]
     fn an_offset_on_no_position_is_left_to_the_at_rest_rule() {
         for strictness in ["mandatory", "proximity"] {
@@ -1616,8 +1384,6 @@ mod tests {
         }
     }
 
-    /// The snapped area removed: nothing to follow, so the offset stays —
-    /// clamped as any offset is — for the at-rest rule.
     #[test]
     fn a_container_whose_area_is_gone_keeps_its_offset() {
         let (mut document, scroller) =
@@ -1633,11 +1399,6 @@ mod tests {
         );
     }
 
-    /// §6.2.1 through a commit. Four 50px pages in a 100px scrollport: the
-    /// last page's start is clamped to the end of the range, 100, which is
-    /// the third page's position too. Standing there the container is
-    /// snapped to the third page, first in tree order, and stays on it when
-    /// a 50px scrollport separates the two (100 and 150).
     #[test]
     fn two_areas_at_one_position_resnap_to_the_first_in_tree_order() {
         let (mut document, scroller) =
@@ -1651,13 +1412,6 @@ mod tests {
         );
     }
 
-    /// A circular axis: the period changes with the scrollport, and the
-    /// area's position is found in the new one. Four full-height pages,
-    /// period 400 at 100px and 600 at 150px: the last page moves from 300
-    /// to 450, which a clamp to the old range's end would never reach.
-    /// Then an area across the seam: four 50px pages centred in the 100px
-    /// scrollport put the first at −25, 175 on a period of 200; grown to
-    /// 80px it centres at −10, 220 on a period of 230.
     #[test]
     fn a_circular_container_follows_its_area_into_the_new_period() {
         let circular = "scroll-snap-type: y mandatory; overscroll-behavior-y: circular;";
@@ -1691,9 +1445,6 @@ mod tests {
         );
     }
 
-    /// A pending request owns the container's position until the painter
-    /// has carried it out, so the commit moves neither the offset nor the
-    /// target the slot carries.
     #[test]
     fn a_container_with_a_pending_request_is_left_to_it() {
         let (mut document, scroller) =

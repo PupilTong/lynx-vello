@@ -27,27 +27,10 @@ use terminus::link::{CustomElement, Document, FontBlob, NodeId};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-/// 200 x 100 CSS px of viewport, a 100px-tall `overflow: hidden` scroller,
-/// and `ROWS` rows of 20px each.
-///
-/// The row height and `contain-intrinsic-size` agree exactly — Ahem's line
-/// box at `font-size: 20px` is 20px tall — so a reveal never moves anything,
-/// which is what makes the scroll range stable across one.
 const ROWS: usize = 20;
 const ROW_HEIGHT: f32 = 20.0;
 const VIEWPORT_HEIGHT: f32 = 100.0;
 
-/// The row indices `render()` must have laid out, at this scroll offset and
-/// scrollport height — derived here from the spec of the margin rather than
-/// from the implementation, so the two have to agree.
-///
-/// The margin is the painter's encode window: one scrollport past the
-/// committed offset in each direction, clamped to the scroll range. The
-/// scrollport clips the admitted region to `[0, scrollport]` in the
-/// scroller's own coordinates, and the window then carries it by
-/// `[low, high]`, giving the band `[low, scrollport + high]` in unscrolled
-/// content coordinates. Touching the band counts as reaching it: the cull
-/// test admits anything it cannot rule out.
 fn admitted_rows(offset: f32, scrollport: f32) -> Vec<usize> {
     let content = ROW_HEIGHT * ROWS as f32;
     let max_offset = (content - scrollport).max(0.0);
@@ -69,25 +52,14 @@ struct Page {
     labels: Vec<NodeId>,
 }
 
-/// The tags [`Page::with_components`] builds its scroller and rows from.
-///
-/// Defined tags rather than `view`s, because `Document::define` requires a
-/// definition to precede every element carrying its name and a page's root
-/// is a `view` long before any case runs.
 const SCROLLER_TAG: &str = "x-scroller";
 const ROW_TAG: &str = "x-row";
 
 impl Page {
-    /// `extra` is appended to the stylesheet so a case can add its own rules.
     fn new(extra: &str) -> Self {
         Self::build(extra, "view", "view", |_| {})
     }
 
-    /// The same page with its scroller and rows built from defined tags, so
-    /// engine components are on the path of everything the commit decides.
-    ///
-    /// `define` runs against the document before the first element exists,
-    /// which is the contract [`Document::define`] asserts for itself.
     fn with_components(extra: &str, define: impl FnOnce(&mut Document<()>)) -> Self {
         Self::build(extra, SCROLLER_TAG, ROW_TAG, define)
     }
@@ -133,8 +105,6 @@ impl Page {
         }
     }
 
-    /// The rows whose contents this render actually laid out, read off the
-    /// shaped paragraphs rather than off the bit.
     fn laid_out_rows(&self) -> Vec<usize> {
         (0..ROWS)
             .filter(|&row| self.doc.dom.text_block_size(self.labels[row]).is_some())
@@ -149,11 +119,6 @@ impl Page {
         rect(&self.doc.dom, self.labels[row])
     }
 
-    /// The skipping changes the commits since the last call queued, as
-    /// `(row index, skipped)` pairs in the order the document queued them.
-    ///
-    /// Every case that calls this has `auto` on its rows alone, so a change
-    /// naming anything else is the drain reporting something it should not.
     fn changes(&mut self) -> Vec<(usize, bool)> {
         let queued = self.doc.dom.take_content_visibility_changes();
         queued
@@ -206,8 +171,6 @@ fn the_first_render_lays_out_only_the_rows_inside_the_encode_window() {
         (0.0, 0.0, 0.0, 0.0),
         "a skipped row's contents keep the zero box the hide pass left",
     );
-    // Every row still has a box of its own, at the position and size its
-    // `contain-intrinsic-size` says.
     for row in 0..ROWS {
         assert_eq!(
             page.row_rect(row),
@@ -224,17 +187,12 @@ fn a_scroll_reveals_and_re_skips_rows_in_one_render() {
     let before = page.laid_out_rows();
     assert_eq!(before, admitted_rows(0.0, VIEWPORT_HEIGHT));
 
-    // Half a window is composable from the committed frame and changes
-    // nothing: the encode window already covers it, which is exactly why
-    // relevance is defined against that window.
     assert_eq!(page.scroll_to(50.0).y, 50.0);
     assert!(
         !page.doc.dom.needs_render(),
         "a scroll inside the committed encode window needs no new frame",
     );
 
-    // Past the window, the frame can no longer be composed, so a render is
-    // owed — and that render re-determines every row.
     assert_eq!(page.scroll_to(150.0).y, 150.0);
     assert!(
         page.doc.dom.needs_render(),
@@ -269,9 +227,6 @@ fn a_nested_auto_box_is_determined_in_the_same_commit() {
         ".inner { display: flex; width: 200px; content-visibility: auto;
                   contain-intrinsic-size: 200px 20px; }",
     );
-    // The nesting goes inside row 0, which is on screen: the inner box has
-    // no paint item at all until its row is revealed, so determining it
-    // takes a second pass of the very same render.
     let inner = page.doc.el(page.rows[0], "view.inner");
     let inner_label = page.doc.el(inner, "text.label");
     let run = page.doc.dom.create_text_node("y", ());
@@ -288,7 +243,6 @@ fn a_nested_auto_box_is_determined_in_the_same_commit() {
     assert_eq!(rect(&page.doc.dom, inner_label).3, ROW_HEIGHT);
     assert!(!page.doc.dom.needs_render());
 
-    // The same nesting below the window stays skipped, both levels.
     let deep = page.doc.el(page.rows[ROWS - 1], "view.inner");
     let deep_label = page.doc.el(deep, "text.label");
     let deep_run = page.doc.dom.create_text_node("z", ());
@@ -302,9 +256,6 @@ fn a_nested_auto_box_is_determined_in_the_same_commit() {
 
 #[test]
 fn rows_a_reveal_moves_into_the_window_are_revealed_too() {
-    // Each placeholder is one scrollport tall and each real row a fifth of
-    // that, as a `<list>` cell with no estimate is: every reveal pulls the
-    // rows after it up into the window, as rows this render already skipped.
     let mut page = Page::new(".row { contain-intrinsic-size: 200px 100px; }");
     assert!(page.doc.dom.render());
     let first = page.laid_out_rows();
@@ -321,7 +272,6 @@ fn rows_a_reveal_moves_into_the_window_are_revealed_too() {
         "the document itself is not left dirty by the commit that published it",
     );
 
-    // Each frame tick resumes it, until the window holds no skipped row.
     let mut commits = 1;
     while page.doc.dom.committed_frame().unwrap().needs_main_ticks() {
         page.doc.dom.resume_relevance();
@@ -340,11 +290,6 @@ fn rows_a_reveal_moves_into_the_window_are_revealed_too() {
     assert!(!page.doc.dom.needs_render(), "a settled frame owes nothing");
 }
 
-/// [`admitted_rows`] with the relevance region stretched by the reach the
-/// painter posted: `reach` capped at three scrollports, added to the window's
-/// `high` when positive and its `low` when negative, the stretched edge kept
-/// in the scroll range. Derived from the stretch's definition, so the
-/// implementation has to agree with it.
 fn admitted_rows_reaching(offset: f32, scrollport: f32, reach: f32) -> Vec<usize> {
     let content = ROW_HEIGHT * ROWS as f32;
     let max_offset = (content - scrollport).max(0.0);
@@ -365,12 +310,6 @@ fn admitted_rows_reaching(offset: f32, scrollport: f32, reach: f32) -> Vec<usize
         .collect()
 }
 
-/// css-contain-2 §4.1's implementation-defined margin, stretched toward
-/// where the painter's own motion is carrying the scroller: the commit after
-/// a reach is recorded reveals the rows past the encode window that the reach
-/// covers, three scrollports of it at most, and leaves the encode window — so
-/// what the frame composes — as it was. A zero reach puts the region back on
-/// the encode window, and the rows it alone admitted skip again.
 #[test]
 fn a_reach_reveals_rows_past_the_encode_window_up_to_three_scrollports() {
     const SCROLLPORT: f32 = 40.0;
@@ -388,8 +327,6 @@ fn a_reach_reveals_rows_past_the_encode_window_up_to_three_scrollports() {
             page.doc.dom.scroll_reach(scroller),
             Vector2D::new(0.0, reach)
         );
-        // A recorded reach schedules nothing; the recentering commit a moving
-        // scroller asks for is the one that reads it.
         assert!(
             !page.doc.dom.needs_render(),
             "recording a reach owes no frame"
@@ -431,7 +368,6 @@ fn a_reach_reveals_rows_past_the_encode_window_up_to_three_scrollports() {
     );
 }
 
-/// A reach toward the start stretches the region's near edge only.
 #[test]
 fn a_backward_reach_reveals_rows_before_the_encode_window() {
     const SCROLLPORT: f32 = 40.0;
@@ -478,15 +414,12 @@ fn an_auto_box_outside_every_scroller_follows_the_viewport() {
         "400px below a 100px viewport, with no scroller to widen the margin",
     );
 
-    // Moving it into view is an ordinary style change: the render it forces
-    // determines the box and reveals it in that same commit.
     doc.set_inline(far, "top: 10px");
     assert!(doc.dom.render());
     assert!(
         doc.dom.text_block_size(label).is_some(),
         "the style change and the reveal land in one render",
     );
-    // A Lynx text flex item is as wide as its one Ahem glyph.
     assert_eq!(rect(&doc.dom, label), (0.0, 0.0, 20.0, 20.0));
     assert!(!doc.dom.needs_render());
 }
@@ -498,7 +431,6 @@ fn a_computed_value_that_is_no_longer_auto_ignores_the_bit() {
     let skipped = ROWS - 1;
     assert!(page.doc.dom.text_block_size(page.labels[skipped]).is_none());
 
-    // `visible` reveals a box whose bit says skipped.
     page.doc
         .set_inline(page.rows[skipped], "content-visibility: visible");
     assert!(page.doc.dom.render());
@@ -507,7 +439,6 @@ fn a_computed_value_that_is_no_longer_auto_ignores_the_bit() {
         "auto -> visible reveals regardless of the bit",
     );
 
-    // `hidden` skips a box whose bit says relevant.
     page.doc
         .set_inline(page.rows[0], "content-visibility: hidden");
     assert!(page.doc.dom.render());
@@ -574,7 +505,6 @@ fn a_transformed_ancestor_moves_the_relevance_test_with_it() {
     let run = doc.dom.create_text_node("x", ());
     doc.dom.append_child(label, run);
 
-    // Laid out at the top of the viewport, but translated far above it.
     doc.set_inline(mover, "transform: translateY(-500px)");
     assert!(doc.dom.render());
     assert!(
@@ -594,12 +524,9 @@ fn a_transformed_ancestor_moves_the_relevance_test_with_it() {
 fn a_revealed_row_is_hit_testable_after_the_same_render() {
     let mut page = Page::new("");
     assert!(page.doc.dom.render());
-    // Row 8 is off screen but inside the window at offset 0, so it is
-    // already laid out; scrolling brings it under the pointer.
     assert_eq!(page.scroll_to(150.0).y, 150.0);
     assert!(page.doc.dom.render());
 
-    // Viewport y = 10 is content y = 160, which is row 8.
     let hits = page.doc.dom.elements_from_point(Point2D::new(10.0, 10.0));
     assert_eq!(
         hits.first().copied(),
@@ -618,8 +545,6 @@ fn a_viewport_change_re_determines_every_auto_box() {
     assert!(page.doc.dom.render());
     assert_eq!(page.laid_out_rows(), admitted_rows(0.0, VIEWPORT_HEIGHT));
 
-    // A taller viewport is a taller scrollport, so both the visible band and
-    // the encode window around it grow.
     page.doc.dom.set_viewport(200.0, 200.0);
     assert!(
         page.doc.dom.needs_render(),
@@ -658,12 +583,9 @@ fn a_render_that_flips_nothing_builds_exactly_once() {
     };
     let first = commit(&page);
 
-    // An idle document refuses to render at all.
     assert!(!page.doc.dom.render());
     assert_eq!(commit(&page), first);
 
-    // A mutation that moves nothing into or out of the window still costs
-    // exactly one commit: the determination confirms every bit and stops.
     page.doc
         .set_inline(page.rows[0], "background-color: rebeccapurple");
     assert!(page.doc.dom.render());
@@ -732,8 +654,6 @@ fn a_removed_row_takes_its_relevance_with_it() {
     assert!(page.doc.dom.render());
     assert!(page.doc.dom.text_block_size(page.labels[0]).is_some());
 
-    // Freeing the relevant row recycles its arena key. The next occupant
-    // must start undetermined rather than inherit "relevant" from it.
     page.doc.dom.remove_element(page.rows[0]);
     page.doc.dom.drop_subtree(page.rows[0]);
     let fresh_row = page.doc.el(page.scroller, "view.row");
@@ -742,19 +662,12 @@ fn a_removed_row_takes_its_relevance_with_it() {
     page.doc.dom.append_child(fresh_label, run);
     assert!(page.doc.dom.render());
 
-    // The new row is appended last, well past the window, so it must skip —
-    // which it can only do if it did not inherit the freed row's bit.
     assert!(
         page.doc.dom.text_block_size(fresh_label).is_none(),
         "a recycled slot starts undetermined",
     );
 }
 
-/// Relevance is a geometric fact about the border box, not a paint-visibility
-/// one. A `visibility: hidden` `auto` box emits no paint item at all, so a
-/// determination keyed on the item list would leave it undetermined — and
-/// therefore skipping — forever, taking its `visibility: visible` contents
-/// down with it.
 #[test]
 fn an_invisible_auto_box_inside_the_window_is_still_determined_relevant() {
     let mut page = Page::new(
@@ -779,8 +692,6 @@ fn an_invisible_auto_box_inside_the_window_is_still_determined_relevant() {
         "determined in this same commit, like any other auto box",
     );
 
-    // And it reached the paint order: the visible child is hit where the
-    // invisible row is, while the row itself — painting nothing — is not.
     let hits = page.doc.dom.elements_from_point(Point2D::new(10.0, 10.0));
     assert_eq!(
         hits.first().copied(),
@@ -793,8 +704,6 @@ fn an_invisible_auto_box_inside_the_window_is_still_determined_relevant() {
     );
 }
 
-/// The same box outside the window is skipped on exactly the geometry, with
-/// `visibility` playing no part either way.
 #[test]
 fn an_invisible_auto_box_outside_the_window_still_skips() {
     let mut page = Page::new(
@@ -818,15 +727,6 @@ fn an_invisible_auto_box_outside_the_window_still_skips() {
     );
 }
 
-/// css-contain-2 §4.4: the commit that determines relevance queues one
-/// `contentvisibilityautostatechange` per element whose *skipping* changed,
-/// and the host drains them once.
-///
-/// The first determination is the case the spec's own
-/// `content-visibility-auto-state-changed-first-observation.html` pins, and
-/// it falls out of the three-state bit rather than needing a rule: an
-/// undetermined box skips, so an on-screen box changes state (skipped -> not
-/// skipped) and an off-screen box does not.
 #[test]
 fn the_first_commit_queues_a_change_for_the_rows_it_reveals_and_no_other() {
     let mut page = Page::new("");
@@ -847,10 +747,6 @@ fn the_first_commit_queues_a_change_for_the_rows_it_reveals_and_no_other() {
     );
 }
 
-/// A scroll past the encode window changes both ways at once, and the drain
-/// reports each row once, in frame order — the order the paint build met
-/// them, which is why a re-skipped row above the window comes before a
-/// revealed one below it.
 #[test]
 fn a_scroll_queues_both_directions_once_each_in_frame_order() {
     let mut page = Page::new("");
@@ -874,16 +770,12 @@ fn a_scroll_queues_both_directions_once_each_in_frame_order() {
     assert_eq!(page.changes(), expected);
 }
 
-/// A commit that determined nothing new queues nothing — including the
-/// commit a mutation forces on a page whose rows all stay where they were.
 #[test]
 fn a_commit_with_no_skipping_change_queues_nothing() {
     let mut page = Page::new(".marked { opacity: 0.5; }");
     assert!(page.doc.dom.render());
     assert!(!page.changes().is_empty(), "the first commit revealed rows");
 
-    // A visual mutation with no bearing on any border box: every row is
-    // re-determined into the state it already had.
     page.doc.add_class(page.rows[0], "marked");
     assert!(page.doc.dom.render(), "the mutation commits a frame");
     assert!(
@@ -891,15 +783,10 @@ fn a_commit_with_no_skipping_change_queues_nothing() {
         "re-determining an element into the state it already had is not a change",
     );
 
-    // And an idle render commits nothing at all.
     assert!(!page.doc.dom.render());
     assert_eq!(page.changes(), []);
 }
 
-/// A nested `auto` box is determined by a later pass of the very same
-/// commit, and its change rides the same drain as its ancestor's — one
-/// entry each, because a pass never re-determines what this commit already
-/// did.
 #[test]
 fn a_nested_auto_box_queues_its_change_in_the_commit_that_revealed_it() {
     let mut page = Page::new(
@@ -927,10 +814,6 @@ fn a_nested_auto_box_queues_its_change_in_the_commit_that_revealed_it() {
     assert_eq!(page.doc.dom.take_content_visibility_changes(), []);
 }
 
-/// A row freed between the commit and the drain leaves its change queued,
-/// naming an id that now resolves to nothing. That is the runtime's to drop
-/// at dispatch — the same rule the retained frame's ids follow — rather than
-/// something this queue prunes.
 #[test]
 fn a_freed_row_leaves_a_change_naming_an_id_that_resolves_to_nothing() {
     let mut page = Page::new("");
@@ -950,18 +833,6 @@ fn a_freed_row_leaves_a_change_naming_an_id_that_resolves_to_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// css-contain-2 §4.4, delivered: `Document::dispatch_content_visibility_changes`
-// ---------------------------------------------------------------------------
-//
-// The event is fired **Rust-side only**. Its listeners are the engine's own
-// components — a defined `CustomElement`, which is what `<list>` will be —
-// reached through `Document::dispatch_element_event`, and nothing about it
-// touches a script realm. What the cases below pin is the walk: the standard's
-// two passes, one delivery per node, `stopPropagation`, and what a target
-// freed or a tree mutated in the middle of one does.
-
-/// What every component here writes its deliveries into.
 type Log = Arc<Mutex<Vec<String>>>;
 
 fn log() -> Log {
@@ -974,11 +845,6 @@ fn take(log: &Log) -> Vec<String> {
 
 type Action = Box<dyn Fn(&mut Document<()>, NodeId, &mut ElementEvent<'_>) + Send + Sync>;
 
-/// An engine component that records every event it hears as
-/// `who:phase:target:state`, naming the target by its `id` attribute.
-///
-/// `on_event` is how a case makes a handler *do* something — stop the walk,
-/// mutate the tree — from inside the delivery.
 struct Recorder {
     who: &'static str,
     log: Log,
@@ -996,8 +862,6 @@ impl Recorder {
         }
     }
 
-    /// Also records `connected_callback`, which is what pins where the
-    /// reaction a handler's own mutation raised runs.
     fn logging_connections(mut self) -> Self {
         self.connections = true;
         self
@@ -1059,7 +923,6 @@ impl CustomElement<()> for Recorder {
     }
 }
 
-/// A page whose scroller and rows both record, with `row` given `action`.
 fn recording_page(log: &Log, action: Option<Action>) -> Page {
     let scroller = Recorder::new("scroller", log);
     let mut row = Recorder::new("row", log);
@@ -1074,9 +937,6 @@ fn recording_page(log: &Log, action: Option<Action>) -> Page {
     page
 }
 
-/// The three deliveries one row's change owes, in order: the scroller hears
-/// it inbound, the row itself hears it at-target, and the scroller hears it
-/// again outbound.
 fn whole_path(row: usize, skipped: bool) -> Vec<String> {
     let state = if skipped { "skipped" } else { "shown" };
     vec![
@@ -1086,12 +946,6 @@ fn whole_path(row: usize, skipped: bool) -> Vec<String> {
     ]
 }
 
-/// The first commit's changes reach the components on the path, in the
-/// standard's order: capture root-inward, the target once, bubble outward.
-///
-/// One delivery at the target, not two — the standard visits it in both
-/// passes only because each pass runs a different registration set, and a
-/// component has one `handle_event`.
 #[test]
 fn every_revealed_row_reaches_its_own_component_and_the_scroller_above_it() {
     let log = log();
@@ -1135,9 +989,6 @@ fn every_revealed_row_reaches_its_own_component_and_the_scroller_above_it() {
     );
 }
 
-/// A scroll past the encode window changes rows in both directions, and each
-/// one is delivered once, in frame order — a re-skipped row above the window
-/// before a revealed one below it.
 #[test]
 fn a_scroll_delivers_both_directions_once_each_in_frame_order() {
     let log = log();
@@ -1164,9 +1015,6 @@ fn a_scroll_delivers_both_directions_once_each_in_frame_order() {
     assert_eq!(take(&log), expected);
 }
 
-/// A row that stops propagation is the last node the event reaches: the
-/// scroller's bubble delivery never happens, while the capture delivery that
-/// already ran stands.
 #[test]
 fn a_row_that_stops_propagation_keeps_the_scroller_from_hearing_the_bubble() {
     let log = log();
@@ -1192,9 +1040,6 @@ fn a_row_that_stops_propagation_keeps_the_scroller_from_hearing_the_bubble() {
     assert_eq!(take(&log), expected);
 }
 
-/// A row freed between the commit that queued its change and the dispatch
-/// delivers nothing at all — not to itself, and not to the scroller above
-/// it, because a dead target resolves to no path.
 #[test]
 fn a_row_freed_before_the_dispatch_delivers_nothing() {
     let log = log();
@@ -1221,9 +1066,6 @@ fn a_row_freed_before_the_dispatch_delivers_nothing() {
     );
 }
 
-/// A document that defines nothing pays the queue drain and the one check
-/// that says nobody can listen — no path is built and no handler exists to
-/// call.
 #[test]
 fn a_document_with_no_definitions_drains_the_queue_and_does_nothing_else() {
     let mut page = Page::new("");
@@ -1241,20 +1083,12 @@ fn a_document_with_no_definitions_drains_the_queue_and_does_nothing_else() {
     assert_eq!(page.doc.dom.take_content_visibility_changes(), []);
 }
 
-/// A handler may mutate the tree it is being called about: the write lands in
-/// the document, the rest of the walk runs, and the next render commits it.
-///
-/// The `connected_callback` of a child the handler appends runs **before the
-/// next step** — the mutation that raised it drained it, as every mutation in
-/// this crate does, and the dispatch opens a scope of its own around each
-/// handler so nothing a handler raised can outlive its step.
 #[test]
 fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
     let log = log();
     let item = Recorder::new("item", &log).logging_connections();
     let scroller = Recorder::new("scroller", &log);
     let row = Recorder::new("row", &log).on_event(Box::new(|document, element, event| {
-        // The first row only, so what the log shows is one step's worth.
         if document
             .get(element)
             .and_then(|node| node.attribute("id"))
@@ -1308,27 +1142,10 @@ fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
     );
 }
 
-// The last remembered size
-// ([css-sizing-4 §5.2.1](https://drafts.csswg.org/css-sizing-4/#last-remembered)),
-// plus csswg-drafts#8407: `content-visibility: auto` makes `contain-intrinsic-*`
-// behave as if `auto` were specified.
-//
-// The recording moment here is the commit's own layout run — this engine has no
-// ResizeObserver — so every case below goes through `render()`, and every
-// assertion is on a box's used height: the estimate before anything is
-// remembered, the real content box afterwards.
-// ---------------------------------------------------------------------------
-
-/// The real content height of a `.target`/`.box`, well past its estimate.
 const TALL: f32 = 50.0;
-/// What `contain-intrinsic-size` carries before anything is remembered.
 const ESTIMATE: f32 = 10.0;
-/// A fixed block above the target, tall enough that the target starts outside
-/// the encode window and one scroll to the end is enough to reach it.
 const SPACER: f32 = 400.0;
 
-/// One `content-visibility: auto` target at the bottom of a scroller, so the
-/// skip/reveal/skip cycle is driven by scrolling rather than by style.
 struct Remembered {
     doc: Doc,
     scroller: NodeId,
@@ -1337,7 +1154,6 @@ struct Remembered {
 }
 
 impl Remembered {
-    /// `containment` is the target's own `contain-intrinsic-*` declarations.
     fn new(containment: &str) -> Self {
         let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
         doc.define_lynx_text("text");
@@ -1393,8 +1209,6 @@ impl Remembered {
     }
 }
 
-/// The whole cycle: skip at the estimate, reveal and record, skip again at
-/// what was recorded.
 #[test]
 fn a_revealed_box_is_remembered_and_re_used_the_next_time_it_skips() {
     let mut page =
@@ -1411,16 +1225,12 @@ fn a_revealed_box_is_remembered_and_re_used_the_next_time_it_skips() {
     );
     assert_eq!(page.scroll_range(), SPACER + ESTIMATE);
 
-    // Scrolling to the end brings it inside the window: it is revealed and laid
-    // out from its real contents, which is the moment its inner size is
-    // recorded.
     assert_eq!(page.scroll_to(1000.0), SPACER + ESTIMATE - VIEWPORT_HEIGHT);
     assert!(page.doc.dom.render());
     assert!(!page.skipping(), "the scroll revealed it");
     assert_eq!(page.target_height(), TALL, "at its real content height");
     assert_eq!(page.scroll_range(), SPACER + TALL);
 
-    // And back out: it skips again, now from what it last rendered at.
     assert_eq!(page.scroll_to(0.0), 0.0);
     assert!(page.doc.dom.render());
     assert!(page.skipping(), "outside the window again");
@@ -1436,8 +1246,6 @@ fn a_revealed_box_is_remembered_and_re_used_the_next_time_it_skips() {
     );
 }
 
-/// csswg-drafts#8407: the same cycle for a box whose `contain-intrinsic-size`
-/// carries no `auto` keyword at all. `content-visibility: auto` supplies it.
 #[test]
 fn content_visibility_auto_makes_a_plain_length_behave_as_auto() {
     let mut page =
@@ -1460,9 +1268,6 @@ fn content_visibility_auto_makes_a_plain_length_behave_as_auto() {
     );
 }
 
-/// A plain document with no scroller: `content-visibility` is set by inline
-/// style, so these cases are about the remembered size itself rather than about
-/// relevance.
 fn flat_doc() -> Doc {
     let mut doc = Doc::with_device(device(200.0, 400.0));
     doc.define_lynx_text("text");
@@ -1478,8 +1283,6 @@ fn flat_doc() -> Doc {
     doc
 }
 
-/// Appends a `.box` whose real content is [`TALL`] high, with `inline` as its
-/// inline style.
 fn tall_box(doc: &mut Doc, inline: &str) -> (NodeId, NodeId) {
     let root = doc.root;
     let boxed = doc.el(root, "view.box");
@@ -1500,8 +1303,6 @@ fn width(doc: &Doc, id: NodeId) -> f32 {
     rect(&doc.dom, id).2
 }
 
-/// `content-visibility: hidden` reads the remembered size exactly as `auto`
-/// does — and a box no rendering update ever laid out has none to read.
 #[test]
 fn a_box_that_was_rendered_keeps_its_size_when_it_starts_skipping() {
     let mut doc = flat_doc();
@@ -1536,8 +1337,6 @@ fn a_box_that_was_rendered_keeps_its_size_when_it_starts_skipping() {
     );
 }
 
-/// `auto none` is "no explicit intrinsic inner size" until there is a
-/// remembered one, and the remembered one once there is.
 #[test]
 fn auto_none_lays_out_as_if_empty_until_something_is_remembered() {
     let mut doc = flat_doc();
@@ -1568,8 +1367,6 @@ fn auto_none_lays_out_as_if_empty_until_something_is_remembered() {
     assert_eq!(height(&doc, empty), 0.0, "the other still has none");
 }
 
-/// The `auto` clause is conditioned on "is currently skipping its contents":
-/// size containment on its own never reads a remembered size.
 #[test]
 fn a_size_contained_box_that_is_not_skipping_uses_the_length() {
     let mut doc = flat_doc();
@@ -1593,10 +1390,6 @@ fn a_size_contained_box_that_is_not_skipping_uses_the_length() {
         "and it is not skipping, so the <length> stands",
     );
 
-    // Nor did that pass overwrite what the box remembers: a size-contained box
-    // was laid out as if it had no contents, so its inner size is the estimate
-    // rather than anything its contents produced. Skipping proves it — the
-    // real measurement is still there.
     doc.set_inline(boxed, "contain: size; content-visibility: hidden");
     assert!(doc.dom.render());
     assert_eq!(
@@ -1606,10 +1399,6 @@ fn a_size_contained_box_that_is_not_skipping_uses_the_length() {
     );
 }
 
-/// Containment is per axis, and so is the recording rule it gates: under
-/// `contain: inline-size` the height this run produced *is* the contents'
-/// own and is recorded, while the width — the substituted estimate — leaves
-/// what the box last measured alone.
 #[test]
 fn inline_size_containment_only_stops_the_width_from_being_recorded() {
     let mut doc = flat_doc();
@@ -1643,8 +1432,6 @@ fn inline_size_containment_only_stops_the_width_from_being_recorded() {
     );
 }
 
-/// "if an element has a last remembered size but does not have auto keyword in
-/// contain-intrinsic-size property, remove its last remembered size."
 #[test]
 fn removing_the_auto_keyword_removes_the_remembered_size() {
     let mut doc = flat_doc();
@@ -1654,8 +1441,6 @@ fn removing_the_auto_keyword_removes_the_remembered_size() {
     assert_eq!(height(&doc, dropped), TALL);
     assert_eq!(height(&doc, kept), TALL);
 
-    // Stylo gives a `contain-intrinsic-size` change box-rebuilding damage, so
-    // the box reaches a committing run and the removal happens in it.
     doc.set_inline(dropped, "contain-intrinsic-height: 10px");
     assert!(
         doc.dom.render(),
@@ -1685,13 +1470,9 @@ fn removing_the_auto_keyword_removes_the_remembered_size() {
     );
 }
 
-/// The last remembered size is state attached to the *element*, so a freed
-/// arena key must not hand it to the key's next occupant.
 #[test]
 fn a_freed_node_takes_its_remembered_size_with_it() {
     let mut doc = flat_doc();
-    // One node, so the key this frees is the key the next element takes: the
-    // slab hands back the most recently freed key first.
     let root = doc.root;
     let recorder = doc.el(root, "view.box");
     doc.set_inline(recorder, "height: 50px");
@@ -1711,9 +1492,6 @@ fn a_freed_node_takes_its_remembered_size_with_it() {
     );
 }
 
-/// The removal rule has no "is rendered" condition, so it has to reach a box
-/// that is already skipping — where the run that serves its own size is the
-/// only run it gets.
 #[test]
 fn a_box_that_loses_the_auto_keyword_while_it_skips_forgets_too() {
     let mut doc = flat_doc();
@@ -1748,9 +1526,6 @@ fn a_box_that_loses_the_auto_keyword_while_it_skips_forgets_too() {
     );
 }
 
-/// css-contain-2 §4: an element in the top layer is relevant to the user,
-/// wherever it is. The same box off screen skips until it enters the
-/// layer, and skips again once it leaves.
 #[test]
 fn a_top_layer_auto_box_is_relevant_wherever_it_is() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));

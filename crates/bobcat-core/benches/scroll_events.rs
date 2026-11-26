@@ -39,23 +39,10 @@ fn main() {
     divan::main();
 }
 
-/// Containers on the page. A screenful of short scrollers, each one a
-/// separate scroll container with its own offset.
 const CONTAINERS: usize = 20;
 
-/// The two offsets the frames alternate between, both inside every
-/// container's scroll range (`ROWS` rows of 40px in a 30px box).
 const OFFSETS: [f32; 2] = [20.0, 40.0];
 
-/// The page every case boots: `CONTAINERS` containers of `tag` in a column,
-/// each 30px tall and holding three 40px rows, laid out by the boot's flush.
-/// `style` is extra inline style for each container ([`VIEW_STYLE`] or
-/// nothing); `listener` is a module body run before the flush, with
-/// `scrollers` in scope.
-///
-/// The listener is a main-thread function, which files the same path
-/// registration a `bindscroll` does and keeps the dispatch on this thread:
-/// the harness has no background thread to publish a `bindscroll` to.
 fn page_source(tag: &str, style: &str, listener: &str) -> String {
     format!(
         r"
@@ -82,26 +69,16 @@ fn page_source(tag: &str, style: &str, listener: &str) -> String {
     )
 }
 
-/// A `scroll` listener on the first container.
 const LISTEN_SCROLL: &str = "__AddEventListener(scrollers[0], 'scroll', () => {}, {});";
 
-/// A `scrollend` listener on the first container.
 const LISTEN_SCROLL_END: &str = "__AddEventListener(scrollers[0], 'scrollend', () => {}, {});";
 
-/// The tag whose component observes `scroll`.
 const SCROLL_VIEW: &str = "scroll-view";
 
-/// The tag no component observes, made a scroll container by
-/// [`VIEW_STYLE`] (a `view` defaults to visible overflow).
 const VIEW: &str = "view";
 
-/// The inline style that makes a [`VIEW`] container scroll on y, as the UA
-/// sheet makes a `scroll-view`.
 const VIEW_STYLE: &str = "overflowY: 'scroll',";
 
-/// Boots a page of `tag` containers and answers the harness with the two
-/// frames' posts for the containers `moving` names, at rest when `rest` is
-/// set.
 fn setup(
     tag: &str,
     listener: &str,
@@ -125,10 +102,6 @@ fn setup(
     (harness, posts)
 }
 
-/// Times one frame per iteration, alternating between the two offsets so
-/// every frame moves its containers. A case that checks its setup with one
-/// frame posts the second offset there, so the first timed frame posts the
-/// first.
 fn run(bencher: divan::Bencher, mut harness: ScriptHarness, posts: &[Vec<ScrollPost>; 2]) {
     let mut frame = 0usize;
     bencher.bench_local(|| {
@@ -138,8 +111,6 @@ fn run(bencher: divan::Bencher, mut harness: ScriptHarness, posts: &[Vec<ScrollP
     });
 }
 
-/// Every container moves and nothing anywhere listens for `scroll` or
-/// `scrollend`: `view`s, which no component observes, so nothing is queued.
 #[divan::bench]
 fn scroll_nobody_listens(bencher: divan::Bencher) {
     let (mut harness, posts) = setup(VIEW, "", 0..CONTAINERS, false);
@@ -150,10 +121,6 @@ fn scroll_nobody_listens(bencher: divan::Bencher) {
     run(bencher, harness, &posts);
 }
 
-/// Every container moves and nothing listens, but the containers are
-/// `scroll-view`s, whose component observes `scroll`: every one's `scroll`
-/// is queued and walked to the component, which finds no listener for its
-/// threshold events, and no realm is called.
 #[divan::bench]
 fn scroll_components_observe(bencher: divan::Bencher) {
     let (mut harness, posts) = setup(SCROLL_VIEW, "", 0..CONTAINERS, false);
@@ -164,15 +131,12 @@ fn scroll_components_observe(bencher: divan::Bencher) {
     run(bencher, harness, &posts);
 }
 
-/// The first container listens for `scroll`; every other container moves.
 #[divan::bench]
 fn scroll_one_listened_elsewhere(bencher: divan::Bencher) {
     let (harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL, 1..CONTAINERS, false);
     run(bencher, harness, &posts);
 }
 
-/// The first container listens for `scroll`, and it alone moves: one
-/// dispatch, which calls the realm.
 #[divan::bench]
 fn scroll_the_listened_container(bencher: divan::Bencher) {
     let (mut harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL, 0..1, false);
@@ -183,9 +147,6 @@ fn scroll_the_listened_container(bencher: divan::Bencher) {
     run(bencher, harness, &posts);
 }
 
-/// The first container listens for `scrollend`; every other container moves
-/// and comes to rest in the same post, so each one's `scrollend` is the
-/// event in question and `scroll` is heard nowhere.
 #[divan::bench]
 fn scrollend_one_listened_elsewhere(bencher: divan::Bencher) {
     let (harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL_END, 1..CONTAINERS, true);

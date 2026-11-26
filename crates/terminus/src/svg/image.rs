@@ -49,32 +49,18 @@ use crate::style::device::Device;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::xml::{XmlError, XmlItem, XmlMarkup, XmlNamespace};
 
-/// A parsed SVG document, ready to apply.
-///
-/// `pub` only because a host reports it
-/// ([`ImageReports::parsed_document`](crate::render::image::ImageReports::parsed_document))
-/// and [`ImageEvent::ParsedDocument`](crate::render::image::ImageEvent) carries it from the
-/// host's parsing thread to the document's; no field or method is public,
-/// and no crate outside `terminus` reads it.
 #[derive(Clone, Debug)]
 pub struct VectorDocument {
     markup: XmlMarkup,
-    /// The size layout is told, in whole CSS px (CSS Images 3 default
-    /// sizing over the root's `width`, `height` and `viewBox`), at least one
-    /// on each axis.
     pub(crate) natural: (u32, u32),
 }
 
-// Parsed on the host's decode pool and shared by every report of one parse.
 const _: () = {
     const fn send_sync<T: Send + Sync>() {}
     send_sync::<VectorDocument>();
 };
 
 impl VectorDocument {
-    /// Parses `bytes` as an SVG document: an element in no namespace is an
-    /// SVG element ([module docs](self)), and the root is the SVG `svg`
-    /// element.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, SvgError> {
         let markup =
             XmlMarkup::parse(bytes, Some(XmlNamespace::Svg)).map_err(|error| match error {
@@ -105,13 +91,9 @@ impl VectorDocument {
     }
 }
 
-/// Why bytes did not parse as an SVG document.
 #[derive(Debug)]
 pub(crate) enum SvgError {
-    /// The bytes did not parse as XML.
     Xml(XmlError),
-    /// The root element is not SVG's `svg`, a root in a namespace the tree
-    /// has no elements for included (`<x:svg xmlns:x="urn:x"/>`).
     NotSvg,
 }
 
@@ -133,19 +115,12 @@ impl std::error::Error for SvgError {
     }
 }
 
-/// A [`VectorDocument`] built as a document of its own, its styles
-/// flushed: what an SVG image is recorded from.
 pub(crate) struct IsolatedSvg {
     document: Document<()>,
     root: NodeId,
 }
 
 impl IsolatedSvg {
-    /// Builds `parsed` under the document element of a new document whose
-    /// viewport is the natural size, with the SVG user-agent sheet and the
-    /// image sheet mounted, and flushes its styles. Its animation timeline
-    /// starts at `now`, the host document's animation clock, so an
-    /// animation the flush creates starts there.
     pub(crate) fn build(parsed: &VectorDocument, now: f64) -> Self {
         #[expect(
             clippy::cast_precision_loss,
@@ -162,17 +137,11 @@ impl IsolatedSvg {
         Self { document, root }
     }
 
-    /// The root's subtree as the item list an image draws, unshaped.
     #[cfg(test)]
     pub(crate) fn record(&self) -> Recording {
         record(&self.document, self.root, RootGroup::Recorded)
     }
 
-    /// The image the document draws now: its root recorded, its text shaped
-    /// with `context`, the host document's text context, and kept in the
-    /// document's own side table (`super::present`), then planned by the
-    /// visual plan of an inline root (`Document::plan_svg_image`) and
-    /// painted by the paint walk with nothing culled, into one display list.
     pub(crate) fn image(&mut self, context: &mut Option<Box<TextContext>>) -> VectorImage {
         let document = &mut self.document;
         let mut recording = record(document, self.root, RootGroup::Recorded);
@@ -192,18 +161,11 @@ impl IsolatedSvg {
         VectorImage::new(scene, viewport, aspect)
     }
 
-    /// Whether the document can still change: it has a running or pending
-    /// CSS animation or transition. Nothing in an image starts a new one (no
-    /// script, no interaction), so a document that answers no never will.
     pub(crate) fn runs(&self) -> bool {
         self.document.has_active_animations()
     }
 }
 
-/// The isolated documents of a document's SVG images that still animate,
-/// by source: empty and unallocated on a page without one. The image
-/// registry holds each one's latest [`VectorImage`]; this table holds what
-/// re-records it.
 #[derive(Default)]
 pub(crate) struct AnimatedImages {
     entries: FxHashMap<Arc<str>, AnimatedImage>,
@@ -211,8 +173,6 @@ pub(crate) struct AnimatedImages {
 
 struct AnimatedImage {
     isolated: IsolatedSvg,
-    /// Whether the last committed frame drew the entry's current image:
-    /// written by the paint walk's owner, which holds the document shared.
     drawn: Cell<bool>,
 }
 
@@ -230,14 +190,10 @@ impl AnimatedImages {
 }
 
 impl<T> Document<T> {
-    /// Whether the animated image `source` is in use: presented by a
-    /// replaced box, or drawn by the last committed frame.
     fn image_in_use(&self, source: &str, animated: &AnimatedImage) -> bool {
         animated.drawn.get() || self.images.presenters(source) > 0
     }
 
-    /// Whether an animated image in use is still running, which is what
-    /// keeps the host ticking. One test on a page without one.
     pub(crate) fn animated_images_run(&self) -> bool {
         !self.animated_images.is_empty()
             && self
@@ -247,9 +203,6 @@ impl<T> Document<T> {
                 .any(|(source, animated)| self.image_in_use(source, animated))
     }
 
-    /// Records which animated images the frame about to be committed draws,
-    /// from its vector draws, and answers [`Self::animated_images_run`] as
-    /// of that frame. One test on a page without one.
     pub(crate) fn note_drawn_images(&self, draws: &[crate::paint::compose::VectorDraw]) -> bool {
         if self.animated_images.is_empty() {
             return false;
@@ -263,11 +216,6 @@ impl<T> Document<T> {
         self.animated_images_run()
     }
 
-    /// Applies one host report: a parsed SVG document is built as an
-    /// isolated document whose timeline starts at this document's clock,
-    /// recorded, and drawn with this document's text context. A document
-    /// that still runs an animation is kept, by source, to tick with this
-    /// one. Answers what the registry answers.
     pub(crate) fn apply_image_event(
         &mut self,
         event: &crate::render::image::ImageEvent,
@@ -297,8 +245,6 @@ impl<T> Document<T> {
         applied
     }
 
-    /// Takes the animated image `source` out of the table once the registry
-    /// has forgotten it (a synthetic source's last presenter let go).
     pub(crate) fn forget_animated_image(&mut self, source: &str) {
         if !self.animated_images.is_empty() && !self.images.knows(source) {
             self.animated_images.remove(source);
@@ -307,12 +253,6 @@ impl<T> Document<T> {
 }
 
 impl<T: Sync> Document<T> {
-    /// Advances every animated image in use to `now`, the host's clock:
-    /// one whose tick restyled something is recorded again and its registry
-    /// entry's image replaced (a new key), and one whose animations have all
-    /// finished leaves the table, its last image staying. An image not in
-    /// use is not ticked; the next tick that finds it in use samples the
-    /// current clock. Folds what it did into `tick`.
     pub(crate) fn advance_animated_images(
         &mut self,
         now: f64,
@@ -343,11 +283,6 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// The image `parsed` draws: built, recorded and drawn with `context`,
-/// the host document's text context. The isolated document goes with the
-/// call; a caller that keeps it builds an [`IsolatedSvg`] and asks it for
-/// its [`image`](IsolatedSvg::image). Its timeline starts at zero: for
-/// tests, which have no host document's clock to start it at.
 #[cfg(test)]
 pub(crate) fn vector_image(
     parsed: &VectorDocument,
@@ -368,8 +303,6 @@ mod tests {
 
     const SVG_OPEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">"#;
 
-    /// A page with an `image` element presenting `svg` under `source`, the
-    /// report applied and the page rendered once.
     fn presented(source: &str, svg: &str) -> (Doc, NodeId) {
         let mut doc = Doc::with_css("image { display: flex; width: 40px; height: 40px; }");
         let node = doc.el(doc.root, "image");
@@ -395,8 +328,6 @@ mod tests {
           rect { animation: paint 1s linear; }
         </style><rect width="20" height="20"/></svg>"#;
 
-    /// A static image, one whose sheet declares `@keyframes` no element
-    /// uses, and SMIL markup keep no document: nothing in them can change.
     #[test]
     fn an_image_that_cannot_change_keeps_no_document() {
         for body in [
@@ -412,9 +343,6 @@ mod tests {
         }
     }
 
-    /// An animated image presented by a box ticks with the host: each tick
-    /// that moves it records it again under a new key and keeps frames
-    /// coming; at its end its document is dropped and the last image stays.
     #[test]
     fn an_animated_image_ticks_with_the_host_and_ends() {
         let source = "app:///fading.svg";
@@ -445,8 +373,6 @@ mod tests {
         assert_eq!(key(&doc, source), ended, "the last image stays");
     }
 
-    /// An image nothing presents or draws is not ticked and asks for no
-    /// frame; presented again, its next tick samples the current clock.
     #[test]
     fn an_animated_image_nothing_uses_is_not_ticked() {
         let source = "app:///fading.svg";
@@ -468,8 +394,6 @@ mod tests {
         assert_ne!(key(&doc, source), unused, "ticked again once used");
     }
 
-    /// A synthetic source leaves the registry with its last presenter, and
-    /// its isolated document with it.
     #[test]
     fn a_synthetic_source_takes_its_document_with_it() {
         let mut doc = Doc::with_css("image { display: flex; width: 40px; height: 40px; }");

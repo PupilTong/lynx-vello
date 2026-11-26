@@ -379,20 +379,9 @@ use super::{
 };
 use crate::clock::ClockInstant;
 
-/// The swiper tag, web-core's only spelling of it.
 pub(super) const SWIPER_TAG: &str = "x-swiper";
-/// The item tag, web-core's only spelling of it.
 pub(super) const SWIPER_ITEM_TAG: &str = "x-swiper-item";
 
-/// The `x-swiper` policy outside the shadow tree — the host's custom
-/// properties and the light-DOM item rules — in `x-swiper.css`'s own order;
-/// see the module documentation for what each rule is for.
-///
-/// `[vertical]:not([vertical="false"])` is the column and
-/// `:is(:not([vertical]), [vertical="false"])` the row. Each important
-/// declaration sits on a line of its own, because [`super::ua_sheet`]'s
-/// pinned test reads the sheet line by line. `@property` rules live here, not
-/// in [`SHADOW_RULES`]: a registration is document-wide.
 pub(super) const UA_RULES: &str = r#"
 @property --swiper-current { syntax: "<integer>"; inherits: true; initial-value: -1; }
 @property --swiper-count { syntax: "<integer>"; inherits: true; initial-value: 0; }
@@ -453,8 +442,6 @@ x-swiper[mode="carry"] > x-swiper-item { animation-name: x-swiper-carry; }
 }
 "#;
 
-/// The swiper's shadow sheet, added to each instance's shadow root: see the
-/// module documentation. `[vertical]:not([vertical="false"])` is the column.
 const SHADOW_RULES: &str = r#"
 :host { timeline-scope: --swiper-scroller; }
 slot { display: contents; }
@@ -513,28 +500,15 @@ slot { display: contents; }
 }
 "#;
 
-/// The scroll container's id in the shadow tree.
 const CONTENT_ID: &str = "content";
-/// The dot strip's id in the shadow tree.
 const INDICATOR_ID: &str = "indicator";
-/// The registered custom property the host carries its item count in.
 const COUNT_PROPERTY: &str = "--swiper-count";
 
-/// The event a swiper fires when its items start moving: the first
-/// `scroll` of `#content` since its last `scrollend`.
 pub(super) const SCROLL_START_EVENT: &str = "scrollstart";
-/// The event a swiper fires when a `scroll` changes the item it shows.
 pub(super) const CHANGE_EVENT: &str = "change";
-/// The event a swiper fires at itself when `#content` comes to rest: the
-/// kernel's own `scrollend` targets `#content` and ends at the shadow root.
 pub(super) const SWIPER_SCROLL_END_EVENT: &str = "scrollend";
-/// The event a swiper fires with `#content`'s offset at each `scroll`.
 pub(super) const TRANSITION_EVENT: &str = "transition";
 
-/// Installs the `x-swiper` component, which keeps its autoplay timers in
-/// `autoplays` and queues its events on `events`. Must run before any
-/// element could carry the tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: ComponentEvents) {
     document.define(
         SWIPER_TAG,
@@ -548,28 +522,12 @@ pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: 
     );
 }
 
-/// The period of an autoplay with no usable `interval`, web-core's
-/// (`XSwiperAutoScroll.ts:65-68`) and Android's (`XSwiperUI.java:90`).
 const DEFAULT_AUTOPLAY_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The least period an autoplay runs at, in milliseconds: the delay HTML
-/// clamps a nested timer to, which is what a browser's `setInterval(…, 0)`
-/// settles at.
 const LEAST_AUTOPLAY_MILLISECONDS: f64 = 4.0;
 
-/// The longest period, in milliseconds: HTML's `long` timeout, about 24
-/// days.
 const LONGEST_AUTOPLAY_MILLISECONDS: f64 = 2_147_483_647.0;
 
-/// The autoplay timers of one document's swipers: for each connected
-/// `x-swiper` that was given `autoplay`, when its next turn is due and how
-/// long after that the following one is.
-///
-/// Shared, as [`super::ComponentEvents`] is, between the component, which
-/// starts and stops the timers from its reactions, and the runtime, which
-/// waits for the earliest ([`Self::next_deadline`]) and runs what came due
-/// ([`Self::run_due`]). Empty on a page with no autoplaying swiper, where
-/// each of the two is one test.
 #[derive(Clone, Default)]
 pub(crate) struct Autoplays(Rc<RefCell<Vec<Autoplay>>>);
 
@@ -580,7 +538,6 @@ struct Autoplay {
 }
 
 impl Autoplays {
-    /// Starts `swiper`'s timer over: its first turn is `period` after `now`.
     fn start(&self, swiper: NodeId, period: Duration, now: ClockInstant) {
         let mut timers = self.0.borrow_mut();
         let timer = Autoplay {
@@ -598,14 +555,10 @@ impl Autoplays {
         self.0.borrow_mut().retain(|armed| armed.swiper != swiper);
     }
 
-    /// When the earliest turn is due, if any swiper autoplays.
     pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
         self.0.borrow().iter().map(|armed| armed.due).min()
     }
 
-    /// Turns every swiper whose timer has come due at `now` ([`turn`]) and
-    /// arms each one's next turn a period after `now`, as `setInterval`
-    /// re-arms from the moment it fires.
     pub(crate) fn run_due(&self, document: &mut LynxDocument, now: ClockInstant) {
         let due: SmallVec<[NodeId; 1]> = self
             .0
@@ -617,19 +570,12 @@ impl Autoplays {
                 armed.swiper
             })
             .collect();
-        // With the list released: a turn mutates the document.
         for swiper in due {
             turn(document, swiper);
         }
     }
 }
 
-/// The period `interval` names: web-core's `parseFloat` of the attribute in
-/// milliseconds, 5000 when it is missing or no number
-/// (`XSwiperAutoScroll.ts:64-68`), within what a timer admits: no shorter
-/// than a nested timer's 4 ms, which is where a browser's `setInterval` of 0
-/// or of a negative delay settles, and no longer than HTML's longest
-/// timeout.
 fn autoplay_period(interval: Option<&str>) -> Duration {
     let Some(milliseconds) = interval.and_then(parse_float) else {
         return DEFAULT_AUTOPLAY_INTERVAL;
@@ -645,9 +591,6 @@ fn autoplay_period(interval: Option<&str>) -> Duration {
     Duration::from_micros(microseconds)
 }
 
-/// JavaScript's `parseFloat` of a decimal literal: the longest prefix of
-/// `text`, past leading white space, that reads as a number. `None` where
-/// `parseFloat` answers `NaN`, and for `Infinity`, which no interval is.
 fn parse_float(text: &str) -> Option<f64> {
     let text = text.trim_start();
     let numeric = text
@@ -659,46 +602,21 @@ fn parse_float(text: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-/// The `x-swiper` component: builds the shadow tree when the element is
-/// constructed, keeps `--swiper-count` equal to the number of its element
-/// children, runs the autoplay timer, answers the `scrollTo` UI method
-/// ([`scroll_to`]) and fires the swiper's events from `#content`'s
-/// `scroll` and `scrollend` (the module documentation's "Events").
-///
-/// The shadow tree is built in `constructed`, not on connection: the element
-/// is new and detached then, and `__CreateElement` mints a swiper before
-/// anything is appended to it, so every child arrives as a `slotchange` at
-/// the slot.
 struct Swiper {
     autoplays: Autoplays,
     events: ComponentEvents,
-    /// The fingers down on each swiper, which `isDragged` reports.
     touch_count: TouchCount,
-    /// What each connected swiper's events remember, dropped when it is
-    /// freed.
     states: RefCell<FxHashMap<NodeId, SwiperState>>,
-    /// [`SHADOW_RULES`], parsed by the first swiper of the document and
-    /// mounted on every swiper's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }
 
-/// What a swiper's events remember between two deliveries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SwiperState {
-    /// The item the swiper last reported, or the `current` attribute it was
-    /// connected with: web-core's `#current`, a number that need not name
-    /// an item until the first `change` replaces it.
     current: f64,
-    /// Whether a `scroll` came since the last `scrollend`, so the next one
-    /// starts nothing.
     scrolling: bool,
 }
 
 impl SwiperState {
-    /// A swiper's state as it connects: web-core's
-    /// `parseFloat(getAttribute('current') ?? '0')` (`XSwiperEvents.ts`,
-    /// `connectedCallback`), with a value that is no finite number read as
-    /// `0`, and nothing moving.
     fn connected(document: &LynxDocument, swiper: NodeId) -> Self {
         Self {
             current: document
@@ -712,10 +630,6 @@ impl SwiperState {
 }
 
 impl Swiper {
-    /// web-core's `_handleAutoplay` (`XSwiperAutoScroll.ts:62-70`) for a
-    /// connected swiper: with `autoplay`, its timer starts over at the
-    /// period `interval` names; without, nothing changes, a running timer
-    /// included.
     fn handle_autoplay(&self, document: &LynxDocument, swiper: NodeId) {
         let Some(element) = document.get(swiper) else {
             return;
@@ -729,12 +643,6 @@ impl Swiper {
         }
     }
 
-    /// `#content`'s `scroll`: `scrollstart` on the first since the last
-    /// `scrollend`, `change` when the item shown is another than the one
-    /// last reported, and `transition` with `#content`'s offset, in that
-    /// order. The item is tracked whether or not anything listens; each
-    /// event is queued only for a listener on the swiper. A swiper with no
-    /// box decides nothing.
     fn scrolled(&self, document: &LynxDocument, swiper: NodeId, content: NodeId) {
         let Some(scroll_box) = rendered_scroll_box(document, content) else {
             return;
@@ -797,8 +705,6 @@ impl Swiper {
         }
     }
 
-    /// `#content`'s `scrollend`: the swiper's own `scrollend` with the item
-    /// last reported, and the next `scroll` starts again.
     fn scroll_ended(&self, document: &LynxDocument, swiper: NodeId) {
         let current = {
             let mut states = self.states.borrow_mut();
@@ -818,10 +724,6 @@ impl Swiper {
     }
 }
 
-/// The element child of `swiper` whose snap position on its main axis
-/// `#content`, standing at `offset`, is nearest ([`nearest_snap_position`]),
-/// as its index among the swiper's element children; `None` when `#content`
-/// has no snap position.
 fn shown_item(
     document: &LynxDocument,
     swiper: NodeId,
@@ -843,10 +745,6 @@ impl CustomElement<()> for Swiper {
         vec!["autoplay".to_owned(), "interval".to_owned()]
     }
 
-    /// Its own shadow tree's `slotchange`, which is how it learns that its
-    /// assigned children changed; `#content`'s `scroll` and `scrollend`,
-    /// which its events are decided on; and the touches on it, which
-    /// `isDragged` counts.
     fn observed_events(&self) -> &'static [&'static str] {
         &[
             SLOT_CHANGE,
@@ -874,8 +772,6 @@ impl CustomElement<()> for Swiper {
         self.touch_count.forget(element);
     }
 
-    /// `autoplay` or `interval` changed. A swiper that is not connected
-    /// reads both when it connects, as web-core's handlers run only then.
     fn attribute_changed_callback(
         &self,
         document: &mut LynxDocument,
@@ -906,15 +802,6 @@ impl CustomElement<()> for Swiper {
         count_items(document, element);
     }
 
-    /// `slotchange` at the swiper's own slot, delivered at its shadow root,
-    /// once per pass: the capture delivery is skipped, the bubble one counts.
-    ///
-    /// `scroll` and `scrollend` whose target is `#content`, delivered at the
-    /// shadow root too, but in the capture pass alone, since neither
-    /// bubbles; the same names aimed anywhere else — a scroller inside an
-    /// item, whose capture pass crosses the swiper, or the swiper's own
-    /// `scrollend`, which it fires at itself — are not its own. Every touch
-    /// event goes to its count.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
@@ -964,65 +851,6 @@ impl CustomElement<()> for Swiper {
     }
 }
 
-/// `scrollTo({index, smooth = true})` on `swiper`, with `params` as the JSON
-/// text the realm serialized: CSSOM-View's "scroll an element into view"
-/// ([`terminus::link::Document::scroll_into_view`]) on the swiper's element child number
-/// `index`, at the item's own snap alignment on the swiper's main axis.
-///
-/// web-core overrides `HTMLElement.scrollTo` on the swiper
-/// (`XSwiper.ts:142-170`, documented at `index.ts:31-33`; lynx-stack#1197
-/// replaced `scrollToNext` and `scrollToPrevious` with it): a first argument
-/// with a numeric `index` turns to that item, and anything else falls through
-/// to the standard method. `scrollTo` is also a name in the base set every
-/// element has ([`super::base_methods`]); a kind's
-/// [`CustomElement::invoke`] runs first, so this overload wins on a swiper
-/// the same way. Android's `scrollTo({index, smooth, direction})` is
-/// `XSwiperUI.java:651-680`; iOS and Harmony have no swiper.
-///
-/// - `index` must be a JSON number; a missing one, or one that is not a number — `NaN` and the
-///   infinities serialize as `null` — is code 4 with nothing moved. Android reads a missing one as
-///   -1 and answers code 4; web-core falls through to the standard `scrollTo` and answers 0.
-/// - A fraction is truncated toward zero, as `children.item(index)`'s `unsigned long` conversion
-///   truncates it in web-core.
-/// - The item is the swiper's element child number `index`, text nodes skipped ([`element_child`]),
-///   web-core's `children.item(index)`. A negative index, or one past the last child, names no item
-///   and is code 4 with nothing moved, which is Android's answer and the rule `selectTab` follows;
-///   web-core does nothing and answers 0.
-/// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'instant'`
-///   reads it, and a missing one is `true`, web-core's default. Android's default is the
-///   `smooth-scroll` attribute (`mSmoothScroll`, `XSwiperUI.java:89`, itself `true` by default),
-///   which only an autoplay turn reads here ([`turn`]).
-/// - Android's `direction` (`"begin"` or `"end"`: which way a circular swiper turns,
-///   `XSwiperUI.java:767-772`) is not read: web-core has no such param.
-///
-/// Where the item lands: on the main axis, the [`ScrollLogicalPosition`] of
-/// the item's computed `scroll-snap-align` — `start` at the start, `center` at
-/// the center, `end` at the end, and `none` at the start; on the cross axis,
-/// `nearest`. css-scroll-snap-1 places a snap position with the same snapport
-/// (`scroll-padding`) and `scroll-margin` terms the scroll-into-view position
-/// uses (`crates/terminus/src/scroll/snap.rs`, `crates/terminus/src/scroll/into_view.rs`),
-/// so the item comes to rest exactly on its snap position. web-core computes
-/// an offset per mode instead (`XSwiper.ts:104-129`): the item's
-/// `offsetLeft`/`offsetTop`, less a third of the item's size in
-/// `flat-coverflow`, which centres that mode's 60% items; in `coverflow` and
-/// `carry` it aims at the start and the items' mandatory
-/// `scroll-snap-align: center` moves the swiper on to the centre. Both end on
-/// the same position in every mode. The snap alignment avoids web-core's
-/// second movement in `coverflow` and `carry`, and follows an author's own
-/// `scroll-snap-align` on an item.
-///
-/// `container: nearest` is the item's nearest scroll container over the flat
-/// tree, the shadow `#content` ([`content`]), the same box an item's
-/// `scroll-initial-target` finds. Its `overflow` is a shadow-sheet declaration
-/// no author rule reaches, so it is always a scroll container and, unlike
-/// `selectTab`, the method needs no guard against scrolling an ancestor.
-///
-/// A smooth turn is animated by the painter and leaves the document's offset
-/// where it was until the painter posts it back; an instant one moves the
-/// document at once. A swiper or item with no box (`display: none`, or a
-/// `wrapper` child, which is `display: contents`) has nothing to scroll, and
-/// the call succeeds with nothing moved, as `selectTab` does. Positions are
-/// the last completed layout's: a UI method never flushes.
 pub(super) fn scroll_to(
     document: &mut LynxDocument,
     swiper: NodeId,
@@ -1076,67 +904,18 @@ pub(super) fn scroll_to(
     Ok(())
 }
 
-/// Whether `swiper` is a column: `vertical` present and not `"false"`, the
-/// UA rules' `[vertical]:not([vertical="false"])`.
 fn is_vertical(document: &LynxDocument, swiper: NodeId) -> bool {
     document
         .get(swiper)
         .is_some_and(|node| flag(node, "vertical"))
 }
 
-/// Whether `element` carries the boolean attribute `name`: present and not
-/// `"false"`, the attribute web-core's false-filtering leaves.
 fn flag(element: &Node<()>, name: &str) -> bool {
     element
         .attribute(name)
         .is_some_and(|value| value != "false")
 }
 
-/// One autoplay turn of `swiper`: to the item after the current one, or
-/// from the last item to the first when it is `circular`
-/// (`XSwiperAutoScroll.ts:22-33`).
-///
-/// The positions are the swiper's snap positions on its main axis
-/// ([`terminus::link::Document::snap_positions`]), one per item, in order. The current
-/// item is the one whose position is nearest the offset, the first on a tie
-/// ([`nearest_snap_position`], which the swiper's events share): under
-/// `circular` an offset across the seam counts from the item whose copy
-/// beyond it is nearer, and the positions, all inside one period, are the
-/// items' in tree order turned about the seam, so the next one is still the
-/// next item.
-/// That is web-core's "item whose centre is nearest the scrollport's mid"
-/// (`XSwiper.ts:37-91`, the mid at 40% of the scrollport in `carousel`)
-/// restated: items are equal on the main axis, and each one's position is
-/// its centre less the same distance — half the scrollport for a centred
-/// item, half the item for a start-aligned one, which in `carousel` is the
-/// 40% web-core uses. The target is the next item's snap position, which is
-/// where web-core's `#scrollToIndex` ends after its mandatory snap
-/// (`:104-129`); on the last item without `circular` nothing moves, and the
-/// timer goes on.
-///
-/// The turn is smooth unless `smooth-scroll` is present with any value,
-/// `"false"` included, which is web-core's reading
-/// (`getAttribute('smooth-scroll') === null`, `XSwiper.ts:101`, with
-/// `smooth-scroll` exempt from its false-filtering, `:28-31`). Android reads
-/// the attribute as a boolean that defaults to `true`
-/// (`XSwiperUI.java:877-885`), and turns over `duration` milliseconds, which
-/// web-core never reads. A `circular` swiper's turn from the last item runs
-/// along the shorter arc of its circle, the painter's rule for a smooth
-/// request, where web-core re-slots its first item to travel forward and
-/// travels backward with two items (`XSwiperCircular.ts:44-118`).
-///
-/// It is a request the painter declines while a pointer holds the swiper
-/// ([`terminus::link::Document::scroll_to_yielding`]), so the document's offset stays
-/// where it is until the painter posts it back, for a `smooth-scroll` turn
-/// too. A turn that comes before then counts from the old item and asks for
-/// the same one again, which the painter leaves to the glide already
-/// running toward it: so an `interval` shorter than a turn, 0 included,
-/// keeps turning rather than starting the glide over at every frame. A
-/// pending `scrollTo` a script made is not replaced.
-///
-/// The offset, the positions and the turn are `#content`'s ([`content`]),
-/// the scroll container. Reads the last completed layout and never flushes.
-/// A swiper with no box, no snap positions or no items moves nothing.
 fn turn(document: &mut LynxDocument, swiper: NodeId) {
     let Some(element) = document.get(swiper) else {
         return;
@@ -1186,9 +965,6 @@ fn turn(document: &mut LynxDocument, swiper: NodeId) {
     document.scroll_to_yielding(content, to, behavior);
 }
 
-/// Writes the number of elements assigned to `swiper`'s slot into its
-/// `--swiper-count` hint: web-core's `childElementCount`, which counts
-/// elements alone, so a text child — a slottable too — is not an item.
 fn count_items(document: &mut LynxDocument, swiper: NodeId) {
     let count = slot(document, swiper).map_or(0, |slot| {
         document
@@ -1200,7 +976,6 @@ fn count_items(document: &mut LynxDocument, swiper: NodeId) {
     document.set_presentational_hint(swiper, COUNT_PROPERTY, &count.to_string());
 }
 
-/// The `<slot>` in the swiper's `#content`, its only child.
 fn slot(document: &LynxDocument, swiper: NodeId) -> Option<NodeId> {
     let content = content(document, swiper)?;
     document
@@ -1210,8 +985,6 @@ fn slot(document: &LynxDocument, swiper: NodeId) -> Option<NodeId> {
         .map(Node::id)
 }
 
-/// The swiper's scroll container, `#content`, the first element of its
-/// shadow tree.
 pub(crate) fn content(document: &LynxDocument, swiper: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(swiper)?;
     document
@@ -1223,7 +996,7 @@ pub(crate) fn content(document: &LynxDocument, swiper: NodeId) -> Option<NodeId>
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use std::time::Duration;
 
@@ -1242,7 +1015,6 @@ mod tests {
     use super::{Autoplays, SWIPER_ITEM_TAG, SWIPER_TAG, autoplay_period, scroll_to};
     use crate::clock::ClockInstant;
 
-    /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -1263,8 +1035,6 @@ mod tests {
         )
     }
 
-    /// A swiper with `count` items under the page, `style` inline on it and
-    /// `attributes` set before anything is laid out.
     fn build(
         document: &mut LynxDocument,
         style: &str,
@@ -1281,12 +1051,10 @@ mod tests {
         (swiper, items)
     }
 
-    /// The swiper's scroll container, `#content` in its shadow tree.
     fn scroller(document: &LynxDocument, swiper: NodeId) -> NodeId {
         super::content(document, swiper).expect("every swiper has a shadow `#content`")
     }
 
-    /// The swiper's dot strip, `#indicator` in its shadow tree.
     fn indicator(document: &LynxDocument, swiper: NodeId) -> NodeId {
         let shadow = document
             .shadow_root(swiper)
@@ -1297,7 +1065,6 @@ mod tests {
             .child_ids()[1]
     }
 
-    /// The swiper's snap positions on its main axis, as single offsets.
     fn snap_points(document: &LynxDocument, swiper: NodeId, vertical: bool) -> Vec<f32> {
         let positions = document
             .snap_positions(scroller(document, swiper))
@@ -1316,10 +1083,6 @@ mod tests {
             .collect()
     }
 
-    // --- the UA rules -------------------------------------------------------
-
-    /// The host keeps the container defaults; its shadow `#content` is the
-    /// scroll container, a row flex box that fills it.
     #[test]
     fn a_swiper_scrolls_x_snapping_mandatory_in_a_row() {
         let mut document = document();
@@ -1402,8 +1165,6 @@ mod tests {
         }
     }
 
-    /// `vertical` set after the first layout turns `#content` too: a `:host()`
-    /// rule in the shadow sheet follows the host's attribute.
     #[test]
     fn a_later_vertical_turns_the_shadow_scroller() {
         let (mut document, swiper, items) = mode_swiper("normal", false, 2);
@@ -1437,8 +1198,6 @@ mod tests {
         }
     }
 
-    /// An author main axis on the swiper, and an author size on an item,
-    /// `!important` or not, still give a row of full-width items.
     #[test]
     fn author_styles_cannot_move_the_main_axis_or_resize_an_item() {
         let mut document = document();
@@ -1464,8 +1223,6 @@ mod tests {
         );
     }
 
-    /// A child that is no item generates no box, except a `wrapper`, which
-    /// keeps generating none of its own.
     #[test]
     fn a_child_that_is_no_item_generates_no_box() {
         let mut document = document();
@@ -1485,7 +1242,6 @@ mod tests {
         assert_eq!(snap_points(&document, swiper, false), [0.0]);
     }
 
-    /// An `x-swiper-item` outside a swiper is an ordinary container.
     #[test]
     fn an_item_outside_a_swiper_is_an_ordinary_container() {
         let mut document = document();
@@ -1545,9 +1301,6 @@ mod tests {
         }
     }
 
-    /// `circular` wraps `#content`'s main axis, present and not `"false"`,
-    /// and wins over `bounces` on that axis when both are set: a circular
-    /// axis has no edge to bounce. The cross axis stays `auto`.
     #[test]
     fn circular_wraps_the_main_axis_unless_it_says_false() {
         for (circular, bounces, main) in [
@@ -1592,10 +1345,6 @@ mod tests {
         }
     }
 
-    // --- the modes ----------------------------------------------------------
-
-    /// One mode in one orientation: each item's rect, and the swiper's snap
-    /// positions on its main axis.
     struct Geometry {
         mode: &'static str,
         vertical: bool,
@@ -1603,18 +1352,6 @@ mod tests {
         snaps: [f32; 3],
     }
 
-    /// A 200px x 100px swiper horizontally, 100px x 200px vertically, of
-    /// three items. Two things the numbers show:
-    ///
-    /// - The last item's end margin extends the scroll range, as a flex item's margin area does in
-    ///   a scroll container's scrollable overflow (css-overflow-3 §3.3): horizontally the last
-    ///   `carousel` item reaches its start (320) and the last `flat-coverflow` or `coverflow` item
-    ///   its centre (240).
-    /// - Every percentage margin resolves against the swiper's width, as CSS resolves a vertical
-    ///   margin too, so under `vertical` the 20% is 20px, not 40px (web-core alike): the first
-    ///   `flat-coverflow` item cannot centre (0, not -20), and the last item of every mode with a
-    ///   trailing margin stops 20px short — `carousel` at 300, not 320, `flat-coverflow` and
-    ///   `coverflow` at 200, not 220.
     const GEOMETRY: [Geometry; 10] = [
         Geometry {
             mode: "normal",
@@ -1765,7 +1502,6 @@ mod tests {
         }
     }
 
-    /// An unknown mode is `normal`.
     #[test]
     fn an_unknown_mode_is_normal() {
         let (mut document, swiper, items) = mode_swiper("cube", false, 2);
@@ -1774,16 +1510,8 @@ mod tests {
         assert_eq!(snap_points(&document, swiper, false), [0.0, 200.0]);
     }
 
-    /// Under `circular` the mode margins are off, as in web-core, whose
-    /// margin rules all carry `:not([circular])`: the items pack edge to
-    /// edge and the scroll range — the period the painter wraps on — is
-    /// their extent alone, so the seam joins the last item to the first
-    /// instead of showing the swiper's own background. `circular="false"`
-    /// keeps the margins.
     #[test]
     fn circular_packs_the_items_without_the_mode_margins() {
-        // The main-axis item size, and the maximum offset packed and with
-        // the margins, of a 200px x 100px (100px x 200px) swiper of three.
         for (mode, vertical, item, packed_max, margined_max) in [
             ("carousel", false, 160.0, 280.0, 320.0),
             ("carousel", true, 160.0, 280.0, 300.0),
@@ -1833,11 +1561,6 @@ mod tests {
         }
     }
 
-    /// `coverflow` and `carry` export their transform to the painter as a
-    /// curve that reads the swiper's scroll slot: nothing ticks on the main
-    /// thread and no curve reads the clock. `coverflow`'s turn is a
-    /// translation, a skew and a scale, which a 2D affine follows. `normal`,
-    /// `carousel` and `flat-coverflow` animate nothing.
     #[test]
     fn the_animated_modes_export_a_scroll_driven_transform() {
         for vertical in [false, true] {
@@ -1867,9 +1590,6 @@ mod tests {
         }
     }
 
-    /// `carry` at rest on the first item: the item in the scrollport is at
-    /// the middle of its view timeline, unscaled, and the next one is at its
-    /// start, at `0%`'s `scale(0.6)`. Scrolling one item on swaps them.
     #[test]
     fn carry_scales_the_items_beside_the_current_one() {
         for vertical in [false, true] {
@@ -1882,9 +1602,6 @@ mod tests {
             } else {
                 Vector2D::new(200.0, 0.0)
             };
-            // An exported curve's cascade value is the commit's: a commit
-            // that repaints — here because the scroll moved far through its
-            // encode window, as the runtime notes it — re-samples it.
             document.scroll_to(scroller(&document, swiper), offset);
             document.note_scroll_windows_stale();
             document.commit();
@@ -1893,17 +1610,10 @@ mod tests {
         }
     }
 
-    /// What `item`'s computed transform does to its border box, read along
-    /// the swiper's main axis.
     struct Turn {
-        /// The scale along the main axis.
         along: f32,
-        /// The scale along the cross axis.
         across: f32,
-        /// The cross-axis movement per unit along the main axis.
         skew: f32,
-        /// Where the transform puts the item's two main-axis edges, as
-        /// offsets from its centre: the start one, then the end one.
         edges: [f32; 2],
     }
 
@@ -1931,14 +1641,6 @@ mod tests {
         }
     }
 
-    /// `coverflow` at rest on the middle one of three 120px items, a row and
-    /// a column: the current item is untransformed, and the items beside it,
-    /// at 87.5% and 12.5% of their view timelines, stand 72% of the way to
-    /// the full pose. Each shows `0.649` of its main-axis size and `0.856` of
-    /// its cross-axis one, skewed by `0.649 × tan 10.1°` with the sign of its
-    /// side, and the edge it turns to the current item — its end edge before
-    /// the current item, its start edge after — is where layout put it, 60px
-    /// from its centre, so it takes nothing from its neighbour.
     #[test]
     fn coverflow_turns_the_items_beside_the_current_one() {
         let close = |actual: f32, expected: f32| (actual - expected).abs() < 1e-3;
@@ -1986,14 +1688,6 @@ mod tests {
         }
     }
 
-    // --- current ------------------------------------------------------------
-
-    /// `current` names the item the first commit shows, and the position
-    /// the painter's at-rest snap rule settles that scroll on is the item's
-    /// snap position: its start in `normal` and `carousel`, its centre in
-    /// the other three. The scroll container an item's
-    /// `scroll-initial-target: nearest` finds over the flat tree is the
-    /// shadow `#content`, and once settled the active dot is that item's.
     #[test]
     fn current_starts_on_the_items_snap_position_in_every_mode() {
         for case in &GEOMETRY {
@@ -2020,8 +1714,6 @@ mod tests {
                     "{} vertical={} current={current}",
                     case.mode, case.vertical
                 );
-                // The settled offset reaches the main thread as an adopted
-                // scroll post does, and the strip re-samples.
                 let content = scroller(&document, swiper);
                 document.advance_scroll_timelines(&[content]);
                 document.commit();
@@ -2037,16 +1729,6 @@ mod tests {
         }
     }
 
-    /// Under `circular` the items pack without the mode margins, so an end
-    /// item's snap position lies past `max_offset` or before `0`, and the
-    /// document admits it on the circle — a period of `max_offset` plus the
-    /// scrollport — instead of clamping it. `carousel` (items 160, `max`
-    /// 280, period 480): the last item's start is 320. `flat-coverflow`
-    /// (items 120, `max` 160, period 360): the first item's centre is −40,
-    /// so 320 on the circle, and the last item's is 200. `current` settles
-    /// there and `scrollTo` lands there, in both orientations, and the
-    /// active dot is the item's: the scroll timeline reads 320 in
-    /// `flat-coverflow` at its representative −40, the first dot.
     #[test]
     fn current_and_scroll_to_land_across_the_seam_under_circular() {
         for (mode, snaps, cases) in [
@@ -2117,7 +1799,6 @@ mod tests {
         }
     }
 
-    /// A later `current` turns the swiper, instantly.
     #[test]
     fn changing_current_turns_the_swiper_instantly() {
         let (mut document, swiper, _) = mode_swiper("normal", false, 3);
@@ -2134,7 +1815,6 @@ mod tests {
         );
     }
 
-    /// The scroll request the next commit carries for `swiper`.
     fn pending(
         document: &mut LynxDocument,
         swiper: NodeId,
@@ -2149,12 +1829,6 @@ mod tests {
             .map(|request| (request.target, request.behavior))
     }
 
-    // --- the shadow tree ----------------------------------------------------
-
-    /// `#content` holding a default slot, then `#indicator`; the items are
-    /// the host's children, assigned to the slot, and the shadow tree is out
-    /// of every node-tree path the realm reads: `childElementIds` (a node's
-    /// children), `parentNode`, and the selector queries.
     #[test]
     fn the_shadow_tree_is_content_with_a_slot_then_the_indicator() {
         let mut document = document();
@@ -2203,9 +1877,6 @@ mod tests {
         assert!(document.scroll_box(content).is_some());
     }
 
-    /// `--swiper-count` is the elements assigned to the slot — every element
-    /// child: a child that is no item counts, a text node, assigned too, does
-    /// not. Kept on `slotchange`: appends, a removal, a freeing removal.
     #[test]
     fn the_count_follows_the_element_children() {
         let mut document = document();
@@ -2233,12 +1904,6 @@ mod tests {
         assert_eq!(value(&document, swiper, "--swiper-count"), "3");
     }
 
-    // --- the indicator ------------------------------------------------------
-
-    /// The strip is `count` dot pitches long, 0.6rem across, centred on the
-    /// main axis 0.5rem in from the host's bottom (horizontal) or right
-    /// (vertical) edge. `1rem` is 16px here, so a dot is 9.6px and a pitch
-    /// 13.44px. Its layout box is before the centring transform.
     #[test]
     fn the_strip_is_one_pitch_per_item_centred_on_the_main_axis() {
         for (vertical, count, length, rect_expected) in [
@@ -2285,8 +1950,6 @@ mod tests {
         }
     }
 
-    /// web-core's colours by default — inactive `#ffffff4d`, active `white`
-    /// — and the attributes' when they are colours.
     #[test]
     fn the_dot_colours_come_from_the_attributes() {
         for (attributes, active, inactive) in [
@@ -2324,8 +1987,6 @@ mod tests {
         }
     }
 
-    /// Shown by default and by `"true"`; hidden by any other present value,
-    /// web-core's literal `"{{false}}"` included.
     #[test]
     fn indicator_dots_hides_the_strip_unless_absent_or_true() {
         for (attribute, shown) in [
@@ -2350,8 +2011,6 @@ mod tests {
         }
     }
 
-    /// The active dot's offset along the strip, from the first of
-    /// `background-position-x` (`-y` when vertical).
     fn active_offset(document: &LynxDocument, swiper: NodeId, vertical: bool) -> f32 {
         let property = if vertical {
             "background-position-y"
@@ -2367,9 +2026,6 @@ mod tests {
             .unwrap_or_else(|| panic!("a px offset: {positions}"))
     }
 
-    /// At rest on each page of five, the active layer sits on that page's
-    /// dot, `k` pitches along, in every mode whose scroll range ends on the
-    /// last item's snap position, both ways.
     #[test]
     fn the_active_dot_sits_on_the_current_pages_dot() {
         const PITCH: f32 = 13.44;
@@ -2401,8 +2057,6 @@ mod tests {
         }
     }
 
-    /// `item`'s own snap position on the swiper's main axis. Under
-    /// `circular` it may lie across the seam, past `max_offset`.
     fn snap_position(document: &LynxDocument, swiper: NodeId, item: NodeId, vertical: bool) -> f32 {
         let positions = document
             .snap_positions(scroller(document, swiper))
@@ -2419,14 +2073,6 @@ mod tests {
             .min
     }
 
-    /// A swiper whose main-axis size changes stays on the item it showed
-    /// (css-scroll-snap-1 §4.1.3): every item's snap position moves with
-    /// the size, and the commit that lays the new size out puts `#content`
-    /// on the same item's new position, in every mode, both ways, bounded
-    /// and `circular` — where the period changes with the size too, and an
-    /// end item's position lies across the seam. The active dot stays on
-    /// that item's dot: the strip's timeline is sampled again from the
-    /// offset the commit settled on.
     #[test]
     fn a_resized_swiper_stays_on_the_item_it_showed() {
         const PITCH: f32 = 13.44;
@@ -2443,8 +2089,6 @@ mod tests {
                         "{} vertical={} circular={circular} item {index}",
                         case.mode, case.vertical
                     );
-                    // As main adopts the painter's post once the swiper has
-                    // come to rest on the item: no request.
                     let before = snap_position(&document, swiper, items[index], case.vertical);
                     document.scroll_to(content, main_axis(case.vertical, before));
                     document.advance_scroll_timelines(&[content]);
@@ -2478,11 +2122,6 @@ mod tests {
         }
     }
 
-    /// The strip's animation is sampled on the main thread — it animates a
-    /// background, which no curve exports — and nothing ticks a clock. A
-    /// hidden strip runs no animation at all: `display: none` alone would not
-    /// stop one here (Stylo's Servo half starts animations on a `display:
-    /// none` element), so the hiding rule also drops `animation-name`.
     #[test]
     fn a_hidden_strip_samples_nothing() {
         for hidden in [false, true] {
@@ -2505,9 +2144,6 @@ mod tests {
         }
     }
 
-    // --- `scrollTo` ---------------------------------------------------------
-
-    /// `offset` on the swiper's main axis, the cross axis 0.
     fn main_axis(vertical: bool, offset: f32) -> Vector2D<f32> {
         if vertical {
             Vector2D::new(0.0, offset)
@@ -2516,16 +2152,12 @@ mod tests {
         }
     }
 
-    /// A laid-out `normal` row of `count` 200px items in a 200px swiper.
     fn row(count: usize) -> (LynxDocument, NodeId, Vec<NodeId>) {
         let (mut document, swiper, items) = mode_swiper("normal", false, count);
         document.layout();
         (document, swiper, items)
     }
 
-    /// An instant `scrollTo` puts the item on its snap position — its start,
-    /// or its centre in the three centred modes — in every mode and
-    /// orientation, and the painter's at-rest snap rule leaves it there.
     #[test]
     fn scroll_to_lands_on_the_items_snap_position_in_every_mode() {
         for case in &GEOMETRY {
@@ -2547,8 +2179,6 @@ mod tests {
         }
     }
 
-    /// Smooth by default: a request the painter carries out, with the
-    /// document's offset where it was.
     #[test]
     fn scroll_to_is_smooth_by_default() {
         let (mut document, swiper, _) = row(3);
@@ -2601,9 +2231,6 @@ mod tests {
         }
     }
 
-    /// A fraction is truncated toward zero; an index naming no item, past
-    /// the end or below zero, is code 4 with nothing moved and nothing
-    /// recorded.
     #[test]
     fn scroll_to_truncates_a_fraction_and_refuses_an_index_naming_no_item() {
         for (index, expected) in [("1.9", 200.0), ("-0.5", 0.0)] {
@@ -2661,9 +2288,6 @@ mod tests {
         }
     }
 
-    /// Only element children are items: a text node between two items does
-    /// not shift the index. White space, so it generates no box of its own
-    /// either (css-flexbox-1 §4) and the offsets stay the pages' alone.
     #[test]
     fn scroll_to_counts_element_children_only() {
         let mut document = document();
@@ -2689,10 +2313,6 @@ mod tests {
         );
     }
 
-    /// An item's `scroll-margin` moves its snap position, and `scrollTo`
-    /// moves with it, at the start and at the centre alike. The modes are the
-    /// two whose items stay narrower than the port with the margin added, so
-    /// each snap position is a single offset.
     #[test]
     fn scroll_to_follows_the_items_scroll_margin() {
         for (mode, unmargined) in [("carousel", 160.0), ("flat-coverflow", 120.0)] {
@@ -2717,10 +2337,6 @@ mod tests {
         }
     }
 
-    /// The item's own `scroll-snap-align` decides, an author's included:
-    /// `end` puts its end edge at the scrollport's end, and `none` (no snap
-    /// area) its start at the start. In `flat-coverflow` item 1 is laid out
-    /// at 160 to 280 in a 200px port.
     #[test]
     fn scroll_to_aligns_as_the_items_own_scroll_snap_align() {
         for (align, expected) in [("none", 160.0), ("end", 80.0), ("center", 120.0)] {
@@ -2741,8 +2357,6 @@ mod tests {
         }
     }
 
-    /// A `display: none` swiper gives its items no box, so there is nothing
-    /// to scroll: the call succeeds and nothing moves or is recorded.
     #[test]
     fn scroll_to_on_a_swiper_with_no_box_moves_nothing() {
         let mut document = document();
@@ -2757,9 +2371,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(content), None);
     }
 
-    /// A `wrapper` child is an element child, so `index` counts it, but it is
-    /// `display: contents` and has no box of its own: naming it succeeds with
-    /// nothing moved. The item after it is the next index.
     #[test]
     fn scroll_to_counts_a_wrapper_which_has_no_box_to_scroll_to() {
         let mut document = document();
@@ -2785,8 +2396,6 @@ mod tests {
         assert_eq!(document.scroll_offset(content), Vector2D::new(start, 0.0));
     }
 
-    /// `invoke` answers `scrollTo` alone; bad params are code 4, and any
-    /// other name is the kind's `NotFound`, which leaves it to the base set.
     #[test]
     fn invoke_answers_scroll_to_and_nothing_else() {
         let (mut document, swiper, _) = row(3);
@@ -2818,21 +2427,12 @@ mod tests {
         );
     }
 
-    // --- autoplay -----------------------------------------------------------
-
-    /// One autoplay turn of `swiper`, as far as the painter: the request the
-    /// next commit carries for it — target, behavior, and whether it yields
-    /// to a pointer — then carried out and acknowledged as the painter's
-    /// post would, so the next turn counts from the new item. `None` when
-    /// the turn asked for nothing.
     fn turned(
         document: &mut LynxDocument,
         swiper: NodeId,
     ) -> Option<(Vector2D<f32>, ScrollBehavior, bool)> {
         super::turn(document, swiper);
         let content = scroller(document, swiper);
-        // Asked first: a frame goes on carrying an acknowledged request
-        // until something else commits.
         document.pending_scroll_request(content)?;
         let frame = document.commit();
         let index = frame
@@ -2844,9 +2444,6 @@ mod tests {
         Some((request.target, request.behavior, request.yields_to_pointer))
     }
 
-    /// Each turn asks for the next item's snap position, smoothly and as a
-    /// request that yields to a pointer, in every mode and both
-    /// orientations; on the last item it asks for nothing.
     #[test]
     fn a_turn_goes_to_the_next_items_snap_position_and_stays_on_the_last() {
         for case in &GEOMETRY {
@@ -2896,9 +2493,6 @@ mod tests {
         }
     }
 
-    /// The current item is the one whose snap position is nearest the
-    /// offset, the first on a tie: a swiper left between two items counts
-    /// from the nearer.
     #[test]
     fn a_turn_counts_from_the_nearest_item() {
         for (from, to) in [(90.0, 200.0), (110.0, 400.0), (100.0, 200.0)] {
@@ -2912,9 +2506,6 @@ mod tests {
         }
     }
 
-    /// `smooth-scroll` present with any value makes the turn instant,
-    /// web-core's reading. The document's own offset waits for the painter
-    /// either way: only the painter knows whether a finger had the swiper.
     #[test]
     fn smooth_scroll_makes_the_turn_instant_and_the_document_still_waits() {
         for value in ["", "true", "false"] {
@@ -2935,8 +2526,6 @@ mod tests {
         }
     }
 
-    /// A `scrollTo` a script made and the painter has not handled yet is not
-    /// replaced by a turn.
     #[test]
     fn a_turn_does_not_replace_a_scroll_a_script_asked_for() {
         let (mut document, swiper, _) = row(3);
@@ -2964,8 +2553,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(content), None);
     }
 
-    /// `interval` is `parseFloat`'s reading in milliseconds, 5000 when it is
-    /// missing or no number, and no shorter than a nested timer's 4 ms.
     #[test]
     fn the_period_is_the_interval_in_milliseconds() {
         for (interval, milliseconds) in [
@@ -2990,15 +2577,12 @@ mod tests {
         }
     }
 
-    /// How long from now `autoplays`' earliest turn is due, in milliseconds.
     fn due_in(autoplays: &Autoplays) -> Option<u128> {
         autoplays
             .next_deadline()
             .map(|deadline| deadline.duration_since(ClockInstant::now()).as_millis())
     }
 
-    /// A detached `x-swiper` with `attributes`, in a document whose autoplay
-    /// timers the test holds.
     fn detached_swiper(attributes: &[(&str, &str)]) -> (LynxDocument, Autoplays, NodeId) {
         let (mut document, autoplays) = with_autoplays();
         let swiper = document.create_element(SWIPER_TAG, ());
@@ -3008,8 +2592,6 @@ mod tests {
         (document, autoplays, swiper)
     }
 
-    /// The timer is a connected swiper's: it starts on connection, ends on
-    /// disconnection, and a new one starts on the next connection.
     #[test]
     fn autoplay_runs_from_connection_to_disconnection() {
         let (mut document, autoplays, swiper) = detached_swiper(&[("autoplay", "")]);
@@ -3038,8 +2620,6 @@ mod tests {
         }
     }
 
-    /// `autoplay` or `interval` written on a connected swiper that has
-    /// `autoplay` starts the timer over at the period `interval` names.
     #[test]
     fn a_change_of_autoplay_or_interval_starts_the_timer_over() {
         let (mut document, autoplays, swiper) = detached_swiper(&[]);
@@ -3061,9 +2641,6 @@ mod tests {
         assert!((4900..=5000).contains(&due), "the default, got {due}");
     }
 
-    /// web-core's handler has no branch for `autoplay` going away, so the
-    /// timer it started keeps running at the period it has, whatever
-    /// `interval` is written afterwards.
     #[test]
     fn removing_autoplay_leaves_the_timer_running() {
         for stop in [None, Some("false")] {
@@ -3087,8 +2664,6 @@ mod tests {
         }
     }
 
-    /// What came due is turned and armed again one period after the run;
-    /// what has not is left alone.
     #[test]
     fn a_run_turns_what_is_due_and_arms_the_next_turn() {
         let (mut document, autoplays) = with_autoplays();
@@ -3123,8 +2698,6 @@ mod tests {
         );
     }
 
-    // --- the events ---------------------------------------------------------
-
     use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
@@ -3133,10 +2706,6 @@ mod tests {
     use super::super::{ComponentEvents, Field, PageConfig};
     use super::{CHANGE_EVENT, SCROLL_START_EVENT, SWIPER_SCROLL_END_EVENT, TRANSITION_EVENT};
 
-    /// A laid-out swiper of three items, with the document's component
-    /// events: a 200 x 100 row of 200px items (snap positions 0, 200, 400),
-    /// or under `vertical` a 100 x 200 column of 200px items, and
-    /// `attributes` set before the items arrive.
     fn evented(
         attributes: &[(&str, &str)],
     ) -> (LynxDocument, ComponentEvents, NodeId, Vec<NodeId>) {
@@ -3152,8 +2721,6 @@ mod tests {
         (document, events, swiper, items)
     }
 
-    /// `#content`'s `scrollend`, delivered as the runtime delivers the
-    /// kernel's: at `#content`, not bubbling, not composed.
     fn content_scroll_ended(document: &mut LynxDocument, swiper: NodeId) {
         let content = scroller(document, swiper);
         document.dispatch_element_event(
@@ -3187,8 +2754,6 @@ mod tests {
         content_scroll_ended(&mut document, swiper);
         assert_eq!(fields_heard(&events, swiper), [], "nobody listens");
 
-        // The item was tracked while nobody listened: the third is no
-        // change, the second is.
         listen(&mut document, swiper, CHANGE_EVENT);
         scrolled(&mut document, content, x(390.0));
         assert_eq!(fields_heard(&events, swiper), []);
@@ -3199,9 +2764,6 @@ mod tests {
         );
     }
 
-    /// `scrollstart` comes with the first `scroll` since the last
-    /// `scrollend`, carrying the item reported before that `scroll`, as
-    /// web-core sends it ahead of the `change` the same `scroll` may bring.
     #[test]
     fn scrollstart_fires_once_per_run_of_scrolls() {
         let (mut document, events, swiper, _) = evented(&[]);
@@ -3224,9 +2786,6 @@ mod tests {
         );
     }
 
-    /// `change` comes on the `scroll` that makes another item's snap
-    /// position the nearest, with no quarter-page gate, and not on a move
-    /// that keeps the item; a tie keeps the first.
     #[test]
     fn change_fires_when_the_nearest_item_changes() {
         let (mut document, events, swiper, _) = evented(&[]);
@@ -3251,11 +2810,6 @@ mod tests {
         );
     }
 
-    /// The item a swiper is connected on is the one `current` names as it
-    /// connects, read as web-core's `parseFloat`: a swiper that starts on it
-    /// reports no change, and one whose `current` names no finite number
-    /// starts from 0. A `current` written after the connection is read by
-    /// the next one, as web-core reads it in `connectedCallback` alone.
     #[test]
     fn the_connected_item_is_the_current_attribute() {
         for (value, first) in [("2", 2.0), ("2.5", 2.5), ("abc", 0.0), ("1e400", 0.0)] {
@@ -3281,9 +2835,6 @@ mod tests {
         }
     }
 
-    /// `#content`'s `scrollend` is the swiper's own, at the swiper, with
-    /// the item last reported; that event, delivered at the swiper, is not
-    /// `#content`'s and changes nothing.
     #[test]
     fn scrollend_reports_the_current_item_at_the_swiper() {
         let (mut document, events, swiper, _) = evented(&[]);
@@ -3299,8 +2850,6 @@ mod tests {
                 vec![("current", Field::Number(1.0))]
             )]
         );
-        // The queued event's delivery: at the swiper, not bubbling,
-        // composed.
         document.dispatch_element_event(
             swiper,
             SWIPER_SCROLL_END_EVENT,
@@ -3312,8 +2861,6 @@ mod tests {
         assert_eq!(fields_heard(&events, swiper), []);
     }
 
-    /// `transition` carries `#content`'s offset at each `scroll`, web-core's
-    /// absolute `{dx, dy}`.
     #[test]
     fn transition_reports_the_contents_offset_at_each_scroll() {
         let (mut document, events, swiper, _) = evented(&[]);
@@ -3334,8 +2881,6 @@ mod tests {
         }
     }
 
-    /// Under `vertical` the item is read from the y offset, and
-    /// `transition` reports it as `dy`.
     #[test]
     fn a_vertical_swiper_reads_its_y_offset() {
         let (mut document, events, swiper, _) = evented(&[("vertical", "")]);
@@ -3356,11 +2901,6 @@ mod tests {
         );
     }
 
-    /// Under `circular` the offset may stand across the seam, past the last
-    /// item: it shows the first item's next copy when that is nearer, and
-    /// the item reported is the item's own index, not its position's rank —
-    /// in `flat-coverflow` the first item's position lies at the end of the
-    /// period.
     #[test]
     fn a_circular_swiper_reports_the_item_across_the_seam() {
         let (mut document, events, swiper, _) = evented(&[("circular", "")]);
@@ -3371,7 +2911,6 @@ mod tests {
             fields_heard(&events, swiper),
             [(CHANGE_EVENT, current(2.0, false))]
         );
-        // The period is 600: 550 is 50 short of the first item's next copy.
         scrolled(&mut document, content, x(550.0));
         assert_eq!(
             document.scroll_offset(content),
@@ -3412,8 +2951,6 @@ mod tests {
         );
     }
 
-    /// `isDragged` is whether a finger is down on the swiper — on an item
-    /// counts — as each event is queued.
     #[test]
     fn is_dragged_is_whether_a_finger_is_down() {
         let (mut document, events, swiper, items) = evented(&[]);
@@ -3438,8 +2975,6 @@ mod tests {
         );
     }
 
-    /// A scroller inside an item fires its own `scroll`, whose capture pass
-    /// crosses the swiper; the swiper decides nothing on it.
     #[test]
     fn a_scroller_inside_an_item_is_not_the_swipers() {
         let (mut document, events, swiper, items) = evented(&[]);

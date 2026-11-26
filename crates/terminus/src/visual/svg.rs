@@ -53,8 +53,6 @@ use crate::svg::recording::{Animated, Item, Recording};
 use crate::svg::{context_matrix, ink_extent};
 use crate::tree::document::{Document, NodeId};
 
-/// The tables of the frame being built that [`plan_root`] appends to, and
-/// the group layer open where it is called.
 pub(super) struct Tables<'a> {
     pub(super) items: &'a mut Vec<PaintItem>,
     pub(super) matrices: &'a mut Vec<Transform3D<f32>>,
@@ -65,11 +63,6 @@ pub(super) struct Tables<'a> {
     pub(super) current_layer: Option<usize>,
 }
 
-/// Appends the recording of the outermost `svg` element whose box item is
-/// the last item of `tables`, when it has one that draws (see the module
-/// documentation): placed by the root's border-box world and placement map,
-/// clipped to its placement's clips inside the root's own clip chain, in the
-/// root's space and scroll slot.
 pub(super) fn plan_root<T: Sync>(document: &Document<T>, tables: Tables<'_>) {
     let Some(root_item) = tables.items.last() else {
         return;
@@ -115,13 +108,6 @@ pub(super) fn plan_root<T: Sync>(document: &Document<T>, tables: Tables<'_>) {
 }
 
 impl<T: Sync> Document<T> {
-    /// The plan of an SVG image: the recording filed for `root`, this
-    /// isolated document's `svg` element (`crate::svg::image`), as the
-    /// items and group layers an inline root's recording becomes, in the
-    /// recording's viewport units. No box is behind them: no root box item
-    /// precedes them, and they take no clip, space, scroll slot or animation
-    /// slot. Claims a commit id, which the paint walk checks the plan
-    /// against; the document is built, styled and recorded, never laid out.
     pub(crate) fn plan_svg_image(&mut self, root: NodeId) -> PaintOrder {
         let mut order = PaintOrder::empty();
         order.commit_id = self.next_commit_id();
@@ -161,26 +147,16 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// Where [`plan_recording`] puts a recording's items and layers.
 #[derive(Clone, Copy)]
 struct Placed<'a> {
-    /// The outermost `svg` element the recording is filed under.
     root: NodeId,
-    /// The recording's viewport units to the space `world` maps from.
     map: Affine,
-    /// The world matrix of that space.
     world: &'a Transform3D<f32>,
-    /// The clip chain, compose space and scroll slot every item and layer
-    /// takes, an animated element's subtree a space nested in `space`.
     clip: Option<usize>,
     space: Option<u32>,
     slot: Option<u32>,
 }
 
-/// Appends `recording`'s path and text items and its layer pushes, placed
-/// by `placed`, to `tables`, giving each element the recording marks as
-/// animated the slot `allocate_animation_slot` answers. Leaves the open
-/// group layer as it found it.
 #[expect(
     clippy::too_many_lines,
     reason = "one linear pass over the recording's items, layers and animated elements"
@@ -210,8 +186,6 @@ fn plan_recording<T: Sync>(
     } = placed;
     let mut current = current_layer;
     let mut open: SmallVec<[usize; 8]> = SmallVec::new();
-    // The animation spaces open around the items: where each element's items
-    // end, and the space around it.
     let mut moving: SmallVec<[(usize, Option<u32>); 4]> = SmallVec::new();
     let mut marked = recording.animated.iter().peekable();
     for (index, item) in recording.items.iter().enumerate() {
@@ -297,8 +271,6 @@ fn plan_recording<T: Sync>(
             }
         }
     }
-    // A recording's pushes and pops balance; a layer left open closes here
-    // all the same, so the frame's groups nest.
     while let Some(opened) = open.pop() {
         current = close(items, layers, opened);
     }
@@ -308,8 +280,6 @@ fn plan_recording<T: Sync>(
     );
 }
 
-/// Ends layer `opened` at the current item, or drops it when it encloses
-/// no item, and answers the layer open around it.
 fn close(items: &[PaintItem], layers: &mut Vec<RenderLayer>, opened: usize) -> Option<usize> {
     let parent = layers[opened].parent;
     let end = items.len();
@@ -322,9 +292,6 @@ fn close(items: &[PaintItem], layers: &mut Vec<RenderLayer>, opened: usize) -> O
     parent
 }
 
-/// Asks for the animation slot of `entry`, an element of `recording` the
-/// recorder marked, whose root has world `root_world`, placement map `map`
-/// and clip chain `clip`.
 fn animate<T: Sync>(
     document: &Document<T>,
     entry: &Animated,
@@ -335,9 +302,6 @@ fn animate<T: Sync>(
     let node = document.get(entry.node)?;
     let style = document.paint_style(entry.node)?;
     let committed = &style.get_box().transform;
-    // The track's factors, from what the recording baked: the reference box
-    // the element's transform was folded against, and its parent's
-    // absolute transform under the root's world and placement.
     let folded = entry
         .reference
         .filter(|_| node.animates_transform())
@@ -372,8 +336,6 @@ fn animate<T: Sync>(
     )
 }
 
-/// The size of the rectangle, in the root's border-box px, that the path
-/// and text items of `entry`'s subtree can put ink in.
 fn subtree_extent(recording: &Recording, entry: &Animated, map: Affine) -> Size2D<f32> {
     recording.items[entry.items.clone()]
         .iter()
@@ -384,9 +346,6 @@ fn subtree_extent(recording: &Recording, entry: &Animated, map: Affine) -> Size2
         .map_or_else(Size2D::zero, size)
 }
 
-/// `local`, a map into the root's border box, followed by the root's world
-/// matrix: composed in f64 when the world is planar, which is every root
-/// outside a 3D transform, so the item's matrix is rounded to f32 once.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the frame's world matrices are f32"

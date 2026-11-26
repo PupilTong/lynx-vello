@@ -20,14 +20,12 @@ fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/rgb.mp4")
 }
 
-/// What a player handed over, in order.
 #[derive(Debug)]
 enum Seen {
     Frame([u8; 4]),
     Event(MediaEvent),
 }
 
-/// A sink that records everything, and wants frames while `wants` says so.
 #[derive(Default)]
 struct Recorder {
     wants: AtomicBool,
@@ -89,7 +87,6 @@ impl Sink {
         .expect("AVFoundation opens a player")
     }
 
-    /// Waits until `done` holds, or fails after ten seconds.
     fn until(&self, what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -139,7 +136,6 @@ impl Sink {
     }
 }
 
-/// Which of the clip's three colours `texel` is, within H.264's rounding.
 fn colour(texel: [u8; 4]) -> Option<&'static str> {
     let near = |expected: [u8; 3]| {
         texel
@@ -163,9 +159,6 @@ fn file() -> MediaSource {
     MediaSource::Url(Url::from_file_path(fixture()).unwrap())
 }
 
-/// An open video shows its first frame paused, before any `play`, and
-/// reports it with the clip's natural size and duration; nothing more comes
-/// while it is paused.
 #[test]
 fn an_open_video_shows_its_first_frame_paused() {
     let sink = Sink::new(true);
@@ -206,9 +199,6 @@ fn an_open_video_shows_its_first_frame_paused() {
     );
 }
 
-/// `play` plays the clip through, its frames in order and on the player's
-/// clock, and reports its end once; a `play` after the end plays it again
-/// from the start.
 #[test]
 fn a_played_video_shows_its_frames_and_ends() {
     let sink = Sink::new(true);
@@ -240,8 +230,6 @@ fn a_played_video_shows_its_frames_and_ends() {
     assert_eq!(again.first(), Some(&"red"), "from the start: {again:?}");
 }
 
-/// A looping video starts over at its end and never reports one; turning
-/// `loop` off lets it end.
 #[test]
 fn a_looping_video_starts_over_and_does_not_end() {
     let sink = Sink::new(true);
@@ -260,9 +248,6 @@ fn a_looping_video_starts_over_and_does_not_end() {
     sink.until("the end once looping stops", || sink.ended() == 1);
 }
 
-/// A paused player hands over no frame, and one whose sink wants no frames
-/// hands over none beyond its first while it plays on, and then the frame it
-/// stops on: a picture drawn again after its video ended shows the end.
 #[test]
 fn a_paused_or_unwanted_player_publishes_nothing() {
     let sink = Sink::new(true);
@@ -301,7 +286,6 @@ fn a_paused_or_unwanted_player_publishes_nothing() {
     );
 }
 
-/// Bytes the resource system holds play as a file does.
 #[test]
 fn bytes_play_as_a_file_does() {
     let sink = Sink::new(true);
@@ -320,8 +304,6 @@ fn bytes_play_as_a_file_does() {
     drop(player);
 }
 
-/// A file `AVFoundation` cannot read is a failure of the player, and nothing
-/// else is reported.
 #[test]
 fn an_unreadable_file_fails() {
     let sink = Sink::new(true);

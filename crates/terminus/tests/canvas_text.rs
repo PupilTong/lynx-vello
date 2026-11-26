@@ -31,7 +31,6 @@ fn alpha(canvas: &mut OffscreenCanvas, x: i32, y: i32) -> u8 {
     canvas.context_2d().get_image_data(x, y, 1, 1).unwrap()[3]
 }
 
-/// The columns of row `y` with any ink.
 fn ink_columns(canvas: &mut OffscreenCanvas, y: i32) -> Option<(i32, i32)> {
     let width = i32::try_from(canvas.width()).unwrap();
     let row = canvas.context_2d().get_image_data(0, y, width, 1).unwrap();
@@ -57,8 +56,6 @@ fn fill_text_inks_the_em_squares() {
     canvas
         .context_2d()
         .fill_text(&mut fonts, "XX", 10.0, 30.0, None);
-    // Two 20 px squares from x = 10, from 16 px above the baseline to 4
-    // below.
     assert_eq!(alpha(&mut canvas, 12, 16), 255);
     assert_eq!(alpha(&mut canvas, 48, 32), 255);
     assert_eq!(alpha(&mut canvas, 52, 25), 0);
@@ -84,13 +81,11 @@ fn measure_text_ahem() {
         (m.em_height_ascent + m.em_height_descent - 20.0).abs() < 0.01,
         "{m:?}"
     );
-    // Measured from `top`, the em square's top is the baseline line.
     canvas.context_2d().set_text_baseline(TextBaseline::Top);
     let top = canvas.context_2d().measure_text(&mut fonts, "XX");
     assert!(top.em_height_ascent.abs() < 0.01, "{top:?}");
     assert!((top.alphabetic_baseline + 16.0).abs() < 0.01, "{top:?}");
 
-    // Trailing spaces count toward the width but not the ink.
     canvas
         .context_2d()
         .set_text_baseline(TextBaseline::Alphabetic);
@@ -100,7 +95,6 @@ fn measure_text_ahem() {
         (spaced.actual_bounding_box_right - 20.0).abs() < 0.01,
         "{spaced:?}"
     );
-    // Whitespace other than spaces becomes spaces rather than breaking.
     let tabbed = canvas.context_2d().measure_text(&mut fonts, "X\nX");
     assert!((tabbed.width - 60.0).abs() < 0.01, "{tabbed:?}");
 }
@@ -146,7 +140,6 @@ fn baselines_move_the_text_vertically() {
     canvas
         .context_2d()
         .fill_text(&mut fonts, "X", 10.0, 10.0, None);
-    // From `top` the square hangs below y = 10.
     assert_eq!(alpha(&mut canvas, 20, 11), 255);
     assert_eq!(alpha(&mut canvas, 20, 28), 255);
     assert_eq!(alpha(&mut canvas, 20, 8), 0);
@@ -172,7 +165,6 @@ fn max_width_squeezes() {
     let (first, last) = ink_columns(&mut canvas, 20).unwrap();
     assert_eq!(first, 10);
     assert_eq!(last, 49);
-    // A max width of zero draws nothing.
     let mut canvas = OffscreenCanvas::new(100, 40);
     canvas.context_2d().set_font(ahem(20.0));
     canvas
@@ -190,8 +182,6 @@ fn stroke_text_outlines() {
     canvas
         .context_2d()
         .stroke_text(&mut fonts, "X", 10.0, 42.0, None);
-    // The square spans x 10..50, y 10..50: its edge is inked, its middle
-    // is not.
     assert_eq!(alpha(&mut canvas, 10, 30), 255);
     assert_eq!(alpha(&mut canvas, 30, 30), 0);
 }
@@ -209,9 +199,6 @@ fn text_follows_the_transform() {
     assert_eq!(ink_columns(&mut canvas, 15), Some((40, 59)));
 }
 
-/// The million-dash limit counts the glyph outlines' length: a 20 px Ahem
-/// square is 80 px of outline, 1.1 million dashes of a 7e-5 period, and is
-/// stroked solid.
 #[test]
 fn stroke_text_past_a_million_dashes_strokes_solid() {
     let mut fonts = fonts();
@@ -225,7 +212,5 @@ fn stroke_text_past_a_million_dashes_strokes_solid() {
     canvas
         .context_2d()
         .stroke_text(&mut fonts, "X", 10.0, 30.0, None);
-    // The square runs from x = 10 to 30 and y = 14 to 34; the middle of its
-    // left edge.
     assert_eq!(alpha(&mut canvas, 10, 24), 255);
 }

@@ -42,8 +42,6 @@ use super::into_view::ScrollLogicalPosition;
 use crate::tree::document::{Document, NodeId};
 use crate::visual::PaintOrder;
 
-/// One `scroll-initial-target: nearest` element the build found, with the
-/// scroll slot it lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InitialTarget {
     pub(crate) chain: u32,
@@ -51,9 +49,6 @@ pub(crate) struct InitialTarget {
 }
 
 impl<T> Document<T> {
-    /// Honours the initial scroll targets the build found; returns whether
-    /// any scroll request was recorded, in which case the frame must be
-    /// rebuilt to carry it.
     pub(crate) fn scroll_to_initial_targets(&mut self, frame: &PaintOrder) -> bool {
         let targets = frame.initial_targets();
         if targets.is_empty() {
@@ -78,9 +73,6 @@ impl<T> Document<T> {
                 continue;
             }
             self.set_honoured_initial_target(container, Some(chosen));
-            // `scrollIntoView`'s position with `block: start` and
-            // `inline: nearest` (§3.1.1), in the one container, which is
-            // the target's nearest: no scroll container lies between them.
             if let Some(position) = self.scroll_into_view_position(
                 chosen,
                 container,
@@ -95,10 +87,6 @@ impl<T> Document<T> {
         requested
     }
 
-    /// Of `candidates` under `container`, the first in flat tree order —
-    /// the only one when there is one, which is the common case and costs no
-    /// walk. The flat tree, because a container in a shadow tree reaches its
-    /// slotted descendants through it alone.
     fn first_in_tree_order(
         &self,
         container: NodeId,
@@ -135,9 +123,6 @@ impl<T> Document<T> {
     }
 
     fn set_honoured_initial_target(&mut self, container: NodeId, target: Option<NodeId>) {
-        // Containers freed since drop out here, on the rare write, rather
-        // than on every release: a `NodeId` is never reissued, so a stale
-        // entry is dead weight and never a wrong answer.
         let mut table = std::mem::take(&mut self.layout_state_mut().initial_targets);
         table.retain(|(held_by, _)| *held_by != container && self.slot(*held_by).is_some());
         if let Some(target) = target {
@@ -197,15 +182,11 @@ mod tests {
             "the published frame carries the position"
         );
 
-        // The user (or anyone) scrolls away; the same target does not drag
-        // the container back on the next commit.
         document.scroll_to(scroller, Vector2D::new(0.0, 50.0));
         document.set_inline_style(pages[0], "height: 120px");
         document.commit();
         assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 50.0));
 
-        // A target arriving later is honoured, once: page 3 now starts at
-        // 120 + 100 + 100.
         document.set_inline_style(pages[2], "");
         document.set_inline_style(pages[3], "scroll-initial-target: nearest");
         document.commit();
@@ -220,10 +201,6 @@ mod tests {
         frame.scroll_slots()[index as usize].request
     }
 
-    /// The honoured target travels to the painter as an instant request in
-    /// the frame the same render publishes, and that render is one commit:
-    /// the request's own dirt is spent by the rebuild, so nothing is left
-    /// for a second one.
     #[test]
     fn a_honoured_target_is_an_instant_request_in_the_same_commit() {
         let (mut document, scroller, pages) = paged("", 4);
@@ -242,15 +219,12 @@ mod tests {
             "no second commit follows"
         );
 
-        // The same target on a later commit records nothing new.
         document.acknowledge_scroll_request(scroller, request.serial);
         document.set_inline_style(pages[0], "opacity: 0.5");
         let frame = document.commit();
         assert_eq!(slot_request(&frame, scroller), None);
     }
 
-    /// A new target whose position the document's own offset already has
-    /// still sends a request: the painter may be showing another offset.
     #[test]
     fn a_new_target_at_the_current_offset_still_reaches_the_painter() {
         let (mut document, scroller, pages) = paged("", 4);
@@ -263,10 +237,6 @@ mod tests {
         assert_eq!(request.target, Vector2D::new(0.0, 100.0));
     }
 
-    /// The move to a new target is recorded for the host's `scroll` and
-    /// `scrollend` as any instant scroll request's is: the container, with
-    /// the offset it had before the move. A new target the container
-    /// already rests on moves nothing and records nothing.
     #[test]
     fn a_honoured_target_that_moves_the_container_is_recorded_for_the_host() {
         let (mut document, scroller, pages) = paged("", 4);
@@ -329,10 +299,6 @@ mod tests {
         );
     }
 
-    /// A target is a target by its own box, so a `content-visibility: auto`
-    /// box whose contents skip — off screen at the first commit, as a list's
-    /// cells are — still sets the position, as does a replaced element, whose
-    /// children the build never enters either.
     #[test]
     fn a_box_whose_contents_are_not_entered_is_still_a_target() {
         let (mut document, scroller, pages) = paged("content-visibility: auto", 4);

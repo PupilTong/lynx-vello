@@ -55,38 +55,16 @@ use crate::jobs::JsThreadHandle;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 
-/// The longest timeout a `wait` can name, in milliseconds — HTML's own
-/// `long` ceiling, about 24 days, and short enough that no deadline built
-/// from it can overflow the clock.
 const MAX_TIMEOUT_MILLISECONDS: f64 = 2_147_483_647.0;
 
-/// One future's answer: the value it settled to, or why it will not settle.
-///
-/// The value is a [`HostValue`], which is the whole of what the boundary
-/// carries: an operation whose product is not one of those has no business
-/// being a `Future`.
 pub(crate) type Outcome = Result<HostValue, String>;
 
-/// One registered operation, as the table holds it.
-///
-/// `!Send` and boxed: it is awaited on the engine thread that registered it,
-/// either inside a job's wait or on a task the owner's epilogue spawned.
 pub(crate) type HostFuture = Pin<Box<dyn Future<Output = Outcome>>>;
 
-/// Every future one realm has registered and not finished with.
-///
-/// Shared with the three host members that maintain it, so it is `Rc`: the
-/// members and the epilogue that drains [`Self::settle_requests`] are
-/// different stack frames on the same thread.
 pub(crate) struct FutureTable {
     next_id: Cell<u32>,
-    /// Registered, and neither waited on nor asked to settle. A timed-out
-    /// wait puts its future back here.
     pending: RefCell<FxHashMap<u32, HostFuture>>,
-    /// An outcome a wait parked, until the realm takes it.
     settled: RefCell<FxHashMap<u32, Outcome>>,
-    /// The futures a `.then` asked to settle asynchronously. The owner's
-    /// epilogue drains this and spawns a task per entry.
     settle_requests: RefCell<Vec<(u32, HostFuture)>>,
 }
 
@@ -100,29 +78,20 @@ impl FutureTable {
         }
     }
 
-    /// Files one operation and answers with the id the realm names it by.
-    ///
-    /// `fetchResource` is what registers one in production
-    /// ([`crate::fetch`]); the test producer below is the other caller.
     pub(crate) fn register(&self, future: impl Future<Output = Outcome> + 'static) -> u32 {
         let id = self.allocate_id();
         self.pending.borrow_mut().insert(id, Box::pin(future));
         id
     }
 
-    /// The futures a `.then` asked to settle since the last drain.
     pub(crate) fn take_settle_requests(&self) -> Vec<(u32, HostFuture)> {
         std::mem::take(&mut *self.settle_requests.borrow_mut())
     }
 
-    /// Parks one outcome until the realm takes it.
     fn park(&self, id: u32, outcome: Outcome) {
         self.settled.borrow_mut().insert(id, outcome);
     }
 
-    /// The parked outcome, as the realm reads it: a rejection reaches the
-    /// realm as the host's own wording, and the class it becomes there is the
-    /// realm's to choose.
     fn take(&self, id: u32) -> Result<HostValue, String> {
         match self.settled.borrow_mut().remove(&id) {
             Some(outcome) => outcome,
@@ -130,10 +99,6 @@ impl FutureTable {
         }
     }
 
-    /// The next id no live future holds.
-    ///
-    /// Ids start at one and never wrap onto a live future, for the reason a
-    /// timer id does not: the realm stores one and tests it for truth.
     fn allocate_id(&self) -> u32 {
         loop {
             let id = self.next_id.get();
@@ -148,20 +113,12 @@ impl FutureTable {
     }
 }
 
-/// What one synchronous wait ended on.
 enum Waited {
-    /// The realm ended under it: the token, the biased first arm.
     Ended,
-    /// The deadline passed. The operation is untouched and still running.
     TimedOut,
     Settled(Outcome),
 }
 
-/// Installs the members a realm's `Future` class speaks to.
-///
-/// None of them runs a callback or touches a document: one parks this job on
-/// an answer, one takes an answer that has arrived, and one asks for the
-/// asynchronous path instead.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
     table: &Rc<FutureTable>,
@@ -177,8 +134,6 @@ pub(crate) fn install(
             return Err(format!("future {id} is not pending"));
         };
         let waited = thread.wait(async {
-            // Built here rather than in job context: the free tokio timer
-            // entry points read the ambient runtime, and a job has none.
             let mut sleep = std::pin::pin!(crate::clock::sleep_until(
                 deadline.unwrap_or_else(ClockInstant::now)
             ));
@@ -192,8 +147,6 @@ pub(crate) fn install(
         match waited {
             Waited::Ended => Err("the realm ended".to_owned()),
             Waited::TimedOut => {
-                // Nothing was cancelled: the operation is still running, and
-                // a later wait or a `.then` still answers from it.
                 futures.pending.borrow_mut().insert(id, future);
                 Ok(HostValue::Boolean(false))
             }
@@ -222,13 +175,6 @@ pub(crate) fn install(
         Ok(HostValue::Undefined)
     })?;
 
-    // What registers a future in production is `fetchResource`
-    // (`crate::fetch`), whose operation is a host fetch — nothing a test of
-    // this table can start on its own. So the end-to-end tests of both realm
-    // kinds bring a producer of their own:
-    // `testFuture(delayMs, value, rejects)` files an operation that settles
-    // to that string, or rejects with it, once the delay has passed, and
-    // answers with its id.
     #[cfg(test)]
     {
         let futures = Rc::clone(table);
@@ -254,8 +200,6 @@ pub(crate) fn install(
     Ok(())
 }
 
-/// Hands one settled outcome back to the realm that asked for it
-/// asynchronously.
 pub(crate) fn deliver(
     engine: &ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -279,12 +223,6 @@ pub(crate) fn deliver(
         .map(|_| ())
 }
 
-/// When a wait of `milliseconds` gives up, or `None` for one that never does.
-///
-/// Non-finite is no deadline at all — which is what `Future.wait()` with no
-/// argument passes — and a negative one is a deadline that has already
-/// passed. The ceiling is HTML's `long`, so no arithmetic here can overflow
-/// the clock.
 fn deadline_from(milliseconds: f64) -> Option<ClockInstant> {
     if !milliseconds.is_finite() {
         return None;
@@ -378,7 +316,6 @@ mod tests {
         let table = FutureTable::new();
         let first = table.register(settles_to("pending"));
         table.park(2, Err("settled and untaken".to_owned()));
-        // Wrapped onto the two ids above, both of which are live.
         table.next_id.set(1);
 
         assert_eq!(first, 1);
@@ -407,7 +344,6 @@ mod tests {
         let passed = deadline_from(-5.0).expect("a negative timeout is a deadline that has passed");
         assert!(passed <= ClockInstant::now());
         assert!(deadline_from(50.0).expect("a deadline") >= now + Duration::from_millis(50));
-        // Clamped rather than overflowing the clock.
         assert!(deadline_from(f64::MAX).is_some());
     }
 }

@@ -20,33 +20,20 @@ use url::Url;
 use crate::image_header::{self, ImageHeader};
 use crate::mime::{self, ImageFormat, MediaType, ResourceClass};
 
-/// The typed result of preprocessing one resource.
 #[derive(Clone, Debug)]
 pub enum Payload {
-    /// UTF-8 text, transcoded from the declared charset with any BOM removed.
     Text(Arc<str>),
-    /// Syntactically valid JSON text.
     Json(Arc<str>),
-    /// An image container: its format and, when the header could be read,
-    /// its intrinsic dimensions. The bytes stay encoded — decoding them is
-    /// the platform decoder's job, later and elsewhere.
     Image {
         format: ImageFormat,
         header: Option<ImageHeader>,
     },
-    /// Anything else, untouched.
     Binary,
 }
 
-/// One preprocessed resource.
 #[derive(Clone, Debug)]
 pub struct Preprocessed {
-    /// The bytes downstream consumers receive: for text and JSON the UTF-8
-    /// re-encoding, which is the input itself when that already was UTF-8
-    /// without a BOM; otherwise the original bytes.
     pub bytes: Bytes,
-    /// The effective media type after sniffing, carrying `charset=utf-8` for
-    /// text and JSON output.
     pub media_type: MediaType,
     pub payload: Payload,
 }
@@ -59,8 +46,6 @@ pub enum PreprocessError {
     Json(String),
 }
 
-/// Runs the pipeline over `bytes`, labelled `declared` by whoever produced
-/// them, located at `url` when a URL exists to read an extension from.
 pub fn preprocess(
     bytes: Bytes,
     declared: Option<&MediaType>,
@@ -107,14 +92,10 @@ pub fn preprocess(
     }
 }
 
-/// Decodes `bytes` under `charset` to UTF-8, returning the text and the
-/// bytes to hand on — the same allocation when nothing changed.
 fn decode_text(bytes: Bytes, charset: Option<&str>) -> Result<(Arc<str>, Bytes), PreprocessError> {
     let decoded = decode_charset(&bytes, charset)?;
     let text: Arc<str> = Arc::from(&*decoded);
     let bytes = match decoded {
-        // Borrowed from the input, but not necessarily all of it: a stripped
-        // BOM leaves a borrow that starts three bytes in.
         Cow::Borrowed(borrowed) if borrowed.len() == bytes.len() => bytes,
         Cow::Borrowed(borrowed) => Bytes::copy_from_slice(borrowed.as_bytes()),
         Cow::Owned(owned) => Bytes::from(owned.into_bytes()),
@@ -122,9 +103,6 @@ fn decode_text(bytes: Bytes, charset: Option<&str>) -> Result<(Arc<str>, Bytes),
     Ok((text, bytes))
 }
 
-/// The encoding-standard decode, narrowed to the charsets a card is realistic
-/// to ship in: a byte-order mark outranks the label, invalid sequences
-/// become U+FFFD as in a browser, and the BOM itself never reaches the text.
 pub fn decode_charset<'a>(
     bytes: &'a [u8],
     charset: Option<&str>,
@@ -154,8 +132,6 @@ pub fn decode_charset<'a>(
     }
 }
 
-/// The encoding standard's `windows-1252` index, which is also what `latin1`
-/// and `us-ascii` labels resolve to there.
 fn windows_1252(byte: u8) -> char {
     const HIGH: [char; 32] = [
         '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',

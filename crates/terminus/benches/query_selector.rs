@@ -92,17 +92,11 @@ fn device() -> terminus::link::Device {
     )
 }
 
-/// Rows per section, so a row count implies how wide the tree is.
 const FAN_OUT: usize = 32;
-/// The tree the selector-shape and floor groups share.
 const ROWS: usize = 1_024;
-/// Ancestors between the chain's deepest node and the element `closest` finds.
 const DEPTH: usize = 64;
 
-/// Queries per timed iteration for the whole-tree cases, each of which is
-/// already linear in the tree.
 const QUERY_BATCH: usize = 4;
-/// Queries per timed iteration for the single-element cases.
 const ELEMENT_BATCH: usize = 512;
 
 const PAGE_CSS: &str = "page { display: linear; }
@@ -110,24 +104,14 @@ const PAGE_CSS: &str = "page { display: linear; }
      row { display: linear; width: 40px; height: 12px; }
      chain { display: linear; }";
 
-/// A committed page plus the probes the query cases start from.
 struct Page {
     doc: Document<()>,
-    /// The first row in tree order, carrying `id=first-row`.
     first_row: NodeId,
-    /// The last row of the last section, carrying `id=last-row`.
     last_row: NodeId,
-    /// A row whose own section matches `.hot`: two `closest` checks.
     shallow_row: NodeId,
-    /// The bottom of the nesting chain: `DEPTH` `closest` checks.
     deep_leaf: NodeId,
 }
 
-/// `rows` rows spread `FAN_OUT` to a section, then one `DEPTH`-deep chain.
-///
-/// Sections alternate `.hot` and `.cold` so an ancestor compound matches about
-/// half of them; rows carry a `data-row` attribute and a class of their own.
-/// Nothing anywhere carries `.absent`.
 fn page(rows: usize) -> Page {
     let mut doc = Document::new(device(), "page", ());
     doc.add_stylesheet(PAGE_CSS, StylesheetOrigin::Author);
@@ -168,8 +152,6 @@ fn page(rows: usize) -> Page {
             doc.set_id_attribute(row, Some("first-row"));
             first_row = Some(row);
         }
-        // The first row of the second `.hot` section: its own section matches
-        // `.hot`, so `closest` stops one step up.
         if index == FAN_OUT * 2 {
             shallow_row = row;
         }
@@ -197,8 +179,6 @@ fn page(rows: usize) -> Page {
     }
 }
 
-/// The document node — `document.querySelector(...)`'s receiver, and the
-/// widest root a query can have.
 fn document(page: &Page) -> NodeId {
     page.doc.root_node().id()
 }
@@ -215,7 +195,6 @@ fn query_all(page: &Page, selectors: &str) -> Vec<NodeId> {
         .expect("selector parses")
 }
 
-/// `QUERY_BATCH` whole-tree queries per iteration.
 fn bench_query(bencher: divan::Bencher, page: &Page, selectors: &str, all: bool) {
     bencher
         .counter(ItemsCount::new(QUERY_BATCH))
@@ -229,8 +208,6 @@ fn bench_query(bencher: divan::Bencher, page: &Page, selectors: &str, all: bool)
             }
         });
 }
-
-// --- no id map: one unique id, reached first versus last ---------------------
 
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_id_first(bencher: divan::Bencher, rows: usize) {
@@ -246,8 +223,6 @@ fn query_selector_id_last(bencher: divan::Bencher, rows: usize) {
     bench_query(bencher, &page, "#last-row", false);
 }
 
-// --- no subtree bloom filter: a class that exists against one that cannot ----
-
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_class_present(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
@@ -258,13 +233,9 @@ fn query_selector_all_class_present(bencher: divan::Bencher, rows: usize) {
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_class_absent(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
-    // The whole walk is dead work: a populated subtree bloom filter rejects
-    // this at the root instead.
     assert_eq!(query_all(&page, ".absent"), []);
     bench_query(bencher, &page, ".absent", true);
 }
-
-// --- the ancestor walk: a reachable versus an unreachable ancestor compound --
 
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_descendant_hit(bencher: divan::Bencher, rows: usize) {
@@ -276,14 +247,9 @@ fn query_selector_all_descendant_hit(bencher: divan::Bencher, rows: usize) {
 #[divan::bench(args = [256, 4_096])]
 fn query_selector_all_descendant_miss(bencher: divan::Bencher, rows: usize) {
     let page = page(rows);
-    // Every row matches the rightmost compound, then climbs to the root before
-    // giving up — the same rightmost `row` as the hit case, so the difference
-    // is the ancestor walk alone.
     assert_eq!(query_all(&page, ".absent row"), []);
     bench_query(bencher, &page, ".absent row", true);
 }
-
-// --- early exit versus full walk on one selector -----------------------------
 
 #[divan::bench]
 fn query_selector_first_class(bencher: divan::Bencher) {
@@ -296,8 +262,6 @@ fn query_selector_all_class(bencher: divan::Bencher) {
     let page = page(ROWS);
     bench_query(bencher, &page, ".cool", true);
 }
-
-// --- what the matcher costs per element, by selector shape -------------------
 
 #[divan::bench]
 fn query_selector_all_type(bencher: divan::Bencher) {
@@ -332,8 +296,6 @@ fn query_selector_all_nth_child(bencher: divan::Bencher) {
 #[divan::bench]
 fn query_selector_all_selector_list(bencher: divan::Bencher) {
     let page = page(ROWS);
-    // A list refuses `dom_apis`' single-selector fast paths, so this is the
-    // shape that always walks and always matches the whole list per element.
     bench_query(
         bencher,
         &page,
@@ -341,8 +303,6 @@ fn query_selector_all_selector_list(bencher: divan::Bencher) {
         true,
     );
 }
-
-// --- a query rooted at an element, not the document --------------------------
 
 #[divan::bench]
 fn query_selector_all_scoped_to_section(bencher: divan::Bencher) {
@@ -372,8 +332,6 @@ fn query_selector_all_scoped_to_section(bencher: divan::Bencher) {
             }
         });
 }
-
-// --- the ancestor walk, by depth ---------------------------------------------
 
 #[divan::bench]
 fn closest_shallow(bencher: divan::Bencher) {
@@ -416,8 +374,6 @@ fn closest_deep(bencher: divan::Bencher) {
         });
 }
 
-// --- the per-call floor: one element, parse included -------------------------
-
 #[divan::bench]
 fn matches_simple(bencher: divan::Bencher) {
     let page = page(ROWS);
@@ -455,8 +411,6 @@ fn matches_complex(bencher: divan::Bencher) {
         });
 }
 
-// --- a selector that does not parse ------------------------------------------
-
 #[divan::bench]
 fn invalid_selector(bencher: divan::Bencher) {
     let page = page(ROWS);
@@ -464,8 +418,6 @@ fn invalid_selector(bencher: divan::Bencher) {
         .counter(ItemsCount::new(ELEMENT_BATCH))
         .bench_local(|| {
             for _ in 0..ELEMENT_BATCH {
-                // The error owns a copy of the selector text, so a caller that
-                // probes with bad selectors allocates on every call.
                 black_box(
                     page.doc
                         .matches(page.first_row, black_box("!!"))

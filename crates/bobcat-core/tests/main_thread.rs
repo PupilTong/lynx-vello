@@ -6,13 +6,9 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
-/// Builds a loading view over `fetcher`, whose entry it answers from
-/// `resolved_url`; callers drive boot through normal pump turns.
 async fn view(
     fetcher: FetcherDouble,
     resolved_url: &str,
@@ -30,11 +26,8 @@ async fn view(
     .await
 }
 
-/// Boots a view over a card's MTS body, which its host serves as the entry
-/// `bobcat-source` registers for a card's root.
 async fn run(source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
     let (mut view, _painter) = view(FetcherDouble::card(source), resolved_url).await?;
-    // Boot is the whole question: what the view did after it goes with it.
     wait_for_script(&mut view)?;
     Ok(())
 }
@@ -105,10 +98,6 @@ async fn script_finished_waits_for_the_tla_entry_and_javascript_boot() {
     .expect("TLA entry boot");
 }
 
-/// The document belongs to the realm, and the class that creates it resolves
-/// from any module in one — a card can reach it. There is still exactly one
-/// document per realm, so a card that builds a second is refused by the host,
-/// which fails that card's boot rather than leaving two documents behind.
 #[tokio::test]
 async fn a_card_that_constructs_a_second_document_fails_its_boot() {
     let error = run(
@@ -133,14 +122,6 @@ async fn a_card_that_constructs_a_second_document_fails_its_boot() {
     );
 }
 
-/// A failure in the entry is located by the URL boot imported it by, which is
-/// the URL the view named it by, even where the fetcher answered from another
-/// one: the module is registered under the name its import asks for, as every
-/// imported module is, and the response URL is its `import.meta.url` and the
-/// base its own imports resolve against.
-///
-/// The line is the body's own: `MTS_CHUNK_PREAMBLE` shares the body's first
-/// line, so a failure there is at line 1.
 #[tokio::test]
 async fn the_requested_entry_url_is_preserved_in_errors() {
     let error = run("const = 1", "app:///broken.js")
@@ -152,11 +133,6 @@ async fn the_requested_entry_url_is_preserved_in_errors() {
     assert!(message.contains("app:///main.js:1:"), "{message}");
 }
 
-/// Pumps a view until boot settles, collecting every failure it reported.
-///
-/// The turn that reports boot settling is read to its end, so a failure the
-/// view reported after it in that same turn is collected too rather than
-/// dropped: a host that took no turn for a while gets them together.
 fn failures_until_boot_settles(
     view: &mut LynxView<Rc<FetcherDouble>>,
 ) -> Vec<bobcat_core::EngineEvent> {
@@ -184,10 +160,6 @@ fn failures_until_boot_settles(
     }
 }
 
-/// The engine completes the entry with the fetcher's answer and adds nothing
-/// to it: an entry that is not a card's body imports what it uses itself,
-/// and boots on those imports alone. Nothing of `MTS_CHUNK_PREAMBLE` is in
-/// scope unless the entry imports it.
 #[tokio::test]
 async fn an_entry_that_imports_the_papi_itself_boots_as_it_was_answered() {
     let (mut view, _painter) = view(
@@ -209,10 +181,6 @@ globalThis.renderPage = function () {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
-/// An entry that names a PAPI member without importing it throws a
-/// `ReferenceError` when that line runs. That is the entry's own failure: the
-/// view was constructed, the failure is a `ScriptRunError` located at the
-/// entry's own line 1, and boot goes on past it to its flush.
 #[tokio::test]
 async fn an_entry_that_names_the_papi_without_importing_it_fails_as_the_entry() {
     let (mut view, _painter) = view(
@@ -238,11 +206,6 @@ async fn an_entry_that_names_the_papi_without_importing_it_fails_as_the_entry() 
     assert_eq!(location.line, Some(1));
 }
 
-/// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.
-///
-/// The view's entry task reads the fetcher's answer before any of the entry
-/// runs, so what the embedder is told is the fetcher's own
-/// `InvalidScriptEncoding`, naming the URL and the reason.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
     let (mut view, _painter) = view(FetcherDouble::new(vec![0xff, 0xfe]), "app:///invalid.js")
@@ -258,10 +221,6 @@ async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
     assert!(message.contains("UTF-8"), "{message}");
 }
 
-/// Both registration forms, end to end against the real element tree:
-/// `__AddEventListener`'s standard identity and `__AddEvent`'s one-per-name
-/// filing, over real handles and real node ids. Delivery itself is driven by
-/// the engine's script thread, which is exercised where that loop lives.
 #[tokio::test]
 async fn the_realm_registers_listeners_against_real_node_ids() {
     run(
@@ -305,8 +264,6 @@ async fn the_realm_registers_listeners_against_real_node_ids() {
     .expect("main-thread boot");
 }
 
-/// A registration is keyed by handle and indexed by node id, and neither is
-/// disturbed by the tree mutations a re-render performs.
 #[tokio::test]
 async fn registrations_survive_the_tree_mutations_a_rerender_makes() {
     run(

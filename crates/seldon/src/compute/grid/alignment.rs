@@ -71,9 +71,6 @@ pub(super) fn item_alignment_offset(
         };
         if reversed { free_space } else { 0.0 }
     } else if alignment == AlignFlags::LAST_BASELINE {
-        // An item that shares no last baseline takes `last baseline`'s
-        // fallback alignment, `safe self-end` (css-align-3 §4.2): its own
-        // end edge, or the container's start once it overflows.
         if free_space < 0.0 {
             if container_axis_reversed {
                 free_space

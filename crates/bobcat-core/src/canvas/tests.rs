@@ -7,14 +7,9 @@ use std::time::{Duration, Instant};
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, NoWakeup};
 
-/// The contract an embedder's `lynx:` module is written against.
 const CANVAS_HOST_D_TS: &str =
     include_str!("../../../../packages/bobcat-element/src/canvas-host.d.ts");
 
-/// `canvas-host.d.ts` exports, and its `BobcatCanvasNative` declares, the
-/// members the engine registers: [`super::MEMBERS`] in every realm and
-/// [`super::DOCUMENT_MEMBER`] in a realm with a document. A member renamed,
-/// added or removed on one side alone fails here.
 #[test]
 fn canvas_host_d_ts_names_the_members_the_engine_registers() {
     let mut registered: Vec<&str> = super::MEMBERS.to_vec();
@@ -47,9 +42,6 @@ fn canvas_host_d_ts_names_the_members_the_engine_registers() {
     assert_eq!(declared, registered, "the `BobcatCanvasNative` members");
 }
 
-/// One suite of drawing and error checks over the canvas members, as a
-/// module every realm kind imports: `run(realm, report)` reports
-/// `canvas <realm> <failures>`, the failures it found as JSON text.
 const SUITE: &str = r"
 import * as H from 'bobcat-internal:host';
 
@@ -275,9 +267,6 @@ export function run(realm, report) {
 }
 ";
 
-/// What a realm reports of the canvas names a card might look for: the
-/// `typeof` of each would-be global, then how `import('bobcat:canvas')`
-/// ends.
 const GLOBALS: &str = r"
 globalThis.canvasGlobals = (realm, report) => {
   const names = ['OffscreenCanvas', 'Path2D', 'ImageData', 'ImageBitmap', 'DOMException',
@@ -292,8 +281,6 @@ globalThis.canvasGlobals = (realm, report) => {
 const SUITE_URL: &str = "app:///canvas-suite.js";
 const WORKER_URL: &str = "app:///canvas-worker.js";
 
-/// Pumps `engine` until `count` console messages starting with `prefix` came,
-/// failing on any script failure, and answers them sorted.
 fn messages(
     engine: &mut crate::test_support::TestEngine,
     prefix: &str,
@@ -325,9 +312,6 @@ fn messages(
     results
 }
 
-/// The suite passes over the members of the MTS realm, a `ShadowRealm`
-/// child of it, the BTS realm and a plain `Worker`: each realm kind has
-/// every canvas member over a table of its own.
 #[test]
 fn the_canvas_members_pass_the_suite_in_every_realm_kind() {
     let main = format!(
@@ -363,8 +347,6 @@ child.importValue('{SUITE_URL}', 'run').then((run) => run('shadow', (message) =>
     );
 }
 
-/// A card has no canvas global in any realm kind, and `bobcat:canvas` is no
-/// module: its import fails in the realm with a `ReferenceError`.
 #[test]
 fn a_card_has_no_canvas_globals_and_no_canvas_module() {
     let main = format!(
@@ -395,9 +377,6 @@ canvasGlobals('main', (message) => console.log(message));
     );
 }
 
-/// The MTS realm's half of the hand-over test: a canvas drawn green and an
-/// image bitmap go to a `Worker` by token; the canvas comes back by another
-/// token, with the worker's draw on it.
 const HAND_OVER_MAIN: &str = r"
 import { Worker } from 'bobcat-internal';
 import * as H from 'bobcat-internal:host';
@@ -429,8 +408,6 @@ globalThis.handOverWorker = worker;
 worker.postMessage({ canvasToken, bitmapToken });
 ";
 
-/// The `Worker`'s half: it attaches both, the canvas token twice, draws
-/// red on the canvas's left half and hands the canvas back.
 const HAND_OVER_WORKER: &str = r"
 import 'bobcat:worker';
 import * as H from 'bobcat-internal:host';
@@ -447,10 +424,6 @@ onmessage = ({ data: { canvasToken, bitmapToken } }) => {
 };
 ";
 
-/// A canvas and an image bitmap move from the MTS realm to a `Worker` by
-/// token, and the canvas back again, keeping its pixels each way. The old
-/// id names nothing after a detach, a token is attached once, and a token
-/// the store does not hold answers `InvalidStateError` without throwing.
 #[test]
 fn canvases_move_between_the_mts_realm_and_a_worker_by_token() {
     let mut engine = TestViewSpec::new(HAND_OVER_MAIN)
@@ -474,8 +447,6 @@ fn canvases_move_between_the_mts_realm_and_a_worker_by_token() {
     );
 }
 
-/// An entry stored and never attached is dropped with the store, which
-/// goes with the last outbox of the view holding it.
 #[test]
 fn an_entry_never_attached_is_dropped_with_the_store() {
     use std::sync::atomic::{AtomicBool, Ordering};

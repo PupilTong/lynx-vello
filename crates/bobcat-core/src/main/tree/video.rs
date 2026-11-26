@@ -68,60 +68,39 @@ use terminus::link::{
 use super::{ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument};
 use crate::main::record::write_record_field;
 
-/// Lynx's video tag and the attributes the component observes.
 pub(crate) const VIDEO_TAG: &str = "video";
 const SRC_ATTRIBUTE: &str = "src";
 const LOOP_ATTRIBUTE: &str = "loop";
 const MUTED_ATTRIBUTE: &str = "muted";
 
-/// The three events the element fires.
 pub(crate) const FIRST_FRAME_EVENT: &str = "firstframe";
 pub(crate) const ENDED_EVENT: &str = "ended";
 pub(crate) const ERROR_EVENT: &str = "error";
 
-/// iOS's `LynxVideoErrorInvalidSource` and `LynxVideoErrorOperation`.
 const INVALID_SOURCE_CODE: i32 = -1;
 const OPERATION_CODE: i32 = -2;
 
-/// The message native gives a `play` with no `src`.
 const MISSING_SOURCE_MESSAGE: &str = "missing video source";
 
-/// What the bare tag and its `object-fit` attribute give the box.
-///
-/// `object-fit` is native's attribute name and the CSS property's, and its
-/// three values are both platforms' (`LynxUIVideo.m:253-261`,
-/// `LynxVideoView.kt:272-278`): `contain`, the default, `cover` and `fill`;
-/// anything else is `contain`, as on both. The border box and the rest of
-/// the common block come from [`super::ua_sheet`]. `video > *` hides the
-/// children, with the ordering constraint `image > *` has
-/// ([`super::image`]), so [`super::ua_sheet`] assembles it last.
 pub(super) const UA_RULES: &str = r#"video { display: flex; object-fit: contain; }
 video[object-fit="cover"] { object-fit: cover; }
 video[object-fit="fill"] { object-fit: fill; }
 video > * { display: none; }
 "#;
 
-/// Installs the component over the record of its elements and the queue
-/// its events go into.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents, videos: Videos) {
     document.define(VIDEO_TAG, Box::new(Video { events, videos }));
 }
 
-/// The picture one element shows and the source it opened it with.
 #[derive(Debug)]
 struct Opened {
     source: Arc<str>,
     picture: PictureId,
-    /// The open is queued and not taken yet: it reads `loop` and `muted`
-    /// when it is, so a change of either before then sends nothing.
     pending: bool,
 }
 
-/// A request queued for the host.
 #[derive(Debug)]
 enum Queued {
-    /// `picture` opens `source` for `element`, under the settings the
-    /// element's `loop` and `muted` give when the request is taken.
     Open {
         element: NodeId,
         picture: PictureId,
@@ -133,13 +112,11 @@ enum Queued {
 #[derive(Debug, Default)]
 struct State {
     elements: FxHashMap<NodeId, Opened>,
-    /// The element each open picture belongs to.
     players: FxHashMap<PictureId, NodeId>,
     queued: Vec<Queued>,
 }
 
 impl State {
-    /// Ends the picture `element` shows, if it shows one.
     fn close(&mut self, element: NodeId) {
         if let Some(opened) = self.elements.remove(&element) {
             self.players.remove(&opened.picture);
@@ -150,18 +127,10 @@ impl State {
     }
 }
 
-/// The document's `video` elements: the picture each shows and the
-/// requests not handed to the host yet.
-///
-/// A handle, like [`super::ImageSources`]: the component and the runtime's
-/// report path each hold a clone of one state.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Videos(Rc<RefCell<State>>);
 
 impl Videos {
-    /// Points `element` at `source`, or at nothing: a new picture for a new
-    /// value, presented at once with no natural size, and the end of the
-    /// one before. Writing the value already there does nothing.
     fn set_source(&self, document: &mut LynxDocument, element: NodeId, source: Option<&str>) {
         let picture = {
             let mut state = self.0.borrow_mut();
@@ -196,9 +165,6 @@ impl Videos {
         document.set_picture(element, picture.map(|id| (PictureKey::Id(id), None)));
     }
 
-    /// Sends `command` to the player of the picture `element` shows. Answers
-    /// whether it shows one. A switch (`Loop`, `Muted`) for a picture whose
-    /// open is still queued is sent with the open instead.
     fn command(&self, element: NodeId, command: MediaCommand) -> bool {
         let mut state = self.0.borrow_mut();
         let Some((picture, pending)) = state
@@ -217,10 +183,6 @@ impl Videos {
         true
     }
 
-    /// Takes the requests made since the last call, for the host, in the
-    /// order they were made. A picture that opens is opened under the
-    /// settings its element's `loop` and `muted` give now: a batch that
-    /// writes `src` before either is read whole.
     pub(crate) fn take_requests(&self, document: &LynxDocument) -> Vec<PlaybackRequest> {
         let queued = {
             let mut state = self.0.borrow_mut();
@@ -256,13 +218,10 @@ impl Videos {
             .collect()
     }
 
-    /// Drops everything kept for `element`, which is being freed, and ends
-    /// the picture it showed.
     fn forget(&self, element: NodeId) {
         self.0.borrow_mut().close(element);
     }
 
-    /// The picture `element` shows.
     #[cfg(test)]
     pub(crate) fn picture(&self, element: NodeId) -> Option<PictureId> {
         self.0
@@ -273,10 +232,6 @@ impl Videos {
     }
 }
 
-/// The events the host's reports owe the document's `video` elements, in
-/// report order, each at the element whose picture reported it; a report for
-/// a picture that has ended since is dropped. A first frame also gives the
-/// element its natural size.
 pub(crate) fn apply_reports(
     document: &mut LynxDocument,
     videos: &Videos,
@@ -330,7 +285,6 @@ pub(crate) fn apply_reports(
     owed
 }
 
-/// An `error` with native's `{errorCode, errorMsg}`.
 fn error_event(node: NodeId, code: i32, message: String) -> ComponentEvent {
     ComponentEvent::Detailed {
         node,
@@ -339,16 +293,11 @@ fn error_event(node: NodeId, code: i32, message: String) -> ComponentEvent {
     }
 }
 
-/// A boolean attribute as both platforms read one written by
-/// `__SetAttribute`: on when present, unless it is the `"false"` a
-/// JavaScript `false` is written as.
 fn is_on(value: Option<&str>) -> bool {
     value.is_some_and(|value| value != "false")
 }
 
 struct Video {
-    /// Where `play`'s own `error` goes: it is fired from the method, so it
-    /// is queued, never dispatched inside the call.
     events: ComponentEvents,
     videos: Videos,
 }
@@ -371,15 +320,10 @@ impl CustomElement<()> for Video {
         new: Option<&str>,
     ) {
         match name {
-            // An empty value names nothing, as `image`'s does: iOS loads no
-            // item for one (`LynxVideoView.m:360-363`), Android no media
-            // item (`LynxVideoView.kt:215-218`).
             SRC_ATTRIBUTE => {
                 self.videos
                     .set_source(document, element, new.filter(|value| !value.is_empty()));
             }
-            // Read whole when the picture opens; a change after that is a
-            // command to its player.
             LOOP_ATTRIBUTE => {
                 let _ = self.videos.command(element, MediaCommand::Loop(is_on(new)));
             }
@@ -396,9 +340,6 @@ impl CustomElement<()> for Video {
         self.videos.forget(element);
     }
 
-    /// `play` and `pause`: the command to the element's player, and code 0
-    /// with `{success: true}`; a `play` with no `src` answers 8 and fires an
-    /// `error`. `params` is not read.
     fn invoke(
         &self,
         _document: &mut LynxDocument,

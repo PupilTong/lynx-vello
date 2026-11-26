@@ -73,29 +73,16 @@ use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
 use crate::main::tree::{LynxDocument, SELECTION_CHANGE, focus_delegate};
 
-/// One group of event names the painter routes to this thread on the
-/// editing account, whether or not the realm listens for them, each while
-/// the state that needs it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EditingRoute {
-    /// `pointerdown` and `click`, while the document exists: a mouse press
-    /// and a touch or pen tap are what focus an editing host and place its
-    /// caret or select a selectable element's text, and a press outside
-    /// both is what blurs and clears.
     Pointer,
-    /// `keydown`, while an element is focused: the keyboard's editing
-    /// actions need a focused host.
     Focus,
-    /// `pointermove`, `pointerup` and `pointercancel`, while a mouse drag
-    /// that placed a caret is held: the moves extend the selection and the
-    /// release or cancellation ends the drag.
     Drag,
 }
 
 impl EditingRoute {
     pub(super) const ALL: [Self; 3] = [Self::Pointer, Self::Focus, Self::Drag];
 
-    /// The names the route holds open.
     pub(super) const fn names(self) -> &'static [&'static str] {
         match self {
             Self::Pointer => &["pointerdown", "click"],
@@ -104,7 +91,6 @@ impl EditingRoute {
         }
     }
 
-    /// The route's bit in `DocumentSlot::editing_routes`.
     pub(super) const fn bit(self) -> u8 {
         match self {
             Self::Pointer => 1,
@@ -114,25 +100,12 @@ impl EditingRoute {
     }
 }
 
-/// What the pointer's editing default actions remember between events.
 #[derive(Debug, Default)]
 pub(super) struct PointerEditing {
-    /// The mouse pointer whose press placed the caret in this selection
-    /// host (an editing host or a selectable element) and whose primary
-    /// button is still held: its moves extend the selection.
     pressed: Option<(PointerId, terminus::link::NodeId)>,
-    /// The last primary press on a selection host, its timestamp, and how
-    /// many quick presses on that host it ended: two select a word, three or
-    /// more a line, as a browser's click count does.
     last_press: Option<(terminus::link::NodeId, f64, u32)>,
 }
 
-/// The editing host `node` is in, by HTML's rule for a plain-text host:
-/// the outermost element of the unbroken run of `contenteditable` elements
-/// above `node` (a nested `contenteditable` is content of the outer host),
-/// with a `contenteditable="false"` element ending the run (its subtree is
-/// not editable). The walk stays inside `node`'s tree: a UA shadow tree's
-/// editing host is found from its own content.
 fn editing_host_of(
     document: &LynxDocument,
     node: terminus::link::NodeId,
@@ -153,49 +126,14 @@ fn editing_host_of(
     host.filter(|&host| document.is_editing_host(host))
 }
 
-/// Whether `node` is inside a shadow tree. Every shadow tree here is a UA
-/// one, built by a component (no script can attach one), and an editing
-/// host inside one is that component's own editor: an `x-input`'s
-/// `contenteditable`, whose input, composition and focus events stay in its
-/// tree as a browser's `<input>` keeps its inner editor's, and which the
-/// component re-fires at its host in Lynx's shape
-/// ([`crate::main::tree::text_field`]).
 fn is_shadow_content(document: &LynxDocument, node: terminus::link::NodeId) -> bool {
     document.shadow_root_of(node).is_some()
 }
 
-/// Whether the text a key typed is text to insert: non-empty and free of
-/// control characters. A platform reports Enter's `"\r"`, Tab's `"\t"`,
-/// Backspace's `"\u{8}"` and Escape's `"\u{1b}"` as typed text too (winit's
-/// `KeyEvent.text` does); none of them is inserted as it is.
 fn is_insertable(text: &str) -> bool {
     !text.is_empty() && !text.chars().any(char::is_control)
 }
 
-/// The browser's editing default action for a `keydown` at a focused
-/// editing host, or `None` for a key that has none here.
-///
-/// With [`TextInputSource::Keys`] (every host but the browser's):
-///
-/// - The text a key typed (`text`, which the host reports with the key: never `key`) is inserted,
-///   unless ctrl or meta is held (a shortcut, not text) or it is a control character. A host whose
-///   platform delivers typed text through its input method reports `None` here and sends the text
-///   as an input-method commit, so it is inserted once.
-/// - `"Enter"` inserts a line break; `"Backspace"` and `"Delete"` delete the character before or
-///   after the caret, or the word with alt; with ctrl or meta held they do nothing.
-///
-/// With [`TextInputSource::Commands`] the host's text proxy reports every insertion, deletion and
-/// line break as an input event of its own (a browser `<textarea>`'s `beforeinput`), which arrives
-/// as a [`Command`], so the two items above do nothing — a Backspace deletes once, by its command —
-/// and only the items below run.
-///
-/// - `"ArrowLeft"` and `"ArrowRight"` move by a character, by a word with alt, to the line's edge
-///   with meta; `"ArrowUp"` and `"ArrowDown"` by a line, or to the value's start or end with meta;
-///   `"Home"` and `"End"` to the line's edge. Shift extends the selection instead of moving the
-///   caret.
-/// - Ctrl-A or meta-A selects everything. Copy, cut and paste do nothing (clipboard access is
-///   deferred), and so do `"Process"` (a key the input method consumed: its text arrives as an
-///   input-method command) and `"Dead"`.
 pub(super) fn key_command(
     key: &str,
     text: Option<&str>,
@@ -248,9 +186,6 @@ pub(super) fn key_command(
     }
 }
 
-/// The detail one edit event crosses with: `InputEvent`'s members for
-/// `beforeinput` and `input`, `CompositionEvent.data` for the three
-/// composition events.
 fn edit_detail(event: &EditEvent) -> EventDetail {
     match event.kind {
         EditEventKind::BeforeInput | EditEventKind::Input => EventDetail::Input {
@@ -265,21 +200,6 @@ fn edit_detail(event: &EditEvent) -> EventDetail {
 }
 
 impl MainThreadRuntime {
-    /// Delivers one routed event the painting side decided, then runs the
-    /// editing default action it has. What the page applies a
-    /// [`crate::link::ToMain::DispatchEvent`] with.
-    ///
-    /// A key event goes to the focused element when there is one, and to
-    /// the target the painter named (the document element) otherwise. The
-    /// dispatch is the kernel's ([`Self::dispatch_input_event`]), which
-    /// builds no path for a name no realm and no component hears — one the
-    /// editing account alone routes. The default action is gated on that
-    /// account itself (`DocumentSlot::editing_routes`), not on the dispatch:
-    /// it runs whenever the account routes the name, heard or not, and
-    /// whatever a listener did, since no event is cancelable from script.
-    ///
-    /// Returns what the listeners threw, in order; a listener that throws is
-    /// nonfatal and its event's default action still runs.
     pub(crate) fn deliver_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -298,9 +218,6 @@ impl MainThreadRuntime {
                 Some(release),
                 &mut failures,
             );
-            // A finger's or a pen's tap is its press, as a touch browser
-            // focuses and places the caret on the tap: at the release, where
-            // the tap landed.
             if self.slot.borrow().editing_routes(CLICK_EVENT)
                 && let EventDetail::Pointer {
                     position,
@@ -339,10 +256,6 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// The editing default actions of a routed event: the keyboard's
-    /// editing commands after a `keydown`, the caret placement and selection
-    /// drag after the pointer events. A pointer's release or cancellation
-    /// ends its drag.
     fn input_default_action(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -405,8 +318,6 @@ impl MainThreadRuntime {
                 if held != *id {
                     return;
                 }
-                // Released without a `pointerup` reaching here, or the
-                // selection moved on (a listener's doing): the drag is over.
                 let selection_host = self.slot.borrow().document_ref().selection_host();
                 if buttons & 1 == 0 || selection_host != Some(host) {
                     self.set_pressed(None);
@@ -427,16 +338,6 @@ impl MainThreadRuntime {
         }
     }
 
-    /// A mouse's primary press, or a finger's or pen's tap:
-    /// inside an editing host it focuses the host and places the caret —
-    /// or, as the second or third in quick succession on that host, selects
-    /// the word or the line. Inside no editing host but in a selectable
-    /// element ([`terminus::link::Document::selectable_root_of`]) it starts the
-    /// document's selection there ([`terminus::link::Document::begin_selection`], which
-    /// blurs a focused host) and runs the same command. Outside both it takes
-    /// the focus away and clears the selection, as a press on a page's
-    /// unfocusable, unselectable area does in a browser. A mouse press that
-    /// placed a caret starts a drag.
     #[allow(
         clippy::too_many_arguments,
         reason = "one press's facts, read out of its detail by the caller"
@@ -454,13 +355,9 @@ impl MainThreadRuntime {
         let host = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
-            // A target freed since the press formed decides nothing, as a
-            // dispatch at it delivers nothing.
             if document.get(target).is_none() {
                 return;
             }
-            // A press in a text field outside its editor — its padding,
-            // above or below its line — focuses the editor.
             let host =
                 editing_host_of(document, target).or_else(|| focus_delegate(document, target));
             if let Some(host) = host {
@@ -490,8 +387,6 @@ impl MainThreadRuntime {
             _ => 1,
         };
         self.pointer_editing.last_press = Some((host, timestamp, count));
-        // A `focus` or `blur` listener can move the selection on, and then
-        // the press places nothing in a host the selection is no longer in.
         if self.slot.borrow().document_ref().selection_host() != Some(host) {
             return;
         }
@@ -507,27 +402,11 @@ impl MainThreadRuntime {
             _ => Command::SelectLineAtPoint { point },
         };
         failures.extend(self.apply_edit(js_runtime, command, timestamp));
-        // Only a mouse drags a selection: a finger or a pen dragging over a
-        // host is the scroll gesture, as on a touch browser.
         if device == PointerKind::Mouse {
             self.set_pressed(Some((pointer, host)));
         }
     }
 
-    /// Records the mouse drag a press started, or its end, and opens or
-    /// closes [`EditingRoute::Drag`] with it: the drag's moves and its
-    /// release reach this thread while it is held, and nothing of a mouse
-    /// that is only hovering does.
-    ///
-    /// The routed-name change is written inside this job and seen by the
-    /// painter at its next routing pass (`DocumentSlot::set_editing_route`,
-    /// through `DocumentSlot::change_names`), so a move the
-    /// painter decided before the press ran here was dropped there: the
-    /// first move that crosses extends to its own position, which catches
-    /// the selection up. A release decided that early never crosses either;
-    /// the drag then ends at the next move that reports the button up or
-    /// the focus moved, or at the next press, which is routed whenever the
-    /// document has a host.
     pub(super) fn set_pressed(&mut self, pressed: Option<(PointerId, terminus::link::NodeId)>) {
         self.pointer_editing.pressed = pressed;
         self.slot
@@ -535,11 +414,6 @@ impl MainThreadRuntime {
             .set_editing_route(EditingRoute::Drag, pressed.is_some());
     }
 
-    /// A viewport position in `host`'s border-box space, which the pointer
-    /// commands take: the position less the host's
-    /// [`bounding_client_rect`](terminus::link::Document::bounding_client_rect) origin,
-    /// from the last committed layout — the geometry the press was made
-    /// against.
     fn host_point(
         &self,
         host: terminus::link::NodeId,
@@ -557,20 +431,6 @@ impl MainThreadRuntime {
         ))
     }
 
-    /// Applies one editing command to the selection host — the focused
-    /// editing host, or the selectable element the selection is in, which
-    /// refuses every command that would change its text — with the events
-    /// it owes, by the prepare/commit seam: the events before the
-    /// change are dispatched at the host in order, then the change is
-    /// committed and the events after it are dispatched. No listener can
-    /// stop the change: none of the events is cancelable from script (the
-    /// 2026-08-17 ruling, `docs/tracking/deviations.md`). A command with
-    /// nothing focused, or one the host refuses, does nothing; so does a
-    /// commit a listener made stale by moving the focus or rewriting the
-    /// value (last write wins).
-    ///
-    /// Returns what the listeners threw; a listener that throws stops
-    /// nothing either.
     pub(crate) fn apply_edit(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -604,14 +464,6 @@ impl MainThreadRuntime {
         for event in after {
             self.dispatch_edit_event(js_runtime, host, event, timestamp, &mut failures);
         }
-        // The engine's own `selectionchange` at the host, after every
-        // command that applied: no realm hears it, because
-        // `dispatch_element_event` runs components alone; the text field
-        // component reads its `selection` event from it. One set lookup when
-        // no component observes it. The W3C `selectionchange` script hears is
-        // separate: the commit set the document's flag if the selection
-        // changed, and the component-events entry fires it at the document
-        // node.
         self.slot
             .borrow_mut()
             .document_mut()
@@ -626,15 +478,10 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// What a host's [`crate::link::ToMain::TextInputSource`] sets: what a
-    /// `keydown`'s editing default action does from the next key on.
     pub(crate) fn set_text_input_source(&mut self, source: TextInputSource) {
         self.text_input_source = source;
     }
 
-    /// [`Self::apply_edit`] for a host's [`crate::link::ToMain::Edit`]: the
-    /// command carries no reading of the view's timeline, so its events are
-    /// stamped with the last one this side was handed.
     pub(crate) fn apply_host_edit(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -644,11 +491,6 @@ impl MainThreadRuntime {
         self.apply_edit(js_runtime, command, timestamp)
     }
 
-    /// One edit event at `host`: bubbling and composed, as Input Events and
-    /// UI Events fire all five, and not cancelable (the 2026-08-17 ruling) —
-    /// except that a host inside a UA shadow tree (an `x-input`'s editor)
-    /// dispatches it non-composed ([`is_shadow_content`]). An event nothing
-    /// hears builds no path ([`Self::dispatch`]).
     fn dispatch_edit_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -672,16 +514,6 @@ impl MainThreadRuntime {
         );
     }
 
-    /// Dispatches the focus events `terminus` has queued, in the order they
-    /// formed: `blur` and `focusout` at the element that lost focus, then
-    /// `focus` and `focusin` at the one that gained it, each naming the
-    /// other as its `relatedTarget`. All four are composed — but for an
-    /// element inside a UA shadow tree ([`is_shadow_content`]); `focusin`
-    /// and `focusout` bubble. An event nothing hears builds no path
-    /// ([`Self::dispatch`]).
-    ///
-    /// Called right after a press, and from the entry that delivers
-    /// component events, for the focus a UI method moved.
     pub(crate) fn dispatch_focus_events(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -709,10 +541,6 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Opens [`EditingRoute::Pointer`] once the document exists, and opens
-    /// or closes [`EditingRoute::Focus`] as an element gains or loses focus:
-    /// the step of [`MainThreadRuntime::settle_entry`] the tests run on its
-    /// own.
     #[cfg(test)]
     pub(crate) fn sync_editing_routes(&mut self) {
         self.slot.borrow_mut().sync_editing_routes();
@@ -720,11 +548,6 @@ impl MainThreadRuntime {
 }
 
 impl DocumentSlot {
-    /// Publishes the focused host's [`TextInputState`](terminus::link::editing::TextInputState) to
-    /// the host when it differs from `published`, the last one published,
-    /// and records it there. Asked by the page's epilogue after its commit,
-    /// so the geometry is the committed frame's. Nothing is computed while
-    /// nothing is focused and nothing was.
     pub(super) fn publish_text_input_state(
         &self,
         published: &mut terminus::link::editing::TextInputState,
@@ -763,13 +586,10 @@ mod tests {
         ..NONE
     };
 
-    /// [`super::key_command`] for a host that reports typed text with its
-    /// keys, which every test below but the last is about.
     fn key_command(key: &str, text: Option<&str>, modifiers: Modifiers) -> Option<Command> {
         super::key_command(key, text, modifiers, TextInputSource::Keys)
     }
 
-    /// Two modifiers held together.
     fn both(first: Modifiers, second: Modifiers) -> Modifiers {
         Modifiers {
             alt: first.alt || second.alt,
@@ -789,8 +609,6 @@ mod tests {
                 "{text:?}"
             );
         }
-        // A key whose text the platform delivers another way (its input
-        // method) types nothing here, whatever its `key`.
         for key in [
             "x",
             "é",
@@ -804,9 +622,6 @@ mod tests {
         ] {
             assert_eq!(key_command(key, None, NONE), None, "{key:?}");
         }
-        // The text a platform reports for the named keys is control
-        // characters, which are not inserted; Enter and Backspace keep their
-        // own commands.
         assert_eq!(key_command("Tab", Some("\t"), NONE), None);
         assert_eq!(key_command("Escape", Some("\u{1b}"), NONE), None);
         assert_eq!(key_command("Unidentified", Some("\u{7f}"), NONE), None);
@@ -907,9 +722,6 @@ mod tests {
         );
     }
 
-    /// A host whose text proxy reports insertions, deletions and line
-    /// breaks as commands of their own gets only movement and select-all
-    /// from a `keydown`: its Backspace deletes once, by the proxy's command.
     #[test]
     fn a_host_that_sends_commands_gets_only_movement_and_select_all_from_keys() {
         let commands = |key, text, modifiers| {

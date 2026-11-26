@@ -12,7 +12,6 @@ use terminus::link::{FontBlob, NodeId};
 
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-/// [`Doc`] plus helpers for document-owned layout results.
 struct Harness {
     doc: Doc,
 }
@@ -51,10 +50,6 @@ impl LayoutSnapshot {
     }
 }
 
-/// The measured ink of the paragraph `holder` establishes.
-///
-/// What the text tests were really asserting: a text node has no box of its
-/// own any more, and the element's box may be stretched by its parent.
 fn text_ink(dom: &terminus::link::Document<()>, holder: terminus::link::NodeId) -> (f32, f32) {
     let size = dom
         .text_block_size(holder)
@@ -444,10 +439,6 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
     dom.append_child(wrapper, text);
     dom.layout();
 
-    // The wrapper generates no box, but its style still reaches the run
-    // inside it: the paragraph's five glyphs measure at 8px, not the page's
-    // 16px. The line box is the page's: its 16px strut starts every line
-    // (CSS 2.2 §10.8.1), and the 8px run fits inside it.
     let _ = text;
     assert_eq!(text_ink(&dom, root), (40.0, 16.0));
     assert_eq!(dom_rect(&dom, wrapper), (0.0, 0.0, 0.0, 0.0));
@@ -542,12 +533,6 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
     assert_eq!(h.rect(lifted).2, 150.0);
 }
 
-/// css-display-3 §2.7 computes a root `display: contents` to `block`; the
-/// fork's `lynx` grammar has no flow layout, so its block-level container,
-/// `flex`, takes that place. The root lays out exactly as a `display: flex`
-/// root does: a flex container whose `auto` size is its content's (this
-/// engine does not stretch an `auto` root to the viewport), with its children
-/// in a row; sized to the viewport, it fills it.
 #[test]
 fn display_contents_root_blockifies_to_a_flex_container() {
     let layout = |display: &str, size: &str| {
@@ -645,13 +630,10 @@ fn a_class_that_toggles_the_containing_block_relayouts_positioned_grandchildren(
     let fixed = h.doc.el(mid, ".fixed");
     let abs = h.doc.el(mid, ".abs");
     h.layout();
-    // Anchored to the viewport: (10, 20) less the mid's origin (120, 60).
     let viewport = (-110.0, -40.0, 30.0, 40.0);
     assert_eq!(h.rect(fixed), viewport);
     assert_eq!(h.rect(abs), viewport);
 
-    // The host now contains both, through a non-positioned intermediate:
-    // (10, 20) less the mid's offset (20, 10) inside the host.
     h.doc.add_class(host, "transformed");
     h.layout();
     let hosted = (-10.0, 10.0, 30.0, 40.0);
@@ -822,8 +804,6 @@ fn backdrop_filter_establishes_the_fixed_containing_block() {
     let fixed = h.doc.el(host, ".fixed");
     h.layout();
 
-    // Relative to `.host`, which itself starts at x = 100. An uncontained
-    // fixed box would resolve against the viewport and land at x = -90 here.
     assert_eq!(h.rect(host).0, 100.0);
     assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
 }
@@ -859,9 +839,6 @@ fn root_backdrop_filter_is_exempt_from_fixed_containing_block_creation() {
     let captured_fixed = h.doc.el(host, ".fixed");
     h.layout();
 
-    // filter-effects-2 §2.1 exempts a document root element: the root's fixed
-    // child resolves against the viewport, so the root's own 10px border does
-    // not shift it. A non-root `backdrop-filter` element does capture its own.
     assert_eq!(h.rect(root_fixed), (0.0, 0.0, 30.0, 40.0));
     assert_eq!(h.rect(captured_fixed), (0.0, 0.0, 30.0, 40.0));
     assert_eq!(h.rect(host).0, 110.0);
@@ -900,17 +877,12 @@ fn hoisted_nodes_relayout_across_passes() {
     assert_eq!(h.rect(fixed), (50.0, 20.0, 30.0, 40.0));
 }
 
-/// The four positioned boxes [`a_current_transform_animation_contains_positioned_descendants`]
-/// reads: a fixed and an absolute child of `.host`, a fixed grandchild under a
-/// static `.mid`, and a fixed child sized against its containing block.
 const CONTAINED: [(f32, f32, f32, f32); 4] = [
     (10.0, 20.0, 30.0, 40.0),
     (5.0, 7.0, 30.0, 40.0),
     (10.0, 20.0, 30.0, 40.0),
     (0.0, 0.0, 150.0, 20.0),
 ];
-/// The same boxes against the viewport, relative to `.host` at (100, 50):
-/// the grandchild's `.mid` sits at the host's origin.
 const ESCAPED: [(f32, f32, f32, f32); 4] = [
     (-90.0, -30.0, 30.0, 40.0),
     (-95.0, -43.0, 30.0, 40.0),
@@ -918,11 +890,6 @@ const ESCAPED: [(f32, f32, f32, f32); 4] = [
     (-100.0, -50.0, 400.0, 20.0),
 ];
 
-/// web-animations-1: a current or in-effect transform animation acts as
-/// `will-change: transform`, so its element contains its absolute and fixed
-/// descendants — through a positive delay, where the committed transform is
-/// `none`, and while it runs — and they escape again once it ends without a
-/// forwards fill. With `forwards` it keeps them.
 #[test]
 fn a_current_transform_animation_contains_positioned_descendants() {
     for (animation, delayed, filled) in [
@@ -1148,11 +1115,6 @@ fn viewport_percentages_resolve_against_the_engine_viewport() {
     assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 400.0, 150.0));
 }
 
-/// `cqw`/`cqh` are the query container's width/height divided by 100. With no
-/// ancestor whose `container-type` is a size container type, css-contain-3's
-/// fallback applies: they resolve against the small viewport, which makes them
-/// the same lengths as `vw`/`vh`. Resolving that way flags the style
-/// `USES_VIEWPORT_UNITS`, so a resize re-cascades them.
 #[test]
 fn container_units_resolve_against_the_viewport_and_follow_resizes() {
     let mut h = Harness::with_device(
@@ -1168,12 +1130,6 @@ fn container_units_resolve_against_the_viewport_and_follow_resizes() {
     assert_eq!(h.rect(h.doc.root), (0.0, 0.0, 20.0, 30.0));
 }
 
-/// [css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
-/// `container-type: inline-size` "applies layout containment, style
-/// containment, and inline-size containment to the principal box", and `size`
-/// the same with size containment. A size query container is therefore a
-/// *contained* box with no `contain` declaration of its own —
-/// `effective_containment` folds the one property into the other's bits.
 #[test]
 fn a_size_query_container_is_contained_by_its_container_type() {
     let mut h = Harness::new(
@@ -1214,8 +1170,6 @@ fn a_size_query_container_is_contained_by_its_container_type() {
     assert_eq!(h.rect(query), (0.0, 0.0, 50.0, 20.0));
 }
 
-/// The 400x600 device every container-query test below resolves its viewport
-/// fallback against.
 fn query_harness(css: &str) -> Harness {
     Harness::with_device(
         css,
@@ -1223,11 +1177,6 @@ fn query_harness(css: &str) -> Harness {
     )
 }
 
-/// [css-contain-3 §2.1](https://drafts.csswg.org/css-contain-3/#container-type):
-/// `cqw` and `cqh` are 1% of the nearest ancestor size query container's
-/// content box. One `layout()` call is enough — the container's size is a
-/// cascade input only layout can produce, so the call lays out, re-cascades
-/// what the sizes moved, and lays out again.
 #[test]
 fn container_units_resolve_against_the_nearest_size_query_container() {
     let mut h = query_harness(
@@ -1243,10 +1192,6 @@ fn container_units_resolve_against_the_nearest_size_query_container() {
     assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 50.0));
 }
 
-/// `container-type: inline-size` supplies the inline axis alone. The engine is
-/// horizontal-writing-mode only, so that is the width; the block axis falls
-/// through the rest of the ancestor chain and, finding no `size` container,
-/// lands on the viewport.
 #[test]
 fn an_inline_size_container_leaves_the_block_axis_to_the_viewport() {
     let mut h = query_harness(
@@ -1266,8 +1211,6 @@ fn an_inline_size_container_leaves_the_block_axis_to_the_viewport() {
         "50cqw is half the container's 200px; 50cqh is half the 600px viewport",
     );
 
-    // The fallback resolves through the viewport, which flags the style
-    // `USES_VIEWPORT_UNITS`, so the existing resize re-cascade covers it.
     h.doc.dom.set_viewport(400.0, 300.0);
     h.layout();
 
@@ -1278,9 +1221,6 @@ fn an_inline_size_container_leaves_the_block_axis_to_the_viewport() {
     );
 }
 
-/// Resizing the container re-resolves every unit under it, which is the whole
-/// reason the recascade loop exists: nothing about the child's own style
-/// changed.
 #[test]
 fn resizing_a_query_container_re_resolves_the_units_under_it() {
     let mut h = query_harness(
@@ -1300,9 +1240,6 @@ fn resizing_a_query_container_re_resolves_the_units_under_it() {
     assert_eq!(h.rect(item), (0.0, 0.0, 50.0, 50.0));
 }
 
-/// Nearest wins per axis, and an incomplete answer merges upwards: the inner
-/// `inline-size` container supplies the width, and the block axis keeps
-/// walking until the outer `size` container answers it.
 #[test]
 fn a_nested_container_supplies_only_the_axis_it_contains() {
     let mut h = query_harness(
@@ -1326,9 +1263,6 @@ fn a_nested_container_supplies_only_the_axis_it_contains() {
     );
 }
 
-/// "The query container's content box": padding and borders are not part of
-/// it. The container below is `box-sizing: content-box`, so its authored
-/// `width` *is* its content width and its border box is 30px wider.
 #[test]
 fn the_container_size_is_its_content_box() {
     let mut h = query_harness(
@@ -1355,8 +1289,6 @@ fn the_container_size_is_its_content_box() {
     );
 }
 
-/// A container that stops being one takes the query with it: the walk finds no
-/// size container above and falls back to the viewport.
 #[test]
 fn losing_container_type_falls_the_units_back_to_the_viewport() {
     let mut h = query_harness(
@@ -1411,11 +1343,6 @@ fn style_width_change_relayouts_without_manual_invalidation() {
     assert_eq!(h.rect(b).2, 160.0);
 }
 
-/// A parked relayout root names a containment boundary that may be gone by
-/// the time the next pass runs. Its id can never come back attached to a
-/// different node, so the pruning is no longer an aliasing defense — but a
-/// replacement built on the freed node's storage must still not inherit the
-/// parked pass, and must obey the skipped-contents subtree it is placed in.
 #[test]
 fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
     let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
@@ -1451,8 +1378,6 @@ fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
 
     assert_eq!(h.doc.dom.drop_subtree(old_boundary).len(), 2);
 
-    // Both freed slots go back on the arena free list, so these two land on
-    // the storage the removed boundary and its child were using.
     let replacement_boundary = h.doc.dom.create_element("view", ());
     let replacement_child = h.doc.dom.create_element("view", ());
     assert!(
@@ -1851,17 +1776,11 @@ fn content_visibility_auto_establishes_the_fixed_containing_block() {
     let plain_fixed = h.doc.el(plain, ".fixed");
     let cv = h.doc.el(root, ".host.cv");
     let cv_fixed = h.doc.el(cv, ".fixed");
-    // A render, not a bare layout: `content-visibility: auto` relevance is
-    // determined by the rendering update, and an `auto` box no rendering
-    // update has reached skips its contents — so the fixed descendant this
-    // test is about only exists once the box is known to be on screen.
     assert!(h.doc.dom.render(), "the first render commits a frame");
 
     assert_eq!(h.rect(plain_fixed), (-90.0, -30.0, 30.0, 40.0));
     assert_eq!(h.rect(cv_fixed), (10.0, 20.0, 30.0, 40.0));
 
-    // The same fixed containing block while the box is skipping: its own
-    // geometry never depended on its contents being laid out.
     h.doc.dom.set_viewport(800.0, 40.0);
     assert!(h.doc.dom.render(), "the resize commits another frame");
     assert_eq!(
@@ -2015,16 +1934,6 @@ fn mutation_inside_a_skipped_container_is_deferred_until_reveal() {
     assert_eq!(h.rect(child), (0.0, 0.0, 30.0, 20.0));
 }
 
-/// A box moved under a skipped box arrives with geometry of its own, and no
-/// algorithm will ever lay it out again while the box skips — so the pass
-/// that accepts the move is the one that has to take that geometry away.
-///
-/// Nothing above either node is invalidated: the move parks its `contain:
-/// strict` source and parks the skipped destination as the relayout boundary
-/// it is, and the root pass is served from the root's cache. The skipped box
-/// is therefore re-run in place, by `compute_boundary_relayout` under its own
-/// committed input, and that re-run is what hides the arrival and rounds it
-/// to the zero box.
 #[test]
 fn a_box_moved_under_a_skipped_box_loses_its_geometry_without_a_root_pass() {
     let mut h = Harness::new(
@@ -2060,8 +1969,6 @@ fn a_box_moved_under_a_skipped_box_loses_its_geometry_without_a_root_pass() {
         h.doc.dom.render(),
         "a frame is owed after the move, and this is the one that draws it",
     );
-    // Dead centre of the skipped box, where the moved node's old box would
-    // now sit: the paint order stops at the box that skips its contents.
     let inside = euclid::default::Point2D::new(80.0, 15.0);
     let hit = h.doc.dom.elements_from_point(inside);
     assert!(
@@ -2082,9 +1989,6 @@ fn a_box_moved_under_a_skipped_box_loses_its_geometry_without_a_root_pass() {
     );
 }
 
-/// A skipped box nested inside another relayout boundary, both parked by one
-/// batch of mutations: the outer boundary owns the rounding walk, and the
-/// result is the one a cold pass produces.
 #[test]
 fn a_parked_skipped_box_inside_a_parked_boundary_matches_a_full_relayout() {
     let mut h = Harness::new(
@@ -2104,8 +2008,6 @@ fn a_parked_skipped_box_inside_a_parked_boundary_matches_a_full_relayout() {
     h.layout();
     assert_eq!(h.rect(inner), (0.0, 0.0, 0.0, 0.0));
 
-    // One inside the skipped box, one beside it: the skipped box parks at
-    // depth 2 and the strict boundary at depth 1.
     h.doc.set_inline(inner, "width: 33px");
     h.doc.set_inline(sibling, "width: 24px");
     h.layout();
@@ -2274,11 +2176,6 @@ fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
     );
 }
 
-/// css-grid-2 §10.1: a box whose containing block a grid generates is laid
-/// out in the grid area its own placement properties name, also when it is
-/// a descendant hoisted past a grid item rather than a child (WPT
-/// `css/css-grid/abspos/positioned-grid-descendant-containing-block-014.html`,
-/// `css/css-grid/grid-definition/grid-auto-fit-collapsed-out-of-flow-001.html`).
 #[test]
 fn a_box_hoisted_to_a_grid_is_laid_out_in_the_area_it_names() {
     let mut h = Harness::new(
@@ -2299,15 +2196,9 @@ fn a_box_hoisted_to_a_grid_is_laid_out_in_the_area_it_names() {
     let half = h.doc.el(item, ".half");
     h.layout();
 
-    // Locations are in the item's coordinates; the item sits at (107, 7)
-    // in the grid's border box, the grid's padding box at (2, 2).
     assert_eq!(h.rect(item), (107.0, 7.0, 100.0, 100.0));
-    // `grid-row: 2` ends at the `auto` line, the padding edge.
     assert_eq!(h.rect(span), (-100.0, 100.0, 200.0, 105.0));
-    // No placement: the padding box, as before.
     assert_eq!(h.rect(auto), (-105.0, -5.0, 210.0, 210.0));
-    // Percentages resolve against the area: half of columns 1–2, and every
-    // row with `auto` row lines (the padding box's height).
     assert_eq!(h.rect(half), (0.0, -5.0, 100.0, 210.0));
 }
 
@@ -2344,8 +2235,6 @@ fn text_children_of_contents_measure_as_container_items() {
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let wrap = h.doc.el(root, "view.wrap");
-    // Text needs a block to live in, so what `display: contents` flattens into
-    // the container's item list is that block — which is the subject here.
     let label = h.doc.el(wrap, "text.label");
     let text = h.doc.dom.create_text_node("hi", ());
     h.doc.dom.append_child(label, text);
@@ -2456,7 +2345,6 @@ fn hoisted_rank_resolves_through_nested_contents_levels() {
     assert_eq!(h.layout_of(fixed).order, 1);
 }
 
-/// `bounding_client_rect` as a tuple, for the same reason `dom_rect` exists.
 fn client_rect(dom: &terminus::link::Document<()>, id: NodeId) -> Option<(f32, f32, f32, f32)> {
     dom.bounding_client_rect(id).map(|rect| {
         (
@@ -2486,7 +2374,6 @@ fn bounding_client_rect_telescopes_nested_offset_boxes() {
         client_rect(&h.doc.dom, parent),
         Some((10.0, 10.0, 200.0, 200.0))
     );
-    // Box-parent-relative locations sum into viewport coordinates.
     assert_eq!(h.rect(child), (30.0, 20.0, 50.0, 40.0));
     assert_eq!(
         client_rect(&h.doc.dom, child),
@@ -2494,8 +2381,6 @@ fn bounding_client_rect_telescopes_nested_offset_boxes() {
     );
 }
 
-/// The no-transform ruling: the rect is the untransformed border box, as
-/// native's own engine-side conversion produces it.
 #[test]
 fn a_transform_never_moves_the_bounding_client_rect() {
     let mut h = Harness::new(
@@ -2514,8 +2399,6 @@ fn a_transform_never_moves_the_bounding_client_rect() {
     h.layout();
     assert_eq!(client_rect(&h.doc.dom, child), before);
 
-    // Nor does one on the ancestor, which also turns it into a containing
-    // block for everything positioned under it.
     h.doc.set_inline(parent, "transform: rotate(45deg)");
     h.layout();
     assert_eq!(client_rect(&h.doc.dom, child), before);
@@ -2560,7 +2443,6 @@ fn bounding_client_rect_subtracts_ancestor_scroll_offsets_but_not_its_own() {
         "scrolling a container never moves the container",
     );
 
-    // Scrolled entirely out of the scrollport, the box is still a box.
     h.doc
         .dom
         .scroll_to(scroller, terminus::link::Vector2D::new(0.0, 300.0));
@@ -2570,9 +2452,6 @@ fn bounding_client_rect_subtracts_ancestor_scroll_offsets_but_not_its_own() {
     );
 }
 
-/// The containing-block escape, on the scroll chain: an out-of-flow box does
-/// not move with scrollers between it and its containing block, and does move
-/// with the containing block's own.
 #[test]
 fn an_out_of_flow_box_follows_only_its_containing_blocks_scroll() {
     let mut h = Harness::new(
@@ -2733,8 +2612,6 @@ fn bounding_client_rect_is_the_border_box_of_a_padded_text_element() {
     );
 }
 
-/// The no-flush contract: the answer is the last completed pass, whatever the
-/// tree has done since.
 #[test]
 fn bounding_client_rect_never_runs_a_pending_layout() {
     let mut h = Harness::new(
@@ -2757,11 +2634,6 @@ fn bounding_client_rect_never_runs_a_pending_layout() {
     assert_eq!(client_rect(&h.doc.dom, cell), Some((25.0, 0.0, 40.0, 40.0)));
 }
 
-// --- CSS Grid Level 3 `display: grid-lanes` -------------------------------
-
-/// The waterfall shape the Lynx `<list list-type="waterfall">` component will
-/// be lowered onto: fixed `minmax(0, 1fr)` lanes, a gutter in both axes, and
-/// `fit-tolerance: 0` so every item lands in the strictly shortest lane.
 const LANES: &str = "page { display: flex; align-items: flex-start;
                             width: 400px; height: 400px; }
      .lanes { display: grid-lanes; width: 200px; gap: 10px; fit-tolerance: 0;
@@ -2798,8 +2670,6 @@ fn grid_lanes_stacks_items_into_the_shortest_lane() {
     assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 130.0));
 }
 
-/// The same two-lane template written the way the `<list>` UA rule will write
-/// it, so `var()` substitution has to reach the track list before expansion.
 #[test]
 fn grid_lanes_reads_a_var_substituted_track_list() {
     let mut h = Harness::new(
@@ -2830,8 +2700,6 @@ fn grid_lanes_reads_a_var_substituted_track_list() {
     assert_eq!(h.rect(items[2]), (0.0, 40.0, 95.0, 20.0));
 }
 
-/// A full-span item spans every lane, so it starts below the longest one and
-/// leaves all of them level behind it.
 #[test]
 fn grid_lanes_full_span_item_levels_every_lane() {
     let mut h = Harness::new(LANES);
@@ -2857,8 +2725,6 @@ fn grid_lanes_full_span_item_levels_every_lane() {
     assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 115.0));
 }
 
-/// The waterfall as it will actually ship: inside a scroll container whose
-/// scrollable extent is the stacking range the lanes pass produced.
 #[test]
 fn grid_lanes_scroll_extent_is_the_stacking_range_beyond_the_scrollport() {
     let mut h = Harness::new(
@@ -2885,8 +2751,6 @@ fn grid_lanes_scroll_extent_is_the_stacking_range_beyond_the_scrollport() {
     assert_eq!(scroll_box.max_offset().y, 30.0);
 }
 
-/// `grid-template-rows` alone puts the tracks on the block axis, so the items
-/// stack rightwards and the scrollable extent is horizontal.
 #[test]
 fn row_grid_lanes_stack_along_the_inline_axis_and_scroll_there() {
     let mut h = Harness::new(
@@ -2930,8 +2794,6 @@ fn row_grid_lanes_stack_along_the_inline_axis_and_scroll_there() {
     assert_eq!(scroll_box.max_offset().x, 30.0);
 }
 
-/// A `display: contents` wrapper generates no box, so the items it holds are
-/// placed exactly where they would be as direct children.
 #[test]
 fn grid_lanes_flattens_a_display_contents_wrapper() {
     let mut h = Harness::new(&format!("{LANES} .wrap {{ display: contents; }}"));
@@ -2959,8 +2821,6 @@ fn grid_lanes_flattens_a_display_contents_wrapper() {
     assert_eq!(h.rect(lanes), (0.0, 0.0, 200.0, 120.0));
 }
 
-/// css-grid-3 §4.2: `fit-tolerance: normal` is `1em` of the container's own
-/// font, so the same three items land in different lanes under two font sizes.
 #[test]
 fn normal_fit_tolerance_resolves_against_the_containers_font_size() {
     for (font_size, third) in [(16.0_f32, (100.0, 20.0)), (40.0_f32, (0.0, 50.0))] {
@@ -2998,8 +2858,6 @@ fn normal_fit_tolerance_resolves_against_the_containers_font_size() {
     }
 }
 
-/// Neither a non-generated box nor an out-of-flow one is a grid item, so
-/// neither occupies a lane or moves the items after it.
 #[test]
 fn grid_lanes_skips_hidden_and_out_of_flow_children() {
     let mut h = Harness::new(&format!(
@@ -3029,19 +2887,6 @@ fn grid_lanes_skips_hidden_and_out_of_flow_children() {
     assert_eq!(h.rect(badge).3, 100.0, "the out-of-flow box is still sized");
 }
 
-// ---------------------------------------------------------------------------
-// Replaced content with an intrinsic aspect ratio, inside each container
-//
-// The seam: `Document::set_natural_size` makes a node replaced, and the node's
-// natural size then reaches layout twice — as the leaf's own measurement, and
-// as `CoreStyle::natural_size`, which the container above reads to settle
-// css-grid-1 §6.2 `normal` self-alignment before it measures anything. These
-// assert the laid-out size, not any element's behaviour, because every element
-// that carries decoded pixels arrives here the same way.
-// ---------------------------------------------------------------------------
-
-/// Attaches a 40x20 natural size to a fresh child, which is what a decoded
-/// bitmap does and what makes the node replaced.
 fn replaced_child(h: &mut Harness, parent: NodeId, spec: &str) -> NodeId {
     let node = h.doc.el(parent, spec);
     h.doc.dom.set_natural_size(
@@ -3053,10 +2898,6 @@ fn replaced_child(h: &mut Harness, parent: NodeId, spec: &str) -> NodeId {
     node
 }
 
-/// css-align-3 §6.2.4: a flex item's `normal` cross alignment is `stretch`,
-/// with no exception for replaced content, and css-flexbox-1 §9.8 makes that
-/// stretched cross size definite for the §9.2 flex-base measurement. The item
-/// fills the 100 of height and its ratio carries the width to 200.
 #[test]
 fn a_replaced_item_stretches_and_transfers_inside_a_flex_row() {
     let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
@@ -3067,10 +2908,6 @@ fn a_replaced_item_stretches_and_transfers_inside_a_flex_row() {
     assert_eq!(h.rect(item), (0.0, 0.0, 200.0, 100.0));
 }
 
-/// css-grid-1 §6.2: `normal` does not stretch a replaced box with a natural
-/// size — it is sized by the block-level rules for replaced elements, at
-/// 40x20. An explicit `stretch` does stretch it, in both axes, which §6.2's
-/// own note says will distort the ratio.
 #[test]
 fn a_replaced_grid_item_keeps_its_natural_size_until_it_is_told_to_stretch() {
     for (class, expected) in [
@@ -3090,14 +2927,8 @@ fn a_replaced_grid_item_keeps_its_natural_size_until_it_is_told_to_stretch() {
     }
 }
 
-/// css-grid-1 §11.5 with css-sizing-4 §5: a replaced item stretched across a
-/// definite column contributes the ratio-transferred height to the `auto` row,
-/// so the row is 100 rather than the item's natural 20.
 #[test]
 fn a_stretched_replaced_grid_item_transfers_into_an_auto_row() {
-    // The grid is nested so that its own block size stays indefinite: a root
-    // box fills the viewport, and css-grid-1 §11.8 would then stretch the
-    // `auto` row to that instead of leaving it at the contribution.
     let mut h = Harness::new(
         "page { display: flex; flex-direction: column; align-items: flex-start;
                 width: 400px; height: 400px; }
@@ -3114,9 +2945,6 @@ fn a_stretched_replaced_grid_item_transfers_into_an_auto_row() {
     assert_eq!(h.rect(grid).3, 100.0, "the auto row takes the transfer");
 }
 
-/// css-grid-3 §6.2 sends grid-axis alignment straight through regular Grid, so
-/// a lanes item told to fill takes its lane's width and its stacking height
-/// from the ratio — and the next item stacks behind it at that height.
 #[test]
 fn replaced_lanes_items_take_their_lane_width_and_stack_by_the_transferred_height() {
     let mut h = Harness::new(
@@ -3136,9 +2964,6 @@ fn replaced_lanes_items_take_their_lane_width_and_stack_by_the_transferred_heigh
     assert_eq!(h.rect(root).3, 100.0);
 }
 
-/// The same lanes without the fill: §6.2's `normal` leaves each replaced item
-/// at 40x20 inside its 100-wide lane, and the stacking range follows the
-/// smaller items.
 #[test]
 fn normal_alignment_leaves_replaced_lanes_items_at_their_natural_size() {
     let mut h = Harness::new(
@@ -3157,11 +2982,6 @@ fn normal_alignment_leaves_replaced_lanes_items_at_their_natural_size() {
     assert_eq!(h.rect(root).3, 40.0);
 }
 
-// ---------------------------------------------------------------------------
-// The top layer (css-position-4 §3.1): a top-layer element's containing block
-// is the initial one, whatever its ancestors establish.
-
-/// The parts of bobcat-core's UA sheet these tests read.
 const TOP_LAYER_UA: &str = "
     dialog { display: flex; position: absolute; }
     dialog.modal { position: fixed; }
@@ -3228,18 +3048,12 @@ fn a_top_layer_elements_static_position_is_the_viewport_origin() {
     let root = h.doc.root;
     let dialog = h.doc.el(root, "dialog.modal");
     h.layout();
-    // An absolutely positioned flex child's static position is where it
-    // would sit as the sole item (css-flexbox-1 §4.1).
     assert_eq!(viewport_rect(&h, dialog), (385.0, 560.0, 30.0, 40.0));
     h.doc.dom.add_to_top_layer(dialog, false);
     h.layout();
     assert_eq!(viewport_rect(&h, dialog), (0.0, 0.0, 30.0, 40.0));
 }
 
-/// HTML's modal `<dialog>` centring: `inset: 0` with `auto` margins centres
-/// the box in the viewport (css-position-3 §4.1's auto-margin resolution),
-/// whatever its ancestors' clips, groups and transforms, and a resize, or a
-/// restyle of the dialog alone, re-centres it.
 #[test]
 fn a_top_layer_element_with_auto_margins_centres_in_the_viewport() {
     let mut h = top_layer_harness(
@@ -3263,8 +3077,6 @@ fn a_top_layer_element_with_auto_margins_centres_in_the_viewport() {
     assert_eq!(viewport_rect(&h, dialog), (100.0, 125.0, 200.0, 50.0));
 }
 
-/// HTML's UA sheet sizes a modal dialog `fit-content` in both axes, so it
-/// shrinks to its contents and the auto margins centre it.
 #[test]
 fn a_fit_content_top_layer_element_with_auto_margins_centres_in_the_viewport() {
     let mut h = top_layer_harness(
@@ -3279,8 +3091,6 @@ fn a_fit_content_top_layer_element_with_auto_margins_centres_in_the_viewport() {
     assert_eq!(viewport_rect(&h, dialog), (350.0, 275.0, 100.0, 50.0));
 }
 
-/// Membership alone moves the containing block: the dialog here keeps the
-/// computed `position: absolute` it had before it entered the layer.
 #[test]
 fn a_top_layer_element_adds_nothing_to_its_parents_scrollable_overflow() {
     let mut h = top_layer_harness(
@@ -3304,14 +3114,6 @@ fn a_top_layer_element_adds_nothing_to_its_parents_scrollable_overflow() {
     assert_eq!(h.layout_of(scroller).content_size.height, 550.0);
 }
 
-// Flexbox sizing regressions, each reduced from the web-platform-tests file
-// it names (`css/css-flexbox/`).
-
-/// `flex-aspect-ratio-cross-size-002.html`: a flex container whose width its
-/// parent stretches takes its height from its own `aspect-ratio`
-/// (css-sizing-4 §5.1), and its stretched item, whose cross size is definite
-/// (css-flexbox-1 §9.8), takes its flex base size through its ratio (§9.2.3
-/// step B).
 #[test]
 fn a_stretched_flex_container_and_item_transfer_their_aspect_ratios() {
     let mut h = Harness::new(
@@ -3330,9 +3132,6 @@ fn a_stretched_flex_container_and_item_transfer_their_aspect_ratios() {
     assert_eq!(h.rect(inner), (0.0, 0.0, 50.0, 50.0));
 }
 
-/// `aspect-ratio-intrinsic-size-005.html` and `-012`/`-013`: in a column
-/// container the stretched width transfers into the item's height, and the
-/// container's automatic height follows.
 #[test]
 fn a_column_item_takes_its_height_from_its_stretched_width_through_its_ratio() {
     let mut h = Harness::new(
@@ -3349,9 +3148,6 @@ fn a_column_item_takes_its_height_from_its_stretched_width_through_its_ratio() {
     assert_eq!(h.rect(column).3, 50.0);
 }
 
-/// `flex-basis-014.html`: the stretched cross size an item's max-content
-/// flex base size is measured at is definite, so a child's percentage
-/// height resolves against it and transfers through the child's ratio.
 #[test]
 fn a_stretched_items_definite_cross_size_reaches_its_content_measurement() {
     let mut h = Harness::new(
@@ -3370,9 +3166,6 @@ fn a_stretched_items_definite_cross_size_reaches_its_content_measurement() {
     assert_eq!(h.rect(ar), (0.0, 0.0, 100.0, 50.0));
 }
 
-/// `flex-minimum-size-002.html`: a percentage `min-height` against an
-/// indefinite height is zero (CSS 2.2 §10.7), not `auto`, so the item has no
-/// automatic minimum and shrinks into a `max-height: 0` container.
 #[test]
 fn an_unresolvable_percentage_minimum_is_zero_not_the_automatic_minimum() {
     let mut h = Harness::new(
@@ -3396,9 +3189,6 @@ fn an_unresolvable_percentage_minimum_is_zero_not_the_automatic_minimum() {
     assert_eq!(h.rect(fixed).3, 13.0);
 }
 
-/// `aspect-ratio-transferred-max-size.html`: a flex item's main size is not
-/// clamped by the maximum its ratio transfers from `max-height`
-/// (w3c/csswg-drafts#10997; Chrome, Firefox and Safari agree).
 #[test]
 fn a_flex_items_main_size_ignores_a_maximum_transferred_through_its_ratio() {
     let mut h = Harness::new(
@@ -3414,10 +3204,6 @@ fn a_flex_items_main_size_ignores_a_maximum_transferred_through_its_ratio() {
     assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 100.0));
 }
 
-/// `stretch-requires-computed-auto-size.html`: an item's percentage height
-/// against a container height its content decided behaves as `auto`, also
-/// once the container's parent commits it at that height; it is neither
-/// resolved nor stretched.
 #[test]
 fn a_percentage_height_against_a_content_decided_height_behaves_as_auto() {
     let mut h = Harness::new(
@@ -3436,9 +3222,6 @@ fn a_percentage_height_against_a_content_decided_height_behaves_as_auto() {
     assert_eq!(h.rect(half), (100.0, 0.0, 100.0, 0.0));
 }
 
-/// `flexbox_align-items-stretch-4.html`: an item kept from stretching by its
-/// auto margins has a content-decided height, against which its child's
-/// percentage height behaves as `auto` (css-flexbox-1 §9.8).
 #[test]
 fn an_unstretched_items_height_is_no_percentage_basis_for_its_children() {
     let mut h = Harness::new(
@@ -3460,10 +3243,6 @@ fn an_unstretched_items_height_is_no_percentage_basis_for_its_children() {
     assert_eq!(h.rect(second), (0.0, 0.0, 100.0, 100.0));
 }
 
-/// `flex-basis-010.html`: a column container's automatic height is its
-/// items laid out at their hypothetical main sizes, not the row algorithm's
-/// contributions: a `0%` basis against that indefinite height is `content`
-/// (css-flexbox-1 §7.2.3), so `height: 500px` is not read.
 #[test]
 fn a_column_containers_automatic_height_sums_hypothetical_main_sizes() {
     let mut h = Harness::new(
@@ -3481,14 +3260,10 @@ fn a_column_containers_automatic_height_sums_hypothetical_main_sizes() {
     h.layout();
 
     assert_eq!(h.rect(item), (0.0, 0.0, 100.0, 100.0));
-    // A definite flex basis wins over the item's height, as in browsers.
     assert_eq!(h.rect(based), (0.0, 100.0, 100.0, 30.0));
     assert_eq!(h.rect(column).3, 130.0);
 }
 
-/// `flex-column-reverse-multiline-item-position.html`: a column `wrap`
-/// container with an automatic height breaks its lines at its maximum
-/// height and is as tall as its longest line.
 #[test]
 fn a_column_wrap_container_breaks_its_lines_at_its_maximum_height() {
     let mut h = Harness::new(

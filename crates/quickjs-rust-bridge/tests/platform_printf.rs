@@ -136,10 +136,6 @@ fn snprintf_supports_the_quickjs_integer_and_dynamic_format_set() {
 #[test]
 fn snprintf_float_conversions_consume_their_arguments() {
     let mut buffer = [0_u8; 160];
-    // Keep an integer after every floating-point family. If any family is
-    // compiled out, nanoprintf emits the conversion literally without
-    // consuming its double and the following integer exposes the va_list
-    // desynchronization.
     // SAFETY: the arguments exactly match their promoted C conversion types.
     let required = unsafe {
         qjs_platform_snprintf(

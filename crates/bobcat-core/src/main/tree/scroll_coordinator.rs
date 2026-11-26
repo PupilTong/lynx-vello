@@ -224,25 +224,17 @@ use terminus::link::{CustomElement, MethodCall, MethodError, MethodOutcome, Node
 use super::scroll_container::{clamp_to_range, object, offset_px};
 use super::{InvalidParams, LynxDocument, is_truthy};
 
-/// The coordinator: native's tag, and web-core's.
 pub(super) const SCROLL_COORDINATOR_TAG: &str = "scroll-coordinator";
 pub(super) const X_FOLDVIEW_TAG: &str = "x-foldview-ng";
-/// The header that folds away.
 pub(super) const SCROLL_COORDINATOR_HEADER_TAG: &str = "scroll-coordinator-header";
 pub(super) const X_FOLDVIEW_HEADER_TAG: &str = "x-foldview-header-ng";
-/// The toolbar pinned over the top of the header.
 pub(super) const SCROLL_COORDINATOR_TOOLBAR_TAG: &str = "scroll-coordinator-toolbar";
 pub(super) const X_FOLDVIEW_TOOLBAR_TAG: &str = "x-foldview-toolbar-ng";
-/// The content area under the header.
 pub(super) const SCROLL_COORDINATOR_SLOT_TAG: &str = "scroll-coordinator-slot";
 pub(super) const X_FOLDVIEW_SLOT_TAG: &str = "x-foldview-slot-ng";
-/// The drag region inside the slot; see the module docs for why it has no
-/// rules of its own.
 pub(super) const SCROLL_COORDINATOR_SLOT_DRAG_TAG: &str = "scroll-coordinator-slot-drag";
 pub(super) const X_FOLDVIEW_SLOT_DRAG_TAG: &str = "x-foldview-slot-drag-ng";
 
-/// All ten tags, native then web-core per role, in the order the roles are
-/// listed above.
 pub(super) const TAGS: [&str; 10] = [
     SCROLL_COORDINATOR_TAG,
     X_FOLDVIEW_TAG,
@@ -256,10 +248,6 @@ pub(super) const TAGS: [&str; 10] = [
     X_FOLDVIEW_SLOT_DRAG_TAG,
 ];
 
-/// The coordinator policy, in the module documentation's order.
-///
-/// Each important declaration's rule sits on a line of its own, because
-/// [`super::ua_sheet`]'s pinned test reads the sheet line by line.
 pub(super) const UA_RULES: &str = r#"
 scroll-coordinator, x-foldview-ng {
   width: 100%; height: 100%; contain: content;
@@ -293,24 +281,14 @@ x-foldview-ng[header-over-slot]:not([header-over-slot="false"]) > x-foldview-hea
 x-foldview-ng[header-over-slot]:not([header-over-slot="false"]) > wrapper > x-foldview-header-ng { z-index: 1; }
 "#;
 
-/// Installs the coordinator component on both of its tags, as
-/// [`super::viewpager`] installs its one component on its two. Must run
-/// before any element could carry either tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     document.define(SCROLL_COORDINATOR_TAG, Box::new(ScrollCoordinator));
     document.define(X_FOLDVIEW_TAG, Box::new(ScrollCoordinator));
 }
 
-/// The coordinator component: no lifecycle reaction and no per-element
-/// state; its only member is the `setFoldExpanded` UI method.
 struct ScrollCoordinator;
 
 impl CustomElement<()> for ScrollCoordinator {
-    /// `setFoldExpanded` ([`set_fold_expanded`]); every other name is
-    /// [`MethodOutcome::NotFound`], so the base set answers `scrollTo`,
-    /// `scrollBy`, `scrollIntoView` and `boundingClientRect`, and
-    /// `getScrollInfo` is code 3. See the module documentation.
     fn invoke(
         &self,
         document: &mut LynxDocument,
@@ -327,46 +305,6 @@ impl CustomElement<()> for ScrollCoordinator {
     }
 }
 
-/// `setFoldExpanded({offset, smooth = true})` on `coordinator`, with
-/// `params` as the JSON text the realm serialized: scrolls the coordinator
-/// so its vertical offset is `offset`, which folds `offset` px of the
-/// header away (0 is fully expanded, the range's end fully folded).
-///
-/// - `params` must be a JSON object, else code 4.
-/// - `offset` is read as `scroll-view`'s `scrollTo` reads it ([`offset_px`]): a JSON number in CSS
-///   px, or a string that is a number followed by `px`, `rpx`, `ppx` or nothing. web-core
-///   `parseFloat`s it, its param being typed as a string (`XFoldviewNg.ts:63-72`), which reads the
-///   number and ignores any unit; iOS reads a number or a unit string through `toPtFromUnitValue`
-///   (`LynxUIScrollCoordinator.m:771-830`). A missing or unreadable `offset` is code 4 and nothing
-///   moves, the engine's rule for a required numeric param, where web-core scrolls to 0
-///   (`parseFloat(undefined)` is `NaN`, and `scrollTo({top: NaN})` reads it as 0) and iOS reads 0.
-/// - The target is clamped to `[0, max]`, `max` the coordinator's vertical scroll range. Both
-///   references clamp to the header height less the toolbar height (web-core's `scrollableLength`,
-///   `:43-45`, iOS's `expandHeight`), which the UA rules make the range by construction; an author
-///   slot taller than the rules give it extends the range, and the clamp with it (the module
-///   documentation's deviation list). The horizontal offset is kept.
-/// - `smooth` is read with JavaScript truthiness, and a missing one is `true`, as web-core's
-///   destructuring default `smooth = true` and its `smooth ? 'smooth' : 'instant'` read it, and as
-///   iOS's default `YES`. A smooth scroll is animated by the painter and leaves the document's
-///   offset where it is until the painter posts it back; an instant one moves the document at once.
-///   Either way the request goes through [`terminus::link::Document::scroll_to_with`], the call
-///   [`super::scroll_container::scroll_to`] makes, and the call answers at once.
-///
-/// The painter settles a smooth request's target onto the carrying frame's
-/// snap positions when it receives the request, so on a container that
-/// snaps, a smooth scroll to a position that is not a snap position goes
-/// elsewhere. The coordinator's UA rules declare no `scroll-snap-type`
-/// (the coordinator computes `none`, which the tests check), so its smooth
-/// request lands on the clamped target; an author `scroll-snap-type` on
-/// the coordinator would have its smooth requests settled onto its snap
-/// positions like any other snapping container's.
-///
-/// `enable-scroll="false"` changes nothing here: the coordinator is still a
-/// scroll container, and only the user's drags are refused. A `display:
-/// none` coordinator has a zero scrollport, so it scrolls to 0 in a request
-/// no frame carries, and one restyled into no scroll container records
-/// nothing; either way nothing moves and the call succeeds, as
-/// `scroll-view`'s `scrollTo` does.
 pub(super) fn set_fold_expanded(
     document: &mut LynxDocument,
     coordinator: NodeId,
@@ -396,7 +334,7 @@ pub(super) fn set_fold_expanded(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::scroll::ScrollBehavior;
     use terminus::link::stylo::properties::PropertyId;
@@ -416,7 +354,6 @@ mod tests {
         X_FOLDVIEW_TOOLBAR_TAG,
     };
 
-    /// One spelling of the five roles.
     #[derive(Debug, Clone, Copy)]
     struct Spelling {
         coordinator: &'static str,
@@ -443,7 +380,6 @@ mod tests {
         },
     ];
 
-    /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -464,7 +400,6 @@ mod tests {
         )
     }
 
-    /// The boxes of one coordinator.
     struct Built {
         coordinator: NodeId,
         toolbar: Option<NodeId>,
@@ -472,9 +407,6 @@ mod tests {
         slot: NodeId,
     }
 
-    /// A coordinator of `spelling` under the page, `style` inline on it,
-    /// with a toolbar `toolbar` px tall (none for `None`), a header `header`
-    /// px tall and a slot, in the documented order.
     fn build(
         document: &mut LynxDocument,
         spelling: Spelling,
@@ -520,8 +452,6 @@ mod tests {
             );
         }
     }
-
-    // --- the UA rules -------------------------------------------------------
 
     #[test]
     fn the_coordinator_is_a_vertical_scroll_container_in_a_column() {
@@ -646,9 +576,6 @@ mod tests {
         }
     }
 
-    /// Every box inside the slot, at any depth and through a `wrapper`,
-    /// defers a forward vertical delta to the scroll container above it, and
-    /// leaves the horizontal axis alone; nothing outside a slot does.
     #[test]
     fn everything_inside_the_slot_captures_forward() {
         for spelling in SPELLINGS {
@@ -687,7 +614,6 @@ mod tests {
         }
     }
 
-    /// The drag region gets the common block and nothing else.
     #[test]
     fn slot_drag_is_a_plain_container() {
         for spelling in SPELLINGS {
@@ -735,11 +661,6 @@ mod tests {
         }
     }
 
-    // --- the pins -----------------------------------------------------------
-
-    /// An author cannot take the coordinator apart: the scroll axis, the
-    /// column and the three positions hold against inline style and author
-    /// `!important`.
     #[test]
     fn author_styles_cannot_undo_the_pinned_structure() {
         const SHEET: &str = "
@@ -787,8 +708,6 @@ mod tests {
         }
     }
 
-    /// Inline `!important` is author-origin too, so it loses to the UA's
-    /// `!important` like any author rule.
     #[test]
     fn inline_important_cannot_undo_the_pins() {
         for spelling in SPELLINGS {
@@ -816,8 +735,6 @@ mod tests {
         }
     }
 
-    /// Every other UA default is a default: an author height on the slot,
-    /// a width on the coordinator, a `z-index` on the toolbar all apply.
     #[test]
     fn the_defaults_are_author_overridable() {
         let mut document = document();
@@ -840,8 +757,6 @@ mod tests {
         assert_eq!(value(&document, toolbar, "z-index"), "5");
         assert_eq!(rect(&document, built.slot), (10.0, 300.0, 200.0, 250.0));
     }
-
-    // --- the attributes -----------------------------------------------------
 
     #[test]
     fn enable_scroll_false_leaves_the_coordinator_to_script() {
@@ -892,8 +807,6 @@ mod tests {
         }
     }
 
-    /// `header-over-slot` raises the header, directly under the coordinator
-    /// or through a `wrapper`, and leaves the slot alone.
     #[test]
     fn header_over_slot_raises_the_header() {
         for (attribute, expected) in [
@@ -925,10 +838,6 @@ mod tests {
         }
     }
 
-    // --- the geometry through a layout --------------------------------------
-
-    /// Coordinator 600 tall, toolbar 200, header 400: the slot starts under
-    /// the header at 400 and is 600 − 200 tall, and the range is 400 − 200.
     #[test]
     fn the_slot_sits_under_the_header_and_fills_below_the_toolbar() {
         for spelling in SPELLINGS {
@@ -962,8 +871,6 @@ mod tests {
         }
     }
 
-    /// The header and slot reach the coordinator through a `wrapper`, which
-    /// generates no box: the geometry is the same.
     #[test]
     fn a_wrapper_around_the_roles_changes_nothing() {
         let mut document = document();
@@ -990,9 +897,6 @@ mod tests {
         );
     }
 
-    /// Scrolled to the end of its range, the toolbar is still at the top of
-    /// the scrollport, over the header's bottom band, and the slot fills
-    /// the rest.
     #[test]
     fn folded_the_toolbar_covers_the_header_and_the_slot_fills_the_rest() {
         let mut document = document();
@@ -1014,8 +918,6 @@ mod tests {
         assert_eq!((slot.origin.y, slot.size.height), (200.0, 400.0));
     }
 
-    /// `enable-scroll="false"`: still a scroll container with the same
-    /// range, but not one the user can move.
     #[test]
     fn enable_scroll_false_is_not_user_scrollable() {
         for spelling in SPELLINGS {
@@ -1031,10 +933,6 @@ mod tests {
         }
     }
 
-    // --- the fold order -----------------------------------------------------
-
-    /// A coordinator 600 tall with a 200px toolbar and a 400px header,
-    /// holding a scroll-view that fills the slot with ten 100px items.
     fn folding(spelling: Spelling) -> (LynxDocument, NodeId, NodeId) {
         let mut document = document();
         let built = build(&mut document, spelling, "height: 600px", Some(200), 400);
@@ -1057,8 +955,6 @@ mod tests {
         (document, built.coordinator, inner)
     }
 
-    /// Forward, the coordinator folds before the content scrolls; backward,
-    /// the content returns to its start before the coordinator unfolds.
     #[test]
     fn a_scroll_in_the_slot_folds_first_and_unfolds_last() {
         for spelling in SPELLINGS {
@@ -1088,8 +984,6 @@ mod tests {
         }
     }
 
-    /// `enable-scroll="false"`: the fold stays where it is and the content
-    /// scrolls on its own.
     #[test]
     fn enable_scroll_false_disables_the_fold() {
         let (mut document, coordinator, inner) = folding(SPELLINGS[1]);
@@ -1100,10 +994,6 @@ mod tests {
         assert_eq!(document.scroll_offset(inner).y, 150.0);
     }
 
-    // --- `setFoldExpanded` --------------------------------------------------
-
-    /// Runs the UI method `name` on `element`, as `callElementMethod` asks
-    /// the element's kind first.
     fn invoke(
         document: &mut LynxDocument,
         element: NodeId,
@@ -1113,8 +1003,6 @@ mod tests {
         document.invoke_element_method(element, MethodCall { name, params })
     }
 
-    /// The request the committed frame carries to the painter for
-    /// `coordinator`.
     fn carried(
         document: &mut LynxDocument,
         coordinator: NodeId,
@@ -1128,8 +1016,6 @@ mod tests {
             .map(|request| (request.target, request.behavior))
     }
 
-    /// A coordinator 600 tall with a 200px toolbar and a 400px header: a
-    /// range of 200.
     fn foldable(spelling: Spelling) -> (LynxDocument, NodeId) {
         let mut document = document();
         let built = build(&mut document, spelling, "height: 600px", Some(200), 400);
@@ -1137,11 +1023,6 @@ mod tests {
         (document, built.coordinator)
     }
 
-    /// Both coordinator tags match `:defined`, as `scroll-view`'s check in
-    /// `scroll_container` has it. `terminus` matches `:defined`
-    /// on every element, so this pins the selector's answer, not the
-    /// definition; the definition is what `invoke` reaching
-    /// `setFoldExpanded` on both tags shows.
     #[test]
     fn both_coordinator_tags_are_defined_elements() {
         for spelling in SPELLINGS {
@@ -1158,10 +1039,6 @@ mod tests {
         }
     }
 
-    /// Smooth by default: the painter animates the request, and the
-    /// document keeps its offset until the painter posts one back. The
-    /// coordinator does not snap, so nothing in the painter moves the
-    /// target to a snap position.
     #[test]
     fn set_fold_expanded_is_smooth_by_default() {
         for spelling in SPELLINGS {
@@ -1194,8 +1071,6 @@ mod tests {
         }
     }
 
-    /// `smooth` is read with JavaScript truthiness; only a falsy one is
-    /// instant, and an instant scroll moves the document at once.
     #[test]
     fn set_fold_expanded_is_instant_for_a_falsy_smooth() {
         for (smooth, behavior) in [
@@ -1234,8 +1109,6 @@ mod tests {
         }
     }
 
-    /// The target clamps to the range, the header height less the toolbar
-    /// height, and the call succeeds.
     #[test]
     fn set_fold_expanded_clamps_to_the_fold_range() {
         for spelling in SPELLINGS {
@@ -1274,8 +1147,6 @@ mod tests {
         }
     }
 
-    /// `1rpx` is the viewport width over 750 (393px here); a unitless
-    /// string is px.
     #[test]
     fn set_fold_expanded_converts_rpx_and_reads_a_unitless_string() {
         for spelling in SPELLINGS {
@@ -1302,8 +1173,6 @@ mod tests {
         }
     }
 
-    /// A missing or unreadable `offset`, or params that are no object, is
-    /// code 4 and records nothing.
     #[test]
     fn set_fold_expanded_refuses_a_missing_or_unreadable_offset() {
         for params in [
@@ -1342,7 +1211,6 @@ mod tests {
         }
     }
 
-    /// `enable-scroll="false"` refuses the user's drags, not script.
     #[test]
     fn set_fold_expanded_scrolls_a_coordinator_the_user_cannot() {
         for attribute in ["enable-scroll", "scroll-enable"] {
@@ -1368,9 +1236,6 @@ mod tests {
         }
     }
 
-    /// A coordinator with no box succeeds and moves nothing: its zero
-    /// scrollport takes a request to 0 that no frame carries, so the commit
-    /// ends it.
     #[test]
     fn a_coordinator_with_no_box_moves_nothing() {
         for spelling in SPELLINGS {
@@ -1402,9 +1267,6 @@ mod tests {
         }
     }
 
-    /// The kind answers `setFoldExpanded` alone. iOS's `getScrollInfo` and
-    /// `scrollBy` are not built; `scrollTo` and `scrollBy` fall to the base
-    /// set, and another kind's method is not the coordinator's.
     #[test]
     fn the_coordinator_answers_set_fold_expanded_alone() {
         for spelling in SPELLINGS {
@@ -1421,8 +1283,6 @@ mod tests {
         }
     }
 
-    /// The header, the toolbar and the slot have no component, so they
-    /// have no `setFoldExpanded`.
     #[test]
     fn the_other_roles_have_no_set_fold_expanded() {
         for spelling in SPELLINGS {

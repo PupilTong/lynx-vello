@@ -77,13 +77,9 @@ use vant::media::{
     MediaSink, MediaSource,
 };
 
-/// The longest a playing video's thread waits before it looks at its clock
-/// again, when no frame is due sooner: twice per frame of a 60 Hz video.
 pub const PLAYING_POLL: Duration = Duration::from_millis(8);
-/// How long a paused video's thread waits for a command.
 pub const PAUSED_POLL: Duration = Duration::from_millis(100);
 
-/// `CMTime`, by value, as `CoreMedia` lays it out.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct CMTime {
@@ -113,7 +109,6 @@ unsafe impl RefEncode for CMTime {
     const ENCODING_REF: Encoding = Encoding::Pointer(&<Self as Encode>::ENCODING);
 }
 
-/// A `CMSampleBufferRef` as a message answers it: `^{opaqueCMSampleBuffer=}`.
 #[repr(transparent)]
 #[derive(Debug)]
 struct SampleBuffer(*mut c_void);
@@ -125,7 +120,6 @@ unsafe impl Encode for SampleBuffer {
     const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("opaqueCMSampleBuffer", &[]));
 }
 
-/// A `CMSampleBufferRef` borrowed for a message's argument.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
 struct SampleBufferRef(*mut c_void);
@@ -136,12 +130,10 @@ unsafe impl Encode for SampleBufferRef {
 }
 
 impl SampleBuffer {
-    /// The buffer, for a message that does not take it over.
     const fn borrowed(&self) -> SampleBufferRef {
         SampleBufferRef(self.0)
     }
 
-    /// Its presentation time, in seconds.
     fn time(&self) -> f64 {
         // SAFETY: a live sample buffer this value owns.
         unsafe { CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(self.0)) }
@@ -156,15 +148,10 @@ impl Drop for SampleBuffer {
     }
 }
 
-/// `kCMTimeFlags_Valid`.
 const TIME_VALID: u32 = 1;
-/// `kCVPixelFormatType_32BGRA`, `'BGRA'`.
 const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
-/// `kAudioFormatLinearPCM`, `'lpcm'`.
 const AUDIO_FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
-/// `kCVPixelBufferLock_ReadOnly`.
 const LOCK_READ_ONLY: u64 = 1;
-/// `AVAssetReaderStatusFailed`.
 const READER_FAILED: isize = 3;
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -203,14 +190,12 @@ unsafe extern "C" {
     static AVMediaTypeAudio: *const c_void;
 }
 
-/// The macOS [`Media`]: `AVFoundation`, one thread per open video.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AvMedia;
 
 impl<F: 'static> Media<F> for AvMedia {
     type Player = AvPlayer;
 
-    /// A `file` URL; anything else is handed over as its bytes.
     fn reads(&self, url: &url::Url) -> bool {
         url.scheme() == "file"
     }
@@ -263,8 +248,6 @@ impl<F: 'static> Media<F> for AvMedia {
     }
 }
 
-/// An open video: what the store's commands reach. Dropping it stops its
-/// thread.
 #[derive(Debug)]
 pub struct AvPlayer {
     commands: mpsc::Sender<Command>,
@@ -304,7 +287,6 @@ impl Drop for AvPlayer {
     }
 }
 
-/// A file this player wrote, removed when its thread ends.
 struct TemporaryFile(std::path::PathBuf);
 
 impl Drop for TemporaryFile {
@@ -313,8 +295,6 @@ impl Drop for TemporaryFile {
     }
 }
 
-/// A fresh path in the temporary directory with the extension `AVFoundation`
-/// reads `media_type`, or else `url`'s path, as.
 fn temporary_file(media_type: Option<&str>, url: &url::Url) -> std::path::PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let essence = media_type.map(|media_type| {
@@ -344,7 +324,6 @@ fn temporary_file(media_type: Option<&str>, url: &url::Url) -> std::path::PathBu
     ))
 }
 
-/// An `NSString` of `text`.
 fn ns_string(text: &str) -> Option<Retained<AnyObject>> {
     let text = std::ffi::CString::new(text).ok()?;
     // SAFETY: `stringWithUTF8String:` copies the NUL-terminated string,
@@ -352,7 +331,6 @@ fn ns_string(text: &str) -> Option<Retained<AnyObject>> {
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
 }
 
-/// An `NSString`'s text.
 fn text_of(string: &AnyObject) -> String {
     // SAFETY: `UTF8String` answers a NUL-terminated string the object owns,
     // read before the object is let go of; it may be null.
@@ -366,7 +344,6 @@ fn text_of(string: &AnyObject) -> String {
         .into_owned()
 }
 
-/// An `NSError`'s description, or `fallback` without one.
 fn describe_error(error: Option<Retained<AnyObject>>, fallback: &str) -> String {
     error
         .and_then(|error| {
@@ -378,8 +355,6 @@ fn describe_error(error: Option<Retained<AnyObject>>, fallback: &str) -> String 
         .map_or_else(|| fallback.to_owned(), |text| text_of(&text))
 }
 
-/// A one-entry `NSDictionary` of `key` to the unsigned number `value`.
-///
 /// # Safety
 ///
 /// `key` must be a `CFStringRef` or `NSString` alive for the process.
@@ -396,8 +371,6 @@ unsafe fn settings(key: *const c_void, value: u32) -> Option<Retained<AnyObject>
     }
 }
 
-/// The first track of `asset` of `kind` (`AVMediaTypeVideo`,
-/// `AVMediaTypeAudio`).
 fn first_track(asset: &AnyObject, kind: *const c_void) -> Option<Retained<AnyObject>> {
     // SAFETY: `tracksWithMediaType:` takes an `AVMediaType` (an `NSString`
     // constant alive for the process) and answers an `NSArray`, loading the
@@ -410,7 +383,6 @@ fn first_track(asset: &AnyObject, kind: *const c_void) -> Option<Retained<AnyObj
     }
 }
 
-/// The asset and its tracks: what each new reader is made from.
 struct Asset {
     handle: Retained<AnyObject>,
     video: Retained<AnyObject>,
@@ -460,8 +432,6 @@ impl Asset {
     }
 }
 
-/// One pass of the asset from its start: a reader with a BGRA video output
-/// and, when the asset has audio, a linear PCM audio output.
 struct Reader {
     handle: Retained<AnyObject>,
     video: Retained<AnyObject>,
@@ -534,7 +504,6 @@ impl Reader {
         }
     }
 
-    /// The next decoded sample of `output`, or `None` at its end.
     fn next(output: &AnyObject) -> Option<SampleBuffer> {
         // SAFETY: `copyNextSampleBuffer` answers a +1 `CMSampleBufferRef`
         // or null at the end of the output, decoding on this thread.
@@ -550,7 +519,6 @@ impl Reader {
         Self::next(&self.video)
     }
 
-    /// Why the reader stopped, when it failed rather than ended.
     fn failure(&self) -> Option<String> {
         // SAFETY: `status` answers an `NSInteger`, `error` an `NSError` or
         // nil.
@@ -574,7 +542,6 @@ impl Drop for Reader {
     }
 }
 
-/// The clock, and the audio renderer it follows when there is one.
 struct Clock {
     synchronizer: Retained<AnyObject>,
     audio: Option<Retained<AnyObject>>,
@@ -609,7 +576,6 @@ impl Clock {
         }
     }
 
-    /// The clock's time, in seconds.
     fn now(&self) -> f64 {
         // SAFETY: `currentTime` answers a `CMTime`.
         unsafe {
@@ -618,7 +584,6 @@ impl Clock {
         }
     }
 
-    /// Runs the clock at `rate` from where it is.
     fn set_rate(&self, rate: f32) {
         // SAFETY: `setRate:` takes a `float`.
         unsafe {
@@ -626,8 +591,6 @@ impl Clock {
         }
     }
 
-    /// Stops the clock at zero and drops the audio queued for the pass
-    /// before.
     fn rewind(&self) {
         // SAFETY: `setRate:time:` takes a `float` and a `CMTime`, `flush`
         // nothing.
@@ -648,8 +611,6 @@ impl Clock {
         }
     }
 
-    /// Queues the reader's audio while the renderer takes more. Answers
-    /// whether the audio has ended.
     fn feed(&self, reader: &Reader) -> bool {
         let (Some(renderer), Some(output)) = (&self.audio, &reader.audio) else {
             return true;
@@ -672,8 +633,6 @@ impl Clock {
     }
 }
 
-/// `buffer`'s image as premultiplied RGBA. A video frame is opaque, so its
-/// BGRA is premultiplied as it stands, and only the channels move.
 fn pixels(buffer: &SampleBuffer) -> Option<ImageData> {
     // SAFETY: the image buffer is the sample's, alive while `buffer` is. Its
     // base address is read only between the lock and the unlock, `height`
@@ -722,7 +681,6 @@ fn pixels(buffer: &SampleBuffer) -> Option<ImageData> {
     }
 }
 
-/// Hands `buffer`'s image to `sink`, answering its size.
 fn hand_over<F, S: MediaSink<F>>(sink: &S, buffer: &SampleBuffer) -> Option<(u32, u32)> {
     let pixels = pixels(buffer)?;
     let size = (pixels.width, pixels.height);
@@ -731,8 +689,6 @@ fn hand_over<F, S: MediaSink<F>>(sink: &S, buffer: &SampleBuffer) -> Option<(u32
     Some(size)
 }
 
-/// The video's whole life on its thread: open it, then serve commands and
-/// follow the clock until the handle is dropped.
 fn run<F, S: MediaSink<F>>(
     path: &std::path::Path,
     settings: MediaSettings,
@@ -760,36 +716,26 @@ fn run<F, S: MediaSink<F>>(
     autoreleasepool(|_| drop(video));
 }
 
-/// Where a video's playback is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Paused,
     Playing,
-    /// It played to its end and stopped there; a `play` starts it over.
     Ended,
-    /// It stopped for good on a failure, which was reported.
     Failed,
 }
 
-/// One open video on its thread.
 struct Video {
     asset: Asset,
     reader: Reader,
     clock: Clock,
-    /// The next frame, not shown yet.
     next: Option<SampleBuffer>,
-    /// The newest frame that came due while the sink wanted none, so it was
-    /// not converted. Handed over when the video stops on it (a pause, the
-    /// end, a failure): the sink keeps it for the draw that comes.
     skipped: Option<SampleBuffer>,
-    /// The audio output has nothing more for this pass.
     audio_done: bool,
     looping: bool,
     phase: Phase,
 }
 
 impl Video {
-    /// Opens the video paused, and hands over and reports its first frame.
     fn open<F, S: MediaSink<F>>(
         path: &std::path::Path,
         settings: MediaSettings,
@@ -830,12 +776,10 @@ impl Video {
         })
     }
 
-    /// How long to wait for a command before looking at the clock again.
     fn wait(&self) -> Duration {
         if self.phase != Phase::Playing {
             return PAUSED_POLL;
         }
-        // The next frame's time, or the end once every frame is shown.
         let due = self
             .next
             .as_ref()
@@ -872,8 +816,6 @@ impl Video {
         }
     }
 
-    /// Shows `frame`, which came due: handed over when the sink wants
-    /// frames, kept as the one skipped otherwise.
     fn show<F, S: MediaSink<F>>(&mut self, frame: SampleBuffer, sink: &S) {
         if sink.wants_frames() {
             let _ = hand_over(sink, &frame);
@@ -883,17 +825,12 @@ impl Video {
         }
     }
 
-    /// The video stops on the frame it shows: one that was skipped is
-    /// handed over now, wanted or not, so the sink's newest frame is the
-    /// one a later draw should show.
     fn settle<F, S: MediaSink<F>>(&mut self, sink: &S) {
         if let Some(frame) = self.skipped.take() {
             let _ = hand_over(sink, &frame);
         }
     }
 
-    /// A new pass from the start, the clock stopped at zero and the first
-    /// frame shown.
     fn restart<F, S: MediaSink<F>>(&mut self, sink: &S) {
         self.next = None;
         self.clock.rewind();
@@ -917,8 +854,6 @@ impl Video {
         sink.event(MediaEvent::Failed(error));
     }
 
-    /// Hands over the newest frame the clock has reached, keeps the audio
-    /// fed, and ends or loops at the end.
     fn advance<F, S: MediaSink<F>>(&mut self, sink: &S) {
         if self.phase != Phase::Playing {
             return;

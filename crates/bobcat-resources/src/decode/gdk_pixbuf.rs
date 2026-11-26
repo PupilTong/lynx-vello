@@ -132,14 +132,12 @@ fn load() -> Result<Loaded, DecodeError> {
     })
 }
 
-/// A raw symbol type marker for the `symbol!` macro's generic request.
 pub(crate) type Raw<T> = T;
 
 pub(crate) fn available() -> Result<(), DecodeError> {
     loaded().map(|_| ())
 }
 
-/// An owned `GObject` reference, released on drop.
 struct Ref<'a> {
     object: Object,
     symbols: &'a Symbols,
@@ -154,7 +152,6 @@ impl Drop for Ref<'_> {
     }
 }
 
-/// Takes the message out of a `GError` and frees it.
 fn take_error(symbols: &Symbols, error: *mut GError) -> String {
     if error.is_null() {
         return "unknown gdk-pixbuf failure".to_owned();
@@ -248,8 +245,6 @@ pub(crate) fn decode(
     })
 }
 
-/// Runs the loader over `bytes`, scaling during load when the header says
-/// how large the image is, and hands back the pixbuf it produced.
 fn load_pixbuf<'a>(
     symbols: &'a Symbols,
     bytes: &[u8],
@@ -315,7 +310,6 @@ fn load_pixbuf<'a>(
     Ok(pixbuf)
 }
 
-/// Packs a pixbuf's rows into tightly packed RGBA8.
 fn read_pixels(pixbuf: &Ref<'_>) -> Result<Vec<u8>, DecodeError> {
     let symbols = pixbuf.symbols;
     // SAFETY: accessors on a live pixbuf; the pixel pointer is valid for

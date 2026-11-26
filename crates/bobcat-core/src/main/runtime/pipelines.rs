@@ -25,21 +25,10 @@ use crate::performance::{
 };
 use crate::realm::string_argument;
 
-/// The attribute a Lynx timing flag rides on: one written to any element is
-/// bound to the next flush's commit.
 pub(super) const TIMING_FLAG_ATTRIBUTE: &str = "__lynx_timing_flag";
-/// W3C Container Timing's attributes (WICG draft): `containertiming`
-/// marks its element a root whose `container` entries carry the value as
-/// their `identifier`, and `containertimingignore` cuts its element's
-/// subtree out of the roots above it. Like the exposure attributes, they
-/// belong to every tag.
 pub(super) const CONTAINER_TIMING_ATTRIBUTE: &str = "containertiming";
 pub(super) const CONTAINER_TIMING_IGNORE_ATTRIBUTE: &str = "containertimingignore";
 
-/// One main-thread realm's own timing state, shared by that realm's members:
-/// which realm it is to the registry, whether its load has rendered and
-/// waits for the flush that ends it, and — for a `<frame>` card's realm —
-/// when the realm was constructed, which its load reports as `createLynx`.
 pub(super) struct RealmTiming {
     pub(super) opener: OpenerId,
     load_pending: Cell<bool>,
@@ -55,32 +44,18 @@ impl RealmTiming {
         })
     }
 
-    /// A card realm's construction span.
     pub(super) fn set_created(&self, start: ClockInstant, end: ClockInstant) {
         self.created.set(Some((start, end)));
     }
 }
 
-/// What one `flushElementTree` call carries beyond the commit: the realm
-/// that called it and its two timing arguments.
 pub(super) struct FlushRequest<'a> {
     pub(super) realm: &'a RealmTiming,
-    /// `pipelineOptions.pipelineID`, 0 for none.
     pub(super) pipeline: u64,
-    /// The `__lynx_timing_flag` option, `""` for none.
     pub(super) flag: &'a str,
 }
 
 impl DocumentSlot {
-    /// `__FlushElementTree`: the commit, and — when anything times this
-    /// flush — the binding of its pipelines to the frame it committed.
-    ///
-    /// Timed are a flush that names a pipeline carrying timestamps, one with
-    /// a flag option, one after a flag attribute or a native pipeline, and
-    /// the realm's first flush after its load rendered. Commit timing is on
-    /// only for the commit itself, and the record is taken only when it is
-    /// this flush's: a flush that built no frame binds to the frame already
-    /// committed, with no stages of its own.
     pub(super) fn flush(
         &mut self,
         thread: &crate::jobs::JsThreadHandle,
@@ -97,8 +72,6 @@ impl DocumentSlot {
             return self.commit_flush(thread).map(drop);
         }
         let started = ClockInstant::now();
-        // The document exists: the boot module creates it before any card
-        // can flush.
         self.document_mut().set_commit_timing(true);
         let committed = self.commit_flush(thread);
         let document = self.document_mut();
@@ -124,8 +97,6 @@ impl DocumentSlot {
             started,
         });
         if completed {
-            // Bound to a frame already presented: complete now, reported at
-            // the embedder's next turn.
             self.outbox.wake();
         }
         Ok(())
@@ -133,11 +104,6 @@ impl DocumentSlot {
 }
 
 impl DocumentSlot {
-    /// Turns the document's Paint Timing contentful test on while the
-    /// registry wants it ([`crate::performance::PipelineRegistry::wants_content_detection`]:
-    /// someone observes `paint` and `first-contentful-paint` has not been
-    /// recorded) and off otherwise, before a commit. One atomic load and one
-    /// `bool` compare per commit; the document is written only on a change.
     pub(super) fn sync_content_detection(&mut self) {
         let wanted = self.outbox.registry().wants_content_detection();
         if wanted != self.content_detection {
@@ -146,18 +112,12 @@ impl DocumentSlot {
         }
     }
 
-    /// Ends Container Timing in the document when the painter facade saw the
-    /// view's first pointer down, wheel or key down since the last commit.
-    /// One relaxed atomic load per commit otherwise.
     pub(super) fn sync_container_timing(&mut self) {
         if self.outbox.registry().take_container_stop() {
             self.document_mut().stop_container_timing();
         }
     }
 
-    /// `node`'s `containertiming` attribute was set to `identifier`, or
-    /// removed (`None`): the document marks or unmarks the root, and the
-    /// registry keeps the identifier its entries carry.
     pub(super) fn container_timing_changed(&mut self, node: NodeId, identifier: Option<&str>) {
         self.outbox
             .registry()
@@ -167,15 +127,6 @@ impl DocumentSlot {
     }
 }
 
-/// Installs a main-thread realm's performance members: the four pipeline
-/// hooks every realm kind has, opening records as this realm, and
-///
-/// - `markLoadTiming(key, url)`: the realm's load milestones — `vmExecuteStart` (the load of the
-///   bundle at `url` begins), then `vmExecuteEnd` and `mtsRenderStart`, after which the realm's
-///   next flush ends the load; any other key does nothing;
-/// - `openNativePipeline(origin, flag)`: a host update arrived with a flag, or a reload arrived,
-///   and the next flush binds it;
-/// - `connectBackground(key)`: the worker under `key` is this realm's BTS.
 pub(super) fn install_realm_members(
     engine: &mut ScriptEngine,
     slot: &Rc<RefCell<DocumentSlot>>,

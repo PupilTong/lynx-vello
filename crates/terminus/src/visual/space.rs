@@ -38,34 +38,21 @@ use super::{AnimationSamples, AnimationSlot, ClipNode, ScrollSlot, StickySamples
 use crate::kurbo::Affine;
 use crate::paint::compose::snap_offset;
 
-/// One node of a frame's space tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Space {
-    /// The next node outward, in the same table.
     pub(crate) parent: Option<u32>,
     pub(crate) kind: SpaceKind,
 }
 
-/// What a space node applies, by index into its slot table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpaceKind {
-    /// A scroll container's content, by scroll slot.
     Scroll(u32),
-    /// A sticky box, by sticky slot.
     Sticky(u32),
-    /// An exported animation, by animation slot.
     Animation(u32),
-    /// An anchor-positioned box's default scroll shift and
-    /// `position-visibility`, by anchored slot.
     Anchored(u32),
-    /// An anchor-positioned box's `position-visibility` alone, by anchored
-    /// slot, for its descendants that escape its containing-block chain:
-    /// `force-hidden` hides "the element and its descendants", but only
-    /// the box and what its containing-block chain carries move with it.
     AnchoredVisibility(u32),
 }
 
-/// The kinds on `space`'s path, innermost first.
 pub(crate) fn path(spaces: &[Space], space: Option<u32>) -> impl Iterator<Item = SpaceKind> + '_ {
     std::iter::successors(space.map(|index| spaces[index as usize]), |node| {
         node.parent.map(|index| spaces[index as usize])
@@ -73,17 +60,12 @@ pub(crate) fn path(spaces: &[Space], space: Option<u32>) -> impl Iterator<Item =
     .map(|node| node.kind)
 }
 
-/// The deepest space on both `a`'s and `b`'s paths; `None` is the root.
-///
-/// A node's parent is always an earlier entry, so of two distinct spaces the
-/// later is never the other's ancestor and steps outward.
 pub(crate) fn common_ancestor(
     spaces: &[Space],
     mut a: Option<u32>,
     mut b: Option<u32>,
 ) -> Option<u32> {
     while a != b {
-        // `None` orders first, so the stepping side is always a node.
         if a > b {
             a = a.and_then(|index| spaces[index as usize].parent);
         } else {
@@ -93,8 +75,6 @@ pub(crate) fn common_ancestor(
     a
 }
 
-/// The nodes from `space` outward up to, not including, `outer`, an
-/// ancestor of `space` or the root.
 pub(crate) fn path_below(
     spaces: &[Space],
     space: Option<u32>,
@@ -105,9 +85,6 @@ pub(crate) fn path_below(
         .map(|index| spaces[index as usize])
 }
 
-/// The reach of every transform curve that moves `content` relative to
-/// `group`: those on `content`'s path below the two spaces' common ancestor,
-/// innermost first. An opacity-only curve moves nothing.
 pub(crate) fn curves_within<'a>(
     spaces: &'a [Space],
     animations: &'a [AnimationSlot],
@@ -128,13 +105,6 @@ pub(crate) fn curves_within<'a>(
     })
 }
 
-/// Whether what a record in `record` draws into a bake in `bake` changes
-/// with the timeline reading: a curve on `record`'s path below the two
-/// spaces' common ancestor moves or fades it, an anchored node there hides
-/// it on a probe a transform curve moves
-/// ([`AnchoredSlot::reads_timeline`]), and a transform curve on `bake`'s
-/// moves the bake across it. An opacity-only curve on `bake`'s side
-/// changes neither, since its alpha applies where the bake is drawn.
 pub(crate) fn sampled_against(
     spaces: &[Space],
     animations: &[AnimationSlot],
@@ -154,9 +124,6 @@ pub(crate) fn sampled_against(
         .is_some()
 }
 
-/// The innermost clip on `clip`'s chain that no transform curve moves
-/// relative to `group`. A curve carrying content around inside a group
-/// cannot carry it out of this clip.
 pub(crate) fn still_clip(
     spaces: &[Space],
     clips: &[ClipNode],
@@ -171,10 +138,6 @@ pub(crate) fn still_clip(
     })
 }
 
-/// Whether a group in `group` bounds content a transform curve moves inside
-/// it under clip chain `clip`: the region of the chain's [`still_clip`] —
-/// or, with none, the viewport — pulls back into `group` through no curve
-/// whose scale range reaches 0.
 pub(crate) fn movers_bounded(
     spaces: &[Space],
     clips: &[ClipNode],
@@ -190,8 +153,6 @@ pub(crate) fn movers_bounded(
             .transform
             .as_ref()
             .is_none_or(|track| track.reach.inverse_norm().is_some()),
-        // A translation, or the zero map of a hidden box, which draws
-        // nothing to bound.
         SpaceKind::Scroll(_)
         | SpaceKind::Sticky(_)
         | SpaceKind::Anchored(_)
@@ -199,9 +160,6 @@ pub(crate) fn movers_bounded(
     })
 }
 
-/// The viewport `(low, high)` range of a layout-space vector anywhere in
-/// `low..high` (per axis) mapped through the linear part `m` (its columns:
-/// the images of the x and y unit vectors).
 pub(crate) fn linear_range(
     m: [Vector2D<f32>; 2],
     low: Vector2D<f32>,
@@ -221,13 +179,10 @@ pub(crate) fn linear_range(
     )
 }
 
-/// Whether `space` moves with scroll slot `slot`: the slot's scroll node is
-/// on its path. What rides a circular slot is what its seam copy draws.
 pub(crate) fn rides(spaces: &[Space], space: Option<u32>, slot: u32) -> bool {
     path(spaces, space).any(|kind| kind == SpaceKind::Scroll(slot))
 }
 
-/// The innermost scroll slot on `space`'s path.
 pub(crate) fn nearest_scroll(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
         SpaceKind::Scroll(slot) => Some(slot),
@@ -235,7 +190,6 @@ pub(crate) fn nearest_scroll(spaces: &[Space], space: Option<u32>) -> Option<u32
     })
 }
 
-/// The innermost sticky slot on `space`'s path.
 pub(crate) fn nearest_sticky(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
         SpaceKind::Sticky(slot) => Some(slot),
@@ -243,10 +197,6 @@ pub(crate) fn nearest_sticky(spaces: &[Space], space: Option<u32>) -> Option<u32
     })
 }
 
-/// The innermost anchored or anchored-visibility *node* on `space`'s path,
-/// as its index in `spaces`: two records under the same one move and hide
-/// together; under a box's anchored node and its visibility node they hide
-/// together but only one moves.
 pub(crate) fn nearest_anchored(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     std::iter::successors(space, |&index| spaces[index as usize].parent).find(|&index| {
         matches!(
@@ -256,7 +206,6 @@ pub(crate) fn nearest_anchored(spaces: &[Space], space: Option<u32>) -> Option<u
     })
 }
 
-/// The innermost animation slot on `space`'s path.
 pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
         SpaceKind::Animation(slot) => Some(slot),
@@ -264,14 +213,6 @@ pub(crate) fn nearest_animation(spaces: &[Space], space: Option<u32>) -> Option<
     })
 }
 
-/// One seam copy of a circular scroll container's content at one instant:
-/// the slot whose scrollport straddles its seam, the shift that moves the
-/// slot's offset back by one period for the copy, and the animation table
-/// the copy composes with ([`SpaceSamples::seam_passes_with`]).
-///
-/// The copy composes with `SpaceSamples { offset_of: &shifted, animations:
-/// &pass.animations, ..*samples }`, `shifted` being
-/// [`SpaceSamples::shifted_offsets`] of the slot and shift.
 #[derive(Debug, Clone)]
 pub(crate) struct SeamPass {
     pub(crate) slot: u32,
@@ -279,36 +220,18 @@ pub(crate) struct SeamPass {
     pub(crate) animations: AnimationSamples,
 }
 
-/// One instant's node inputs with the tables they index: the scroll offsets
-/// `offset_of` reports (falling back to the committed ones), the sampled
-/// sticky shifts, anchored shifts and animation deltas.
 #[derive(Clone, Copy)]
 pub(crate) struct SpaceSamples<'a> {
     pub(crate) spaces: &'a [Space],
     pub(crate) slots: &'a [ScrollSlot],
     pub(crate) animations: &'a AnimationSamples,
     pub(crate) stickies: &'a StickySamples,
-    /// Indexed by anchored slot, one entry per slot: while the table is
-    /// being sampled, a slot not yet reached holds the default sample — the
-    /// identity — which is what sampling the table itself relies on.
     pub(crate) anchored: &'a AnchoredSamples,
     pub(crate) ratio: f32,
     pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 }
 
 impl<'a> SpaceSamples<'a> {
-    /// The extra copies a circular scroll container's content composes at
-    /// this instant, as `(slot, shift)`: one per slot whose scrollport
-    /// straddles its seam, with that slot's offset moved back by one period
-    /// on each straddling axis.
-    ///
-    /// A slot's offset here is already normalized into its period (the
-    /// frame's entry points wrap `offset_of`), so it straddles on an axis
-    /// exactly when the offset is past `max_offset`: the scrollport then
-    /// shows the end of the scrolling area at the offset itself and its
-    /// start one period back. Straddling both axes needs the two single-axis
-    /// copies and the diagonal one, the fourth quadrant being the slot's own
-    /// content. Empty for the overwhelmingly common frame.
     pub(crate) fn seam_passes(&self) -> SmallVec<[(u32, Vector2D<f32>); 2]> {
         let mut passes = SmallVec::new();
         for (slot, index) in self.slots.iter().zip(0_u32..) {
@@ -332,17 +255,6 @@ impl<'a> SpaceSamples<'a> {
         passes
     }
 
-    /// The seam copies this instant composes ([`Self::seam_passes`]), each
-    /// with the animation table its replay reads ([`SeamPass`]): these
-    /// samples' table with
-    /// every curve of `curves` that runs on a view progress timeline over
-    /// the copied slot sampled again at `now` with that slot one period
-    /// back — the copy shows the content at that offset, so an item's
-    /// place in the scrollport, which such a timeline reads, is the copy's
-    /// own. Every other curve keeps its sample: a scroll progress timeline
-    /// is the container's position, the same in both copies, and a clock
-    /// animation reads no offset. Only the slots the table holds are
-    /// resampled, which a composed table narrows to what the program names.
     pub(crate) fn seam_passes_with(
         &self,
         curves: &[AnimationSlot],
@@ -373,9 +285,6 @@ impl<'a> SpaceSamples<'a> {
             .collect()
     }
 
-    /// `offset_of` with slot `slot`'s offset moved by `shift`, every other
-    /// slot's as it is: the offsets one seam pass composes with. Hand it to
-    /// a copy of these samples, `SpaceSamples { offset_of: &shifted, ..*self }`.
     pub(crate) fn shifted_offsets(
         &self,
         slot: u32,
@@ -393,8 +302,6 @@ impl<'a> SpaceSamples<'a> {
         }
     }
 
-    /// `space`'s live map in viewport CSS px: its path's node transforms,
-    /// root first.
     pub(crate) fn css(&self, space: Option<u32>) -> Affine {
         let mut product = Affine::IDENTITY;
         let mut current = space;
@@ -406,9 +313,6 @@ impl<'a> SpaceSamples<'a> {
         product
     }
 
-    /// [`Self::css`] conjugated into device px: encoded content carries the
-    /// device scale as its outermost factor, so the map applies inside one
-    /// scale and outside the other.
     pub(crate) fn device(&self, space: Option<u32>) -> Affine {
         let css = self.css(space);
         let scale = f64::from(self.ratio);
@@ -419,13 +323,6 @@ impl<'a> SpaceSamples<'a> {
         }
     }
 
-    /// Maps a space into a filter entry's bake target: device px with the
-    /// entry's `rect` origin at `(0, 0)` and the entry's own map divided out
-    /// on the *left*, because the composed frame draws the baked texture at
-    /// `device(entry) · Tr(origin)`. So
-    /// `device(entry) · Tr(origin) · bake_map(entry, origin)(space)` is
-    /// `device(space)` for every space — whatever moves between the two, and
-    /// not only when the two differ by a translation.
     pub(crate) fn bake_map(
         &self,
         entry: Option<u32>,
@@ -436,8 +333,6 @@ impl<'a> SpaceSamples<'a> {
         move |space| out * device(space)
     }
 
-    /// [`Self::device`] behind a one-entry cache: consecutive ops mostly
-    /// share a space.
     pub(crate) fn device_cached(&self) -> impl Fn(Option<u32>) -> Affine + '_ {
         let last = std::cell::Cell::new(None);
         move |space| match last.get() {
@@ -483,8 +378,6 @@ mod tests {
         PaintItemKind, PaintOrder, ScrollSlot, SlotSamples, SnapSlot, StickySample, StickySamples,
     };
 
-    /// Scroller `R` at the root, an animated element `A` inside it, and a
-    /// scroller `S` inside `A`: spaces 0, 1 and 2.
     const TREE: [Space; 3] = [
         Space {
             parent: None,
@@ -520,8 +413,6 @@ mod tests {
         }
     }
 
-    /// A quarter turn about `(50, 50)`: a delta that commutes with no
-    /// translation.
     fn quarter_turn() -> Affine {
         Affine::translate((50.0, 50.0))
             * Affine::rotate(std::f64::consts::FRAC_PI_2)
@@ -535,7 +426,6 @@ mod tests {
             .all(|(a, b)| (a - b).abs() < 1e-9)
     }
 
-    /// A whole-frame sample table: slot `i` is `samples[i]`.
     fn table<S>(samples: impl IntoIterator<Item = S>) -> SlotSamples<S> {
         (0..).zip(samples).collect()
     }
@@ -558,8 +448,6 @@ mod tests {
 
     static NO_ANCHORED: crate::visual::anchored::AnchoredSamples = smallvec::SmallVec::new_const();
 
-    /// Two branches under a scroller: an animated element holding a
-    /// scroller (spaces 1 and 3), and a sticky box (space 2).
     #[test]
     fn two_spaces_meet_at_their_deepest_shared_node() {
         let spaces = [
@@ -618,10 +506,6 @@ mod tests {
         );
     }
 
-    /// A filter entry in the outer scroller's content, ops in the animated
-    /// element's space: the rotation and the scroll translation do not
-    /// commute, so the side the entry's own map is divided out on is
-    /// observable.
     #[test]
     fn a_bake_divides_the_entrys_own_map_out_on_the_left() {
         let slots = [slot(None, 30.0), slot(Some(0), 20.0)];
@@ -634,7 +518,6 @@ mod tests {
         let origin = (7.0, 11.0);
         let entry = Some(0);
         let bake = samples.bake_map(entry, origin);
-        // What compose draws the baked texture at.
         let placement = samples.device(entry) * Affine::translate(origin);
 
         for space in [None, entry, Some(1), Some(2)] {
@@ -676,8 +559,6 @@ mod tests {
         assert!(close(samples.css(Some(1)), Affine::translate((3.0, 12.0))));
     }
 
-    /// A frame over [`TREE`] with one clip in `A`'s box space and one item
-    /// per case in `S`'s content space.
     fn frame(items: &[(f32, Option<usize>)]) -> PaintOrder {
         let mut order = PaintOrder::empty();
         order.spaces.extend_from_slice(&TREE);
@@ -721,8 +602,6 @@ mod tests {
         let samples = order.space_samples(&animations, &stickies, &NO_ANCHORED, 1.0, &|_| None);
         let [inside, clipped, unclipped] = [0, 1, 2].map(|index| &order.items[index]);
 
-        // Baked at (5, 55); `S` scrolls it to (5, 35) in `A`'s box, inside
-        // the clip.
         let point = on_screen(&samples, 5.0, 55.0);
         assert_eq!(
             order.item_hit(inside, point, &samples),
@@ -738,8 +617,6 @@ mod tests {
             "the translations-outside order is not where the item is",
         );
 
-        // Baked at (5, 5); `S` scrolls it to (5, −15) in `A`'s box, above
-        // the clip, which moves with `A` and not with `S`.
         let point = on_screen(&samples, 5.0, 5.0);
         assert_eq!(order.item_hit(clipped, point, &samples), None);
         assert_eq!(

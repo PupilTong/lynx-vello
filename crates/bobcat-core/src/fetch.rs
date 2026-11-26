@@ -76,28 +76,10 @@ use crate::performance::{LazyBundleEntry, Opener};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 
-/// Starts one fetch and answers the id of the future its outcome settles —
-/// or `true`, for a URL this view has fetched already. A second argument,
-/// `true`, names the fetch a lazy bundle load, which a `resource.lazyBundle`
-/// entry reports.
 const FETCH_EXPORT: &str = "fetchResource";
 
-/// Resolves a URL against the view's base, as a fetch of it resolves it.
 const RESOLVE_EXPORT: &str = "resolveUrl";
 
-/// Installs the one member a realm fetches a URL through, and the one that
-/// resolves a URL the way that fetch does.
-///
-/// Neither evaluates anything or touches a document. `fetchResource` reads no
-/// byte of what comes back: it registers the fetch as a future of this
-/// realm's and answers that future's id — unless the view's fetcher says it
-/// already holds that URL, in which case it answers `true` and starts
-/// nothing. `resolveUrl` answers a string, and throws for a URL that does not
-/// resolve.
-///
-/// `opener` is the realm the fetches are timed as — the main-thread realm or
-/// `<frame>` card realm, or the worker — which decides which BTS observer
-/// hears its `resource.lazyBundle` entries.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
     sources: &HostOutbox,
@@ -117,13 +99,9 @@ pub(crate) fn install(
         const NAME: &str = "bobcat-internal:host.fetchResource";
         let url = string_argument(NAME, arguments, 0)?.to_owned();
         let lazy_bundle = matches!(arguments.get(1), Some(HostArgument::Boolean(true)));
-        // Already fetched, as the fetcher itself answers: nothing is
-        // requested and the realm has its outcome before this call returns.
         if requests.fetch_probe().is_some_and(|probe| probe(&url)) {
             return Ok(HostValue::Boolean(true));
         }
-        // The one read a lazy bundle's fetch makes while nobody observes
-        // `resource`.
         let registry = requests.registry();
         let timing = (lazy_bundle && registry.times_resources())
             .then(|| (ClockInstant::now(), Arc::<str>::from(url.as_str())));
@@ -132,9 +110,6 @@ pub(crate) fn install(
             timed: timing.is_some(),
         });
         let timed = timing.map(|timing| (timing, Arc::clone(registry), requests.clone()));
-        // Registered rather than awaited: which of the two ways out the realm
-        // takes — the synchronous `Future.wait` or the `.then` the owner's
-        // epilogue settles — is the caller's business, not this member's.
         let id = futures.register(async move {
             let answer = answer.await;
             if let Some(((started, url), registry, host)) = timed {
@@ -144,8 +119,6 @@ pub(crate) fn install(
                 };
                 let entry = LazyBundleEntry::from_fetch(url, started, ClockInstant::now(), outcome);
                 if registry.note_lazy_bundle(opener, entry) {
-                    // The embedder's next `pump` reports it, and tells the
-                    // BTS observer owed it.
                     host.wake();
                 }
             }

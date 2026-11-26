@@ -82,114 +82,67 @@ use crate::image_header::ImageHeader;
 use crate::memory::MemoryCache;
 use crate::mime::ImageFormat;
 
-/// What a [`Residency`] is built with.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResidencyConfig {
-    /// The bitmap tier's budget for decoded bitmaps. Best-effort: the frames
-    /// being drawn are never evicted, and a single bitmap larger than the
-    /// budget still has to exist while it is on screen.
     pub budget_bytes: usize,
-    /// The largest per-axis size of an image's first decode, before any
-    /// frame has said how large it draws it. Also bounded by
-    /// [`Self::max_renderable`].
     pub initial_bound: u32,
-    /// The largest axis the caller's rasterizer draws: no decode is asked
-    /// for more.
     pub max_renderable: u32,
-    /// A resident bitmap at least this many times larger than its draw on
-    /// both axes is re-decoded at the drawn size.
     pub downsample_ratio: f32,
 }
 
-/// One view's name for its working set, minted by [`Residency::new_view`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ViewKey(u64);
 
-/// What a request for a source means for the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Requested {
-    /// Already a bitmap: the caller reports its intrinsic size now, and
-    /// whether its frames animate.
     Loaded {
         intrinsic: (u32, u32),
         animated: bool,
     },
-    /// Failed before, and failed for good: the caller reports the failure
-    /// now.
     Failed,
-    /// A load is in flight; the waiter joined it.
     Joined,
-    /// Nothing known, or a document parsed before: the caller starts a load
-    /// decoding at most `bound`. The waiter is filed with it.
-    Start { bound: (u32, u32) },
+    Start {
+        bound: (u32, u32),
+    },
 }
 
-/// A raster load's outcome: the bitmap, what the bytes were, and the bytes
-/// themselves when nothing else could restore them.
 #[derive(Debug)]
 pub struct Decoded<F = Infallible> {
     pub url: Url,
     pub bitmap: DecodedImage<F>,
     pub format: ImageFormat,
     pub header: Option<ImageHeader>,
-    /// The encoded bytes, kept when no other tier can hand them back.
     pub encoded: Option<Bytes>,
-    /// Whether the image has more than one frame to play, as its decoder
-    /// answered: what every later request is told with its size.
     pub animated: bool,
 }
 
-/// What a refinement re-decodes, and at what size. A restore of a wanted
-/// source ([`Residency::want`]) is a refinement of a bitmap the tier no
-/// longer holds.
 #[derive(Clone, Debug)]
 pub struct Refinement {
     pub url: Url,
-    /// The entry's own bytes, when it kept them; otherwise another tier is
-    /// asked for them again.
     pub encoded: Option<Bytes>,
     pub format: ImageFormat,
     pub header: Option<ImageHeader>,
     pub target: (u32, u32),
 }
 
-/// What a frame finds for a source ([`Residency::describe`]).
 #[derive(Debug)]
 pub enum Described<F = Infallible> {
-    /// The resident bitmap, the descriptor that names it, and the refinement
-    /// the caller starts when it is far from the drawn size and none is in
-    /// flight.
     Resident {
         image: PictureFrame<F>,
         descriptor: ImageDescriptor,
         refine: Option<Refinement>,
     },
-    /// Loaded, and the tier does not hold the bitmap — released or evicted.
-    /// `descriptor` names the bitmap last inserted for the source; the
-    /// refinement is planned by the rule a resident bitmap's is, from the
-    /// descriptor's size. Nothing is restored: a caller that cannot draw
-    /// from the descriptor alone says the source is wanted
-    /// ([`Residency::want`]).
     Absent {
         descriptor: ImageDescriptor,
         refine: Option<Refinement>,
     },
-    /// Nothing to draw: loading, failed, a document, never asked for, or a
-    /// bitmap the tier dropped whose restore failed.
     Unavailable,
 }
 
-/// What is known about every source asked for, and the decoded bitmaps.
 pub struct Residency<W, F = Infallible> {
     entries: FxHashMap<Arc<str>, Entry<W>>,
     bitmaps: MemoryCache<PictureFrame<F>>,
-    /// Document requests whose parse is in flight, each with the waiter
-    /// that asked: where a parse's answer goes, since a waiter cannot travel
-    /// with the job. Not an entry: two requests for one source are two of
-    /// these, two parses and two answers, and each leaves the list when a
-    /// parse of its source completes.
     requested: Vec<(Arc<str>, W)>,
-    /// Each view's working set; the bitmap tier pins their union.
     views: FxHashMap<ViewKey, Vec<Arc<str>>>,
     next_view: u64,
     config: ResidencyConfig,
@@ -208,23 +161,11 @@ impl<W, F> std::fmt::Debug for Residency<W, F> {
     }
 }
 
-/// What [`Residency::find`] answers: the loaded entry, the size a draw
-/// decodes at, and the resident bitmap.
 type Found<'a, F> = (&'a mut Loaded, (u32, u32), Option<PictureFrame<F>>);
 
 enum Entry<W> {
-    /// Asked for; the job has not completed. Every waiter that asked is told
-    /// when it does.
-    Loading {
-        waiters: Vec<W>,
-    },
-    /// A decoded raster image.
+    Loading { waiters: Vec<W> },
     Loaded(Loaded),
-    /// A fetched document that parsed and was reported to every waiter that
-    /// asked. Nothing of it is kept, since the engine owns the scene it
-    /// encodes; the marker keeps the source known, and a later request
-    /// fetches and parses it again. It has no bitmap, so the bitmap tier,
-    /// refinement and restore never see it.
     Parsed,
     Failed,
 }
@@ -232,31 +173,16 @@ enum Entry<W> {
 struct Loaded {
     url: Url,
     intrinsic: (u32, u32),
-    /// Whether the image's frames animate.
     animated: bool,
-    /// The container, for a decoder that wants to be told what it is given.
-    /// Never [`ImageFormat::Svg`]: an SVG document completes as
-    /// [`Entry::Parsed`], so no restore or refinement ever decodes one.
     format: ImageFormat,
     header: Option<ImageHeader>,
-    /// The encoded bytes, kept when no other tier can hand them back: a
-    /// registration that may be cleared, a `data:` URL, a response the byte
-    /// tier did not store, and everything in the browser.
     encoded: Option<Bytes>,
-    /// A refinement decode in flight, and the size it targets. A restore of
-    /// a wanted source is one too.
     refining: Option<(u32, u32)>,
-    /// A decode failed while the tier held no bitmap for the source: there
-    /// is nothing to draw it from, and nothing restores it again.
     unrestorable: bool,
-    /// The bitmap last inserted for the source, whether or not the tier
-    /// still holds it.
     descriptor: ImageDescriptor,
 }
 
 impl Loaded {
-    /// A decode of the source at `target`: what a refinement or a restore
-    /// runs.
     fn decode_at(&self, target: (u32, u32)) -> Refinement {
         Refinement {
             url: self.url.clone(),
@@ -267,8 +193,6 @@ impl Loaded {
         }
     }
 
-    /// The refinement to start when a bitmap of `size` is far from
-    /// `target` and none is in flight; marks it in flight.
     fn plan(&mut self, size: (u32, u32), target: (u32, u32), ratio: f32) -> Option<Refinement> {
         (self.refining.is_none() && wants_refinement(size, target, self.intrinsic, ratio)).then(
             || {
@@ -292,16 +216,11 @@ impl<W, F: Clone> Residency<W, F> {
         }
     }
 
-    /// A key for one more view's working set.
     pub fn new_view(&mut self) -> ViewKey {
         self.next_view += 1;
         ViewKey(self.next_view)
     }
 
-    /// Names `source` for `waiter`: what is known answers at once, a load
-    /// in flight is joined, and otherwise the caller is told to start the
-    /// load and `waiter` is filed with it. A document parsed before is
-    /// fetched and parsed again.
     pub fn request(&mut self, source: &str, waiter: W) -> Requested {
         match self.entries.get_mut(source) {
             Some(Entry::Loaded(loaded)) => {
@@ -329,16 +248,10 @@ impl<W, F: Clone> Residency<W, F> {
         }
     }
 
-    /// Files a document request for `source` whose parse the caller starts.
-    /// Nothing is consulted and no entry is filed: every request is one
-    /// parse and one answer.
     pub fn request_document(&mut self, source: Arc<str>, waiter: W) {
         self.requested.push((source, waiter));
     }
 
-    /// `source`'s load decoded: the bitmap enters the tier and the entry is
-    /// loaded. Answers the waiters to tell and the intrinsic size to tell
-    /// them, or `None` when no load of `source` was in flight.
     pub fn loaded(
         &mut self,
         source: &Arc<str>,
@@ -373,17 +286,10 @@ impl<W, F: Clone> Residency<W, F> {
         Some((waiters, intrinsic))
     }
 
-    /// `source`'s load was a document, and it parsed: the entry becomes the
-    /// parsed marker. Answers the waiters to tell, or `None` when no load of
-    /// `source` was in flight.
     pub fn parsed(&mut self, source: &str) -> Option<Vec<W>> {
         self.settle(source, Entry::Parsed)
     }
 
-    /// A parse of a document request for `source` completed: answers the
-    /// waiter of one request for it, or `None` when none is in flight. Any
-    /// request for this source will do: the source names its markup, so
-    /// every parse of it is the same document.
     pub fn requested_document_done(&mut self, source: &str) -> Option<W> {
         let index = self
             .requested
@@ -392,15 +298,10 @@ impl<W, F: Clone> Residency<W, F> {
         Some(self.requested.swap_remove(index).1)
     }
 
-    /// `source`'s load failed, or it could not even be started: the entry
-    /// fails for good. Answers the waiters to tell, or `None` when no load
-    /// of `source` was in flight.
     pub fn failed(&mut self, source: &str) -> Option<Vec<W>> {
         self.settle(source, Entry::Failed)
     }
 
-    /// A refinement of `source` at `target` decoded: the bitmap replaces the
-    /// resident one, unless the entry is no longer refining to `target`.
     pub fn refined(
         &mut self,
         source: &Arc<str>,
@@ -422,11 +323,6 @@ impl<W, F: Clone> Residency<W, F> {
         self.bitmaps.insert(Arc::clone(source), image, bytes);
     }
 
-    /// A refinement of `source` failed. It clears `refining`, so a later
-    /// describe may plan another, and leaves the loaded entry alone — but a
-    /// failure while the tier holds no bitmap for the source was its
-    /// restore, and leaves it with nothing to draw: [`Self::describe`]
-    /// answers [`Described::Unavailable`] for it from then on.
     pub fn refine_failed(&mut self, source: &str) {
         let resident = self.bitmaps.contains(source);
         if let Some(Entry::Loaded(loaded)) = self.entries.get_mut(source) {
@@ -435,10 +331,6 @@ impl<W, F: Clone> Residency<W, F> {
         }
     }
 
-    /// What a frame drawing `source` at `hint` can draw without a restore:
-    /// the resident bitmap, or the descriptor of the one last inserted. A
-    /// bitmap far from the drawn size plans a refinement; nothing is
-    /// restored here.
     pub fn describe(&mut self, source: &str, hint: ImageSizeHint) -> Described<F> {
         let ratio = self.config.downsample_ratio;
         let Some((loaded, target, image)) = self.find(source, hint) else {
@@ -462,17 +354,6 @@ impl<W, F: Clone> Residency<W, F> {
         }
     }
 
-    /// A frame draws `source` at `hint` and has nothing to draw it from: the
-    /// tier does not hold its bitmap, and the caller's rasterizer holds no
-    /// upload of it. Answers the decode that restores it at the drawn size,
-    /// for the caller to run off its thread and answer with
-    /// [`Self::refined`] or [`Self::refine_failed`] — and marks it in
-    /// flight, so a source wanted again before that answer starts nothing.
-    ///
-    /// `None` when there is nothing to start: the bitmap is resident, a
-    /// decode of the source is already in flight (a refinement brings a
-    /// bitmap back too), its restore failed before, or it is not a loaded
-    /// bitmap.
     pub fn want(&mut self, source: &str, hint: ImageSizeHint) -> Option<Refinement> {
         let (loaded, target, image) = self.find(source, hint)?;
         if image.is_some() || loaded.refining.is_some() || loaded.unrestorable {
@@ -482,26 +363,15 @@ impl<W, F: Clone> Residency<W, F> {
         Some(loaded.decode_at(target))
     }
 
-    /// Drops the bitmaps of `sources` from the tier, pinned or not: the
-    /// caller holds them elsewhere. The entries stay loaded, so
-    /// [`Self::describe`] answers their descriptors and a later
-    /// [`Self::want`] restores them.
     pub fn release(&mut self, sources: &[Arc<str>]) {
         for source in sources {
             let _ = self.bitmaps.remove(source);
         }
     }
 
-    /// The loaded entry for `source`, the size a draw of `hint` decodes
-    /// at, and the resident bitmap, marked most recently used. A resident
-    /// bitmap is always the one last inserted, so the entry's descriptor
-    /// names it.
     fn find(&mut self, source: &str, hint: ImageSizeHint) -> Option<Found<'_, F>> {
         let loaded = match self.entries.get_mut(source) {
             Some(Entry::Loaded(loaded)) => loaded,
-            // The engine draws a document itself and never reads it here;
-            // answering `None` is what keeps every restore and refinement
-            // unreachable for an SVG document.
             Some(Entry::Parsed | Entry::Loading { .. } | Entry::Failed) | None => return None,
         };
         let target = bounded(
@@ -512,15 +382,11 @@ impl<W, F: Clone> Residency<W, F> {
         Some((loaded, target, image))
     }
 
-    /// Records `view`'s working set, replacing what it said before. The
-    /// bitmap tier pins the union of every view's set, so those bitmaps are
-    /// never evicted.
     pub fn retain(&mut self, view: ViewKey, frame: &[Arc<str>]) {
         self.views.insert(view, frame.to_vec());
         self.pin();
     }
 
-    /// Forgets `view`'s working set: what only it pinned may be evicted.
     pub fn release_view(&mut self, view: ViewKey) {
         if self.views.remove(&view).is_some() {
             self.pin();
@@ -532,18 +398,15 @@ impl<W, F: Clone> Residency<W, F> {
         self.bitmaps.budget()
     }
 
-    /// Changes the bitmap budget, evicting what no longer fits.
     pub fn set_budget(&mut self, budget: usize) {
         self.bitmaps.set_budget(budget);
     }
 
-    /// Bytes held by decoded bitmaps.
     #[must_use]
     pub fn bitmap_bytes(&self) -> usize {
         self.bitmaps.used_bytes()
     }
 
-    /// Bytes held by encoded images nothing else can restore.
     #[must_use]
     pub fn encoded_bytes(&self) -> usize {
         self.entries
@@ -555,20 +418,16 @@ impl<W, F: Clone> Residency<W, F> {
             .sum()
     }
 
-    /// Whether `source` has been asked for at all. A document request does
-    /// not count: it files no entry.
     #[must_use]
     pub fn knows(&self, source: &str) -> bool {
         self.entries.contains_key(source)
     }
 
-    /// Whether `source` has a resident bitmap.
     #[must_use]
     pub fn is_resident(&self, source: &str) -> bool {
         self.bitmaps.contains(source)
     }
 
-    /// The resident bitmap's size, if any.
     #[must_use]
     pub fn resident_size(&self, source: &str) -> Option<(u32, u32)> {
         if !self.bitmaps.contains(source) {
@@ -582,8 +441,6 @@ impl<W, F: Clone> Residency<W, F> {
         }
     }
 
-    /// Moves a loading entry to `next`, answering its waiters; leaves any
-    /// other entry alone and answers `None`.
     fn settle(&mut self, source: &str, next: Entry<W>) -> Option<Vec<W>> {
         let entry = self.entries.get_mut(source)?;
         let Entry::Loading { waiters } = entry else {
@@ -594,8 +451,6 @@ impl<W, F: Clone> Residency<W, F> {
         Some(waiters)
     }
 
-    /// Pins the union of every view's working set, which trims what is no
-    /// longer pinned.
     fn pin(&mut self) {
         let union: Vec<Arc<str>> = self.views.values().flatten().cloned().collect();
         let _ = self.bitmaps.pin(&union);
@@ -644,7 +499,6 @@ mod tests {
         }
     }
 
-    /// Requests `source` for `waiter` and completes its load with `bitmap`.
     fn load(
         residency: &mut Residency<&'static str>,
         source: &str,
@@ -984,7 +838,6 @@ mod tests {
             "and the source stays loaded"
         );
 
-        // A refinement that fails while the bitmap is resident is no restore.
         load(
             &mut residency,
             "big.png",
@@ -1150,8 +1003,6 @@ mod tests {
         ));
     }
 
-    /// A platform frame whose last clone records that it was let go, as the
-    /// browser's closes its `ImageBitmap`.
     #[derive(Clone, Debug)]
     struct Frame(std::rc::Rc<std::cell::Cell<bool>>);
 
@@ -1167,9 +1018,6 @@ mod tests {
         (decoded, frame)
     }
 
-    /// A platform frame is held until the caller's rasterizer holds its
-    /// upload and then let go, its descriptor kept; a want decodes the
-    /// source again, and the bytes it counts are its size's.
     #[test]
     fn a_platform_frame_is_held_until_released_then_restored_by_a_decode() {
         let mut residency: Residency<&'static str, Frame> = Residency::new(ResidencyConfig {

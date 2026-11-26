@@ -10,8 +10,6 @@ use bobcat_core::{
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, mts_entry_source};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -38,8 +36,6 @@ async fn setup() -> (LynxGroup, Resources, flume::Receiver<()>) {
     (group, resources, receiver)
 }
 
-/// One view and the painter that captures it. A painter is per view — there
-/// is at most one — so a test that captures two pages builds two.
 async fn view(
     group: &LynxGroup,
     resources: &Resources,
@@ -55,21 +51,12 @@ async fn view(
     (view, painter)
 }
 
-/// Pumps until boot settles, and answers with the first failure it reported.
-///
-/// A fatal event ends the wait at once. A `ScriptRunError` does not, because
-/// boot goes on past one: it is the answer only if nothing fatal follows it,
-/// so a failure of boot's own code, which comes right after a
-/// `ScriptRunError` with the same message, is still read as the
-/// `StartupFailed` it is.
 fn boot(
     view: &mut LynxView<ViewResources>,
     receiver: &flume::Receiver<()>,
 ) -> Result<(), LynxViewError> {
     let mut script_error = None;
     loop {
-        // The engine waits its own realm timers out, so the only reason to
-        // stop waiting here is a wakeup — or the generous hang budget.
         receiver
             .recv_timeout(Duration::from_secs(20))
             .expect("startup wakes the host");
@@ -87,15 +74,6 @@ fn boot(
     }
 }
 
-/// A text sheet and a pre-parsed sheet both mount through the real resource
-/// system, in the order the view listed them.
-///
-/// Boot's first `__FlushElementTree` mounts every listed sheet in listed
-/// order before the document is styled, whatever order the fetcher answered
-/// them in, so `ScriptFinished` means both are mounted. `first.css` sizes the
-/// box and paints it red; `second.css` paints it blue with a selector of the
-/// same specificity, so the pixel is blue only if `second.css`, listed later,
-/// won the tie, and it is a box of `first.css`'s size only if both mounted.
 #[tokio::test]
 async fn text_and_preparsed_sheets_keep_cascade_order() {
     let (group, resources, receiver) = setup().await;
@@ -152,14 +130,6 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
-/// A decoding failure keeps the resolved URL, which is what a card's author
-/// needs to find the file.
-///
-/// The entry's answer is read by the view's entry task before any of it
-/// runs, so its failure reaches the embedder as the fetcher's own
-/// `InvalidScriptEncoding`. A listed stylesheet is read by boot's first
-/// `__FlushElementTree`, so its failure reaches the embedder as the exception
-/// that flush threw. What has to survive either is the resolved URL.
 #[tokio::test]
 async fn source_utf8_errors_keep_the_resolved_url() {
     for stylesheet in [false, true] {
@@ -198,12 +168,6 @@ async fn source_utf8_errors_keep_the_resolved_url() {
     }
 }
 
-/// A view whose entry cannot be loaded fails, and its group goes on serving.
-///
-/// The failing view's entry task reads the answer in a job of the group's one
-/// queue; what keeps a sibling from waiting on it is that the read *ends* — a
-/// resolution failure is an answer, and reporting it, the fetcher's own
-/// error, finishes the job.
 #[tokio::test]
 async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
@@ -213,8 +177,6 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
         ViewSources::new("app:///", "app:///missing.js", SCREEN, "en-US"),
     )
     .await;
-    // `app:` is a plausible scheme that nothing registered and no transport
-    // serves, so resolution is where the load stops.
     match boot(&mut failed, &receiver) {
         Err(LynxViewError::Resource(error)) => {
             assert!(
@@ -238,8 +200,6 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     )
     .await;
     boot(&mut sibling, &receiver).unwrap();
-    // One frame of the sibling's: post, take its turns until it is serviced,
-    // draw. The failed view is not what holds it up.
     let posted = sibling_painter.post_frame().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !sibling_painter.frame_serviced(&posted) {
@@ -254,15 +214,6 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     assert!(failed.pump().is_empty());
 }
 
-/// A browser embedder learns the base only from the entry response, so it
-/// names one with `set_base_url` after the system is already built. A source
-/// specifier resolves against that base and not the one the config carried.
-///
-/// The relative source is a stylesheet: the entry is resolved against the
-/// view's own base, which this embedder names the same, while a relative
-/// stylesheet is resolved by the fetcher against its base. A sheet that did
-/// not resolve against the new base would fail the view, and the blue it
-/// paints is how this test sees that it mounted.
 #[tokio::test]
 async fn a_base_named_after_construction_resolves_a_relative_source() {
     let (group, resources, receiver) = setup().await;
@@ -452,8 +403,6 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
         )
         .unwrap();
     assert!(!view.is_ready());
-    // Boot's first flush waits for a painter to bind the view, and readiness
-    // is past it.
     let mut painter =
         bobcat_core::Painter::new(bobcat_core::DrawTarget::Offscreen, 32.0, 24.0, 1.0)
             .await
@@ -488,11 +437,6 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
     assert!(view.is_ready());
 }
 
-/// The browser's XML path registers both scripts as the modules a card's
-/// bodies become, and the engine adds nothing to either: the main-thread
-/// script names the PAPI and `lynx` without importing them and fails on its
-/// own third line, reported at line 3; the background-thread script names
-/// `lynx` and the `module` its chunk wrapper gives it, also without imports.
 #[tokio::test]
 async fn a_browser_xml_response_registers_both_scripts_as_card_bodies() {
     let (group, resources, receiver) = setup().await;
@@ -608,9 +552,6 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
-/// An import that fails rejects its promise, where the entry can catch it.
-/// One the entry does not catch is the app's failure rather than the boot's:
-/// it is reported as a `ScriptRunError`, and boot still finishes.
 #[tokio::test]
 async fn import_failures_reject_promises_and_an_uncaught_one_is_reported_before_boot_finishes() {
     for caught in [true, false] {
@@ -655,9 +596,6 @@ async fn import_failures_reject_promises_and_an_uncaught_one_is_reported_before_
             boot(&mut view, &receiver).unwrap();
             continue;
         }
-        // `boot` would answer with the `ScriptRunError` this branch is about
-        // and say nothing of the order of the events around it, so the events
-        // are collected here instead.
         let mut events = Vec::new();
         while !events
             .iter()
@@ -789,8 +727,6 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
             std::time::Instant::now() < stop,
             "import never committed its frame"
         );
-        // The engine waits its own timers out; this is a poll interval for a
-        // wakeup that has no deadline of its own to name.
         let _ = receiver.recv_timeout(Duration::from_millis(100));
         for event in view.pump() {
             assert!(

@@ -8,7 +8,6 @@ use super::{Axis, Binding, ProgressTiming, iteration_progress};
 use crate::test_common::Doc;
 use crate::tree::document::NodeId;
 
-/// A timing on a source scrolling to 1000.
 fn timed(
     range: [f32; 2],
     duration: Option<f64>,
@@ -31,7 +30,6 @@ fn timing(range: [f32; 2], duration: Option<f64>, delay: f64, iterations: f64) -
     timed(range, duration, delay, iterations, AnimationFillMode::None)
 }
 
-/// `(start_delay, iteration, active)`.
 fn normalized(timing: ProgressTiming) -> (f64, f64, f64) {
     (
         timing.origin - f64::from(timing.start),
@@ -40,10 +38,6 @@ fn normalized(timing: ProgressTiming) -> (f64, f64, f64) {
     )
 }
 
-/// Blink's proportional normalization: `auto` fills the range, a time
-/// duration and delay keep their proportions, and an infinite count, a
-/// duration and delay totalling nothing, or an empty range leave no active
-/// interval.
 #[test]
 fn durations_and_delays_normalize_proportionally_into_the_range() {
     let whole = [0.0, 1000.0];
@@ -138,9 +132,6 @@ fn at(progress: f64, reversed: bool) -> Option<AnimationProgress> {
     Some(AnimationProgress::new(progress, reversed))
 }
 
-/// Every fill mode in every phase of a range narrowed to `[200, 600]`: the
-/// before phase takes the first keyframe only with a backwards fill, the
-/// after phase the last only with a forwards one.
 #[test]
 fn each_fill_mode_holds_only_its_own_phases() {
     let before = Some(AnimationProgress::before_phase(false));
@@ -162,9 +153,6 @@ fn each_fill_mode_holds_only_its_own_phases() {
     }
 }
 
-/// web-animations-2 §2.4.4: the end of the active interval is the after
-/// phase, except at the timeline's own 0% or 100%, where a range ending
-/// there still shows its last keyframe without a forwards fill.
 #[test]
 fn a_range_ending_at_the_timeline_end_stays_active_there() {
     let whole = timing([0.0, 1000.0], None, 0.0, 1.0);
@@ -179,10 +167,6 @@ fn a_range_ending_at_the_timeline_end_stays_active_there() {
     assert_eq!(iteration_progress(&narrowed, 200.0), at(0.0, false));
 }
 
-/// The progress is the simple iteration progress with the iteration's
-/// direction beside it, never the directed progress: `reverse` at a quarter
-/// is a quarter through a reversed iteration, and `alternate` flips per
-/// iteration.
 #[test]
 fn directions_report_the_iteration_they_reverse() {
     let quarter = 300.0;
@@ -220,8 +204,6 @@ fn directions_report_the_iteration_they_reverse() {
     );
 }
 
-/// An infinite count takes no range at all: past the range's start it is at
-/// the end of its iteration, forwards whatever `alternate` would say.
 #[test]
 fn an_infinite_count_sits_at_its_iteration_end() {
     let infinite = filled(
@@ -235,10 +217,6 @@ fn an_infinite_count_sits_at_its_iteration_end() {
     assert_eq!(iteration_progress(&none, 400.0), at(0.0, false));
 }
 
-/// A start delay takes its share of the range before the active interval:
-/// 1s after 1s is the before phase over the first half, and a negative
-/// delay starts the range part of the way through the iteration, so its
-/// backwards fill is not the first keyframe.
 #[test]
 fn a_delay_is_the_before_phase_in_proportion() {
     let before = Some(AnimationProgress::before_phase(false));
@@ -275,9 +253,6 @@ fn a_delay_is_the_before_phase_in_proportion() {
     assert_eq!(iteration_progress(&early, 100.0), None);
 }
 
-/// Blink: a duration and delay totalling nothing is a zero active duration
-/// at the range's start, not the whole range, so past it only a forwards
-/// fill shows, and it shows the last keyframe.
 #[test]
 fn a_duration_and_delay_totalling_nothing_ends_at_the_range_start() {
     let both = timed([0.0, 1000.0], Some(1.0), -1.0, 1.0, AnimationFillMode::Both);
@@ -286,10 +261,6 @@ fn a_duration_and_delay_totalling_nothing_ends_at_the_range_start() {
     assert_eq!(iteration_progress(&none, 500.0), None);
 }
 
-/// web-animations-2 §2.4.4 after csswg-drafts#13819: the timeline boundary
-/// is the source's scroll limit, not the timeline's own 100%. A view
-/// timeline's range ending at the scroll limit stays active there; one
-/// ending at the cover range's end short of it does not.
 #[test]
 fn the_timeline_boundary_is_the_scroll_limit() {
     let fill = AnimationFillMode::None;
@@ -300,9 +271,6 @@ fn the_timeline_boundary_is_the_scroll_limit() {
     assert_eq!(iteration_progress(&cover, 350.0), None);
 }
 
-/// The range's end at the scroll limit is exact whatever the start delay
-/// rounds to: 20% of 314 is not an f32, and the delay is a proportion of
-/// the rest.
 #[test]
 fn the_range_end_is_exact_under_a_rounded_delay() {
     let start = 0.2_f32 * 314.0;
@@ -318,9 +286,6 @@ fn the_range_end_is_exact_under_a_rounded_delay() {
     assert_eq!(iteration_progress(&timing, 314.0), at(1.0, false));
 }
 
-/// web-animations-1 §4.7: at the end of the active interval the simple
-/// iteration progress is 1, however the iteration duration rounds — a third
-/// of 1000 or of 700 is no f32.
 #[test]
 fn the_last_iteration_ends_at_one() {
     let thirds = timing([0.0, 1000.0], None, 0.0, 3.0);
@@ -356,7 +321,6 @@ fn binding(doc: &Doc, id: NodeId) -> Binding {
         .expect("the animation is bound")
 }
 
-/// The binding's source and its attachment range `[start, end]`.
 fn attached(doc: &Doc, id: NodeId) -> Option<(NodeId, Axis, [f32; 2])> {
     match binding(doc, id) {
         Binding::Active {
@@ -369,8 +333,6 @@ fn attached(doc: &Doc, id: NodeId) -> Option<(NodeId, Axis, [f32; 2])> {
     }
 }
 
-/// A 200px scroller holding a 300px spacer, the subject carrying `subject`,
-/// and a 500px tail, with `scroller` on the scroller.
 fn view_page(scroller: &str, subject: &str) -> (Doc, NodeId, NodeId) {
     let mut doc = Doc::with_css(PAGE);
     let root = doc.root;
@@ -391,9 +353,6 @@ fn view_range(scroller: &str, subject: &str) -> [f32; 2] {
     range
 }
 
-/// Each named range of a subject smaller than the scrollport — the 50px
-/// subject 300px down a 200px scrollport: A 100, B 150, C 300, D 350 — and of
-/// one larger than it (300px: A 100, B 400, C 300, D 600).
 #[test]
 fn view_ranges_follow_the_subject_through_the_scrollport() {
     for (subject, ranges) in [
@@ -438,9 +397,6 @@ fn view_ranges_follow_the_subject_through_the_scrollport() {
     }
 }
 
-/// Insets shrink the visibility range: `auto` is the scroller's
-/// `scroll-padding`, a percentage resolves against the scrollport, and a
-/// lone value applies to both ends.
 #[test]
 fn view_insets_narrow_the_visibility_range() {
     for (scroller, timeline, expected) in [
@@ -465,11 +421,6 @@ fn view_insets_narrow_the_visibility_range() {
     }
 }
 
-/// A sticky subject holds each edge alignment over an interval: stuck at the
-/// scrollport's top from offset 300 until its containing block runs out at
-/// 800, its start edge meets the visibility range's start at every offset
-/// between. Ranges ending on that alignment take its latest offset, ranges
-/// starting on one elsewhere their earliest.
 #[test]
 fn a_sticky_subject_takes_the_earliest_or_latest_alignment() {
     let sticky = "position: sticky; top: 0px; animation-timeline: view()";
@@ -488,11 +439,6 @@ fn a_sticky_subject_takes_the_earliest_or_latest_alignment() {
     }
 }
 
-/// A bottom-sticky subject pins its end edge to the scrollport's end from
-/// offset -150 (its containing block's start) to 150 (its own place): B is
-/// that interval and the other points single offsets (A -200, C 300, D 350),
-/// so `contain` starts at B's earliest. An end inset of 50px moves A onto the
-/// interval, where `cover` and `entry` start at its latest.
 #[test]
 fn a_bottom_sticky_subject_takes_the_earliest_or_latest_alignment() {
     let sticky = "position: sticky; bottom: 0px";
@@ -518,8 +464,6 @@ fn a_bottom_sticky_subject_takes_the_earliest_or_latest_alignment() {
     }
 }
 
-/// A start inset of 50px puts a top-sticky subject's D on its pinned
-/// interval `[300, 800]`: `cover` and `exit` end at its earliest.
 #[test]
 fn a_top_sticky_subject_ends_cover_at_the_earliest_alignment() {
     let sticky = "position: sticky; top: 0px; animation-timeline: view(50px 0px)";
@@ -537,11 +481,6 @@ fn a_top_sticky_subject_ends_cover_at_the_earliest_alignment() {
     }
 }
 
-/// A sticky subject inside a sticky box: the 150px box pins to the top from
-/// 300 to 800, and the subject, 50px into it, pins 60px below the top from
-/// 290 — before the box does — until 840, after the box stops, so its start
-/// edge sits at `clamp(o + 60, 350, 900)`. With a start inset of 60px, C is
-/// that whole interval; each end comes from both boxes' clamps at once.
 #[test]
 fn a_sticky_chain_moves_the_subject_by_every_box() {
     for (range, expected) in [
@@ -578,8 +517,6 @@ fn a_sticky_chain_moves_the_subject_by_every_box() {
     }
 }
 
-/// A view timeline whose subject sits in skipped contents has no box to
-/// measure, so it is inactive until the contents are rendered again.
 #[test]
 fn a_view_subject_in_skipped_contents_is_inactive() {
     let mut doc = Doc::with_css(PAGE);
@@ -600,9 +537,6 @@ fn a_view_subject_in_skipped_contents_is_inactive() {
     assert_eq!(source(&doc, mover), Some(container), "rendered");
 }
 
-/// `scroll()` binds the nearest scroll container on the containing-block
-/// chain, `hidden` axes included; `self` binds the element; `root` and a
-/// `nearest` with none above bind the document element when it scrolls.
 #[test]
 fn scroll_functions_find_their_scroller() {
     let mut doc = Doc::with_css(&format!(
@@ -668,8 +602,6 @@ fn scroll_functions_find_their_scroller() {
     assert_eq!(source, root);
 }
 
-/// A tree of scrollers declaring `--t`, the mover referencing it placed
-/// with `place`.
 fn named(css: &str, build: impl FnOnce(&mut Doc) -> NodeId) -> (Doc, NodeId) {
     let mut doc = Doc::with_css(&format!(
         "{PAGE}
@@ -693,9 +625,6 @@ fn source(doc: &Doc, mover: NodeId) -> Option<NodeId> {
     attached(doc, mover).map(|(source, _, _)| source)
 }
 
-/// scroll-animations-1 §4.2: the element itself, then its ancestors, then the
-/// last definer in tree order under the nearest scope boundary or the
-/// document element, skipping definers a nested `timeline-scope` limits.
 #[test]
 fn named_timelines_resolve_by_ancestry_then_scope() {
     let (doc, mover) = named("", |doc| {
@@ -782,9 +711,6 @@ fn named_timelines_resolve_by_ancestry_then_scope() {
     assert_eq!(attached(&doc, mover), None, "no definer: inactive");
 }
 
-/// One element's declarations: later list entries win, and a scroll
-/// timeline beats a view timeline of the same name; a scroll timeline on a
-/// box that does not scroll still wins the lookup and is inactive.
 #[test]
 fn one_definer_resolves_one_timeline() {
     for (declaration, axis) in [
@@ -830,9 +756,6 @@ fn one_definer_resolves_one_timeline() {
     );
 }
 
-/// Names are tree-scoped: a reference from inside a shadow tree matches a
-/// name its own tree declares, on the host through `:host`, and not one the
-/// document declares.
 #[test]
 fn a_shadow_tree_matches_only_its_own_names() {
     for (document_css, shadow_css, bound) in [
@@ -864,9 +787,6 @@ fn a_shadow_tree_matches_only_its_own_names() {
     }
 }
 
-/// A name cascaded through `::slotted` belongs to the slot's tree, even on
-/// an element hosting a tree of its own: a reference from the slot's tree
-/// finds it, one from the element's own shadow tree does not.
 #[test]
 fn a_slotted_name_belongs_to_the_slot_tree() {
     let mut doc = Doc::with_css(PAGE);
@@ -903,8 +823,6 @@ fn a_slotted_name_belongs_to_the_slot_tree() {
     assert_eq!(attached(&doc, from_own_tree), None, "its own shadow tree");
 }
 
-/// The offset a binding samples moves with `scroll_to`: halfway through the
-/// cover range `[100, 350]` is half the fade.
 #[test]
 fn a_binding_samples_the_live_offset() {
     let (mut doc, container, element) = view_page("", "animation-timeline: view()");
@@ -913,14 +831,6 @@ fn a_binding_samples_the_live_offset() {
     assert_eq!(doc.value(element, "opacity"), "0.5");
 }
 
-/// On an `overscroll-behavior: circular` axis (`max` 370, period 570) the
-/// document's offset stands anywhere in the period. A scroll progress
-/// timeline reads an offset past `max` at its representative nearer the
-/// range: 20px before the period's end is −20, the start, and 20px past
-/// `max` is itself, the end; the seam's midpoint, 470, keeps the offset.
-/// A view progress timeline reads the offset as it stands, clamped to the
-/// range: at 550 the first subject's cover range `[-200, 50]` is behind
-/// it.
 #[test]
 fn a_scroll_timeline_through_the_seam_reads_the_nearer_end_of_the_range() {
     let mut doc = Doc::with_css(PAGE);
@@ -952,10 +862,6 @@ fn a_scroll_timeline_through_the_seam_reads_the_nearer_end_of_the_range() {
     }
 }
 
-/// The timeline boundary is the scroll limit (web-animations-2 §2.4.4): a
-/// last child's `entry` range ends at the scroll limit and holds its last
-/// keyframe there without a fill, and a cover range ending short of the
-/// limit leaves the base value at its end.
 #[test]
 fn a_view_range_holds_its_end_only_at_the_scroll_limit() {
     let mut doc = Doc::with_css(PAGE);
@@ -983,9 +889,6 @@ fn a_view_range_holds_its_end_only_at_the_scroll_limit() {
     assert_eq!(doc.value(element, "opacity"), "1", "cover ends short of it");
 }
 
-/// An animation on an inactive timeline is idle, so it is not current and
-/// has none of the side effects of an `opacity` animation; on an active one
-/// it has them, whatever its progress.
 #[test]
 fn only_an_active_timeline_makes_its_animation_current() {
     let mut doc = Doc::with_css(PAGE);
@@ -1002,8 +905,6 @@ fn only_an_active_timeline_makes_its_animation_current() {
     assert!(animates(current), "active: current");
 }
 
-/// The definer table follows the tree: an unlinked definer is gone from it,
-/// and the same element linked back defines again.
 #[test]
 fn a_definer_leaves_with_its_element_and_returns_with_it() {
     let mut definer = None;
@@ -1028,12 +929,6 @@ fn a_definer_leaves_with_its_element_and_returns_with_it() {
     assert!(listed(&doc));
 }
 
-/// WPT `timeline-range-name-offset-in-keyframes.tentative.html`'s page: a
-/// 400px scroller over a 600px spacer, the 200px subject defining `--foo`,
-/// and another 600px spacer, so `cover` is `[200, 800]`, `entry`
-/// `[200, 400]`, `contain` `[400, 600]` and `exit` `[600, 800]` of a
-/// 1000px scroll range. The subject runs `animation` on `--foo`; `keyframes`
-/// adds rules.
 fn range_page(keyframes: &str, animation: &str) -> (Doc, NodeId, NodeId) {
     let mut doc = Doc::with_css(&format!(
         "page {{ display: flex; width: 800px; height: 600px; align-items: flex-start; }}
@@ -1059,7 +954,6 @@ fn range_page(keyframes: &str, animation: &str) -> (Doc, NodeId, NodeId) {
     (doc, container, subject)
 }
 
-/// `longhand` of `id` with `container` scrolled to `offset`.
 fn value_at(doc: &mut Doc, container: NodeId, id: NodeId, offset: f32, longhand: &str) -> String {
     doc.dom.scroll_to(container, Vector2D::new(0.0, offset));
     doc.dom.advance_scroll_timelines(&[container]);
@@ -1070,11 +964,6 @@ fn opacity_at(doc: &mut Doc, container: NodeId, id: NodeId, offset: f32) -> Stri
     value_at(doc, container, id, offset, "opacity")
 }
 
-/// scroll-animations-1 Appendix A, "Named Timeline Range Keyframe Selectors",
-/// as WPT `timeline-range-name-offset-in-keyframes.tentative.html` asserts it:
-/// keyframes on the `entry` and `exit` ranges fade the subject in and out, hold
-/// between them, and move with the ranges when the scrollport shrinks to 300px
-/// (`entry` then `[300, 500]`, `exit` still `[600, 800]`).
 #[test]
 fn range_keyframes_sit_on_their_named_ranges() {
     let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
@@ -1108,11 +997,6 @@ fn range_keyframes_sit_on_their_named_ranges() {
     );
 }
 
-/// The example of scroll-animations-1 Appendix A, "Named Timeline Range
-/// Keyframe Selectors": range keyframes on one animation have the outcome of
-/// two animations attached to `entry` and `exit`, over the cover range. Past it
-/// the two differ by fill: the example's range version has none, and the
-/// two-animation version fills forwards.
 #[test]
 fn range_keyframes_equal_the_two_animation_formulation() {
     let keyframes = "
@@ -1162,14 +1046,6 @@ fn range_keyframes_equal_the_two_animation_formulation() {
     );
 }
 
-/// WPT `view-timeline-keyframe-boundary-interpolation.html`, its bottom
-/// margin an 800px box after the target: attached to `contain`
-/// (`[700, 800]`), `cover 0%` resolves to offset -1 and
-/// `cover 100%` to 2. A property with keyframes on both sides interpolates
-/// across the attachment range with no automatic keyframe; one declared only
-/// before 0 gets an automatic 100% keyframe with its base value, one declared
-/// only past 1 an automatic 0%. The backwards-filled before phase stands at
-/// offset 0, between keyframes, so it shows the interpolated value.
 #[test]
 fn range_keyframes_outside_the_attachment_range_interpolate_across_it() {
     let mut doc = Doc::with_css(
@@ -1202,13 +1078,6 @@ fn range_keyframes_outside_the_attachment_range_interpolate_across_it() {
     }
 }
 
-/// Percentage and range keyframes in one rule, on `range_page`'s cover
-/// range: `entry 100%` and `contain 0%` both resolve to a third, where the
-/// value jumps to the later one's; a percentage keyframe tied with a range
-/// keyframe comes first (css-animations-2's computed keyframe order, where
-/// Blink puts the range keyframe first); and range keyframes with one
-/// selector collapse into the earliest (csswg-drafts#8507), their
-/// declarations cascading.
 #[test]
 fn range_keyframes_order_by_offset_then_computed_order() {
     let keyframes = "
@@ -1252,8 +1121,6 @@ fn range_keyframes_order_by_offset_then_computed_order() {
     }
 }
 
-/// The opacity `id`'s animation `name` samples at `progress` running forward,
-/// from its keyframes as placed now.
 fn sampled_opacity(doc: &Doc, id: NodeId, name: &str, progress: f64) -> Option<f32> {
     use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
     use stylo::properties::{LonghandId, OwnedPropertyDeclarationId};
@@ -1275,9 +1142,6 @@ fn sampled_opacity(doc: &Doc, id: NodeId, name: &str, progress: f64) -> Option<f
     }
 }
 
-/// On the document timeline no keyframe has a named range to attach to, so
-/// range keyframes are ignored and a property only they declare is not
-/// animated; percentage keyframes beside them animate as usual.
 #[test]
 fn range_keyframes_are_ignored_on_the_document_timeline() {
     let mut doc = Doc::with_css(
@@ -1297,10 +1161,6 @@ fn range_keyframes_are_ignored_on_the_document_timeline() {
     assert_eq!(sampled_opacity(&doc, element, "mixed", 0.25), None);
 }
 
-/// On a scroll progress timeline every range name stands for the whole
-/// scroll range, as Blink resolves it and WPT
-/// `timeline-offset-keyframes-with-scroll-timeline.html` asserts:
-/// `cover 0%` is offset 0 and `cover 100%` offset 1, beside a 50% keyframe.
 #[test]
 fn range_keyframes_on_a_scroll_timeline_name_the_whole_range() {
     let mut doc = Doc::with_css(&format!(
@@ -1318,7 +1178,6 @@ fn range_keyframes_on_a_scroll_timeline_name_the_whole_range() {
     doc.el(container, "view.tail");
     doc.el(container, "view.tail");
     doc.flush();
-    // A 200px scrollport over 1020px: an 820px scroll range.
     for (offset, expected) in [(0.0, "0"), (205.0, "0.25"), (615.0, "0.75"), (820.0, "1")] {
         assert_eq!(
             opacity_at(&mut doc, container, mover, offset),
@@ -1328,9 +1187,6 @@ fn range_keyframes_on_a_scroll_timeline_name_the_whole_range() {
     }
 }
 
-/// A change of the subject's box places the keyframes again at the next
-/// layout: at offset 300 the 200px subject is halfway through `entry`, and
-/// the 100px one (`cover` `[200, 700]`, `entry` `[200, 300]`) past it.
 #[test]
 fn range_keyframes_follow_a_resized_subject() {
     let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
@@ -1343,9 +1199,6 @@ fn range_keyframes_follow_a_resized_subject() {
     assert_eq!(doc.value(subject, "opacity"), "1");
 }
 
-/// A restyle rebuilds the animation from its keyframes rule, and the
-/// ranges placed before it place the new keyframes too: a style flush alone,
-/// with no layout to place them again, keeps the value.
 #[test]
 fn a_restyle_keeps_the_placed_range_keyframes() {
     let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
@@ -1359,9 +1212,6 @@ fn a_restyle_keeps_the_placed_range_keyframes() {
     assert_eq!(doc.value(subject, "opacity"), "0.5");
 }
 
-/// A paused animation holds its progress, and its range keyframes still
-/// follow the layout: held at a sixth of the cover range, the shrunk
-/// subject's `entry 100%` sits at a fifth, five sixths of the way there.
 #[test]
 fn a_paused_animation_places_its_range_keyframes_again() {
     let (mut doc, container, subject) = range_page("", "fade-in-out linear both");
@@ -1380,8 +1230,6 @@ fn a_paused_animation_places_its_range_keyframes_again() {
     );
 }
 
-/// An element in skipped contents holds its keyframes as placed
-/// (css-contain-2 §4), and places them again once rendered.
 #[test]
 fn range_keyframes_in_skipped_contents_hold() {
     let (mut doc, container, subject) = range_page("", "none");
@@ -1417,10 +1265,6 @@ fn range_keyframes_in_skipped_contents_hold() {
     assert_eq!(doc.value(element, "opacity"), "1");
 }
 
-/// Directions read the range keyframes' offsets like any others: a reversed
-/// iteration eases each segment by its upper keyframe's timing function,
-/// and `alternate` reverses the second of two iterations, each holding the
-/// keyframes at the same fractions of the attachment range.
 #[test]
 fn range_keyframes_run_in_every_direction() {
     let keyframes = "
@@ -1453,11 +1297,6 @@ fn range_keyframes_run_in_every_direction() {
     }
 }
 
-/// Range keyframes are ignored on an inactive timeline and for an empty
-/// attachment range, and a property only they declare is not animated: on
-/// `--missing`, which nothing defines, the animation is idle; attached to
-/// `contain 50% contain 50%` its `to` keyframe fills forwards past the empty
-/// range while its `entry 0%` opacity is absent.
 #[test]
 fn range_keyframes_are_ignored_on_inactive_timelines_and_empty_ranges() {
     let keyframes = "@keyframes partly { entry 0% { opacity: 0.2; } to { width: 100px; } }";
@@ -1488,9 +1327,6 @@ fn range_keyframes_are_ignored_on_inactive_timelines_and_empty_ranges() {
     assert!(!doc.dom.get(subject).expect("live").animates_opacity());
 }
 
-/// A subject taken out with `display: none` makes its timeline inactive, and
-/// the keyframes are ignored; brought back 100px tall, they are placed for
-/// the new box (`entry 100%` at a fifth of the cover range).
 #[test]
 fn a_subject_without_a_box_and_back_places_range_keyframes_again() {
     let (mut doc, container, subject) = range_page("", "fade-in-out linear both");

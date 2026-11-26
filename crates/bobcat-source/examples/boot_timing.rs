@@ -32,7 +32,6 @@ fn resources(input: &Url) -> Resources {
     )
 }
 
-/// One boot: until the view exists, and until the container was registered.
 struct Boot {
     view: Duration,
     registered: Duration,
@@ -47,8 +46,6 @@ async fn boot(input: &Url, bytes: &[u8], deferred: bool) -> Boot {
     let sources = if deferred {
         let page = PageSource::defer(input, bytes.to_vec()).expect("the card defers");
         let sources = page.view_sources(screen, "en-US");
-        // The install `DeferredPage::register_in_background` runs, with the
-        // time it finished recorded.
         let (url, bytes, done) = (input.clone(), bytes.to_vec(), Arc::clone(&registered));
         resources.register_in_background(input, move |registrar| {
             let result = ContainerSources::from_bytes(&url, &bytes)
@@ -72,8 +69,6 @@ async fn boot(input: &Url, bytes: &[u8], deferred: bool) -> Boot {
         .create_lynx_view(393.0, 727.0, 1.0, resources.builder(), Vec::new(), sources)
         .expect("a view");
     let view_at = start.elapsed();
-    // Boot's first flush commits a frame, so the view is turned the way the
-    // CLI turns it: an offscreen painter posts frames while the view pumps.
     let mut painter = Painter::new(DrawTarget::Offscreen, 393.0, 727.0, 1.0)
         .await
         .expect("a painter");
@@ -132,7 +127,6 @@ fn main() {
         .build()
         .unwrap();
     for deferred in [false, true] {
-        // One boot to warm the process (fonts, the GPU-free engine setup).
         runtime.block_on(boot(&input, &bytes, deferred));
         let boots: Vec<Boot> = (0..RUNS)
             .map(|_| runtime.block_on(boot(&input, &bytes, deferred)))

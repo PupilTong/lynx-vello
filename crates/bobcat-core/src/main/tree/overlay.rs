@@ -213,27 +213,15 @@ use terminus::link::{CustomElement, Node, NodeId, ShadowRootMode, ShadowSheet};
 
 use super::{ComponentEvents, LynxDocument};
 
-/// Native's tag, and the JSX tag a compiled card writes.
 pub(super) const OVERLAY_TAG: &str = "overlay";
-/// web-core's tag, native's legacy alias.
 pub(super) const X_OVERLAY_TAG: &str = "x-overlay-ng";
-/// The boolean attribute that shows the overlay.
 const VISIBLE_ATTRIBUTE: &str = "visible";
-/// The boolean attribute that lets touches outside the content through.
 const EVENTS_PASS_THROUGH_ATTRIBUTE: &str = "events-pass-through";
-/// The event queued when the overlay enters the top layer.
 const SHOW_EVENT: &str = "showoverlay";
-/// The event queued when `visible` takes the overlay out of the top layer.
 const DISMISS_EVENT: &str = "dismissoverlay";
-/// The shadow dialog's id, and the part name web-core exports it under.
 const DIALOG_ID: &str = "dialog";
-/// The class of the box inside the dialog that holds the slot.
 const INNER_CLASS: &str = "overlay-inner";
 
-/// The overlay's UA rules on the host and its light children, as the module
-/// documentation lists. The one `!important` line stays on a line of its
-/// own: `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions` reads the
-/// sheet line by line.
 pub(super) const UA_RULES: &str = r"
 overlay, x-overlay-ng {
   display: contents; position: fixed; top: 0;
@@ -244,8 +232,6 @@ overlay > wrapper > :first-child, x-overlay-ng > wrapper > :first-child { positi
 overlay > :not(:first-child), x-overlay-ng > :not(:first-child) { display: none !important; }
 ";
 
-/// The shadow sheet, added to each instance's shadow root: see the module
-/// documentation.
 const SHADOW_RULES: &str = r#"
 #dialog:is([open], :popover-open) {
   position: fixed; top: 0; right: 0; bottom: 0; left: 0;
@@ -263,28 +249,14 @@ const SHADOW_RULES: &str = r#"
 slot { display: contents; }
 "#;
 
-/// Installs one component under both tag names, over the queue its events go
-/// into. Must run after [`terminus::link::Document::define_html_elements`], whose
-/// `dialog` component the shadow dialog is, and before any element could
-/// carry either tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let overlay: Rc<dyn CustomElement<()>> = Rc::new(Overlay::new(events));
     document.define_shared(OVERLAY_TAG, Rc::clone(&overlay));
     document.define_shared(X_OVERLAY_TAG, overlay);
 }
 
-/// The overlay component: builds the shadow tree when the element is
-/// constructed, keeps the shadow dialog's top-layer membership in step with
-/// `visible`, `events-pass-through` and connection, and queues `showoverlay`
-/// and `dismissoverlay` on the transitions.
-///
-/// The shadow tree is built in `constructed`, as the swiper's is: the
-/// element is new and detached then, so every child arrives at the slot.
 struct Overlay {
     events: ComponentEvents,
-    /// [`SHADOW_RULES`], parsed by the first overlay of either tag and
-    /// mounted on every one's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }
 
@@ -296,9 +268,6 @@ impl Overlay {
         }
     }
 
-    /// Shows the shadow dialog the way the host's `events-pass-through`
-    /// asks — `showModal()`, or as a Manual popover — and queues
-    /// `showoverlay`.
     fn show(&self, document: &mut LynxDocument, overlay: NodeId) {
         let dialog = shadow_dialog(document, overlay);
         show_dialog(document, overlay, dialog);
@@ -312,15 +281,11 @@ fn show_dialog(document: &mut LynxDocument, overlay: NodeId, dialog: NodeId) {
             .show_popover(dialog)
             .expect("a hidden manual popover in a connected host shows");
     } else {
-        // A removal left a modal dialog open and not modal (HTML's
-        // removing steps); `showModal()` refuses an open one.
         close(document, dialog);
         show_modal(document, dialog).expect("a closed dialog in a connected host shows");
     }
 }
 
-/// Hides the shadow dialog the way it was shown: `hidePopover()`, or
-/// `close()`, which also closes a dialog a removal left open.
 fn hide_dialog(document: &mut LynxDocument, dialog: NodeId) {
     if document.popover_showing(dialog) {
         document
@@ -357,8 +322,6 @@ impl CustomElement<()> for Overlay {
         document.append_child(shadow, dialog);
     }
 
-    /// A visible overlay entering the document enters the top layer: on
-    /// first insertion, and again after a removal dropped its entry.
     fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
         if shows(attribute(document, element, VISIBLE_ATTRIBUTE).as_deref())
             && document.is_connected(element)
@@ -399,15 +362,10 @@ impl CustomElement<()> for Overlay {
     }
 }
 
-/// The overlay's shadow `#dialog`, the first element of its shadow tree,
-/// which [`Overlay::constructed`] builds for every overlay.
 fn shadow_dialog(document: &LynxDocument, overlay: NodeId) -> NodeId {
     dialog_of(document, overlay).expect("every overlay has its shadow dialog")
 }
 
-/// The shadow `#dialog` of `element` when it is a constructed `overlay` or
-/// `x-overlay-ng`, and `None` for every other element: what
-/// [`super::layout_change_target`] observes for an overlay.
 pub(super) fn dialog_of(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
     let tag = document.get(element)?.tag_name()?;
     if tag != OVERLAY_TAG && tag != X_OVERLAY_TAG {
@@ -420,13 +378,10 @@ pub(super) fn dialog_of(document: &LynxDocument, element: NodeId) -> Option<Node
         .map(Node::id)
 }
 
-/// Whether a `visible` value shows the overlay: present and not `"false"`.
 fn shows(value: Option<&str>) -> bool {
     value.is_some_and(|value| value != "false")
 }
 
-/// Whether an `events-pass-through` value lets touches through: present and
-/// not `"false"`, the boolean reading `visible` has.
 fn passes_through(value: Option<&str>) -> bool {
     shows(value)
 }
@@ -437,7 +392,7 @@ fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Opt
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::stylo::properties::PropertyId;
     use terminus::link::stylo::values::computed::Display;
@@ -449,15 +404,10 @@ mod tests {
     use super::super::{ComponentEvent, ComponentEvents, LynxDocument, PageConfig};
     use super::{OVERLAY_TAG, X_OVERLAY_TAG, shadow_dialog};
 
-    /// The phone viewport `test_support` builds.
     const VIEWPORT: (f32, f32) = (393.0, 727.0);
 
-    /// Both tags, which must behave identically.
     const TAGS: [&str; 2] = [OVERLAY_TAG, X_OVERLAY_TAG];
 
-    /// A counter card's overlay class: a `display` and a translucent green
-    /// background on the host, which must neither show a hidden overlay nor
-    /// paint over the viewport.
     const HOST_CLASS: &str = ".host { display: flex; background-color: rgba(0, 255, 0, 0.2); \
                               width: 100%; height: 100%; }";
 
@@ -473,7 +423,6 @@ mod tests {
         )
     }
 
-    /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -490,7 +439,6 @@ mod tests {
             .expect("a valid selector")
     }
 
-    /// The first element child of `parent`.
     fn first_element(document: &LynxDocument, parent: NodeId) -> NodeId {
         document
             .get(parent)
@@ -501,7 +449,6 @@ mod tests {
             .expect("an element child")
     }
 
-    /// What the component queued since the last call, as `(node, name)`.
     fn queued(events: &ComponentEvents) -> Vec<(NodeId, &'static str)> {
         events
             .take()
@@ -513,14 +460,12 @@ mod tests {
             .collect()
     }
 
-    /// The elements at `point` in the committed frame, front to back.
     fn hits(document: &mut LynxDocument, x: f32, y: f32) -> Vec<NodeId> {
         document.layout();
         document.commit();
         document.elements_from_point(Point2D::new(x, y))
     }
 
-    /// An overlay under the page holding a 100 by 50 first child.
     fn overlay(document: &mut LynxDocument, tag: &str) -> (NodeId, NodeId) {
         let overlay = child(document, tag, "");
         let content = element_under(
@@ -532,12 +477,6 @@ mod tests {
         (overlay, content)
     }
 
-    // --- the shadow tree ----------------------------------------------------
-
-    /// web-core's template less its placeholder: `dialog#dialog[part=dialog]`
-    /// holding `div.overlay-inner` holding the default slot, which every
-    /// child of the host is assigned to. The host's child list is its light
-    /// children alone, and the host generates no box, shown or hidden.
     #[test]
     fn the_shadow_tree_is_a_dialog_holding_the_slot_and_the_host_has_no_box() {
         for tag in TAGS {
@@ -592,12 +531,6 @@ mod tests {
         }
     }
 
-    // --- showing and hiding --------------------------------------------------
-
-    /// A hidden overlay's dialog is closed and generates no box, so neither
-    /// does its content; `visible="false"` is hidden; `visible=""` and
-    /// `visible="true"` open the dialog in the top layer, with the display
-    /// `defaultDisplayLinear` picks for `dialog`.
     #[test]
     fn visible_opens_the_shadow_dialog_and_false_closes_it() {
         for tag in TAGS {
@@ -638,10 +571,6 @@ mod tests {
         }
     }
 
-    /// An author `display` and background on the host — a counter card's
-    /// overlay class — do not show a hidden overlay: hidden is the shadow
-    /// dialog's state, which no document rule reaches. The host gets a box,
-    /// and web-core's host rule keeps it zero-sized.
     #[test]
     fn an_author_display_on_the_host_does_not_show_a_hidden_overlay() {
         for tag in TAGS {
@@ -684,12 +613,6 @@ mod tests {
         }
     }
 
-    /// An overlay with an author `display` is a relayout boundary of its own
-    /// (`contain: strict`). Shown in the same commit as a change under a
-    /// boundary above it, with a `wrapper` between the two, its dialog is
-    /// placed and its content shown all the same: the boxes between the two
-    /// boundaries carry no rounding marks for the outer walk to follow, so
-    /// the overlay's subtree is rounded on its own.
     #[test]
     fn an_author_display_host_shown_beside_a_change_under_an_outer_boundary_shows() {
         for tag in TAGS {
@@ -728,9 +651,6 @@ mod tests {
         }
     }
 
-    /// The same overlay shown in a commit whose other change reached the
-    /// document root: the whole-tree walk prunes at the unmarked `wrapper`
-    /// above the host, and the host's own walk places the dialog.
     #[test]
     fn an_author_display_host_shown_beside_a_root_reaching_change_shows() {
         for tag in TAGS {
@@ -758,11 +678,6 @@ mod tests {
         }
     }
 
-    /// The box that fills the viewport is the shadow dialog, and it is
-    /// transparent, its `::backdrop` too: an author background on the host
-    /// paints on a zero-sized box, and an author rule for `dialog` does not
-    /// reach the shadow one. Outside the content, a point hits the dialog
-    /// and nothing of the host.
     #[test]
     fn the_viewport_is_filled_by_a_transparent_dialog_the_host_s_style_does_not_reach() {
         for tag in TAGS {
@@ -802,7 +717,6 @@ mod tests {
         }
     }
 
-    /// `::part(dialog)` is the way to the shadow dialog, as in web-core.
     #[test]
     fn part_dialog_reaches_the_shadow_dialog() {
         for tag in TAGS {
@@ -823,11 +737,6 @@ mod tests {
         }
     }
 
-    // --- the content ---------------------------------------------------------
-
-    /// The shown dialog fills the viewport wherever the overlay is written;
-    /// the first child sits at the viewport's top-left with its own size; a
-    /// second child generates no box, even with an author `display`.
     #[test]
     fn the_dialog_fills_the_viewport_and_only_the_first_child_renders() {
         for tag in TAGS {
@@ -865,11 +774,6 @@ mod tests {
         }
     }
 
-    /// A `wrapper` as the overlay's first child: the wrapper's own first
-    /// child sits at the viewport's top-left with its own size, and the
-    /// wrapper's later children still render (web-core hides only the
-    /// overlay's direct children), in `.overlay-inner`'s flow, which the
-    /// absolute first child has left.
     #[test]
     fn the_first_child_through_a_wrapper_sits_at_the_viewport_s_top_left() {
         for tag in TAGS {
@@ -884,8 +788,6 @@ mod tests {
             assert_eq!(display(&document, wrapper), Display::Contents, "{tag}");
             assert_eq!(rect(&document, first), (0.0, 0.0, 100.0, 50.0), "{tag}");
             assert_ne!(display(&document, sibling), Display::None, "{tag}");
-            // The first child is out of flow, so the sibling starts the
-            // flow at the top-left too; in flow it would sit at y 50.
             assert_eq!(
                 rect(&document, sibling),
                 (0.0, 0.0, 30.0, 20.0),
@@ -894,12 +796,6 @@ mod tests {
         }
     }
 
-    // --- the top layer and hit testing ---------------------------------------
-
-    /// A shown overlay's dialog is in the top layer: a modal dialog, which
-    /// blocks the document, unless `events-pass-through` says otherwise,
-    /// when it is a popover, which blocks nothing; toggling the attribute
-    /// while it is shown switches between the two.
     #[test]
     fn events_pass_through_decides_whether_the_overlay_blocks_the_document() {
         const MODAL: (bool, bool, bool) = (true, false, true);
@@ -908,7 +804,6 @@ mod tests {
             let mut document = document();
             let (overlay, _) = overlay(&mut document, tag);
             let dialog = shadow_dialog(&document, overlay);
-            // `(:modal, :popover-open, :open)`.
             let modal = |document: &mut LynxDocument| {
                 document.layout();
                 (
@@ -928,7 +823,6 @@ mod tests {
             assert!(document.in_top_layer(dialog), "{tag}");
             assert!(!document.blocks_document(dialog), "{tag}");
             assert_eq!(modal(&mut document), POPOVER, "{tag}: a popover");
-            // The popover is laid out as the modal dialog is.
             for (property, expected) in [
                 ("pointer-events", "none"),
                 ("position", "fixed"),
@@ -951,7 +845,6 @@ mod tests {
             assert_eq!(modal(&mut document), MODAL, "{tag}");
             assert_eq!(document.top_layer().count(), 1, "{tag}");
 
-            // Shown with the attribute already present.
             document.remove_attribute(overlay, "visible");
             document.set_attribute(overlay, "events-pass-through", "");
             assert!(!document.in_top_layer(dialog), "{tag}: hidden stays out");
@@ -965,10 +858,6 @@ mod tests {
         }
     }
 
-    /// Outside the content, a blocking overlay answers with its dialog — the
-    /// target a composed event retargets to the host — and nothing below is
-    /// hit; a pass-through overlay lets the page content below answer. A
-    /// point on the content hits the content either way.
     #[test]
     fn a_touch_outside_the_content_reaches_the_page_only_through_a_pass_through_overlay() {
         for tag in TAGS {
@@ -1025,9 +914,6 @@ mod tests {
         }
     }
 
-    /// A drag on the overlay's content ends its scroll chain at the dialog,
-    /// a top-layer element, and never reaches a scroller the overlay is
-    /// written in: what web-core's 1px placeholder does in a browser.
     #[test]
     fn a_drag_on_the_overlay_does_not_scroll_the_page_below() {
         for tag in TAGS {
@@ -1055,16 +941,6 @@ mod tests {
         }
     }
 
-    // --- events ---------------------------------------------------------------
-
-    /// `showoverlay` when `visible` shows a connected overlay, and
-    /// `dismissoverlay` when it stops: removed or `"false"`. A rewrite that
-    /// keeps it shown fires nothing, and so does switching it to a popover.
-    /// Both are queued at the host. `close()` on the modal dialog queues the
-    /// dialog's own `close` at the dialog, as web-core's does; it is not
-    /// composed, so it never leaves the shadow tree
-    /// (`an_overlay_shows_and_dismisses_through_set_attribute` in
-    /// `main/runtime` delivers it to nothing).
     #[test]
     fn visible_transitions_queue_showoverlay_and_dismissoverlay() {
         for tag in TAGS {
@@ -1096,7 +972,6 @@ mod tests {
                 document.set_attribute(overlay, "visible", "false");
                 assert_eq!(queued(&events), vec![], "{tag}: already hidden");
 
-                // A modal one dismissed.
                 document.remove_attribute(overlay, "events-pass-through");
                 document.set_attribute(overlay, "visible", "");
                 assert_eq!(queued(&events), vec![(overlay, "showoverlay")], "{tag}");
@@ -1113,10 +988,6 @@ mod tests {
         }
     }
 
-    /// `visible` on a disconnected overlay does nothing until it connects;
-    /// connecting a visible overlay shows it; removing a shown overlay fires
-    /// nothing; reconnecting it shows it again; one hidden while disconnected
-    /// comes back closed.
     #[test]
     fn connection_shows_a_visible_overlay_and_removal_fires_nothing() {
         for tag in TAGS {
@@ -1137,8 +1008,6 @@ mod tests {
             assert!(!document.in_top_layer(dialog), "{tag}");
             assert_eq!(queued(&events), vec![], "{tag}: removal fires nothing");
 
-            // The removal left the dialog open and not modal, so it is
-            // closed before `showModal()`, with its own `close`.
             document.append_child(page, overlay);
             assert!(document.in_top_layer(dialog), "{tag}");
             assert!(document.blocks_document(dialog), "{tag}");
@@ -1148,8 +1017,6 @@ mod tests {
                 "{tag}: reconnected"
             );
 
-            // Hidden while out of the document: back closed, and nothing at
-            // the host.
             document.remove_element(overlay);
             document.remove_attribute(overlay, "visible");
             document.append_child(page, overlay);
@@ -1159,8 +1026,6 @@ mod tests {
             assert_eq!(display(&document, dialog), Display::None, "{tag}");
             assert_eq!(queued(&events), vec![(dialog, "close")], "{tag}");
 
-            // A pass-through one comes back from a removal hidden, as a
-            // popover does, and shows again.
             document.set_attribute(overlay, "events-pass-through", "");
             document.set_attribute(overlay, "visible", "");
             assert!(document.popover_showing(dialog), "{tag}");
@@ -1174,7 +1039,6 @@ mod tests {
                 "{tag}"
             );
 
-            // A hidden overlay connecting fires nothing.
             let hidden = document.create_element(tag, ());
             document.set_attribute(hidden, "visible", "false");
             document.append_child(page, hidden);
@@ -1186,7 +1050,6 @@ mod tests {
         }
     }
 
-    /// Overlays stack in show order, the later one on top.
     #[test]
     fn overlays_stack_in_the_order_they_were_shown() {
         let mut document = document();

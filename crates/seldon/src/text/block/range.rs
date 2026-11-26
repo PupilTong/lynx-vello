@@ -19,107 +19,21 @@ use crate::geometry::{Point, Rect};
 use crate::text::paragraph::query::Displayed;
 
 impl TextBlock {
-    /// The boxes the source range `[start, end)` occupies in the committed
-    /// layout, in the paragraph's own coordinates (the origin is the
-    /// content box's top-left, as [`Self::size`] measures).
-    ///
-    /// One box per rendered line the range shows content on, in line order.
-    /// A box spans from the inline start of the leftmost selected cluster or
-    /// atomic box on that line to the inline end of the rightmost one, and
-    /// takes its `top` and `height` from the line ([`super::LineInfo`]), so a
-    /// box is the line's height whatever the selected glyphs' own extents.
-    /// An atomic box's one unit selects its placed margin box's horizontal
-    /// extent.
-    ///
-    /// What shows no content contributes no box: text past a truncation cut
-    /// has no glyph, the dots and the inline-truncation content are no
-    /// source text, and the collapsible whitespace a soft wrap or a preserved
-    /// newline leaves at a line's end belongs to no line, as in
-    /// [`Self::lines`]. A range that covers only such text answers an empty
-    /// list. Collapsed whitespace that renders nothing at all — a dropped
-    /// segment break between two CJK characters — counts as part of the
-    /// cluster before it.
-    ///
-    /// `start == end` answers one box of zero width at `(0, 0)`, as tall as
-    /// the line holding `start`: the natives' answer for an empty range
-    /// (iOS's `CGRectMake(0, 0, 0, lineRect.size.height)`), kept for parity
-    /// although it says nothing about where `start` is.
-    ///
-    /// `None` when `start > end`, when `end` is past the source length, or,
-    /// for `start == end`, when the paragraph has no line at all.
-    ///
-    /// # Panics
-    ///
-    /// When the block has never been laid out; a host asks
-    /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn range_boxes(&self, start: u32, end: u32) -> Option<Vec<Rect<f32>>> {
         self.paragraph.range_boxes_in(&self.displayed(), start, end)
     }
 
-    /// The source unit of the cluster or atomic box under `point` in the
-    /// committed layout, in the paragraph's own coordinates (the space
-    /// [`Self::range_boxes`] answers in).
-    ///
-    /// The inverse of [`Self::range_boxes`] over one unit: a point inside the
-    /// box `range_boxes(u, u + 1)` answers `u`'s cluster. Vertically a line
-    /// owns its whole line box, half-open at the bottom, so the leading above
-    /// and below a glyph is the line's and two stacked lines leave no gap
-    /// between them; horizontally a cluster owns `[left, left + advance)` and
-    /// an atomic box its placed margin box's extent. A cluster answers its
-    /// first source unit — a surrogate pair or a multi-character grapheme is
-    /// one hit; parley gives each of a ligature's characters a cluster of its
-    /// own — and a collapsed whitespace span answers the first unit it
-    /// collapsed.
-    ///
-    /// `None` off content, which is the native hit test's answer for a tap
-    /// that lands on no character: Android's `UITextUtils.findEventTarget`
-    /// checks the line's top, bottom, left and right before it asks for an
-    /// offset, and answers the paragraph itself outside them
-    /// (`lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/
-    /// behavior/ui/text/UITextUtils.java:70-86`). So: above the first line or
-    /// below the last, before a line's first cluster or past its last, on the
-    /// collapsible whitespace a soft wrap or a preserved newline leaves
-    /// hanging at a line's end (no line's content, as in [`Self::lines`]),
-    /// and on what a truncation draws in place of the cut — the dots and the
-    /// inline-truncation content are no source text. A caret query would
-    /// snap to the nearest position instead; this one answers *what* was
-    /// hit, not where a caret would go.
-    ///
-    /// Bidirectional text is walked in visual order, the order parley
-    /// positions clusters in, so a hit in a right-to-left run answers the
-    /// cluster drawn under the point.
-    ///
-    /// # Panics
-    ///
-    /// When the block has never been laid out; a host asks
-    /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn index_at_point(&self, point: Point<f32>) -> Option<u32> {
         self.paragraph.index_at_point_in(&self.displayed(), point)
     }
 
-    /// The source units content item `item` contributed, in the units
-    /// [`Self::range_boxes`] takes: a run's whole pre-collapse text, an
-    /// atomic box's one unit.
-    ///
-    /// The host's way from its own item table to source offsets — which of
-    /// its nodes owns which units — without summing text lengths a second
-    /// time. Fixed when the block is built: a re-break or a truncation moves
-    /// no source offset, so this needs no layout.
-    ///
-    /// `None` when `item` is past the content items the block was built
-    /// from; the truncation content is no source text and has no units.
     #[must_use]
     pub fn item_source_range(&self, item: u32) -> Option<Range<u32>> {
         self.paragraph.item_source_range(item)
     }
 
-    /// The display layout as the core's range queries read it.
-    ///
-    /// What is no source text is cut off here, once, for every reader: the
-    /// tail past a truncation cut — the dots, and the inline-truncation
-    /// content's clusters and boxes.
     fn displayed(&self) -> Displayed<'_, LineInfo> {
         let block = &self.paragraph.content.block;
         let (cut_byte, content_slots) = self
@@ -129,11 +43,6 @@ impl TextBlock {
             .map_or((block.text.len(), block.boxes.len()), |part| {
                 (part.cut_byte as usize, part.content_slots)
             });
-        // The reported lines are the display layout's, in order, each
-        // carrying its own line box: where `assemble` read a line from the
-        // natural layout because the display has none or a blank one there,
-        // the box is the natural line's, and the cluster walk, which zips the
-        // display's lines with the reported ones, stops at the shorter.
         Displayed {
             layout: self.display(),
             lines: self.lines(),
@@ -146,7 +55,7 @@ impl TextBlock {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    #![allow(clippy::float_cmp)] // Ahem's em squares have exact metrics.
+    #![allow(clippy::float_cmp)]
 
     use core::num::NonZeroU32;
 
@@ -166,7 +75,6 @@ mod tests {
         })
     }
 
-    /// One committed block over `items` at `width`.
     fn block(items: &[InlineItem<'_>], style: BlockStyle, width: Option<f32>) -> TextBlock {
         let mut context = text_context();
         let mut block = TextBlock::new(&mut context, style, items, None);
@@ -197,7 +105,6 @@ mod tests {
     #[test]
     fn a_wrapped_range_answers_one_box_per_line() {
         let style = ahem_style();
-        // "abc " then "def" at 35px: the space hangs at the first line's end.
         let block = block(&[run("abc def", &style)], BlockStyle::default(), Some(35.0));
         assert_eq!(block.lines().len(), 2);
         assert_eq!(
@@ -271,7 +178,6 @@ mod tests {
             run("cd", &style),
         ];
         let block = block(&items, BlockStyle::default(), None);
-        // The box's line, whatever the box does to its top and height.
         let line = block.lines()[0];
         let (top, height) = (line.top, line.height);
         assert_eq!(
@@ -296,7 +202,6 @@ mod tests {
             overflow: TextOverflow::Ellipsis,
             ..BlockStyle::default()
         };
-        // At 45px one line fits "a" and the three dots: the cut is unit 1.
         let block = block(&[run("aaaa bbbb", &style)], block_style, Some(45.0));
         assert!(block.truncated());
         assert_eq!(block.lines().len(), 1);
@@ -337,7 +242,6 @@ mod tests {
             line_height: super::super::LineHeight::Px(16.0),
             ..ahem_style()
         };
-        // "abc " then "def" at 35px, two 16px lines.
         let block = block(&[run("abc def", &style)], BlockStyle::default(), Some(35.0));
         assert_eq!(block.lines().len(), 2);
         assert_eq!(at(&block, 0.0, 0.0), Some(0), "the first glyph's corner");
@@ -375,10 +279,8 @@ mod tests {
             },
             Some(100.0),
         );
-        // "a  b" keeps both spaces: 40px wide, centred in 100, it starts at 30.
         assert_eq!(at(&block, 29.9, 5.0), None);
         assert_eq!(at(&block, 30.0, 5.0), Some(0));
-        // Each kept space is a cluster of its own.
         assert_eq!(at(&block, 45.0, 5.0), Some(1));
         assert_eq!(at(&block, 55.0, 5.0), Some(2));
         assert_eq!(at(&block, 65.0, 5.0), Some(3));
@@ -419,7 +321,6 @@ mod tests {
             overflow: TextOverflow::Ellipsis,
             ..BlockStyle::default()
         };
-        // At 45px one line fits "a" and the three dots.
         let block = block(&[run("aaaa bbbb", &style)], block_style, Some(45.0));
         assert!(block.truncated());
         assert_eq!(at(&block, 5.0, 5.0), Some(0));

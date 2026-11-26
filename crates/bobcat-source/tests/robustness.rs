@@ -27,11 +27,6 @@
 
 use bobcat_source::xml::parse;
 
-/// Whether `part` points into `whole`.
-///
-/// An empty `&str` is exempt: a zero-length slice of the source and a `""`
-/// literal are indistinguishable at runtime, and the parser may return either
-/// for a present-but-empty section.
 fn borrows_from(part: &str, whole: &str) -> bool {
     if part.is_empty() {
         return true;
@@ -41,12 +36,6 @@ fn borrows_from(part: &str, whole: &str) -> bool {
     offset >= start && offset + part.len() <= start + whole.len()
 }
 
-/// Parses `source`, asserts everything that must hold either way, and reports
-/// whether it parsed.
-///
-/// A panic anywhere under `parse` fails the test by itself; that is the
-/// headline property and needs no assertion of its own. The return value feeds
-/// the coverage floor below.
 fn check(source: &str) -> bool {
     let mut ok = false;
     match parse(source) {
@@ -85,7 +74,6 @@ fn check(source: &str) -> bool {
                 error.offset() <= source.encode_utf16().count(),
                 "UTF-16 offset past the end of the source: {source:?}"
             );
-            // The formatted message is what an embedder surfaces.
             let _ = error.to_string();
         }
     }
@@ -102,9 +90,6 @@ const VALID: &str = concat!(
     "</lynx>\n",
 );
 
-/// Seeds. Mutation starts from shapes that already reach deep into the
-/// grammar; starting from noise would spend the whole budget failing the
-/// `<?xml` prologue.
 fn seeds() -> Vec<String> {
     vec![
         VALID.to_owned(),
@@ -116,14 +101,11 @@ fn seeds() -> Vec<String> {
     ]
 }
 
-/// Characters worth splicing in: every delimiter the grammar switches on, plus
-/// the multi-byte and boundary cases that make an offset bug observable.
 const INTERESTING: &[char] = &[
     '<', '>', '/', '?', '!', '-', '[', ']', '"', '\'', '=', ' ', '\n', '\t', '\0', '\u{feff}', 'é',
     '中', '𝄞', 'x',
 ];
 
-/// xorshift64*, so a failure reproduces from the seed printed with it.
 struct Rng(u64);
 
 impl Rng {
@@ -138,9 +120,6 @@ impl Rng {
         if bound == 0 {
             return 0;
         }
-        // `bound` came from a `usize` and the modulus keeps the result under
-        // it, so this narrows back into the range it started in — on a 32-bit
-        // target too.
         usize::try_from(self.next() % bound as u64).expect("modulus keeps this under `bound`")
     }
 
@@ -149,9 +128,6 @@ impl Rng {
     }
 }
 
-/// One mutation, at character granularity so the result is always valid UTF-8 —
-/// which is what `parse` takes, so byte-level mutation would only manufacture
-/// inputs the signature cannot express.
 fn mutate(source: &str, rng: &mut Rng) -> String {
     let mut chars: Vec<char> = source.chars().collect();
     match rng.below(6) {
@@ -170,8 +146,6 @@ fn mutate(source: &str, rng: &mut Rng) -> String {
             chars.truncate(rng.below(chars.len() + 1));
         }
         4 if !chars.is_empty() => {
-            // Duplicate a run: the cheapest way to reach repeated delimiters
-            // and unbalanced nesting.
             let start = rng.below(chars.len());
             let end = start + rng.below(chars.len() - start + 1);
             let run: Vec<char> = chars[start..end].to_vec();
@@ -185,8 +159,6 @@ fn mutate(source: &str, rng: &mut Rng) -> String {
     chars.into_iter().collect()
 }
 
-/// Enough to walk the grammar's branches many times over; the whole test runs
-/// in well under a tenth of a second, so it stays in the ordinary suite.
 const ITERATIONS: usize = 20_000;
 
 #[test]
@@ -197,14 +169,10 @@ fn arbitrary_source_is_rejected_rather_than_fatal() {
     let mut accepted = 0usize;
 
     for iteration in 0..ITERATIONS {
-        // Restart from a seed periodically so the search does not wander into
-        // one shape and stay there.
         if iteration % 64 == 0 {
             current = rng.pick(&seeds).clone();
         }
         current = mutate(&current, &mut rng);
-        // Keep inputs small: what is under test is the grammar's branches, not
-        // throughput, and an unbounded walk would only grow the string.
         if current.chars().count() > 2048 {
             current.truncate(
                 current
@@ -218,12 +186,6 @@ fn arbitrary_source_is_rejected_rather_than_fatal() {
         }
     }
 
-    // A floor, not a target. The mutations are aggressive enough that almost
-    // everything is rejected, which is fine — the offset invariants are
-    // checked on the rejections. But if a grammar change made *nothing* parse,
-    // the `Ok` branch above would quietly stop being exercised and this test
-    // would still pass. The generator is fixed-seed, so this count is exact;
-    // 5 leaves room for the grammar to move without going flaky.
     assert!(
         accepted >= 5,
         "only {accepted} of {ITERATIONS} mutated inputs parsed — \
@@ -231,8 +193,6 @@ fn arbitrary_source_is_rejected_rather_than_fatal() {
     );
 }
 
-/// Shapes worth naming, rather than hoping the search reaches them: every
-/// construct with a terminator is a chance to run off the end of the source.
 #[test]
 fn unterminated_and_degenerate_constructs_are_rejected() {
     for source in [
@@ -255,11 +215,9 @@ fn unterminated_and_degenerate_constructs_are_rejected() {
         "<lynx engine-version=\"1\"><script thread=\"main\"><![CDATA[]]",
         "</lynx>",
         "<lynx engine-version=\"1\"></lynx>",
-        // Multi-byte characters at every position an offset could be computed.
         "中<lynx engine-version=\"中\"><script thread=\"main\">中</script></lynx>",
         "𝄞",
         "<lynx engine-version=\"𝄞\">",
-        // Nesting the terminators the scanner searches for.
         "<lynx engine-version=\"1\"><!--<script thread=\"main\">--></lynx>",
         "<lynx engine-version=\"1\"><script thread=\"main\"><![CDATA[</script>]]></script></lynx>",
     ] {
@@ -267,8 +225,6 @@ fn unterminated_and_degenerate_constructs_are_rejected() {
     }
 }
 
-/// The BOM and the declaration are both optional prefixes; each combination
-/// shifts every later offset, which is where an off-by-one would surface.
 #[test]
 fn optional_prefixes_do_not_shift_reported_offsets_off_a_boundary() {
     let body = "<lynx engine-version=\"1\"><script thread=\"main\">x</script></lynx>";
@@ -280,7 +236,6 @@ fn optional_prefixes_do_not_shift_reported_offsets_off_a_boundary() {
         "\u{feff}<?xml version=\"1.0\"?><!-- 中 -->",
     ] {
         let _ = check(&format!("{prefix}{body}"));
-        // And the same prefixes in front of something that must fail.
         let _ = check(&format!("{prefix}<lynx engine-version=\"1\">"));
     }
 }

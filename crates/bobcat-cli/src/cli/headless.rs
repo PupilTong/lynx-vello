@@ -30,16 +30,10 @@ use crate::cli::command::{COMMAND_HELP, Command, Console, describe_text_input};
 use crate::cli::page::Program;
 use crate::cli::screenshot::save_screenshot;
 
-/// How long one frame waits for the view to service it before the frame is
-/// drawn from what the view has already published.
 const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The pointer id of the `tap` command's finger.
 const TAP_POINTER_ID: u32 = 1;
 
-/// This embedder's wakeup: a `Pump` on the same channel the console and the
-/// synthetic clock feed, so a wakeup from the Lynx main thread is one more
-/// loop input.
 #[derive(Debug)]
 struct ChannelWakeup(flume::Sender<HostEvent>);
 
@@ -52,26 +46,16 @@ impl EventRequester for ChannelWakeup {
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     let (sender, receiver) = flume::unbounded();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
-    // The resource system completes image loads on its own runtime — a driver
-    // thread plus tokio's blocking pool; each completion wakes this loop the
-    // same way a commit does, so the next turn reports it.
     let resources = program.resources({
         let requester = std::sync::Arc::clone(&event_requester);
         move || requester.request_event()
     });
-    // One page, so one group: its Lynx main thread and its Stylo workers exist
-    // for this view alone. The handle is dropped as this scope ends — the view
-    // holds the group's thread alive by itself.
     let group = super::start_group(
         event_requester,
         &options.locale,
         &options.preload_scripts,
         &program.input,
     )?;
-    // Two constructions: the view, which is the page and its resources, and
-    // the painter over the windowless GPU target it renders into.
-    // No screen to measure here, so `SystemInfo` reports this view's own
-    // metrics in physical pixels, named as such.
     let (width, height, ratio) = (
         options.viewport_width,
         options.viewport_height,
@@ -97,9 +81,6 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     painter.attach(&view)?;
 
     let mut script = ScriptGate::default();
-    // Commands that arrived while a frame was waiting for its view. They are
-    // newer than anything the script gate holds and older than anything still
-    // in the channel, which is the order the loop below takes the three in.
     let mut held = VecDeque::new();
     let mut host = Host {
         view: &mut view,
@@ -127,15 +108,8 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         } else if let Some(command) = host.held.pop_front() {
             Some(command)
         } else if running {
-            // The frame clock is the only deadline this loop has. A realm
-            // timer is not one: the engine waits its own out and wakes this
-            // loop through the requester like any other publication.
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(HostEvent::Command(command)) => Some(command),
-                // The wakeup answers before the deadline, and the Lynx main
-                // thread posts one per notification, so a chatty commit would
-                // otherwise walk the frame clock forward without ever letting
-                // it fire: both arms check the clock.
                 Ok(HostEvent::Pump) | Err(RecvTimeoutError::Timeout) => {
                     turn(&mut host, &mut painter, Some(&mut clock), &mut script)?;
                     None
@@ -157,10 +131,6 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             continue;
         };
         let Some(command) = script.accept(command) else {
-            // Keep the console responsive while a render-dependent command
-            // waits for the first script commit. Commands behind it remain
-            // ordered, so `screenshot ...` followed by `quit` still writes
-            // the requested frame. A leading `quit` remains immediate.
             console.prompt();
             continue;
         };
@@ -178,7 +148,6 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     }
 }
 
-/// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
     host: &mut Host<'_>,
@@ -254,7 +223,6 @@ fn execute_command(
             },
         ),
         Command::ShowTextInput => {
-            // What the view published up to now, the newest last.
             if check_script(host)? {
                 script.finish();
             }
@@ -272,27 +240,20 @@ enum HostEvent {
     Pump,
 }
 
-/// What a frame's wait needs of this embedder: the view whose turn it takes,
-/// the channel its wakeups arrive on, and somewhere to keep a command that
-/// arrives on that channel meanwhile.
 struct Host<'a> {
     view: &'a mut LynxView<ViewResources>,
     receiver: &'a flume::Receiver<HostEvent>,
     held: &'a mut VecDeque<Command>,
     input: &'a str,
-    /// The last text input state the view published.
     text_input: Option<TextInputState>,
 }
 
-/// Sends one editing command to the view, reporting a refusal.
 fn edit(view: &LynxView<ViewResources>, command: EditCommand) {
     if let Err(error) = view.edit(command) {
         eprintln!("bobcat: the view refused the edit: {error}");
     }
 }
 
-/// One turn with no command to run: the view's, and then a frame if a
-/// running clock says one is due. A paused loop passes no clock.
 fn turn(
     host: &mut Host<'_>,
     painter: &mut Painter,
@@ -313,16 +274,6 @@ fn turn(
     Ok(())
 }
 
-/// One frame: post it, take this embedder's turns until the view has
-/// serviced it, draw. Answers whether the view reported its script finished
-/// during the wait.
-///
-/// Each turn pumps the view first, then sleeps on the channel: the view sends
-/// a `Pump` both when it asks this host for something and when it services
-/// the post, and the resource system sends one when a load completes. A
-/// command that arrives meanwhile is not this wait's to run and keeps its
-/// place in `held`. A frame the view has not serviced by [`FRAME_DEADLINE`]
-/// is drawn from what the view had published.
 fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool, CliError> {
     let posted = painter.post_frame()?;
     let deadline = Instant::now() + FRAME_DEADLINE;
@@ -335,7 +286,6 @@ fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool
         match host.receiver.recv_deadline(deadline) {
             Ok(HostEvent::Pump) => {}
             Ok(HostEvent::Command(command)) => host.held.push_back(command),
-            // The deadline, or a channel nobody sends on any more.
             Err(_) => break,
         }
     }
@@ -343,13 +293,6 @@ fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool
     Ok(finished)
 }
 
-/// Takes this embedder's turns until no picture the frame draws is on its
-/// way ([`Painter::awaits_pictures`]): a source the store dropped and the
-/// rasterizer no longer holds is restored off this thread, and its arrival
-/// wakes this loop. Bounded by [`FRAME_DEADLINE`]; past it the capture that
-/// follows is refused rather than missing the picture. A command that
-/// arrives meanwhile keeps its place in `held`. Answers whether the view
-/// reported its script finished during the wait.
 fn await_pictures(host: &mut Host<'_>, painter: &mut Painter) -> Result<bool, CliError> {
     let deadline = Instant::now() + FRAME_DEADLINE;
     let mut finished = false;
@@ -370,13 +313,9 @@ fn check_script(host: &mut Host<'_>) -> Result<bool, CliError> {
     let mut finished = false;
     for event in host.view.pump() {
         match event {
-            // The view has ended, so the run ends with it.
             event if event.is_fatal() => return Err(CliError::from_fatal_event(host.input, event)),
             EngineEvent::ScriptFinished => finished = true,
             EngineEvent::TextInputStateChanged(state) => host.text_input = Some(*state),
-            // Not fatal: the view and its realms go on, so each of these is
-            // reported the way a browser console reports one rather than by
-            // stopping the run.
             EngineEvent::ScriptRunError(error) => {
                 eprintln!("script failed: {error}");
             }
@@ -410,12 +349,6 @@ fn check_script(host: &mut Host<'_>) -> Result<bool, CliError> {
     Ok(finished)
 }
 
-/// Holds commands that would otherwise observe the initial blank target.
-///
-/// Only frame production and capture require the first script to finish. Once
-/// one such command is waiting, later commands queue behind it to preserve the
-/// console's input order. Before that point, including for a leading `quit`,
-/// the console remains fully usable while the script thread is running.
 #[derive(Debug, Default)]
 struct ScriptGate {
     finished: bool,
@@ -441,8 +374,6 @@ impl ScriptGate {
     }
 }
 
-/// Frames and captures, and the input and editing commands, which reach a
-/// view that has booted (an edit before that is refused).
 const fn requires_script(command: &Command) -> bool {
     matches!(
         command,

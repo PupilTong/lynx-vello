@@ -10,25 +10,6 @@ use super::{Additions, Paragraph};
 use crate::style::TextBrush;
 
 impl<S, A: Additions> Paragraph<S, A> {
-    /// Calls `visit(units, left, right)` once per cluster or atomic box of
-    /// `line` that shows source content, in visual order, with the source
-    /// units it covers and its inline extent.
-    ///
-    /// An inserted segment's cluster covers no source unit and is skipped;
-    /// an atom's extent is its own margin box, without the advance laid
-    /// beside it ([`Additions::box_advance`]).
-    ///
-    /// `line` belongs to a layout whose text starts with this paragraph's
-    /// normalized content: the natural layout, or one a consumer built over a
-    /// prefix of the content followed by text of its own. `cut_byte` is where
-    /// the content ends in that layout's text and `content_slots` how many of
-    /// its box slots are content boxes, which come first. What lies past
-    /// either is no source text and is skipped here, once, for every reader.
-    /// Clipping to the line's own source range, which is what drops the
-    /// whitespace hanging at its end, is the caller's.
-    ///
-    /// `objects` are that layout's ([`Objects::of`]): its cluster bytes
-    /// count each box's object, which `cut_byte` and the text do not.
     pub(in crate::text) fn for_each_extent(
         &self,
         line: &Line<'_, TextBrush>,
@@ -39,10 +20,6 @@ impl<S, A: Additions> Paragraph<S, A> {
     ) {
         let block = &self.content.block;
         let text = &block.text;
-        // A run is split into one glyph run per style; its clusters are
-        // walked once, from the first glyph run's offset, which is where the
-        // run starts. A box's object is a run of its own, which parley
-        // yields as the box rather than as a glyph run.
         let mut walked_run = None;
         for item in line.items() {
             match item {

@@ -735,10 +735,6 @@ fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
     assert_eq!(output.first_baseline, Some(15.0));
 }
 
-/// A `linear` column of one fixed-size box, whose first baseline is that
-/// box's 7px: given only when its caller reads it
-/// (`LayoutInput::reads_first_baseline`), and synthesized from its own 20px
-/// bottom edge otherwise.
 fn linear_column_with_baseline(tree: &mut TestTree) -> (TestId, TestId) {
     let inner = fixed_leaf(tree, 20.0, 20.0);
     tree.set_first_baseline(inner, 7.0);
@@ -766,8 +762,6 @@ fn a_baseline_group_sizes_its_row_from_a_linear_item_s_own_baseline() {
         Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
     );
 
-    // The shared baseline is the first item's 15px; the column's 7px
-    // baseline sits on it, and its 13px below that size the auto row.
     assert_close(tree.layout(first).location.y, 0.0);
     assert_close(tree.layout(column).location.y, 8.0);
     assert_close(output.size.height, 28.0);
@@ -780,8 +774,6 @@ fn a_measured_grid_aligns_a_baseline_group_by_a_linear_item_s_own_baseline() {
     let first = fixed_leaf(&mut tree, 20.0, 20.0);
     tree.set_first_baseline(first, 15.0);
     let (column, _) = linear_column_with_baseline(&mut tree);
-    // A 10px row the items overflow: their aligned positions are what the
-    // container's scrollable extent reaches.
     let mut style = grid_style(&[px(50.0), px(50.0)], &[px(10.0)]);
     style.align_items = ItemPlacement(AlignFlags::BASELINE);
     style.justify_items = justify_items(AlignFlags::START);
@@ -797,8 +789,6 @@ fn a_measured_grid_aligns_a_baseline_group_by_a_linear_item_s_own_baseline() {
         ),
     );
 
-    // The column's 7px baseline sits on the first item's 15px: it spans
-    // 8–28px.
     assert_close(output.content_size.height, 28.0);
 }
 
@@ -824,7 +814,6 @@ fn a_measured_grid_asks_its_items_for_the_first_baseline_it_is_asked_for() {
     let (read, read_probes) = run(true);
     assert_eq!(read.first_baseline, Some(7.0));
     assert_eq!(read_probes, 1);
-    // Unread, the column's fixed-size box is never measured for it.
     let (unread, unread_probes) = run(false);
     assert_eq!(unread.size, read.size);
     assert_eq!(unread_probes, 0);
@@ -904,12 +893,6 @@ fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
     assert_point(tree.layout(second_column).location, Point::new(20.0, 0.0));
 }
 
-/// css-grid-2 §6.6: an item's content-based minimum is "its specified size
-/// suggestion if it exists" — a definite preferred size, even over empty
-/// content. Empty `width: 30px` and `width: 50px` items give their `0fr`
-/// and `1fr` columns those bases, and §12.7.1's restart then leaves the
-/// last `1fr` column the remaining 20px (WPT
-/// `css/css-grid/layout-algorithm/grid-find-fr-size-restart-algorithm.html`).
 #[test]
 fn a_specified_size_is_the_automatic_minimum_of_an_empty_item() {
     let mut tree = TestTree::default();
@@ -935,10 +918,6 @@ fn a_specified_size_is_the_automatic_minimum_of_an_empty_item() {
     assert_size(tree.layout(last).size, Size::new(20.0, 100.0));
 }
 
-/// A stretched item's border box is floored at its padding and border: a
-/// 50px column stretches an item with 40px inline padding on each side to
-/// 80px, and a 50px row one with 40px block padding to 80px (WPT
-/// `css/css-grid/grid-items/grid-item-border-padding-005.html`).
 #[test]
 fn a_stretched_item_is_never_smaller_than_its_padding() {
     let mut tree = TestTree::default();
@@ -1266,11 +1245,6 @@ fn absolute_auto_grid_lines_use_the_container_padding_edges() {
     assert_size(tree.layout(child).size, Size::new(116.0, 76.0));
 }
 
-/// css-position-3 §3.5.3: a grid child whose containing block is the grid
-/// itself takes the grid area its placement names as its static-position
-/// rectangle, not the content box (WPT
-/// `css/css-grid/abspos/positioned-grid-items-001.html`, whose items have
-/// `auto` insets).
 #[test]
 fn absolute_static_position_aligns_in_the_grid_area_it_names() {
     let mut tree = TestTree::default();
@@ -1285,15 +1259,9 @@ fn absolute_static_position_aligns_in_the_grid_area_it_names() {
 
     definite_layout(&tree, root, 100.0, 50.0);
 
-    // Centered in column 2 (30..100): 30 + (70 - 20) / 2; at the end of row 1.
     assert_point(tree.layout(child).location, Point::new(55.0, 40.0));
 }
 
-/// The same with `auto` placement on every side: the area is the augmented
-/// grid's padding-edge lines, so the static position follows the padding
-/// box, not the content box (WPT
-/// `css/css-grid/abspos/absolute-positioning-grid-container-containing-block-001.html`,
-/// `autoRowAutoColumn`).
 #[test]
 fn absolute_static_position_with_auto_placement_starts_at_the_padding_edge() {
     let mut tree = TestTree::default();
@@ -1931,11 +1899,6 @@ fn normal_item_alignment_preserves_a_preferred_aspect_ratio() {
     assert_size(tree.layout(child).size, Size::new(100.0, 50.0));
 }
 
-/// css-grid-2 §10.1: an `auto` line is the padding edge, "the padding edge
-/// of the scrollable area, if the grid container overflows" — which only a
-/// scroll container has. A grid that is none keeps the padding edge however
-/// far its tracks overflow it (WPT
-/// `css/css-grid/abspos/grid-positioned-items-within-grid-implicit-track-001.html`).
 #[test]
 fn absolute_auto_line_uses_padding_edge_of_overflowing_scrollable_area() {
     for (overflow, width) in [(Overflow::Hidden, 200.0), (Overflow::Visible, 100.0)] {
@@ -2051,11 +2014,6 @@ fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
     assert_size(tree.layout(fixed).size, Size::new(40.0, 80.0));
 }
 
-/// css-grid-2 §12.1 step 3 for an item that does not stretch into its row:
-/// its percentage width, resolved against the column, gives it a height
-/// through its preferred aspect ratio, and that height transferred back is a
-/// min-content width other than the one the column was sized with, so the
-/// columns are sized again.
 #[test]
 fn unstretched_ratio_item_resolved_against_its_column_feeds_the_column_back() {
     let mut tree = TestTree::default();
@@ -2304,10 +2262,6 @@ fn absolute_children_resolve_intrinsic_preferred_widths() {
     }
 }
 
-/// css-position-3 §3.5.3: for the static position "all auto margins on the
-/// box itself are treated as zero" — they do not center the box, its
-/// self-alignment places it (WPT
-/// `css/css-grid/abspos/positioned-grid-items-024.html`).
 #[test]
 fn absolute_child_auto_margins_are_zero_in_static_position() {
     let mut tree = TestTree::default();
@@ -2748,18 +2702,6 @@ fn template_components_after_the_track_limit_are_dropped() {
     assert_close(tree.layout(probe).location.x, 9_999.0);
 }
 
-// ---------------------------------------------------------------------------
-// Items with an intrinsic aspect ratio
-//
-// The fixtures below are replaced leaves: they carry a natural size, and they
-// answer a known dimension through their own ratio the way
-// `NaturalSize::measure` answers for a decoded bitmap. Every expected number
-// is the one css-grid-1 §6.2 (item sizing), §11.5 (intrinsic track sizes) and
-// css-sizing-4 §5 (the aspect-ratio transfer) produce; each was also read off
-// Chrome 153 over the equivalent `<img>` markup, and agrees.
-// ---------------------------------------------------------------------------
-
-/// A replaced 40x20 leaf, ratio 2:1.
 fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -2770,7 +2712,6 @@ fn wide_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     })
 }
 
-/// The same leaf standing up: 20x40, ratio 1:2.
 fn tall_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     let known = input.known_dimensions;
     LeafMetrics::new(match (known.width, known.height) {
@@ -2781,9 +2722,6 @@ fn tall_bitmap(input: LeafMeasureInput) -> LeafMetrics {
     })
 }
 
-/// Marks a style as belonging to replaced content with a natural size, which
-/// is what `CoreStyle::natural_size` reports and what §6.2 keys `normal`
-/// self-alignment on.
 fn with_natural_size(style: TestStyle, width: f32, height: f32) -> TestStyle {
     TestStyle {
         natural_size: Size::new(Some(width), Some(height)),
@@ -2799,18 +2737,6 @@ fn tall_item(tree: &mut TestTree, style: TestStyle) -> TestId {
     tree.push_measured_leaf(with_natural_size(style, 20.0, 40.0), tall_bitmap)
 }
 
-/// css-grid-1 §6.2, every self-alignment value against a definite 200x200
-/// area.
-///
-/// * `normal` does **not** stretch a replaced box with a natural size: it is sized by CSS 2
-///   §10.3.4/§10.6.2, i.e. at 40x20.
-/// * `stretch` does, in both axes at once, and §6.2's own note says that distorts the ratio —
-///   200x200.
-/// * `start`/`center`/`end` are fit-content sizing, which for replaced content is the natural size
-///   again.
-/// * One axis stretched and the other `normal` transfers: a stretched 200-wide column gives 100 of
-///   height; a stretched 200-tall row gives 400 of width, which overflows the 200-wide column
-///   exactly as Chrome lays it out.
 #[test]
 fn normal_self_alignment_leaves_a_replaced_grid_item_at_its_natural_size() {
     let cases = [
@@ -2859,11 +2785,6 @@ fn normal_self_alignment_leaves_a_replaced_grid_item_at_its_natural_size() {
     }
 }
 
-/// The same §6.2 sentence read the other way: a box whose ratio is the
-/// `aspect-ratio` *property* and which is not replaced still fills its column
-/// under `normal` (CSS 2 §10.3.3's stretch-fit inline size) and takes its row
-/// size from that width. The asymmetry is the whole point — `normal` is not
-/// simply `start` for everything with a ratio.
 #[test]
 fn normal_self_alignment_still_fills_the_column_for_a_non_replaced_ratio_box() {
     let mut tree = TestTree::default();
@@ -2881,12 +2802,6 @@ fn normal_self_alignment_still_fills_the_column_for_a_non_replaced_ratio_box() {
     assert_size(tree.layout(item).size, Size::new(200.0, 200.0));
 }
 
-/// §11.5: a definite track in one axis reaches the item's contribution in the
-/// other, so an `auto` track sizes to the ratio-transferred size rather than
-/// to the item's own pixels. Both orientations, both ratios: a 2:1 item
-/// stretched across a 200px column contributes a 100px row; stretched down a
-/// 200px row it contributes a 400px column; the 1:2 item halves and doubles
-/// the same way.
 #[test]
 fn a_definite_track_transfers_into_the_auto_track_of_the_other_axis() {
     let cases = [
@@ -2925,9 +2840,6 @@ fn a_definite_track_transfers_into_the_auto_track_of_the_other_axis() {
     }
 }
 
-/// With nothing definite in either axis there is nothing to transfer from, so
-/// §11.5 falls back to the item's own max-content contribution: both tracks
-/// take the natural size.
 #[test]
 fn two_auto_tracks_size_a_ratio_item_from_its_natural_size() {
     let mut tree = TestTree::default();
@@ -2939,10 +2851,6 @@ fn two_auto_tracks_size_a_ratio_item_from_its_natural_size() {
     assert_size(output.size, Size::new(40.0, 20.0));
 }
 
-/// §11.7 resolves `fr` before items are laid out, so a flexible column is as
-/// definite a transfer source as a fixed one. `minmax(120px, 1fr)` is the same
-/// story through §11.4's two halves. Both give the stretched item half of the
-/// 400px container, and a 200px row from the ratio.
 #[test]
 fn flexible_and_minmax_tracks_transfer_like_fixed_ones() {
     for columns in [
@@ -2969,9 +2877,6 @@ fn flexible_and_minmax_tracks_transfer_like_fixed_ones() {
     }
 }
 
-/// A spanning item stretches across its whole grid area — the spanned tracks
-/// *and* the gutters between them, per §11.2's definition of a grid area — so
-/// the transfer reads 100 + 10 + 100 and the `auto` row becomes 105.
 #[test]
 fn a_spanning_item_transfers_from_the_tracks_and_the_gutters_it_covers() {
     let mut tree = TestTree::default();
@@ -2996,13 +2901,6 @@ fn a_spanning_item_transfers_from_the_tracks_and_the_gutters_it_covers() {
     assert_close(output.size.height, 105.0);
 }
 
-/// css-sizing-3 §5.1: the stretched size is clamped by the item's own
-/// min/max in that axis *before* the ratio transfers from it, and the clamp on
-/// the transferred axis applies afterwards and simply breaks the ratio.
-///
-/// * `max-width: 120` on a 200px column: 120 wide, 60 tall.
-/// * `min-width: 300`: 300 wide, 150 tall, overflowing the column.
-/// * `max-height: 40`: still 200 wide, cut to 40 tall.
 #[test]
 fn item_min_and_max_sizes_clamp_the_transfer_on_both_sides() {
     let cases = [
@@ -3045,8 +2943,6 @@ fn item_min_and_max_sizes_clamp_the_transfer_on_both_sides() {
     }
 }
 
-/// An authored size in one axis is the item's used size there, so it is what
-/// the ratio transfers from — the track the item sits in never gets a say.
 #[test]
 fn an_authored_size_outranks_the_track_as_the_transfer_source() {
     let mut tree = TestTree::default();
@@ -3064,9 +2960,6 @@ fn an_authored_size_outranks_the_track_as_the_transfer_source() {
     assert_close(output.size.height, 45.0);
 }
 
-/// §11.5 sizes an `auto` track to the *largest* contribution it collects, so
-/// two ratio items in one column leave it as wide as the wider of the two,
-/// and each item keeps its own size inside it.
 #[test]
 fn an_auto_track_takes_the_largest_of_two_ratio_contributions() {
     let mut tree = TestTree::default();
@@ -3097,9 +2990,6 @@ fn an_auto_track_takes_the_largest_of_two_ratio_contributions() {
     assert_point(tree.layout(natural).location, Point::new(0.0, 45.0));
 }
 
-/// Placement decides *where* a ratio item lands, never how it is sized. With
-/// `dense` backfilling, the auto-placed item takes the column the explicitly
-/// placed one left open, and both still stretch to 100 and transfer to 50.
 #[test]
 fn dense_placement_moves_a_ratio_item_without_resizing_it() {
     let mut tree = TestTree::default();
@@ -3134,12 +3024,6 @@ fn dense_placement_moves_a_ratio_item_without_resizing_it() {
     assert_close(output.size.height, 50.0);
 }
 
-/// §11.5 with css-sizing-4 §5 for an item whose ratio is the `aspect-ratio`
-/// property *and* which is replaced: with nothing definite in the other axis
-/// the transfer still has the natural size to work from, so a 1:1 ratio turns
-/// the natural 40 of width into 40 of row rather than leaving the row at the
-/// natural 20. A 4:1 ratio cuts it to 10 — the transferred size *is* the
-/// contribution, not a floor under the content's own.
 #[test]
 fn an_authored_ratio_transfers_from_replaced_contents_natural_size() {
     for (item_ratio, expected) in [(1.0, 40.0), (4.0, 10.0), (0.25, 160.0)] {
@@ -3159,10 +3043,6 @@ fn an_authored_ratio_transfers_from_replaced_contents_natural_size() {
     }
 }
 
-/// css-contain-2 §3.1 substitutes a size-contained box's contents, but it does
-/// not stop the box from being replaced, so §6.2 still keeps `normal` off
-/// `stretch`. The item is start-aligned at its substituted size, which with no
-/// `contain-intrinsic-size` is zero — the same 0x0 Chrome produces.
 #[test]
 fn size_containment_leaves_a_replaced_item_unstretched_at_its_substituted_size() {
     let mut tree = TestTree::default();
@@ -3181,9 +3061,6 @@ fn size_containment_leaves_a_replaced_item_unstretched_at_its_substituted_size()
 
 #[test]
 fn a_scroll_container_counts_grid_item_margin_areas() {
-    // css-overflow-3 §3.3: "the margin areas of grid item and flex item
-    // boxes". The first item's margin area ends at 150, past both its 120px
-    // track and its border box; the baseline-aligned second item's at 35.
     let mut tree = TestTree::default();
     let first = tree.push_leaf(
         TestStyle {
@@ -3218,27 +3095,11 @@ fn a_scroll_container_counts_grid_item_margin_areas() {
     assert_point(tree.layout(second).location, Point::new(120.0, 0.0));
     assert_size(output.content_size, Size::new(150.0, 35.0));
 
-    // A `visible` grid keeps the border boxes only (csswg-drafts#9194).
     let root = tree.push_grid(style(Overflow::Visible), vec![first, second]);
     let output = definite_layout(&tree, root, 100.0, 20.0);
     assert_size(output.content_size, Size::new(140.0, 20.0));
 }
 
-// ---------------------------------------------------------------------------
-// The available grid space of a container whose size is not known.
-//
-// css-grid-2 §12.1 has two cases only: the grid container's definite size,
-// or the min-/max-content constraint it is sized under. A container whose
-// size is unknown under a definite available size (an absolutely positioned
-// box that does not stretch, `fit-content`, an unstretched item) first takes
-// its css-sizing-3 §5.2.2 fit-content inline size, `min(max-content,
-// max(min-content, stretch-fit))`, and its max-content block size, and only
-// then sizes its tracks against that now-definite size.
-// ---------------------------------------------------------------------------
-
-/// A paragraph whose longest word is 500 wide and whose unbroken line is
-/// 1000: it fills any width between the two, on one 100-tall line at 1000
-/// or more and on two below that.
 fn paragraph_leaf(input: LeafMeasureInput) -> LeafMetrics {
     let width = input
         .known_dimensions
@@ -3260,8 +3121,6 @@ fn paragraph(tree: &mut TestTree, style: TestStyle) -> TestId {
     tree.push_measured_leaf(style, paragraph_leaf)
 }
 
-/// `position: absolute; inset: 0; width/height: fit-content; margin: auto`
-/// (HTML's `dialog:modal`) over `style`.
 fn fit_content_box(style: TestStyle) -> TestStyle {
     TestStyle {
         position: PositionProperty::Absolute,
@@ -3284,8 +3143,6 @@ fn place_in_800_by_600(tree: &TestTree, target: TestId) -> Layout {
     })
 }
 
-/// A grid container with `style`, absolutely positioned in an 800×600
-/// containing block, around the items `content` pushes.
 fn placed_grid(
     style: TestStyle,
     content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
@@ -3301,9 +3158,6 @@ fn fixed_items(count: usize) -> impl FnOnce(&mut TestTree) -> Vec<TestId> {
     move |tree| (0..count).map(|_| fixed_leaf(tree, 100.0, 50.0)).collect()
 }
 
-/// Fixed tracks sum to the max-content size, which fits the 800 stretch-fit
-/// size; the block size is the one 50-tall row, not the 600 available, and
-/// the `auto` margins centre the 200×50 box.
 #[test]
 fn fit_content_grid_takes_its_fixed_tracks_and_centres() {
     let style = fit_content_box(grid_style(&[px(100.0), px(100.0)], &[]));
@@ -3313,10 +3167,6 @@ fn fit_content_grid_takes_its_fixed_tracks_and_centres() {
     assert_point(tree.layout(items[1]).location, Point::new(100.0, 0.0));
 }
 
-/// §12.7's flex fraction under a max-content constraint is the largest
-/// item's, so `1fr 1fr` over two 100-wide items is 200; `auto` tracks are
-/// their items' max-content contributions and are not stretched (§12.8)
-/// into free space a fit-content container does not have.
 #[test]
 fn fit_content_grid_sizes_flexible_and_auto_tracks_at_their_content() {
     for columns in [vec![fr(1.0), fr(1.0)], vec![auto_track(), auto_track()]] {
@@ -3333,12 +3183,8 @@ fn fit_content_grid_sizes_flexible_and_auto_tracks_at_their_content() {
     assert_point(layout.location, Point::new(350.0, 275.0));
 }
 
-/// The other two arms of the fit-content clamp: a max-content size above the
-/// stretch-fit size is held to it, unless the min-content size is larger
-/// still.
 #[test]
 fn fit_content_grid_clamps_between_its_intrinsic_sizes() {
-    // max-content 1000, min-content 200: the stretch-fit 800.
     let style = fit_content_box(grid_style(
         &[
             minmax(fixed_breadth(100.0), fixed_breadth(500.0)),
@@ -3350,9 +3196,6 @@ fn fit_content_grid_clamps_between_its_intrinsic_sizes() {
     assert_size(layout.size, Size::new(800.0, 50.0));
     assert_point(tree.layout(items[1]).location, Point::new(400.0, 0.0));
 
-    // Two paragraphs in `1fr 1fr`: max-content 2000, min-content 1000 (each
-    // column's automatic minimum is its paragraph's longest word), so 1000,
-    // where each paragraph wraps onto two lines.
     let style = fit_content_box(grid_style(&[fr(1.0), fr(1.0)], &[]));
     let (tree, items, layout) = placed_grid(style, |tree| {
         vec![
@@ -3365,8 +3208,6 @@ fn fit_content_grid_clamps_between_its_intrinsic_sizes() {
     assert_point(tree.layout(items[1]).location, Point::new(500.0, 0.0));
 }
 
-/// The block axis is max-content: a `1fr` row is its item's height, not the
-/// 600 the containing block offers.
 #[test]
 fn fit_content_grid_block_size_is_its_max_content_size() {
     let style = fit_content_box(grid_style(&[], &[fr(1.0)]));
@@ -3376,9 +3217,6 @@ fn fit_content_grid_block_size_is_its_max_content_size() {
     assert_size(tree.layout(items[0]).size, Size::new(100.0, 50.0));
 }
 
-/// `left: 0; top: 0` with `auto` sizes is shrink-to-fit as well
-/// (css-position-3 §4.1): the same fit-content path, no `fit-content`
-/// keyword needed.
 #[test]
 fn shrink_to_fit_absolute_grid_does_not_fill_the_containing_block() {
     let style = TestStyle {
@@ -3395,8 +3233,6 @@ fn shrink_to_fit_absolute_grid_does_not_fill_the_containing_block() {
     assert_point(layout.location, Point::ZERO);
 }
 
-/// §7.2.3.2: with no definite size and no maximum, `auto-fill` repeats once,
-/// whatever space the containing block offers.
 #[test]
 fn fit_content_grid_repeats_auto_fill_once() {
     let mut style = grid_style(&[], &[]);
@@ -3405,7 +3241,6 @@ fn fit_content_grid_repeats_auto_fill_once() {
     assert_size(layout.size, Size::new(100.0, 50.0));
 }
 
-/// A column flex container 800×600 around one item `item` pushes.
 fn in_column_flex(item: impl FnOnce(&mut TestTree) -> TestId) -> (TestTree, TestId) {
     let mut tree = TestTree::default();
     let child = item(&mut tree);
@@ -3420,10 +3255,6 @@ fn in_column_flex(item: impl FnOnce(&mut TestTree) -> TestId) -> (TestTree, Test
     (tree, child)
 }
 
-/// An unstretched flex item is fit-content sized in the cross axis
-/// (css-flexbox-1 §9.4 step 7 → css-sizing-3 §5.2.2): `align-self:
-/// flex-start` leaves a `1fr 1fr` grid at its two 100-wide items, not the
-/// column flex container's 800.
 #[test]
 fn flex_start_grid_item_of_a_column_flex_container_fits_its_content() {
     let (tree, grid) = in_column_flex(|tree| {
@@ -3439,8 +3270,6 @@ fn flex_start_grid_item_of_a_column_flex_container_fits_its_content() {
     assert_size(tree.layout(grid).size, Size::new(200.0, 50.0));
 }
 
-/// A row flex container 600 tall measures a `flex-start` grid's cross size
-/// under that definite space: its `1fr` row is its item's 50, not 600.
 #[test]
 fn flex_start_grid_item_of_a_row_flex_container_takes_its_content_height() {
     let mut tree = TestTree::default();
@@ -3457,12 +3286,6 @@ fn flex_start_grid_item_of_a_row_flex_container_takes_its_content_height() {
     assert_size(tree.layout(grid).size, Size::new(100.0, 50.0));
 }
 
-/// css-grid-2 §6.2: an item that does not stretch is fit-content sized
-/// within its area, so the available space it lays out in is the area, not a
-/// max-content constraint. A paragraph (min-content 500, max-content 1000)
-/// with `justify-self: start` in an 800px column wraps at 800; a flex
-/// container around the same paragraph does too; a `1fr 1fr` grid stays at
-/// its 200 of content.
 #[test]
 fn unstretched_grid_items_fit_content_into_their_area() {
     let start = || TestStyle {
@@ -3499,10 +3322,6 @@ fn unstretched_grid_items_fit_content_into_their_area() {
     assert_close(tree.layout(item).size.width, 200.0);
 }
 
-/// The track-sizing runs one layout of a grid with a single `auto` column
-/// pays for, counted off its one item: the test host caches nothing, so each
-/// run measures the item once at max-content width and twice at min-content
-/// width (its automatic minimum and the column feedback check).
 fn grid_track_sizing_runs(tree: &TestTree, item: TestId) -> usize {
     let probes = |available: AvailableSpace| {
         tree.measure_inputs(item)
@@ -3515,15 +3334,6 @@ fn grid_track_sizing_runs(tree: &TestTree, item: TestId) -> usize {
     runs
 }
 
-/// Only a container whose width is unknown under a definite available width
-/// runs intrinsic track sizing of its own. With a known width — its own, or
-/// stretched into a parent's column — one run sizes the tracks. A fit-content
-/// container runs once under a max-content constraint, then at its decided
-/// size twice (the run that decides its block size, and the rerun under the
-/// now-definite percentage basis every container of unknown size takes):
-/// one run more than before it had a fit-content size at all. The
-/// min-content run is added only when the max-content size overflows the
-/// stretch-fit size, and a block size already known saves the middle run.
 #[test]
 fn only_a_fit_content_grid_runs_intrinsic_track_sizing() {
     let leaf = |tree: &mut TestTree, max: f32| {
@@ -3545,9 +3355,6 @@ fn only_a_fit_content_grid_runs_intrinsic_track_sizing() {
     assert_size(tree.layout(grid).size, Size::new(800.0, 600.0));
     assert_eq!(grid_track_sizing_runs(&tree, item), 1);
 
-    // The fit-content runs decide the width, the provisional run sizes the
-    // rows at it, and no definite rerun follows: nothing reads a percentage
-    // basis and the max-content rows are the container's height.
     for (max_content, width, runs) in [(100.0, 100.0, 2), (1000.0, 800.0, 3)] {
         let (tree, items, layout) = placed_grid(fit_content_box(auto_grid()), |tree| {
             vec![leaf(tree, max_content)]
@@ -3569,11 +3376,6 @@ fn only_a_fit_content_grid_runs_intrinsic_track_sizing() {
     assert_eq!(grid_track_sizing_runs(&tree, items[0]), 2);
 }
 
-/// A size-contained inline axis has its substituted extent as both intrinsic
-/// sizes (css-contain-2 §3.1), so a fit-content grid with `contain:
-/// inline-size` is `contain-intrinsic-width` wide with no intrinsic run of its
-/// own, and its `1fr 1fr` columns split that width; the block size is still
-/// max-content.
 #[test]
 fn fit_content_grid_with_a_contained_inline_axis_takes_its_substituted_width() {
     let style = TestStyle {
@@ -3587,8 +3389,6 @@ fn fit_content_grid_with_a_contained_inline_axis_takes_its_substituted_width() {
     assert_point(tree.layout(items[1]).location, Point::new(150.0, 0.0));
 }
 
-/// `align-self: last baseline` (css-align-3 §9.3, css-grid-1 §11.5 step 1's
-/// shims) and the container's own last baseline (css-grid-1 §10.6).
 mod last_baseline {
     use super::*;
 
@@ -3614,10 +3414,6 @@ mod last_baseline {
         placement(line(start), line(start + 1))
     }
 
-    /// A row flex container whose last line's last item has a fixed height:
-    /// its last baseline is that item's, 10 + 9 = 19 below its top, 3 above
-    /// its 22px bottom edge. A measurement reports 19 only when it is asked
-    /// for an exact last baseline (`LayoutInput::reads_last_baseline`).
     fn nested_flex(tree: &mut TestTree, style: TestStyle) -> TestId {
         let line = |tree: &mut TestTree, height: f32, baseline: f32| {
             tree.push_baseline_leaf(
@@ -3644,10 +3440,6 @@ mod last_baseline {
         )
     }
 
-    /// A grid that is a last-baseline group member asks the item its own last
-    /// baseline comes from (css-grid-1 §10.6) for an exact one, so a nested
-    /// flex container with a fixed-height last item gives 19, not its 22px
-    /// bottom edge.
     #[test]
     fn a_requested_grid_last_baseline_asks_the_item_it_comes_from() {
         let mut tree = TestTree::default();
@@ -3689,9 +3481,6 @@ mod last_baseline {
         assert_eq!(output.last_baseline, Some(19.0));
     }
 
-    /// §11.5 step 1's shims read a last-baseline group member's last baseline
-    /// exactly: the nested flex container reaches 3 below it and the leaf 15,
-    /// so the container is shimmed 12 and the auto row is 22 + 12 = 34.
     #[test]
     fn last_baseline_shims_ask_a_group_member_for_an_exact_last_baseline() {
         let mut tree = TestTree::default();
@@ -3732,11 +3521,8 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 100.0, 40.0);
 
-        // 20 below the baseline at most, so it sits 20 above the row's end.
         assert_close(tree.layout(short).location.y, 5.0);
         assert_close(tree.layout(tall).location.y, 10.0);
-        // The first row holds no first-baseline group, so the first baseline
-        // is the last-baseline group's too (§10.6 step 2).
         assert_eq!(output.first_baseline, Some(20.0));
         assert_eq!(output.last_baseline, Some(20.0));
     }
@@ -3760,12 +3546,9 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 90.0, 50.0);
 
-        // Both areas end at 50; the lower item reaches 8 below its baseline.
         assert_close(tree.layout(spanning).location.y + 40.0, 42.0);
         assert_close(tree.layout(lower).location.y + 12.0, 42.0);
         assert_close(tree.layout(upper).location.y, 0.0);
-        // First row: its first-baseline group. Last row: its last-baseline
-        // group, which the spanning item joined.
         assert_eq!(output.first_baseline, Some(6.0));
         assert_eq!(output.last_baseline, Some(42.0));
     }
@@ -3782,9 +3565,6 @@ mod last_baseline {
 
         definite_layout(&tree, root, 100.0, 20.0);
 
-        // 25 above the baseline and 5 below overflow the 20px row. The group
-        // stays flush with the row's end and overflows its start, as in
-        // browsers: no `safe` alignment moves it back.
         assert_close(tree.layout(tall).location.y, -10.0);
         assert_close(tree.layout(short).location.y, 10.0);
     }
@@ -3812,8 +3592,6 @@ mod last_baseline {
 
         definite_layout(&tree, root, 100.0, 60.0);
 
-        // The shallow item is shimmed 10 on its end side (15 - 5), so the
-        // auto row is 30, not 20, and the group fits it.
         assert_close(tree.layout(marker).location.y, 30.0);
         assert_close(tree.layout(shallow).location.y, 0.0);
         assert_close(tree.layout(deep).location.y, 10.0);
@@ -3839,9 +3617,6 @@ mod last_baseline {
 
         definite_layout(&tree, root, 100.0, 60.0);
 
-        // Baselines here are horizontal, so a column shares none: each item
-        // takes `safe self-end` — its own end edge, and the container's
-        // start once it overflows the area.
         assert_close(tree.layout(ltr).location.x, 80.0);
         assert_close(tree.layout(rtl).location.x, 0.0);
         assert_close(tree.layout(wide).location.x, 0.0);
@@ -3852,7 +3627,6 @@ mod last_baseline {
         let mut tree = TestTree::default();
         let top = leaf(&mut tree, at(1, row(1)), Size::new(10.0, 10.0), 8.0);
         tree.set_first_baseline(top, 4.0);
-        // Listed out of grid order: the second column's item is the last one.
         let right = leaf(&mut tree, at(2, row(2)), Size::new(10.0, 10.0), 9.0);
         let left = leaf(&mut tree, at(1, row(2)), Size::new(10.0, 10.0), 6.0);
         let mut style = grid_style(&[px(30.0), px(30.0)], &[px(20.0), px(20.0)]);
@@ -3881,18 +3655,12 @@ mod last_baseline {
 
         let output = definite_layout(&tree, root, 100.0, 40.0);
 
-        // As without the offset (the group's baseline at 20), then 7 lower.
         assert_close(tree.layout(shifted).location.y, 5.0 + 7.0);
         assert_close(tree.layout(other).location.y, 10.0);
         assert_eq!(output.last_baseline, Some(20.0));
     }
 }
 
-/// css-grid-2 §12.5 step 4 grows only the flexible tracks with an intrinsic
-/// minimum: an item in a `minmax(0, 0.4fr)` row leaves its fixed 0 base, so
-/// §12.7.1 gives both rows 100 × 0.4 = 40 for an 80px container, and the
-/// definite rerun 80 × 0.4 = 32 each (WPT
-/// `css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height-002.html`).
 #[test]
 fn a_fixed_minimum_flexible_row_takes_no_base_from_its_item() {
     let mut tree = TestTree::default();
@@ -3919,10 +3687,6 @@ fn auto_height_layout(tree: &TestTree, root: TestId, width: f32) -> LayoutOutput
 
 #[test]
 fn an_auto_height_grid_stretches_its_auto_rows_to_its_min_height() {
-    // css-grid-2 §12.8 stretches `auto` tracks into a definite min-height
-    // when the free space is otherwise indefinite. The max-content run sized
-    // the rows to 20 + 30; the container is 100 tall, so the definite rerun
-    // stays for this grid and shares the 50 left between the two rows.
     let mut tree = TestTree::default();
     let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
     let second = intrinsic_leaf(&mut tree, Size::new(10.0, 30.0), Size::new(10.0, 30.0));
@@ -3940,10 +3704,6 @@ fn an_auto_height_grid_stretches_its_auto_rows_to_its_min_height() {
 
 #[test]
 fn an_auto_height_grid_its_rows_fill_skips_the_definite_rerun() {
-    // The height the max-content run gave the rows is the container's, and
-    // nothing reads a percentage basis, so sizing the tracks again at that
-    // height could only repeat them: each item is measured for its row
-    // once, and committed once.
     let mut tree = TestTree::default();
     let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
     let second = intrinsic_leaf(&mut tree, Size::new(10.0, 30.0), Size::new(10.0, 30.0));
@@ -3960,8 +3720,6 @@ fn an_auto_height_grid_its_rows_fill_skips_the_definite_rerun() {
 
 #[test]
 fn a_percentage_row_keeps_the_definite_rerun_of_an_auto_height_grid() {
-    // The 50% row is `auto` while the height is indefinite and resolves
-    // against the final 40px height in the rerun, as css-grid-2 §7.2 asks.
     let mut tree = TestTree::default();
     let first = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
     let second = intrinsic_leaf(&mut tree, Size::new(10.0, 20.0), Size::new(10.0, 20.0));
@@ -3977,11 +3735,6 @@ fn a_percentage_row_keeps_the_definite_rerun_of_an_auto_height_grid() {
 
 #[test]
 fn a_flex_factor_below_one_keeps_the_definite_rerun_of_an_intrinsic_grid() {
-    // Three items in one 0.5fr column: the spanned factors sum to 1.5, so the
-    // column's base is the items' 0 min-content, and under max-content the
-    // fr size is the 100px max-content contribution, which makes the column
-    // 50 wide. At that definite width §12.7.1 floors the factor sum at 1, so
-    // the fr size is 50 and the column takes 25: the rerun stays.
     let mut tree = TestTree::default();
     let mut children = Vec::new();
     for _ in 0..3 {
@@ -4001,10 +3754,6 @@ fn a_flex_factor_below_one_keeps_the_definite_rerun_of_an_intrinsic_grid() {
 
 #[test]
 fn a_min_content_maximum_keeps_the_definite_rerun_of_an_intrinsic_grid() {
-    // Under max-content the `minmax(auto, min-content)` column's base is the
-    // item's 100px limited max-content contribution, which outgrows its 40px
-    // min-content growth limit; at the definite 100px the base is the 40px
-    // automatic minimum and stays there.
     let mut tree = TestTree::default();
     let child = intrinsic_leaf(&mut tree, Size::new(40.0, 10.0), Size::new(100.0, 10.0));
     let column = minmax(TrackBreadth::Auto, TrackBreadth::MinContent);
@@ -4018,11 +3767,6 @@ fn a_min_content_maximum_keeps_the_definite_rerun_of_an_intrinsic_grid() {
 
 #[test]
 fn a_min_content_constraint_keeps_the_definite_rerun() {
-    // Under a min-content constraint both `auto` columns are based on their
-    // items' 50px min-content contributions, 100 in all. At that definite
-    // width the first column's base is its item's 0 minimum, and maximizing
-    // shares the 50px left out equally up to the growth limits: the second
-    // column stops at its 60px max-content size and the first takes 40.
     let mut tree = TestTree::default();
     let first = tree.push_leaf(
         TestStyle {
@@ -4053,11 +3797,6 @@ fn a_min_content_constraint_keeps_the_definite_rerun() {
     assert_point(tree.layout(second).location, Point::new(40.0, 0.0));
 }
 
-/// css-grid-2 §6.6: the content-based minimum is the specified size
-/// suggestion — a definite preferred size — whatever the content measures, so
-/// an empty 40px-tall item keeps its `auto` row at 40px in a 30px container
-/// instead of sharing the container out. Found through the grid-lanes WPT
-/// `intrinsic-sizing/row-defined-height.html`, which shares this sizing.
 #[test]
 fn a_definite_preferred_size_is_the_content_based_minimum() {
     let mut tree = TestTree::default();

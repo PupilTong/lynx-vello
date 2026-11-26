@@ -36,47 +36,24 @@ use super::ScrollBehavior;
 use super::snap::scroll_padding;
 use crate::tree::document::{Document, NodeId};
 
-/// CSSOM-View's `ScrollLogicalPosition`: where on one axis
-/// [`Document::scroll_into_view`] puts the element in a scrolling box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollLogicalPosition {
-    /// The element's start edge at the box's start edge.
     Start,
-    /// The element's center at the box's center.
     Center,
-    /// The element's end edge at the box's end edge.
     End,
-    /// Whichever edge moves the box least, and no move at all when the
-    /// element is already inside the box or covers both of its edges.
     Nearest,
 }
 
-/// The draft's `ScrollIntoViewContainer`: which scrolling boxes
-/// [`Document::scroll_into_view`] scrolls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollIntoViewContainer {
-    /// Every scroll container above the element.
     All,
-    /// Only the nearest scroll container above the element.
     Nearest,
 }
 
-/// CSSOM-View's `ScrollIntoViewOptions` dictionary, with its parent
-/// `ScrollOptions`' `behavior`.
-///
-/// [`Default`] is the dictionary's defaults (`block: "start"`,
-/// `inline: "nearest"`, `container: "all"`) except `behavior`. The
-/// dictionary's `behavior` defaults to `"auto"`, which resolves through the
-/// element's `scroll-behavior` property, and this grammar has no such
-/// property (see [`ScrollBehavior`]): the caller resolves `auto` itself, and
-/// the default here is [`ScrollBehavior::Instant`], what `auto` resolves to
-/// under the property's initial value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollIntoViewOptions {
     pub behavior: ScrollBehavior,
-    /// The block axis: y, see the module documentation.
     pub block: ScrollLogicalPosition,
-    /// The inline axis: x, see the module documentation.
     pub inline: ScrollLogicalPosition,
     pub container: ScrollIntoViewContainer,
 }
@@ -92,21 +69,6 @@ impl Default for ScrollIntoViewOptions {
     }
 }
 
-/// The offset §"determine the scroll-into-view position" chooses on one
-/// axis.
-///
-/// `area` is the element's extent in the box's scrolling coordinates
-/// (unscrolled), `port` the snapport's extent relative to the scrollport,
-/// and `current` the box's offset, so the visible range is `port + current`.
-/// `reversed` says the axis's start edge is its higher coordinate (the
-/// inline axis of an `rtl` box): the extents are mirrored, placed, and the
-/// offset mirrored back.
-///
-/// `nearest` is the draft's four cases, with one reading: an element exactly
-/// the size of the box counts as "shorter" (`<=`), where the draft's strict
-/// "less than" and "greater than" leave such an element, partly outside,
-/// where it is. Aligning either edge gives the same offset for it, which is
-/// where Blink's closest-edge alignment puts it too.
 pub(crate) fn align(
     position: ScrollLogicalPosition,
     current: f32,
@@ -147,8 +109,6 @@ pub(crate) fn align(
     }
 }
 
-/// `values`' snapport on both axes, relative to a scrollport of `width` by
-/// `height`: the scrollport inset by `scroll-padding`.
 fn snapport(values: &ComputedValues, width: f32, height: f32) -> ((f32, f32), (f32, f32)) {
     (
         (
@@ -163,37 +123,11 @@ fn snapport(values: &ComputedValues, width: f32, height: f32) -> ((f32, f32), (f
 }
 
 impl<T> Document<T> {
-    /// Scrolls the scroll containers above `target` to bring it into view,
-    /// as CSSOM-View's §"scroll an element into view" does; see the module
-    /// documentation. Answers whether `target` has a box and a scroll
-    /// container above it, whether or not anything moved — `false` means
-    /// nothing was scrolled because there was nothing to scroll.
-    ///
-    /// The containers are taken innermost first. Each is scrolled to the
-    /// position [`ScrollIntoViewOptions::block`] and
-    /// [`ScrollIntoViewOptions::inline`] choose, as its scroll box admits it
-    /// ([`ScrollBox::admit`](super::ScrollBox::admit): clamped to its range,
-    /// or on a circular axis normalized into its period, so a position past
-    /// `max_offset` or before `0` lands across the seam), with
-    /// [`ScrollIntoViewOptions::behavior`], when that position differs from
-    /// its current offset or it has a pending request
-    /// ([`Self::pending_scroll_request`], the draft's "ongoing smooth
-    /// scroll", which this request then replaces); an unmoved container with
-    /// nothing pending records no request. [`ScrollIntoViewContainer::Nearest`]
-    /// stops after the first container.
-    ///
-    /// An outer container places the element where the inner containers'
-    /// offsets will put it after this call: the target requested for each
-    /// one, or its current offset when none was requested. A smooth request
-    /// has not moved the document's offset yet, and still counts at its
-    /// target.
     pub fn scroll_into_view(&mut self, target: NodeId, options: ScrollIntoViewOptions) -> bool {
         if self.bounding_client_rect(target).is_none() {
             return false;
         }
         let mut found = false;
-        // The summed offsets of the containers already handled: how far
-        // they move the element in every container further out.
         let mut inner_offsets = Vector2D::zero();
         let mut current = self.nearest_scroll_container(target);
         while let Some(container) = current {
@@ -224,11 +158,6 @@ impl<T> Document<T> {
         found
     }
 
-    /// Where `container` scrolls to put `target` at `block` (y) and
-    /// `inline` (x), unclamped, or `None` when either has no box or
-    /// `container` is no scroll container. `inner_offsets` is what the
-    /// scroll containers between them move `target` by, subtracted from its
-    /// unscrolled position.
     pub(crate) fn scroll_into_view_position(
         &self,
         target: NodeId,
@@ -273,7 +202,6 @@ mod tests {
 
     #[test]
     fn align_places_each_position_against_the_snapport() {
-        // An element at 200..250 in a 100px port at offset 0.
         let area = (200.0, 250.0);
         assert_eq!(align(Start, 0.0, area, (0.0, 100.0), false), 200.0);
         assert_eq!(align(End, 0.0, area, (0.0, 100.0), false), 150.0);
@@ -325,7 +253,6 @@ mod tests {
 
     #[test]
     fn a_reversed_axis_starts_at_its_higher_edge() {
-        // Element 200..250, port 100 wide: in `rtl`, start is the right edge.
         let area = (200.0, 250.0);
         assert_eq!(align(Start, 0.0, area, (0.0, 100.0), true), 150.0);
         assert_eq!(align(End, 0.0, area, (0.0, 100.0), true), 200.0);
@@ -338,9 +265,6 @@ mod tests {
         );
     }
 
-    /// A 100px column scroller in a page holding `count` 50px items, so item
-    /// `n` sits at `50 n` and the range is `50 count - 100`; `css` is added
-    /// after the base sheet.
     fn column(count: usize, css: &str) -> (Document<()>, NodeId, Vec<NodeId>) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -464,10 +388,6 @@ mod tests {
         );
     }
 
-    /// An outer 100px column scroller holding a 300px spacer, an inner
-    /// 100px column scroller, and a 300px spacer; the inner holds a 300px
-    /// spacer, the target (50px) and a 300px spacer. The inner sits at 300
-    /// in the outer, the target at 300 in the inner.
     fn nested() -> (Document<()>, NodeId, NodeId, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -520,8 +440,6 @@ mod tests {
             "the target is at 300 + 300 unscrolled, less the inner's 300"
         );
 
-        // Smooth: neither offset moves, and the outer still places the
-        // target at the inner's requested offset.
         let (mut document, outer, inner, target) = nested();
         let smooth = ScrollIntoViewOptions {
             behavior: ScrollBehavior::Smooth,
@@ -584,11 +502,6 @@ mod tests {
         );
     }
 
-    /// On a circular axis the position is admitted into the period rather
-    /// than clamped: in a column of five 50px items (`max` 150, period
-    /// 250), item 4 centred needs 175, past `max`, and stands there with the
-    /// scrollport straddling the seam; item 0 centred needs −25, which is
-    /// 225 on the circle. The request carries the same target.
     #[test]
     fn a_circular_axis_admits_a_position_past_either_end_of_the_range() {
         for (item, expected) in [(4, 175.0), (0, 225.0), (2, 75.0)] {

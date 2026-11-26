@@ -82,9 +82,6 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// The whole ingestion path through the real binary: a bundle whose only
-/// styling lives in its rkyv `StyleInfo` section must render the same pixels
-/// the inline-style bundle does.
 #[test]
 fn author_css_from_the_style_info_section_renders() {
     let gpu = prime_radiant::headless("author_css_from_the_style_info_section_renders");
@@ -144,8 +141,6 @@ fn author_css_from_the_style_info_section_renders() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Raw XML bypasses `StyleInfo`: its UTF-8 `<style>` body must still mount
-/// before the main-thread program creates the classed element.
 #[test]
 fn author_css_from_raw_lynx_xml_renders() {
     let gpu = prime_radiant::headless("author_css_from_raw_lynx_xml_renders");
@@ -204,12 +199,6 @@ fn author_css_from_raw_lynx_xml_renders() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Editing without a window: a finger's tap focuses the fixture's
-/// `contenteditable` host, two keys type `ab` through their text, an
-/// input-method composition of `x` is replaced by the commit of `y`, and the
-/// text input state the view publishes says `aby`. The realm's listeners see
-/// each key's `keydown` and the composition's events in order, with one
-/// `compositionend` after the commit's `input`.
 #[test]
 fn the_editing_commands_type_compose_and_commit_into_a_host() {
     let gpu = prime_radiant::headless("the_editing_commands_type_compose_and_commit_into_a_host");
@@ -229,9 +218,6 @@ fn the_editing_commands_type_compose_and_commit_into_a_host() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start interactive bobcat");
-    // Each `frame` waits until the view has applied everything sent before
-    // it: the tap's focus has opened the `keydown` route before a key is
-    // dispatched, and the edits have been published before they are shown.
     write!(
         child.stdin.take().expect("piped stdin"),
         "frame\ntap 40 30\nframe\nshow text-input\nkey a a\nkey b b\ncompose x 1 1\nframe\n\
@@ -313,7 +299,6 @@ fn styled_lynx_xml() -> String {
     .to_owned()
 }
 
-/// A bundle whose `.styled` class comes only from its `StyleInfo` section.
 fn styled_bundle() -> Vec<u8> {
     use bobcat_source::web::style_info::{
         CssProperty, CssPropertyId, DeclarationBlock, ParsedDeclaration, Rule, RuleKind,

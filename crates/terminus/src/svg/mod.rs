@@ -66,17 +66,12 @@ pub(crate) mod use_element;
 pub(crate) use layers::ink_extent;
 pub(crate) use record::context_matrix;
 
-/// The SVG namespace.
 pub(crate) const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
-/// The local name of SVG's `svg` element, which `Document::create_element`
-/// creates in the SVG namespace and `Document::define` refuses.
 pub(crate) const SVG_TAG: &str = "svg";
 
-/// The local name of SVG's `use` element.
 pub(crate) const USE_TAG: &str = "use";
 
-/// Whether `node` is SVG's `use` element.
 pub(crate) fn is_use<T>(node: &crate::tree::node::Node<T>) -> bool {
     node.in_svg_namespace() && node.tag_name() == Some(USE_TAG)
 }

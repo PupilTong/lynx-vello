@@ -101,8 +101,6 @@ fn paint_one_outset(
     let margin = 3.0 * geometry.sigma + geometry.dx.abs() + geometry.dy.abs();
     let bounds = BoxShape::Rect(rect.inflate(margin, margin));
     ring_path_into(&mut paths.ring, &bounds, border_shape);
-    // Inline shadows keep their balanced clip in the current scene. Recording
-    // compose ops here would clone the ring and split fragments for every box.
     let radius = uniform_radius(&radii);
     if geometry.sigma == 0.0 || radius.is_some() {
         let scene = sink.scene_for(space);
@@ -128,7 +126,6 @@ fn paint_one_outset(
         scene.pop_layer();
         return;
     }
-    // The knockout clips the blurred result, not the silhouette entering the blur.
     sink.push_clip_box(
         space,
         Fill::EvenOdd,
@@ -285,7 +282,6 @@ fn outset_extent(shadows: &[BoxShadow]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// One computed shadow's used scalar geometry, in CSS px.
 struct ShadowGeometry {
     dx: f64,
     dy: f64,
@@ -332,7 +328,6 @@ fn adjust_radii(radii: &CornerRadii, delta: f32) -> CornerRadii {
     }
 }
 
-/// Only the analytic primitive's exact geometry may take the fast path.
 #[expect(
     clippy::float_cmp,
     reason = "only identical radii may use the exact analytic geometry"
@@ -465,7 +460,6 @@ mod tests {
                 doc.dom
                     .set_inline_style_property(*card, "box-shadow", shadow);
             }
-            // Repeated commits must keep shadows inside the existing fragments.
             for tick in ["1", "2", "3"] {
                 doc.dom.set_attribute(cards[0], "data-tick", tick);
                 doc.dom.render();

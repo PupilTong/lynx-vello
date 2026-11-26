@@ -11,26 +11,18 @@ use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
 use crate::view::{NoWakeup, ScriptSource, WorkerId};
 
-/// The handle a packed id names. A handle carries a generation as well as
-/// an arena key, so a test spells one the way script sees it — and for a
-/// document that has freed nothing the generation is zero, which is why
-/// these read as the small integers the PAPI hands out.
 fn node_id(bits: u64) -> terminus::link::NodeId {
     terminus::link::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
-/// The name and detail a dispatch carries, spelled as the painting side
-/// already owns them.
 fn tap() -> Arc<str> {
     Arc::from("tap")
 }
 
-/// Where a test's event happened, when the position is not what it is about.
 fn event_point() -> Point2D<f32> {
     Point2D::new(12.0, 30.0)
 }
 
-/// The ingredients a test stages when the document is not what it is about.
 fn ingredients() -> DocumentIngredients {
     DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default())
 }
@@ -80,8 +72,6 @@ fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
         .document_element()
         .first_child()
         .expect("rendered view");
-    // The first render job precedes the queued flush; its nested job follows it.
-    // This test drives the realm directly, before Page's dirty-commit epilogue.
     assert_eq!(tree.rounded_layout(view.id()).unwrap().size.width, 20.0);
     assert_eq!(
         view.attribute("style").as_deref(),
@@ -140,25 +130,11 @@ fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
     assert!(reports[0].contains("processor failed"));
 }
 
-/// A named Lepus chunk is a script resource of its own, loaded through the
-/// same synchronous host loader a `require` uses and run again on every
-/// `__LoadLepusChunk` call, as native's `TemplateEntry` does.
-///
-/// What a chunk shares with the root is the bindings `MTS_CHUNK_PREAMBLE`
-/// gives a card's root — the realm hands them to the chunk as the parameters
-/// of the function body it was compiled as — and this realm's `globalThis`.
-/// Not the root's lexical scope, and not the root's `var`s: a `var` at a
-/// chunk's top level is local to that call.
-//
-// A plain test rather than a `tokio::test`, for the reason the `require`
-// tests spell out: the load's wait is a `block_on` of the realm's engine
-// thread, which tokio refuses from inside a runtime.
 #[test]
 fn lepus_chunks_load_per_call_and_defer_jobs_to_the_checkpoint() {
     let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
     let mut notices = far.0.notices;
     let host = std::thread::spawn(move || {
-        // Two calls, two requests, two evaluations: nothing caches a chunk.
         for call in 1..=2 {
             let (url, completion) = requested_module(&mut notices);
             assert_eq!(url, "app:///chunks.js/worklet.js", "call {call}");
@@ -173,7 +149,6 @@ fn lepus_chunks_load_per_call_and_defer_jobs_to_the_checkpoint() {
                 "app:///chunks.js/worklet.js",
             )));
         }
-        // A chunk this page does not carry is a load the host refuses.
         let (url, completion) = requested_module(&mut notices);
         assert_eq!(url, "app:///chunks.js/missing.js");
         completion.complete(Err(crate::resource::unanswered_source().into()));
@@ -252,12 +227,6 @@ fn mts_imported_inputs_follow_global_props_updates() {
     }
 }
 
-/// The same runtime over a document that can shape text: Ahem's solid em
-/// squares make a run's box its glyph count times its font size.
-///
-/// The fonts are staged rather than registered, because the document does
-/// not exist until the boot module creates it — and staging is what a view
-/// with fonts does now.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
@@ -280,26 +249,14 @@ fn runtime_over(
     (js_runtime, runtime, elements)
 }
 
-/// A same-thread window onto the realm's document, so a test can observe
-/// what script built without going through the runtime's own methods.
 struct DocumentProbe {
     slot: Rc<RefCell<DocumentSlot>>,
-    // These tests exercise only MTS. Keep the far ends open so the realm's
-    // sends succeed; worker_tests executes both sides against a real worker
-    // runtime.
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
-    /// The engine thread `__AdoptStyleSheet` parks on. These tests call the
-    /// runtime directly rather than queueing jobs, but a realm is opened with
-    /// a live thread and a synchronous adoption needs one, so the probe holds
-    /// it for as long as the realm lives.
     _thread: Rc<JsThread>,
 }
 
 impl DocumentProbe {
-    /// The document the realm's boot module created. Booting is what makes
-    /// one exist, so a test that asks before it has booted is asking about
-    /// something that is not there yet.
     fn tree(&self) -> RefMut<'_, LynxDocument> {
         RefMut::filter_map(self.slot.borrow_mut(), |slot| slot.document.as_mut())
             .ok()
@@ -307,9 +264,6 @@ impl DocumentProbe {
     }
 }
 
-/// The painting side's view of the realm's name set, driven by hand: a test
-/// resyncs it where a routing pass would and then asks what the realm has
-/// published.
 struct PublishedNames(DetachedView);
 
 impl PublishedNames {
@@ -318,8 +272,6 @@ impl PublishedNames {
         self.0.published.has_listener(name)
     }
 
-    /// The whole published set, sorted, for a test about which names the
-    /// realm has opened rather than about one of them.
     fn names(&mut self) -> Vec<String> {
         self.0.published.sync();
         let mut names: Vec<String> = self
@@ -334,8 +286,6 @@ impl PublishedNames {
     }
 }
 
-/// The same runtime, plus the painting end of its link — so a test can
-/// ask what the realm published.
 fn runtime_over_watching_names(
     ingredients: DocumentIngredients,
 ) -> (
@@ -347,8 +297,6 @@ fn runtime_over_watching_names(
     runtime_over_watching_names_probing(ingredients, None)
 }
 
-/// [`runtime_over_watching_names`], over a view whose fetcher answers
-/// `style_sheet_probe` with `probe`.
 fn runtime_over_watching_names_probing(
     ingredients: DocumentIngredients,
     probe: Option<crate::resource::StyleSheetProbe>,
@@ -370,8 +318,6 @@ fn runtime_over_watching_names_probing(
         outbox,
         &WorkerFactory::new(workers, Arc::default()),
         thread.handle(),
-        // No entry here: these tests evaluate their own scripts against the
-        // realm afterwards.
         RealmStartup::default(),
     )
     .expect("main-thread runtime");
@@ -384,8 +330,6 @@ fn runtime_over_watching_names_probing(
     (js_runtime, runtime, probe, PublishedNames(far_end))
 }
 
-/// Two views' realms on one group's `QuickJS` runtime, each over its own
-/// document — what a `LynxGroup` holds once a second view joins it.
 fn two_view_group() -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -395,7 +339,6 @@ fn two_view_group() -> (
     two_view_group_with([RealmStartup::default(), RealmStartup::default()])
 }
 
-/// The same group, each view opened with its own startup.
 fn two_view_group_with(
     pages: [RealmStartup; 2],
 ) -> (
@@ -433,27 +376,15 @@ fn two_view_group_with(
     (js_runtime, first, second, ends)
 }
 
-/// The far ends of a group's channels, held so the realms' sends succeed.
 #[derive(Default)]
 struct GroupFarEnds {
     views: Vec<DetachedView>,
     workers: Option<mpsc::UnboundedReceiver<WorkerCommand>>,
-    /// The flag `bobcat-workers` sets once it has trapped, which the group's
-    /// `WorkerFactory` reads at every construction. No thread reads this
-    /// group's inbox, so a test sets it by hand.
     trapped: Arc<std::sync::atomic::AtomicBool>,
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
-    /// The engine thread both realms were opened with, held for their life.
     thread: Option<Rc<JsThread>>,
 }
 
-/// A realm starts every worker the same way, from the URL its specifier joins
-/// to, and asks its host for nothing as it does: a `Start` carries neither a
-/// script nor a source, and a worker's realm asks for its own script once it
-/// boots. The source the realm records under each key is the id of that key
-/// and the worker's URL, at every URL: `bobcat:bts` is recorded as any other
-/// is. Boot's own BTS and the worker the entry constructs over `bobcat:bts`
-/// have that URL in common and are told apart by their ids.
 #[test]
 fn constructing_a_worker_asks_the_host_for_nothing_and_records_its_id_and_url() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
@@ -470,8 +401,6 @@ fn constructing_a_worker_asks_the_host_for_nothing_and_records_its_id_and_url() 
         )
         .expect("the entry constructs the three workers");
     let workers = ends.workers.as_mut().expect("the group's worker inbox");
-    // The entry's three, in the order it constructed them, then boot's own
-    // BTS, which boot constructs once the entry has run.
     let mut start = || {
         let Ok(WorkerCommand::Start(start)) = workers.try_recv() else {
             panic!("each `new Worker` sent one Start")
@@ -500,8 +429,6 @@ fn constructing_a_worker_asks_the_host_for_nothing_and_records_its_id_and_url() 
         first.workers.source_of(background.key),
         "two workers over one URL have different ids"
     );
-    // Nothing reads this group's `Start`s but the test, so no worker has
-    // booted: whatever the host was asked for, the constructing realm asked.
     while let Ok(notice) = ends.views[0].notices.try_recv() {
         assert!(
             !matches!(notice, ViewNotice::RequestSource { .. }),
@@ -510,12 +437,6 @@ fn constructing_a_worker_asks_the_host_for_nothing_and_records_its_id_and_url() 
     }
 }
 
-/// A worker constructed once `bobcat-workers` has trapped is sent nowhere: no
-/// `Start` reaches the thread's inbox, and the view hears no `WorkerCreated`
-/// for it. The realm queues the worker's `Failed` on its own channel instead,
-/// under the key the script holds, and still names the worker by its source.
-/// Boot constructs its BTS the same way once the entry has run, so two
-/// workers fail here, the entry's first.
 #[test]
 fn a_worker_constructed_after_its_thread_trapped_is_sent_no_start() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
@@ -571,10 +492,6 @@ fn a_worker_constructed_after_its_thread_trapped_is_sent_no_start() {
     }
 }
 
-/// The host's page data reaches the realm it was given to as plain strings,
-/// and `bobcat:runtime` parses them there: the entry sees the global props as
-/// it loads, and `processData` gets the init data. A view given none sees
-/// `{}` for both, never its sibling's.
 #[test]
 fn page_data_is_parsed_by_the_realm_it_was_given_to() {
     let (mut js, mut first, mut second, _workers) = two_view_group_with([
@@ -623,9 +540,6 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
         .expect("a view given no page data boots over empty objects");
 }
 
-/// Nothing native reads page data, so text that is not JSON is first met in
-/// the realm, as `bobcat:runtime` evaluates: that view's boot fails naming the
-/// input, before the entry loads.
 #[test]
 fn malformed_page_data_fails_boot_before_the_entry_runs() {
     let (mut js, first, second, _workers) = two_view_group_with([
@@ -770,14 +684,6 @@ fn entry_initialization_cannot_replace_the_host_render_argument() {
         .unwrap();
 }
 
-/// One view's entry failing must not fail the view beside it.
-///
-/// The two realms share one `QuickJS` runtime, and therefore one promise-job
-/// queue and one unhandled-rejection queue. Boot loads the entry with
-/// `await import(...)`, so an entry that throws rejects *through* that queue,
-/// and what it leaves there outlasts the failure its own caller was handed.
-/// Left runtime-wide, the next realm to enter — this one's boot, its event
-/// dispatch, its timer — would be handed a failure it could not have caused.
 #[test]
 fn a_failed_boot_leaves_the_group_s_other_view_alone() {
     let (mut js_runtime, mut first, mut second, _workers) = two_view_group();
@@ -1088,9 +994,6 @@ fn get_engine_returns_one_event_target_with_standard_listener_identity() {
         .expect("engine EventTarget behavior");
 }
 
-/// A card's MTS body is its entry with `MTS_CHUNK_PREAMBLE` on the body's
-/// own first line, so an error in the body's first line is reported at line
-/// 1 of the entry's URL.
 #[test]
 fn bundle_url_reaches_script_error_location() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -1124,11 +1027,6 @@ fn stale_element_ids_become_script_errors_without_losing_the_tree() {
     );
 }
 
-/// The number script holds *is* the DOM's `NodeId` and the element's
-/// Lynx `unique_id` — one identity, issued by native — and dropping an
-/// element retires it. The element built afterwards reuses the freed
-/// node's storage but reports a different `unique_id`, so a handle that
-/// outlived its element can only ever name nothing.
 #[test]
 fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -1156,8 +1054,6 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
         "the detached element is still allocated while script can reach it"
     );
 
-    // Let go of the handle only now: a collection the engine starts on its
-    // own may otherwise free it before the probe above.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1174,8 +1070,6 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
         "a swept handle drops its element through the finalization registry"
     );
 
-    // A second module rather than a second boot: a realm boots once, because
-    // its boot module is what creates its one document.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1269,13 +1163,6 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     assert_eq!(view.attribute("text").as_deref(), None);
 }
 
-/// The page configuration reaches the document through the realm.
-///
-/// The boot module is written with the five switches as boolean literals and
-/// hands them to `new Document(config)`, whose `createDocument` call passes
-/// them back as five booleans, and the UA cascade is built from *those* — so
-/// what these switches do to a `view`'s computed style is the boot module's
-/// literals working. The document is built from what JavaScript handed back.
 #[test]
 fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
     use terminus::link::stylo::values::computed::{Display, Overflow};
@@ -1302,7 +1189,6 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
             )
             .expect("main-thread script");
         let tree = elements.tree();
-        // The page is minted with the document; the script's own view follows it.
         let page = tree.get(node_id(2)).expect("the card's page");
         let view = tree.get(node_id(3)).expect("the card's one view");
         assert_eq!(
@@ -1331,11 +1217,6 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
     }
 }
 
-/// `enableCSSInheritance` takes the same path as the two switches above: the
-/// boot module's literal, `new Document(config)`, the fifth boolean of
-/// `createDocument`, and the UA rule that boolean adds. With it on, a `text`
-/// inside a `view` takes the view's color; with it off the text block's reset
-/// keeps the initial black, as before the switch existed.
 #[test]
 fn the_css_inheritance_switch_written_into_the_boot_module_reaches_the_ua_cascade() {
     use terminus::link::stylo::color::AbsoluteColor;
@@ -1365,8 +1246,6 @@ fn the_css_inheritance_switch_written_into_the_boot_module_reaches_the_ua_cascad
             )
             .expect("main-thread script");
         let tree = elements.tree();
-        // The page is node 2, so the view and the text created after it are
-        // 3 and 4; the tag is asserted so a different numbering fails here.
         let color = |id, tag| {
             let element = tree.get(node_id(id)).expect("a live element");
             assert_eq!(element.tag_name(), Some(tag));
@@ -1390,13 +1269,6 @@ fn the_css_inheritance_switch_written_into_the_boot_module_reaches_the_ua_cascad
     }
 }
 
-/// A page configuration switch that is not a boolean refuses the
-/// construction, and the boot that asked for it fails.
-///
-/// Rust needs these five fields, so it reads each rather than forwarding
-/// them; a card that reaches `createDocument` and hands it anything else gets
-/// the message rather than a document built on defaults. The argument is read
-/// before the second-document refusal, so this is the message the card sees.
 #[test]
 fn a_non_boolean_page_config_switch_refuses_the_document() {
     let (mut js_runtime, mut runtime, _elements, _names) =
@@ -1572,9 +1444,6 @@ fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
     assert!(style.contains("width: 7px"), "{style}");
 }
 
-/// A value the per-property setter would reject must stay rejected: a
-/// batch that concatenated the record into style-attribute text would let
-/// a `;` start a second declaration instead.
 #[test]
 fn a_style_record_value_cannot_inject_a_second_declaration() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -1693,11 +1562,6 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
     );
 }
 
-/// The painting side routes against the published name set, and the realm is
-/// the only thing that can maintain it: every registration lives there, in
-/// six places per element, and the host is told only when a name's
-/// document-wide registration count crosses zero — its first registration
-/// anywhere added, and its last removed.
 #[test]
 fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -1725,9 +1589,6 @@ fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
             "app:///registration-counts.js",
         )
         .expect("main-thread script");
-    // Nothing of the components': `slotchange` (the swiper's and the refresh
-    // view's) and `tap` (the markdown component's) are routed only while an
-    // element of theirs exists, and this page has none.
     assert_eq!(names.names(), ["longpress", "swipe"]);
 
     runtime
@@ -1765,8 +1626,6 @@ fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
         "removing the last registration unpublishes it"
     );
 
-    // A name a component observes, with no element of it alive, is the
-    // realm's like any other: removing its last registration unpublishes it.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1784,8 +1643,6 @@ fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
     assert_eq!(names.names(), [] as [String; 0]);
 }
 
-/// The replica is what the painting side filters against, so a
-/// registration has to reach it as the realm makes it.
 #[test]
 fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -1809,10 +1666,6 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     assert!(names.contains("longpress"));
     assert!(!names.contains("scroll"));
 
-    // A second module rather than a second entry: the point is a later
-    // unregistration, not a second boot. It goes through the PAPI, because
-    // the host has no member that could take one — the realm decides when a
-    // name's last registration anywhere is gone.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1830,9 +1683,6 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     );
 }
 
-/// The host hands the realm the whole path and nothing else. Which steps
-/// have a listener, and in which pass, is the realm's alone — so what is
-/// observable here is which listeners ran, in which order, with which phase.
 #[test]
 fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -1867,7 +1717,6 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
     let delivered = runtime
         .dispatch_for_test(&mut js_runtime, node_id(target), &tap(), event_point())
         .expect("dispatch");
-    // All the host learns: the realm published the export it called.
     assert!(delivered);
 
     runtime
@@ -1886,9 +1735,6 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
         .expect("verification");
 }
 
-/// A key event crosses as its two strings, `repeat` and a modifier bitmask,
-/// and reaches the page as a `KeyboardEvent`-shaped event: the members on
-/// the event itself, the `detail` empty.
 #[test]
 fn a_key_event_reaches_the_page_with_its_keyboard_members() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -1951,9 +1797,6 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
         .expect("verification");
 }
 
-/// A `click` is dispatched at the nearest common ancestor of its two targets,
-/// and a second one at the same target within 500 ms adds a `dblclick` after
-/// it; a third starts over.
 #[test]
 fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -1981,7 +1824,6 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
         )
         .expect("main-thread script");
 
-    // `page` is 2, `outer` 3, `a` 4, `b` 5.
     let mut click = |down: u64, release: u64, at: f64| {
         let payload = InputEventPayload {
             detail: terminus::link::event::EventDetail::Pointer {
@@ -2031,9 +1873,6 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
         .expect("verification");
 }
 
-/// `scroll` and `scrollend` are queued only for a name something hears: an
-/// adopted offset on a page with neither listener queues nothing, and one
-/// with a `scroll` listener queues the `scroll` alone, once per adopt.
 #[test]
 fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2107,7 +1946,6 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     );
 }
 
-/// A painter post of `node` at offset `y`, at rest or still moving.
 fn scroll_post(
     node: terminus::link::NodeId,
     y: f32,
@@ -2126,7 +1964,6 @@ fn scroll_post(
     )
 }
 
-/// A queued `scroll` at `node` with the change `delta_y`.
 fn queued_scroll(node: terminus::link::NodeId, delta_y: f32) -> ComponentEvent {
     ComponentEvent::Scroll {
         node,
@@ -2135,11 +1972,8 @@ fn queued_scroll(node: terminus::link::NodeId, delta_y: f32) -> ComponentEvent {
     }
 }
 
-/// What [`ScrollProbe`] heard, one entry per delivery.
 type ScrollLog = Rc<RefCell<Vec<String>>>;
 
-/// A test component that observes `scroll`, as the engine's `scroll-view`
-/// and `list` do, and records each delivery as `name:target-is-self`.
 struct ScrollProbe {
     log: ScrollLog,
 }
@@ -2163,9 +1997,6 @@ impl terminus::link::CustomElement<()> for ScrollProbe {
     }
 }
 
-/// A live element of a component observing `scroll` keeps the name owed
-/// with no realm registration at all: the probe's own scroll is queued and
-/// reaches it. Its `scrollend`, which nothing observes or registers, is not.
 #[test]
 fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2223,7 +2054,6 @@ fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
         [queued_scroll(probe, 40.0)],
         "the observed `scroll` is owed; the unheard `scrollend` is not"
     );
-    // Back in the queue, for the delivery.
     runtime.slot.borrow().component_events.queue_scroll(
         probe,
         "scroll",
@@ -2234,13 +2064,6 @@ fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
     assert_eq!(*log.borrow(), ["scroll:true"]);
 }
 
-/// A `scroll-view`'s threshold events end to end: its component observes
-/// `scroll`, so a painter post that moves it queues the kernel `scroll` with
-/// no realm listening for that name; the delivery of that `scroll` reaches
-/// the component, which queues a `scrolltolower` for the listener on the
-/// element; and that event's delivery, an entry later, carries the scroll
-/// metrics a kernel `scroll` carries, without bubbling to the page's own
-/// `bindEvent`. A move inside the zone queues the `scroll` and nothing else.
 #[test]
 fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2283,7 +2106,6 @@ fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
         tree.get(page).expect("the page").child_ids()[0]
     };
 
-    // The range is 800, so the lower zone starts at 750.
     runtime.adopt_scroll_offsets([scroll_post(scroller, 760.0, false)].into_iter());
     assert_eq!(
         runtime.slot.borrow().component_events.take(),
@@ -2320,12 +2142,6 @@ fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
-/// An `x-swiper`'s `change` end to end: a painter post that moves its
-/// shadow `#content` queues the kernel `scroll` there, with no realm
-/// listening for that name; its delivery, which ends at the shadow root,
-/// reaches the swiper's component, which queues `change` at the swiper; and
-/// that event reaches the swiper's listener an entry later as
-/// `{current, isDragged}`, without bubbling to the page.
 #[test]
 fn a_swiper_fires_change_from_its_contents_scroll() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2393,9 +2209,6 @@ fn a_swiper_fires_change_from_its_contents_scroll() {
     );
 }
 
-/// A vertical `x-swiper` of three 200px items with a worklet listener on
-/// the swiper for `scrollstart`, `change` and `scrollend`, connected with
-/// `current` when one is given, and its shadow `#content`.
 fn swiper_with_state_listeners(
     js_runtime: &mut ScriptRuntime,
     runtime: &mut MainThreadRuntime,
@@ -2445,8 +2258,6 @@ fn swiper_with_state_listeners(
     crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
 }
 
-/// Runs the deliveries the component events queued so far ask for, each in
-/// an entry of its own as the page posts them, until none is left.
 fn deliver_component_events(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     while runtime.has_component_events() {
         let failures = runtime.dispatch_component_events(js_runtime);
@@ -2454,8 +2265,6 @@ fn deliver_component_events(js_runtime: &mut ScriptRuntime, runtime: &mut MainTh
     }
 }
 
-/// The painter's post of `container` at rest at `offset`, once it carried
-/// out the pending instant request there: the post names that request.
 fn rest_after_request(
     runtime: &mut MainThreadRuntime,
     elements: &DocumentProbe,
@@ -2482,15 +2291,6 @@ fn rest_after_request(
     );
 }
 
-/// A `current` written after the first commit turns the swiper through
-/// `#content`'s `scroll-initial-target`, and that turn is a scroll like any
-/// other (CSSOM-View fires `scroll` and `scrollend` for every change of a
-/// scroll position; web-core's `current` setter calls `scrollTo`, native's
-/// pager reports the turn): the commit's instant move queues `#content`'s
-/// `scroll` in the same entry's epilogue, which brings the swiper's
-/// `scrollstart` from the item it was on and its `change`, and the
-/// painter's rest post after it carried the request out brings the
-/// swiper's `scrollend`.
 #[test]
 fn a_swiper_current_written_later_fires_scrollstart_change_and_scrollend() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2511,7 +2311,6 @@ fn a_swiper_current_written_later_fires_scrollstart_change_and_scrollend() {
             "writing current",
         )
         .expect("the write");
-    // The epilogue's step after the commit.
     runtime.queue_instant_scroll_events();
     assert_eq!(
         runtime.slot.borrow().component_events.take(),
@@ -2540,11 +2339,6 @@ fn a_swiper_current_written_later_fires_scrollstart_change_and_scrollend() {
     expect_seen(&mut js_runtime, &mut runtime, r#"scrollend:{"current":2}"#);
 }
 
-/// A swiper connected with `current` starts on that item through the same
-/// initial target, at its first commit: the move fires `scrollstart` and,
-/// at the painter's rest post, `scrollend`, as web-core's connect-time
-/// `scrollTo` does, and no `change`, since the swiper starts from the item
-/// `current` names — native too suppresses only the initial `change`.
 #[test]
 fn a_swiper_connected_with_current_fires_scrollstart_and_scrollend_and_no_change() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2567,13 +2361,6 @@ fn a_swiper_connected_with_current_fires_scrollstart_and_scrollend_and_no_change
     expect_seen(&mut js_runtime, &mut runtime, r#"scrollend:{"current":1}"#);
 }
 
-/// A `viewpager`'s `select-index` written after the first commit turns the
-/// pager through its pages' `scroll-initial-target`, and the turn fires the
-/// pager's events as a swipe's would: the commit's instant move queues the
-/// pager's own `scroll` in the same entry's epilogue, which brings its
-/// `offsetchange`, and the painter's rest post after it carried the request
-/// out brings its `change` — what web-core's connect-time `selectTab` and
-/// native's `select-index` setter report too.
 #[test]
 fn a_viewpager_select_index_written_later_fires_offsetchange_and_change() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2650,14 +2437,6 @@ fn a_viewpager_select_index_written_later_fires_offsetchange_and_change() {
     );
 }
 
-/// An `x-refresh-view`'s `startrefresh` end to end: a painter post that
-/// moves its shadow `#container` from `#content` (170) onto the header's
-/// snap position (120) and leaves it at rest queues the kernel `scroll` and
-/// `scrollend` there, with no realm listening for either name; their
-/// delivery, which ends at the shadow root, reaches the view's component,
-/// which queues `startrefresh` at the view; and that event reaches the
-/// view's listener an entry later as `{isManual: true}`, without bubbling to
-/// the page.
 #[test]
 fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2703,7 +2482,6 @@ fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
         let view = tree.get(page).expect("the page").child_ids()[0];
         let container = crate::main::tree::refresh_view::container(&tree, view)
             .expect("the refresh view's `#container`");
-        // The painter's first post acknowledges the initial scroll target.
         if let Some(serial) = tree.pending_scroll_request(container) {
             tree.acknowledge_scroll_request(container, serial);
         }
@@ -2754,9 +2532,6 @@ fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
     );
 }
 
-/// A [`ComponentDetail::Fields`] detail reaches script as one key per pair,
-/// numbers as numbers and booleans as booleans, in the component's order:
-/// the `{current, isDragged}` shape.
 #[test]
 fn a_component_event_with_a_fields_detail_reaches_script_as_numbers_and_booleans() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2808,10 +2583,6 @@ fn a_component_event_with_a_fields_detail_reaches_script_as_numbers_and_booleans
     );
 }
 
-/// What the page's `x-swiper` component observes — its slot's
-/// `slotchange`, `#content`'s `scroll` and `scrollend`, and the touches its
-/// `isDragged` counts — with `names` beside them, sorted as
-/// [`PublishedNames::names`] lists them.
 fn with_swiper(names: &[&str]) -> Vec<String> {
     let mut all: Vec<String> = [
         "scroll",
@@ -2829,14 +2600,6 @@ fn with_swiper(names: &[&str]) -> Vec<String> {
     all
 }
 
-/// The painter's name set follows the realm's registration counts crossing
-/// zero with two adjustments: a `dblclick` registration routes `click` there
-/// too (the `dblclick` is decided from the `click`s the painter sends) and
-/// removing it stops routing `click` only when `click` is not listened for
-/// itself; and a name an element alive observes (the page's `x-swiper`'s
-/// `slotchange`, `scroll`, `scrollend` and touches) stays routed whatever the realm's registrations
-/// for it say, where an unobserved name stops being routed with its last registration.
-/// `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -2901,11 +2664,6 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     );
 }
 
-/// The extras channel end to end: a drag's `scroll` reaches the realm as a
-/// W3C event whose Lynx `detail` is the scroll metrics — the offset and the
-/// scrolling area read at delivery, the delta its post moved the container
-/// by — and its `scrollend` with a zero delta; an `<image>` `load` still
-/// reports `{width, height}`, now as extras.
 #[test]
 fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -2948,8 +2706,6 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
             },
         )
     };
-    // Delivered between the two posts, as the page's posted entry is: the
-    // offset is read at delivery.
     runtime.adopt_scroll_offsets([entry(40.0, false)].into_iter());
     assert!(
         runtime
@@ -2990,9 +2746,6 @@ fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
         .expect("verification");
 }
 
-/// An engine component on the path that observes the event's name.
-/// Records its delivery, marks the target so script can tell it ran first,
-/// and stops propagation — which must end only its own walk.
 struct StoppingComponent {
     log: Rc<RefCell<Vec<String>>>,
 }
@@ -3017,11 +2770,6 @@ impl terminus::link::CustomElement<()> for StoppingComponent {
     }
 }
 
-/// The one walk calls the page realm at the path's top step, so the
-/// realm's whole Lynx walk, bubble listeners included, runs before
-/// the component on the path hears the capture step (web-core's order,
-/// `docs/tracking/deviations.md`); the component's `stop_propagation` then
-/// ends the walk, which has nothing after it here.
 #[test]
 fn the_page_realm_runs_at_the_paths_top_before_the_components_on_the_path() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -3067,7 +2815,6 @@ fn the_page_realm_runs_at_the_paths_top_before_the_components_on_the_path() {
         )
         .expect("the tree");
 
-    // `page` is 2, the probe 3, the view 4.
     runtime
         .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
         .expect("dispatch");
@@ -3153,9 +2900,6 @@ fn add_event_delivers_on_the_real_path_and_a_catch_form_ends_the_walk() {
         .expect("verification");
 }
 
-/// `global-bindEvent` is not on the path, so its delivery is neither
-/// filtered by one nor ended by a `catch` on one. Both handler kinds run,
-/// the string before the worklet, at the registered element.
 #[test]
 fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -3230,9 +2974,6 @@ fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
         .expect("verification");
 }
 
-/// A name no path registration holds is still a name the painting side
-/// has to route, or the event that would reach a global handler is dropped
-/// before a path is ever built.
 #[test]
 fn a_global_only_registration_publishes_its_name_and_is_delivered() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -3290,8 +3031,6 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
         "removing the last global registration unpublishes its name like any other"
     );
 
-    // The painting side is what drops an event nobody wants; a dispatch that
-    // reaches the realm anyway finds nothing registered and runs nothing.
     runtime
         .dispatch_for_test(
             &mut js_runtime,
@@ -3314,9 +3053,6 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
         .expect("verification");
 }
 
-/// `__QuerySelector`/`__QuerySelectorAll` are `Element.querySelector`'s
-/// scope, which never answers the element they were asked on — unlike
-/// `SelectorQuery`, which shares the same host primitive.
 #[test]
 fn the_query_selector_papi_never_answers_the_element_it_was_asked_on() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -3384,12 +3120,6 @@ fn the_query_selector_papi_never_answers_the_element_it_was_asked_on() {
         .expect("verification");
 }
 
-/// A dataset entry is on the node as its `data-<key>` attribute, so the
-/// document's selector engine matches `[data-<key>]` and `[data-<key>="…"]`
-/// for an entry either member wrote, as web-core's DOM does
-/// (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:434-446`,
-/// `web-core/src/main_thread/client/element_apis/dataset_apis.rs:12-55`).
-/// The typed values `__GetDataset` answers are not changed by it.
 #[test]
 fn a_dataset_entry_is_matched_by_a_data_attribute_selector() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -3485,9 +3215,6 @@ fn a_dataset_entry_is_matched_by_a_data_attribute_selector() {
         .expect("verification");
 }
 
-/// A stylesheet's attribute selector over a dataset entry applies, and a
-/// dataset write restyles the element at the next flush: the attribute write
-/// behind it records the invalidation any attribute write does.
 #[test]
 fn a_dataset_write_restyles_an_attribute_selector_rule() {
     use crate::resource::{LoadedSource, StyleSheetSource};
@@ -3543,18 +3270,12 @@ fn a_dataset_write_restyles_an_attribute_selector_rule() {
         "app:///swap.js",
     );
     assert_eq!(sizes(), [(20.0, 10.0), (90.0, 40.0)]);
-    // `wide` is not named by this write and stays; `state` loses its
-    // attribute with its value.
     step("__SetDataset(second, {state: null});", "app:///clear.js");
     assert_eq!(sizes(), [(20.0, 10.0), (20.0, 40.0)]);
     step("__AddDataset(second, 'wide', false);", "app:///narrow.js");
     assert_eq!(sizes(), [(20.0, 10.0), (20.0, 10.0)]);
 }
 
-/// The one UI method the engine dispatches: `boundingClientRect` answers the
-/// border box of the last layout pass, and — as native does, where web-core
-/// reports the id alone — the element's `id` attribute and `dataset` ride
-/// along. `right` and `bottom` are sums the realm derives.
 #[test]
 fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -3632,15 +3353,6 @@ fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() 
         .expect("measuring");
 }
 
-/// `selectTab` on a pager, through both paths a card reaches a UI method by:
-/// `__InvokeUIMethod`, and the selector-query `invoke` the background
-/// thread's `lynx.createSelectorQuery()` sends (`__BobcatQueryNodes`). The
-/// pager's element child number `index` is scrolled into view at its start
-/// edge, which for four 200px pages is `index` times 200; an instant turn
-/// moves the document at once, a smooth one — the default — only records
-/// the request for the painter. Bad params, and an index naming no page,
-/// are code 4 and move nothing; `selectTab` anywhere but a pager, and any
-/// other method on a pager, is code 3; `boundingClientRect` is unchanged.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
@@ -3719,7 +3431,6 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             .request
             .map(|request| (request.target, request.behavior))
     };
-    // One module per step, each under a URL of its own.
     let steps = std::cell::Cell::new(0);
     let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
         steps.set(steps.get() + 1);
@@ -3765,7 +3476,6 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
         ))
     );
 
-    // Smooth is the default, on either path.
     for source in [
         "expectCode(viaPapi(held[1], 'selectTab', {index: 3}), 0);",
         "expectCode(viaQuery('#pager', 'selectTab', {index: 3}), 0);",
@@ -3786,7 +3496,6 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
         );
     }
 
-    // No numeric index: refused, and nothing recorded or moved.
     let pending = elements.tree().pending_scroll_request(pager);
     run(
         &mut runtime,
@@ -3802,8 +3511,6 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(pager), pending);
 
-    // An index naming no page, past the end or below zero, is refused on
-    // either path, and nothing is recorded or moved.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -3844,11 +3551,6 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
 }
 
-/// An `x-swiper` given `autoplay` through `__SetAttribute` keeps a timer the
-/// page waits for with its realm's own: nothing is armed before the
-/// attribute, the deadline is one `interval` away after it, and the turn
-/// that comes due asks the painter for the next item as a request that
-/// yields to a pointer, then waits for the one after. No script runs for it.
 #[test]
 fn an_autoplaying_swiper_arms_the_pages_deadline_and_turns_when_due() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -3933,17 +3635,6 @@ fn an_autoplaying_swiper_arms_the_pages_deadline_and_turns_when_due() {
     );
 }
 
-/// `scrollTo({index, smooth})` on a swiper, through both paths a card reaches
-/// a UI method by: `__InvokeUIMethod`, and the selector-query `invoke` the
-/// background thread's `lynx.createSelectorQuery()` sends
-/// (`__BobcatQueryNodes`). The swiper's element child number `index` is
-/// scrolled into view in its shadow `#content` at the item's snap alignment,
-/// which for four 200px `normal` items is `index` times 200; an instant turn
-/// moves the document at once, a smooth one — the default — only records the
-/// request for the painter. Bad params, and an index naming no item, are
-/// code 4 and move nothing; `scrollTo` on a plain view is the base set's
-/// CSSOM-View method, which finds no scroll container there: code 0, and
-/// nothing moves.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
@@ -4023,7 +3714,6 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
             .request
             .map(|request| (request.target, request.behavior))
     };
-    // One module per step, each under a URL of its own.
     let steps = std::cell::Cell::new(0);
     let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
         steps.set(steps.get() + 1);
@@ -4069,7 +3759,6 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
         ))
     );
 
-    // Smooth is the default, on either path.
     for source in [
         "expectCode(viaPapi(held[1], 'scrollTo', {index: 3}), 0);",
         "expectCode(viaQuery('#swiper', 'scrollTo', {index: 3}), 0);",
@@ -4090,7 +3779,6 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
         );
     }
 
-    // No numeric index: refused, and nothing recorded or moved.
     let pending = elements.tree().pending_scroll_request(scroller);
     run(
         &mut runtime,
@@ -4106,8 +3794,6 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
     assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(scroller), pending);
 
-    // An index naming no item, past the end or below zero, is refused on
-    // either path, and nothing is recorded or moved.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -4147,16 +3833,6 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
     assert_eq!(offset(), terminus::link::Vector2D::new(400.0, 0.0));
 }
 
-/// `autoStartRefresh`, `finishRefresh` and `finishLoadMore` on an
-/// `x-refresh-view`, through `__InvokeUIMethod` and the selector-query
-/// `invoke`. The view is 400px tall with a 50px header, a content `view` of
-/// its full height and a 50px footer, so the 120px top placeholder puts the
-/// header's start at 120 and `#content` at rest at 170. Each method answers
-/// code 0 and records a request for the shadow `#container`:
-/// `autoStartRefresh` an instant one to the header's start, which moves the
-/// document to 120 at once, and the other two a smooth one back to
-/// `#content`, which the painter carries out while the document stays where
-/// it is. `selectTab` is no method of the view: code 3.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
@@ -4262,9 +3938,6 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
             .expect("step");
     };
 
-    // After the first `autoStartRefresh` the document rests at 120: a
-    // smooth request leaves it there for the painter, and an instant one to
-    // where it already is still replaces the pending request.
     for (source, carried) in [
         ("expectCode(viaPapi('autoStartRefresh', {}), 0);", instant),
         (
@@ -4306,13 +3979,6 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
     assert_eq!(offset(), terminus::link::Vector2D::new(0.0, 120.0));
 }
 
-/// `setFoldExpanded` on an `x-foldview-ng`, through `__InvokeUIMethod` and
-/// the selector-query `invoke`. The coordinator is 300px tall with a 20px
-/// toolbar, a 100px header and a slot, a fold range of 80. Each instant
-/// call moves the document at once and answers code 0; an offset past the
-/// range clamps to it; a missing `offset` is code 4. `getScrollInfo` is
-/// iOS-only and not built: code 3. `scrollTo` and `scrollBy` are the base
-/// set's CSSOM-View methods, which read `top` and not `offset`.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
@@ -4419,7 +4085,6 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
         ),
         ("expectCode(viaPapi('getScrollInfo', {}), 3);", 10.0),
         ("expectCode(viaQuery('getScrollInfo', {}), 3);", 10.0),
-        // The base set's `scrollBy` reads `left`/`top`: `offset` moves nothing.
         ("expectCode(viaPapi('scrollBy', {offset: 30}), 0);", 10.0),
         ("expectCode(viaQuery('scrollTo', {top: 70}), 0);", 70.0),
         ("expectCode(viaPapi('scrollTo', {top: 10}), 0);", 10.0),
@@ -4429,13 +4094,6 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
     }
 }
 
-/// An `<x-markdown>`'s UI methods through `__InvokeUIMethod`, each answer
-/// built by `element-papi.ts` from the record the component writes:
-/// `getContent`'s `{content}` with web-core's inclusive `end`, `getImages`'
-/// and `getParseResult`'s typings shapes, `getTextBoundingRect`'s
-/// `{boundingRect, boxes}` and `getCharIndexByPoint`'s `{index}` over the
-/// rendered text, and code 4 for `getParseResult` without tags. A 10px Ahem
-/// paragraph at the page's origin.
 #[test]
 fn a_markdown_answers_its_ui_methods_through_invoke() {
     let (mut js_runtime, mut runtime, _elements) = text_runtime();
@@ -4495,13 +4153,6 @@ fn a_markdown_answers_its_ui_methods_through_invoke() {
         .expect("the markdown's methods answer as expected");
 }
 
-/// `getTextBoundingRect` on a `text`, through `__InvokeUIMethod` and the
-/// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
-/// padding answers its range's box in viewport CSS px, from the content
-/// box's origin, with `boundingRect` the union `element-papi.ts` builds. A
-/// reversed range is code 4, a range past the text's end code 8, and the
-/// method on a `view` code 3. The text is `text-selection`, and
-/// `setTextSelection` and `getSelectedText` answer through both paths too.
 #[test]
 fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
     let (mut js_runtime, mut runtime, _elements) = text_runtime();
@@ -4595,11 +4246,6 @@ fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
         .expect("text methods");
 }
 
-/// A `scroll-view`'s `getScrollInfo`, `scrollBy` and `scrollTo` through
-/// `__InvokeUIMethod`: the data methods' records come back as the objects
-/// `element-papi.ts` builds from them, in CSS px, and every method moves the
-/// document the realm reads back. The scroller is 100px tall over five 40px
-/// children, a range of 100.
 #[test]
 fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -4675,11 +4321,6 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
     );
 }
 
-/// A `list`'s `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
-/// `getVisibleCells` through `__InvokeUIMethod`: the data methods' records
-/// come back as the objects `element-papi.ts` builds from them, in CSS px,
-/// and the list's missing `scrollTo` is the base set's CSSOM-View one. The
-/// list is 100px tall over five 40px cells, a range of 100.
 #[test]
 fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -4764,15 +4405,6 @@ fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
     );
 }
 
-/// `scrollRelevanceSpan(list, cell)` answers how far the list's
-/// `content-visibility: auto` relevance region reaches past the cell, as
-/// `[ahead_x, behind_x, ahead_y, behind_y]`. The list is 100px tall over ten
-/// 40px cells (a range of 300) at offset 0, so its window on y is `0..=100`
-/// and the region's far edge is 200: cell 3 (120..160) reads 80 ahead and
-/// 160 behind; on x, where nothing scrolls, the cell's own 100px both ways.
-/// A reach of 120 the painter posted stretches the far edge to 320, so 200
-/// ahead, and runs no pipeline step to do it. A node that is no scroll
-/// container answers the empty string.
 #[test]
 fn scroll_relevance_span_reads_the_region_past_a_cell_and_grows_by_the_reach() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -4840,11 +4472,6 @@ fn scroll_relevance_span_reads_the_region_past_a_cell_and_grows_by_the_reach() {
     );
 }
 
-/// `scrollIntoView` through `__InvokeUIMethod` is the base method every
-/// element has: a child view of a `scroll-view` scrolls the scroller (code
-/// 0, no data), and the page, with no scroll container above it, answers
-/// code 8. The scroller is 100px tall over five 40px children, a range of
-/// 100.
 #[test]
 fn every_element_answers_scroll_into_view_and_one_with_no_scroller_above_fails() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -4906,16 +4533,6 @@ fn every_element_answers_scroll_into_view_and_one_with_no_scroller_above_fails()
     );
 }
 
-/// The base set's `scrollTo` and `scrollBy`, CSSOM-View's `ScrollToOptions`
-/// methods, through both paths a card reaches a UI method by:
-/// `__InvokeUIMethod` and the selector-query `invoke` (`__BobcatQueryNodes`).
-/// A 100px square `view` with `overflow: scroll` over a 300px child, a range
-/// of 200, scrolls to `top` and by `top`; a `scroll-view` of the same size
-/// answers its own `scrollTo`, which reads `index` and `offset` and no `top`
-/// (as web-core's `ScrollView.scrollTo` override shadows the standard one),
-/// so `{top: 50}` there scrolls to offset 0. An unknown `behavior` and
-/// params that are no dictionary are code 4. `boundingClientRect` answers
-/// the same object on either path.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
@@ -5021,9 +4638,6 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
         offset(scroll_box),
         terminus::link::Vector2D::new(0.0, 200.0)
     );
-    // A `behavior` outside the enum, and params that are no dictionary, are
-    // code 4 and move nothing, as web-core answers the `TypeError` Web IDL
-    // throws; an array is a dictionary with no members.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5038,9 +4652,6 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
         terminus::link::Vector2D::new(0.0, 200.0)
     );
 
-    // The scroll-view's own `scrollTo` answers: `{index: 1}` lands on the
-    // second child, and `{top: 50}` is its offset-less call, which scrolls
-    // to 0.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5054,8 +4665,6 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
     );
     assert_eq!(offset(scroller), terminus::link::Vector2D::zero());
 
-    // `boundingClientRect` is the base set's on every element, its answer
-    // the object `element-papi.ts` builds on either path.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5073,9 +4682,6 @@ fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
     );
 }
 
-/// Each component-method outcome maps to one status code, and `Data` to a
-/// record whose first field is the code `0`, the component's fields after it
-/// unchanged.
 #[test]
 fn a_method_outcome_answers_its_status_code_or_a_record() {
     let number = |outcome| match method_answer(outcome) {
@@ -5103,13 +4709,6 @@ fn a_method_outcome_answers_its_status_code_or_a_record() {
     }
 }
 
-/// A `<dialog>`'s four methods through `__InvokeUIMethod` and the
-/// selector-query `invoke` (`__BobcatQueryNodes`): `showModal` opens it in
-/// the top layer, where `:modal` matches and `open` is an attribute script
-/// reads back; `show` on a modal dialog is HTML's `InvalidStateError`, code
-/// 7 (native's `INVALID_STATE_ERROR`); `close` delivers a `close` and `requestClose` a `cancel` and
-/// then a `close`, each non-bubbling — the capture pass runs the path, the bind
-/// pass the dialog alone — with a `{}` detail, from an entry of their own.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
@@ -5229,7 +4828,6 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
     );
     assert!(!runtime.has_component_events());
 
-    // `close(returnValue)`: the value is dropped.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5255,7 +4853,6 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
         "page-capture:2:close:{}|dialog:4:close:{}",
     );
 
-    // Closing a closed dialog succeeds and owes nothing.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5287,7 +4884,6 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
         "page-capture:2:cancel:{}|dialog:4:cancel:{}|page-capture:2:close:{}|dialog:4:close:{}",
     );
 
-    // The methods belong to `dialog` alone, and `dialog` has no others.
     run(
         &mut runtime,
         &mut js_runtime,
@@ -5298,14 +4894,6 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
     );
 }
 
-/// An `<x-overlay-ng>` shown and hidden through `__SetAttribute(…,
-/// 'visible', …)`: the boolean `true` opens its shadow dialog in the top
-/// layer, blocking the document, and owes `showoverlay`; `false`
-/// (stringified to `"false"`) closes it and owes `dismissoverlay`. Each is
-/// delivered at the host from an entry of its own, non-bubbling — the capture
-/// pass runs the path, the bind pass the overlay alone, so the outer view's
-/// `bindEvent` never runs — with a `{}` detail. A rewrite that keeps it shown
-/// owes nothing.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario: show, rewrite, hide")]
 fn an_overlay_shows_and_dismisses_through_set_attribute() {
@@ -5415,14 +5003,6 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
     );
 }
 
-/// A component event with a string detail, queued from inside a scope as a
-/// component's own callback queues one, is delivered from an entry of its
-/// own at the element, not bubbling and composed, with the detail built in the realm from
-/// one string argument per key: `{id}`, `{url, content, contentId}` and
-/// `{url, contentId}`, the shapes `<x-markdown>`'s `parseEnd`, `link` and
-/// `imageTap` carry. A string the component had no value for is a key the
-/// detail leaves out, so it does not reach the `JSON.stringify` below even
-/// as `undefined`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -5521,9 +5101,6 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
             .is_empty()
     );
     assert!(!runtime.has_component_events());
-    // Not bubbling (native's custom events): the bind pass runs at the
-    // element alone, so the outer view's handlers never run, and there is no
-    // `global-bindEvent` pass.
     expect_seen(
         &mut js_runtime,
         &mut runtime,
@@ -5538,10 +5115,6 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
         .join("|"),
     );
 
-    // A `link` as `<x-markdown>` queues it, and a `Plain` event of the same
-    // name: neither reaches the outer view's `bindEvent` or the
-    // `global-bindEvent` pass, the detailed one is heard first and carries its
-    // strings.
     {
         let slot = runtime.slot.borrow();
         slot.component_events.queue_detailed(
@@ -5571,15 +5144,8 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
     );
 }
 
-/// What [`TapProbe`] heard, one entry per delivery.
 type TapLog = Rc<RefCell<Vec<String>>>;
 
-/// A test component that builds `<view><text/></view>` in its shadow tree,
-/// as a UA component builds its content, and records every `tap` it hears
-/// as `phase:target-tag:x,y`. For a bubble-pass delivery whose target is its
-/// own shadow content — the one the markdown component acts on — it also
-/// writes the tapped tag to its own `heard` attribute, which script's `tap`
-/// listener reads to see that the component heard the tap first.
 struct TapProbe {
     log: TapLog,
 }
@@ -5627,14 +5193,6 @@ impl terminus::link::CustomElement<()> for TapProbe {
     }
 }
 
-/// A `tap` the gesture path delivers at a component's UA shadow content is
-/// heard first by that component, through `terminus`'s walk, with the shadow node
-/// it hit as the target and the gesture's position; script's `tap` follows,
-/// starting at the host, retargeted, and sees what the component did; the
-/// same dispatch's Rust walk hands the component that composed `tap` too, at
-/// the host as itself. A tap at the host's light child fires no
-/// non-composed `tap`: the component hears only the composed one, as an
-/// ancestor of a target outside its shadow tree.
 #[test]
 fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -5723,7 +5281,6 @@ fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
         "a light child's tap fires no non-composed tap; the composed one reaches \
          the host as an ancestor, its target outside the host's shadow tree"
     );
-    // `heard` is still the earlier tap's.
     expect_seen(
         &mut js_runtime,
         &mut runtime,
@@ -5731,12 +5288,6 @@ fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
     );
 }
 
-/// An `<x-markdown>` a script creates renders its `content` in its UA shadow
-/// tree, and a `tap` the gesture path delivers at the paragraph holding a
-/// link — the node the hit lands on, a paragraph's runs having no box of
-/// their own — reaches the script as `link`, with web-core's
-/// `{url, content, contentId}` detail, from an entry of its own. The
-/// component hears the tap with no `tap` listener in the realm.
 #[test]
 fn a_tap_on_markdown_link_text_reaches_script_as_link() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -5779,7 +5330,6 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
             "flush",
         )
         .expect("the flush");
-    // The render's `parseEnd`, which nothing here listens for.
     assert!(
         runtime
             .dispatch_component_events(&mut js_runtime)
@@ -5801,7 +5351,6 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
         (markdown, paragraph)
     };
 
-    // "see " is four 10px Ahem glyphs: the link's text starts at x = 40.
     runtime
         .dispatch_for_test(&mut js_runtime, paragraph, &tap(), Point2D::new(45.0, 5.0))
         .expect("the tap on the link text");
@@ -5824,20 +5373,12 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
         ),
     );
 
-    // Plain text owes nothing.
     runtime
         .dispatch_for_test(&mut js_runtime, paragraph, &tap(), Point2D::new(5.0, 5.0))
         .expect("the tap on plain text");
     assert!(!runtime.has_component_events());
 }
 
-/// A name a component observes is in the painter's name set with no realm
-/// listener anywhere once an element of it exists — `tap`, for a probe
-/// component defined after the build, whose element's creation publishes
-/// it at the next commit — so the painter sends the gesture's `tap` and the
-/// component hears it. Before that element, the document's own markdown
-/// definition publishes nothing. A script that listens for the name and
-/// then stops does not unpublish what the element still observes.
 #[test]
 fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -5929,12 +5470,6 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     );
 }
 
-/// `tap` is in the painter's name set while an `x-markdown` element exists,
-/// not because the document defines the component: creating one opens it at
-/// the next commit, a script `tap` listener added and removed meanwhile does
-/// not close it, freeing one of two markdowns (by collection, the only
-/// release path) closes nothing, and freeing the last closes it unless
-/// script still listens — in which case the script's last removal does.
 #[test]
 fn a_markdown_element_routes_tap_while_it_exists() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -5971,7 +5506,6 @@ fn a_markdown_element_routes_tap_while_it_exists() {
         runtime
             .collect_garbage(&mut js_runtime)
             .expect("collection");
-        // What the entry's epilogue does before its commit crosses.
         runtime.commit_if_dirty();
     };
 
@@ -6039,14 +5573,6 @@ fn a_markdown_element_routes_tap_while_it_exists() {
     );
 }
 
-/// An event at a UA component's shadow content — an `<x-swiper>`'s
-/// shadow `#content`, which a touch between its items hits — reaches script
-/// as a browser reports it to listeners outside the shadow tree: retargeted
-/// to the host. A tap there captures down from the page and bubbles from
-/// the swiper, its `target` at every step. A non-composed event at the same
-/// node never leaves
-/// the shadow tree, where script names nothing, so it reaches no listener
-/// and is no error.
 #[test]
 fn an_event_at_shadow_content_reaches_script_retargeted_to_its_host() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -6128,10 +5654,6 @@ fn an_event_at_shadow_content_reaches_script_retargeted_to_its_host() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
-/// A tap on a shown, blocking `<x-overlay-ng>` outside its content hits the
-/// overlay's shadow dialog, the box that fills the viewport, and reaches
-/// script as a browser reports it: at the overlay, retargeted, through its
-/// ancestors.
 #[test]
 fn a_tap_on_an_overlay_outside_its_content_reaches_script_at_the_overlay() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -6199,9 +5721,6 @@ fn a_tap_on_an_overlay_outside_its_content_reaches_script_at_the_overlay() {
     );
 }
 
-/// Measuring runs no pipeline step. A job that mutates and then measures
-/// sees the box the last pass produced; the new one arrives only once the
-/// realm flushes itself, or once the entry's epilogue commits for it.
 #[test]
 fn a_measurement_reports_the_last_pass_until_something_else_flushes() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6248,8 +5767,6 @@ fn a_measurement_reports_the_last_pass_until_something_else_flushes() {
         )
         .expect("mutating");
 
-    // The epilogue every entry into the realm owes, which is why the
-    // background thread's query path is always measuring a current tree.
     runtime.commit_if_dirty();
 
     runtime
@@ -6265,9 +5782,6 @@ fn a_measurement_reports_the_last_pass_until_something_else_flushes() {
         .expect("next entry");
 }
 
-/// Both readback members go through the same element validation as every
-/// other tree primitive: a handle whose element has been freed is a script
-/// error, not a zero rect or an empty style.
 #[test]
 fn measuring_or_reading_the_style_of_a_freed_element_fails_the_entry() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6309,9 +5823,6 @@ fn measuring_or_reading_the_style_of_a_freed_element_fails_the_entry() {
     }
 }
 
-/// `__GetComputedStyleByKey` is CSSOM's `getPropertyValue`, so it takes CSS
-/// property names and nothing else — no IDL spelling, no shorthand — and it
-/// reports the resolved value without running a pass to produce one.
 #[test]
 fn computed_style_by_key_answers_css_names_off_the_last_flush() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6363,9 +5874,6 @@ fn computed_style_by_key_answers_css_names_off_the_last_flush() {
         .expect("reading styles");
 }
 
-/// The Typed OM half: a whole-style snapshot of computed values, in which a
-/// non-custom name that is not a property is a `TypeError` and an absent
-/// custom property is simply missing.
 #[test]
 fn the_computed_style_map_snapshots_every_property_of_a_flushed_element() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6484,11 +5992,6 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
         .expect("verification");
 }
 
-/// One call is one dispatch, which is what makes one event object serve the
-/// whole walk — a property one listener writes reaches the next — and what
-/// makes the end of the walk a fact the realm owns: the standard's last
-/// dispatch step resets `eventPhase` and `currentTarget` on an event a
-/// listener kept.
 #[test]
 fn one_call_is_one_dispatch_with_one_event_object_that_is_reset_at_its_end() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6626,18 +6129,12 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
         )
         .expect("main-thread script");
 
-    // Collect the unrelated handle between building the path and running
-    // the walk. The real finalizer performs the one `dropElement` call;
-    // invoking it manually here would leave that finalizer armed and make
-    // its later cleanup a duplicate stale-id call.
     runtime.collect_garbage(&mut js_runtime).expect("sweep");
 
     runtime
         .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
         .expect("dispatch");
 
-    // A collected handle is routine — a ReactLynx re-render drops them
-    // constantly — so it must not silently cost the rest of the walk.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -6686,10 +6183,6 @@ fn stopping_propagation_ends_the_walk() {
         .expect("verification");
 }
 
-/// The painting side already refuses to route a name no listener anywhere
-/// has registered, and a dispatch that arrives for one anyway is answered by
-/// the host's listener table: nothing hears the name, so no path is built and
-/// no realm is called.
 #[test]
 fn a_dispatch_with_nothing_registered_calls_no_realm() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -6714,8 +6207,6 @@ fn a_dispatch_with_nothing_registered_calls_no_realm() {
     );
 }
 
-/// The source and the placeholder of the image tests below, and the pixel
-/// count a load reports for the first of them.
 const IMAGE_SOURCE: &str = "app:///a.png";
 const IMAGE_PLACEHOLDER: &str = "app:///holding.png";
 const IMAGE_PIXELS: (u32, u32) = (40, 20);
@@ -6735,11 +6226,6 @@ fn image_failed(source: &str) -> terminus::link::ImageEvent {
     }
 }
 
-/// One image under the page, with a handler of every form that could see its
-/// events: a worklet `bindload`/`binderror` on the image itself, the same
-/// form on its parent, a `capture-bind` on the page, and a
-/// `global-bindEvent` off the path. What runs is what the non-bubbling shape
-/// allows, and `seen` is the record.
 fn image_page(script_url: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
@@ -6781,8 +6267,6 @@ fn image_page(script_url: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentPr
     (js_runtime, runtime, elements)
 }
 
-/// The `<dialog>` in an `<overlay>`'s shadow tree: the element `visible`
-/// puts in the top layer.
 fn overlay_dialog(tree: &LynxDocument, overlay: terminus::link::NodeId) -> terminus::link::NodeId {
     let root = tree
         .shadow_root(overlay)
@@ -6790,10 +6274,6 @@ fn overlay_dialog(tree: &LynxDocument, overlay: terminus::link::NodeId) -> termi
     tree.get(root).expect("the shadow root").child_ids()[0]
 }
 
-/// Asserts what the realm has recorded since the last check, and clears it.
-///
-/// The check runs in the realm, as every other event test's does: a
-/// verification module throws, and the failure carries what was delivered.
 fn expect_seen(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, expected: &str) {
     runtime
         .evaluate_module(
@@ -6813,15 +6293,10 @@ fn expect_seen(js_runtime: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, 
         .expect("the deliveries are what the dispatch owed");
 }
 
-/// An `<image>`'s `load` is web-core's: the intrinsic pixel size as the
-/// detail, and non-bubbling, so the capture pass still runs the whole path,
-/// the bind pass runs on the image alone, and there is no `global-bindEvent`
-/// pass at all.
 #[test]
 fn an_image_load_carries_its_intrinsic_size_and_does_not_bubble() {
     let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-load.js");
     js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
-    // A source that has not loaded owes nothing.
     expect_seen(&mut js_runtime, &mut runtime, "");
 
     runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
@@ -6838,9 +6313,6 @@ fn an_image_load_carries_its_intrinsic_size_and_does_not_bubble() {
     );
 }
 
-/// `error` carries `{}`. Native's payload is richer — `errMsg`,
-/// `error_code`, `lynx_categorized_code` — and web-core is what this follows;
-/// see `docs/tracking/deviations.md`.
 #[test]
 fn an_image_error_carries_an_empty_detail() {
     let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-error.js");
@@ -6860,9 +6332,6 @@ fn an_image_error_carries_an_empty_detail() {
     );
 }
 
-/// The placeholder is a second source the page did not ask about, so neither
-/// of its endings is an event — while the `src` behind it still reports its
-/// own, whichever way it ends.
 #[test]
 fn a_placeholder_settling_is_nobody_s_event() {
     let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-placeholder.js");
@@ -6889,12 +6358,9 @@ fn a_placeholder_settling_is_nobody_s_event() {
                 .dispatch_component_events(&mut js_runtime)
                 .is_empty()
         );
-        // A placeholder is an interim picture, not an answer to the page.
         expect_seen(&mut js_runtime, &mut runtime, "");
     }
 
-    // The source behind it is still the element's own, and its failure is
-    // still the element's `error` — once.
     runtime.apply_image_events(&[image_failed(IMAGE_SOURCE), image_failed(IMAGE_SOURCE)]);
     assert!(
         runtime
@@ -6908,11 +6374,6 @@ fn a_placeholder_settling_is_nobody_s_event() {
     );
 }
 
-/// Binding is what asks the host for a URL, so a URL this document has
-/// already settled answers at the bind — and no report will ever arrive for
-/// it again. It is still delivered as its own turn's work rather than from
-/// inside the `__SetAttribute` that wrote it, which is web-core's shape too:
-/// an `<img>` load event is a task, cached URL or not.
 #[test]
 fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it() {
     let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-remount.js");
@@ -6925,8 +6386,6 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
     );
     expect_seen(&mut js_runtime, &mut runtime, "");
 
-    // The bind settled it, and dispatching from inside `__SetAttribute` would
-    // re-enter the realm in the middle of that call.
     js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
     expect_seen(&mut js_runtime, &mut runtime, "");
 
@@ -6941,8 +6400,6 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
         r#"page-capture:2:load:{"width":40,"height":20}|image:4:load:{"width":40,"height":20}"#,
     );
 
-    // Exactly once: the queue was drained, and rewriting the value already
-    // there binds nothing.
     assert!(
         runtime
             .dispatch_component_events(&mut js_runtime)
@@ -6957,9 +6414,6 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
-/// An element freed between the outcome forming and its delivery resolves to
-/// nothing. A `NodeId` names one node for the life of the document, so the
-/// lookup can never reach a stranger.
 #[test]
 fn an_element_collected_before_its_load_is_delivered_gets_nothing() {
     let (mut js_runtime, mut runtime, elements) = image_page("app:///image-collected.js");
@@ -6994,8 +6448,6 @@ fn an_element_collected_before_its_load_is_delivered_gets_nothing() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
-/// Writes a `src` the way a card does, through the PAPI.
-/// The playback requests the entry's epilogue handed the host.
 fn playback_notices(
     notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
 ) -> Vec<terminus::link::PlaybackRequest> {
@@ -7008,13 +6460,6 @@ fn playback_notices(
         .collect()
 }
 
-/// An `<image>` whose `src` loads animated, through the realm: the entry
-/// that applied the load asks the host to play a picture of the element's
-/// own under its `loop-count`; `startplay` is delivered before `load`, each
-/// loop the host reports is a `currentloopcomplete` and the last a
-/// `finalloopcomplete`, all non-bubbling with an empty detail; and the four
-/// UI methods answer code 0 with native's message, in the call, and reach
-/// the host as controls when the entry ends.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -7156,13 +6601,6 @@ fn an_animated_image_plays_its_own_picture_through_the_realm() {
     );
 }
 
-/// A `<video>` through the realm: the entry that wrote its `src` asks the
-/// host to open a picture of the element's own under its `loop` and
-/// `muted`; the player's reports are `firstframe` with `{duration}`, `ended`
-/// with `{}` and `error` with `{errorCode, errorMsg}`, none of them bubbling;
-/// `play` and `pause` answer code 0 with `{success: true}` in the call and
-/// reach the host as commands when the entry ends; and `play` on a video
-/// with no `src` answers 8 and fires an `error`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -7343,8 +6781,6 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
         "generated text is absent from the DOM"
     );
 
-    // The run is content of the paragraph its `text` element owns, so the
-    // measured size lives on the element (node 3), not on the text node.
     let measured = tree
         .text_block_size(node_id(3))
         .expect("the text element established a paragraph");
@@ -7481,13 +6917,6 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
     }
 }
 
-/// Native Lynx accepts `text-overflow` as an element attribute on `<text>`
-/// as well as a CSS property (`text_element.cc:176-182`), and the Lynx UA
-/// sheet's attribute selectors are how this engine honours that
-/// (`crates/bobcat-core/src/main/tree/text.rs`). This drives the whole path a
-/// compiled card drives — `__SetAttribute` on a text already flushed — in
-/// both directions: `ellipsis` widens the clamped paragraph by the three-dot
-/// marker, and `clip` takes it away again.
 #[test]
 fn the_text_overflow_attribute_from_papi_reaches_the_paragraph_marker() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -7601,8 +7030,6 @@ fn a_collected_raw_text_releases_its_attribute_content() {
     );
     assert_eq!(elements.tree().get(node_id(4)).unwrap().child_ids(), []);
 
-    // Let go of the handle only now: a collection the engine starts on its
-    // own may otherwise free it before the probe above.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -7623,13 +7050,6 @@ fn a_collected_raw_text_releases_its_attribute_content() {
     );
 }
 
-/// A handle is what keeps an element alive, and while the element is
-/// attached its handle is kept by its parent's — up to the permanent page
-/// handle. So a `ReactLynx` list handing a recycled cell's elements
-/// between snapshot instances, and deleting the old `__elements` array,
-/// takes nothing away: the elements are on screen and their handles are
-/// reachable from the page. What ends a subtree is detaching it and then
-/// letting go.
 #[test]
 fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -7704,11 +7124,6 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
     );
 }
 
-/// The whole ownership graph, through every mutation that changes a
-/// parent. Script keeps no reference of its own to anything, so the only
-/// thing that can survive a collection is what the page's permanent
-/// handle holds through the chain of child sets — which must be exactly
-/// the connected elements, and nothing more.
 #[test]
 fn every_connected_element_survives_a_collection_script_holds_nothing_through() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -7747,7 +7162,6 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
         .collect_garbage(&mut js_runtime)
         .expect("collection");
     let tree = elements.tree();
-    // page 2, a 3, b 4, c 5, d 6, e 7, f 8, g 9.
     for (id, parent) in [(3, 2), (6, 2), (7, 3), (8, 3)] {
         assert_eq!(
             tree.get(node_id(id))
@@ -7764,10 +7178,6 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
     }
 }
 
-/// The invariant, checked rather than argued: a connected element's
-/// handle is held by its parent's, so a drop can never name one. If it
-/// does, the realm's ownership graph has diverged from the tree, and the
-/// element must not quietly disappear from the screen.
 #[test]
 fn dropping_a_connected_element_is_refused() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -7791,13 +7201,6 @@ fn dropping_a_connected_element_is_refused() {
     );
 }
 
-/// A handle that script has let go of reads as gone at once — `QuickJS`
-/// answers a `WeakRef` from the refcount — while its element stays
-/// allocated and stays a parent until the collection that finalizes it.
-/// So the ownership graph must never be what decides which native
-/// operation runs: a child of a let-go parent is still attached, and
-/// treating it as detached turns this swap into a silent deletion of the
-/// element it was swapped with.
 #[test]
 fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -7834,7 +7237,6 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
         )
         .expect("main-thread script");
 
-    // page 2, visible 3, wrapper 4, cell 5.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -7853,9 +7255,6 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
         .expect("the swap kept both elements attached");
 }
 
-/// A drop frees one node. A descendant script still names is unlinked
-/// from the freed ancestor and goes on as a detached root it can attach
-/// somewhere else — the ancestor's handle dying does not take it.
 #[test]
 fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -7910,14 +7309,6 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
     );
 }
 
-/// `ReactLynx`'s unmount: `__RemoveElement` on the snapshot's root, then
-/// every handle of the subtree is let go at once. Whatever order the
-/// finalizer delivers those in, the whole subtree is gone after one
-/// collection and the ids are retired. The three handles are held on
-/// `globalThis` until the intact subtree has been read, and let go of
-/// together by a second script: a collection `QuickJS` starts on its own
-/// while the first script allocates would otherwise free them before the
-/// test reads the subtree.
 #[test]
 fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -7950,8 +7341,6 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
         "before collection the detached subtree is intact"
     );
 
-    // The unmounted snapshot instance's `__elements`, deleted: all three
-    // handles are let go at once.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -7972,10 +7361,6 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
     }
 }
 
-/// `__ReplaceElement` detaches what it replaces, and the detached
-/// element is kept by the handle script still holds — together with the
-/// subtree under it, whose handles that one holds in turn. Both go when
-/// script lets go.
 #[test]
 fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -8047,8 +7432,6 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
     assert!(tree.get(node_id(3)).is_none() && tree.get(node_id(4)).is_none());
 }
 
-/// A drop is immediate and final: the element is gone the moment the
-/// finalizer's call lands, and the id it used names nothing afterwards.
 #[test]
 fn a_drop_frees_the_element_at_once_and_retires_its_id() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -8088,11 +7471,6 @@ fn a_drop_frees_the_element_at_once_and_retires_its_id() {
         .expect_err("a freed id names nothing");
 }
 
-/// A listener that captures its own element must not keep it alive: the
-/// closure is reachable only from the handle it captures, so the cycle
-/// has no root once script lets go. This is exactly what a per-handle
-/// store in a `WeakMap` would break under `QuickJS`, whose `WeakMap` marks
-/// its values unconditionally.
 #[test]
 fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
     for (label, registration) in [
@@ -8142,10 +7520,6 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
     }
 }
 
-/// Removals pace collection: once enough subtrees have been removed,
-/// the batch that crosses the count ends with a collection, so the
-/// handles those subtrees left behind are finalized and the subtrees freed
-/// without any allocation pressure or explicit collection.
 #[test]
 fn enough_removals_end_a_batch_with_a_collection() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -8178,9 +7552,6 @@ fn enough_removals_end_a_batch_with_a_collection() {
             "churning",
         )
         .expect("churn");
-    // The count, not the tree, is the witness: QuickJS may collect on its
-    // own allocation pressure at any point, which frees cells too, but
-    // only the paced collection resets the count.
     assert_eq!(
         runtime.slot.borrow().removals,
         below,
@@ -8209,20 +7580,6 @@ fn enough_removals_end_a_batch_with_a_collection() {
     }
 }
 
-/// Every element on an event path carries a handle — a connected one is
-/// held by its parent's, up to the permanent page handle — so a target
-/// always resolves to one. A target that does not is the ownership graph
-/// and the tree disagreeing, and the realm says so instead of inventing
-/// an `Event` that cannot name what it happened to.
-///
-/// Routing cannot produce one today: it targets elements, and a hit on a
-/// text run maps to its element in `hit.rs`. This builds the path by hand
-/// against the run itself, the one node no handle ever names. A hit on a UA
-/// component's shadow chrome is not one: `first_element_at` answers with the
-/// flat-tree element it hits, shadow tree included, and the dispatch drops
-/// every shadow step, so the event starts at the host
-/// (`an_event_at_shadow_content_reaches_script_retargeted_to_its_host`).
-/// Generated text has no DOM identity and cannot become such a target.
 #[test]
 fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -8241,7 +7598,6 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
             "app:///run-target.js",
         )
         .expect("main-thread script");
-    // Explicitly construct a host-owned text node the realm has no handle for.
     let run = {
         let mut tree = elements.tree();
         let run = tree.create_text_node("host-owned", ());
@@ -8260,20 +7616,6 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     assert!(error.contains("ownership graph"), "{error}");
 }
 
-/// `__SetAttribute(list, "update-list-info", …)` against the real document,
-/// where the protocol's primitives live: the list's children
-/// (`childElementIds`), the tree edits, the placeholders' relevance and the
-/// `contentvisibilityautostatechange` that builds a cell.
-///
-/// The batch is serviced in a microtask, so the callbacks a card files
-/// *after* writing the operations are the ones that serve it — the order
-/// `ReactLynx`'s own `ListUpdateInfoRecording.flush` writes in. It inserts a
-/// placeholder per position and builds nothing; the commit then finds the
-/// placeholders inside the encode window, and the delivery of that commit's
-/// state changes is where `componentAtIndex` runs, one cell per placeholder.
-/// A timer then removes old indices 1 and 3. What the script found is
-/// written back onto the list as attributes, since the document is the only
-/// thing this test can read.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -8408,20 +7750,6 @@ fn update_list_info_builds_and_retires_cells_through_the_filed_callbacks() {
     );
 }
 
-/// The list protocol's fill-ahead against the real document: a delivery
-/// builds the run of placeholders the relevance region covers, counted at a
-/// built sibling's size, not only the placeholders the commit revealed.
-///
-/// The list is 100px tall over 400 placeholders with no estimate, so each
-/// stands at `100cqh` (100px) and a commit reveals only the few the region
-/// holds, collapsing each to nothing once revealed, up to the relevance
-/// passes' cap. The first delivery has no built sibling to count by and
-/// builds those alone. The second commit lays them out at 5px each, and its
-/// delivery reads `scrollRelevanceSpan` on the first placeholder past them:
-/// at offset 0 the region is `0..=200` (the window `0..=100` and a
-/// scrollport), so it builds every cell up to 200px, 40 cells in all, where
-/// building the revealed placeholders alone would stop at the passes' cap
-/// again.
 #[test]
 fn update_list_info_builds_the_run_the_relevance_region_covers() {
     const CELLS: usize = 400;
@@ -8508,10 +7836,6 @@ fn update_list_info_builds_the_run_the_relevance_region_covers() {
     );
 }
 
-/// The realm's timers, from the four globals a card calls to the schedule a
-/// page's epilogue runs. A zero delay is due the moment it is armed, so a
-/// test spends a turn by asking the runtime to run what is due — which is
-/// exactly what the first step of every epilogue does.
 #[test]
 fn a_timeout_runs_once_with_the_arguments_it_was_given() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -8534,7 +7858,6 @@ fn a_timeout_runs_once_with_the_arguments_it_was_given() {
         runtime.run_due_timers(&mut js_runtime).is_empty(),
         "the callback returned"
     );
-    // Nothing is armed any more, so a second pass finds nothing to run.
     assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     assert_eq!(runtime.next_timer_deadline(), None);
 
@@ -8604,9 +7927,6 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
         assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     }
 
-    // Three passes ran it and the third disarmed it, so the last three found
-    // nothing — a repeat neither runs twice in one pass nor outlives its own
-    // `clearInterval`.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -8715,9 +8035,6 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
     );
 }
 
-/// A chain of zero-delay timers is exactly what the standard's nesting clamp
-/// exists for: it runs unclamped to the fifth link and waits from there on,
-/// which is what keeps such a chain from spinning `bobcat-main`.
 #[test]
 fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -8785,7 +8102,6 @@ fn requested_module(
     }
 }
 
-/// One `require` answered, from whichever URL the host says it found it at.
 fn module_source(source: &str, url: &str) -> crate::resource::LoadedSource {
     crate::resource::LoadedSource::Module {
         source: source.to_owned(),
@@ -8793,9 +8109,6 @@ fn module_source(source: &str, url: &str) -> crate::resource::LoadedSource {
     }
 }
 
-// Plain tests rather than `tokio::test`s, for the reason the adoption's own
-// pin below spells out: a `require`'s wait is a `block_on` of the realm's
-// engine thread, which tokio refuses from inside a runtime.
 #[test]
 fn require_waits_for_its_own_request_and_resolves_against_the_response_url() {
     let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
@@ -8859,8 +8172,6 @@ fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
             match outcome {
                 "failure" => completion.complete(Err(crate::resource::unanswered_source().into())),
                 "dropped" => drop(completion),
-                // The embedder's release, while this realm is parked on the
-                // answer: the token is the other arm of that wait.
                 "cancelled" => {
                     token.cancel();
                     return Some(completion);
@@ -8899,10 +8210,6 @@ fn a_require_that_cannot_load_throws_and_leaves_the_realm_usable() {
     }
 }
 
-/// A synchronous load's URL is resolved against the view's base URL — the
-/// detached outbox's `app:///` — by URL rules before it is requested, not
-/// against the module that made the load: a rooted and a relative lazy
-/// container name reach the fetcher as one absolute URL.
 #[test]
 fn a_sync_load_resolves_against_the_views_base() {
     let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
@@ -8933,17 +8240,11 @@ fn a_sync_load_resolves_against_the_views_base() {
     host.join().unwrap();
 }
 
-/// A synchronous load whose URL does not resolve against the view's base
-/// throws in the realm, as a failed load does, and is never requested.
 #[test]
 fn a_sync_load_that_does_not_resolve_throws_without_a_request() {
     let (mut js, mut runtime, _elements, far) = runtime_over_watching_names(ingredients());
     let mut notices = far.0.notices;
     let (finished, mut finish) = tokio::sync::oneshot::channel::<()>();
-    // Every source request that reaches this thread is recorded and its
-    // completion dropped, which fails that load: a URL that was requested
-    // fails the assertion below instead of leaving the realm waiting for an
-    // answer. Dropping `finished` ends the loop.
     let host = std::thread::spawn(move || {
         let deadline = ClockInstant::now() + std::time::Duration::from_secs(10);
         let mut requested = Vec::new();
@@ -8987,8 +8288,6 @@ fn a_sync_load_that_does_not_resolve_throws_without_a_request() {
     );
 }
 
-/// A fetch is not resolved by the engine: the fetcher gets the string the
-/// realm wrote and resolves it against its own base.
 #[test]
 fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
     let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
@@ -9016,15 +8315,6 @@ fn a_fetch_reaches_the_fetcher_as_the_realm_wrote_it() {
     assert_eq!(url, "/lazy.bundle");
 }
 
-/// A name under an engine prefix is answered from the runtime's built-ins and
-/// this realm's host modules, and from nothing else. One that is neither
-/// fails in the realm with a `ReferenceError`, through an `import` or a
-/// `require`, and never reaches the host: `bobcat:worker` and `bobcat:bts` are
-/// registered, but each imports `bobcat-internal:worker` — `bobcat:bts`
-/// through `bobcat:worker` — which an MTS realm does not declare.
-/// `bobcat:lynx-modules`, `bobcat:selector-query` and
-/// `bobcat:global-event-emitter` import nothing an MTS realm lacks, so they
-/// load here as well.
 #[test]
 fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
     let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
@@ -9075,13 +8365,6 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
     }
 }
 
-/// The members an MTS realm's `bobcat-internal:host` and
-/// `bobcat-internal:native-modules` export, which is what decides the
-/// built-ins it can link. Written down so that a change to either set is a
-/// change to these lists. A namespace lists its exports sorted by name;
-/// `testFuture` is the test build's own producer. The native module member
-/// is the one a worker realm has too; the module table is a startup member
-/// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
     let expected = crate::canvas::host_members_with_canvas(
@@ -9115,10 +8398,6 @@ fn an_mts_realm_declares_these_host_members() {
         .unwrap();
 }
 
-/// What a `ShadowRealm` child of the MTS realm exports under
-/// `bobcat-internal:host`: every member of the page realm's, the three
-/// `Worker` members included, and no `bobcat-internal:native-modules` at
-/// all.
 #[test]
 fn a_frame_realm_declares_the_page_members() {
     let expected = crate::canvas::host_members_with_canvas(
@@ -9141,8 +8420,6 @@ fn a_frame_realm_declares_the_page_members() {
         .unwrap();
 }
 
-/// The page realm's `bobcat-internal:host` exports beside the canvas members
-/// every realm has, sorted as a namespace lists them.
 const MTS_HOST_MEMBERS: [&str; 62] = [
     "adoptStyleSheet",
     "attributeNames",
@@ -9208,8 +8485,6 @@ const MTS_HOST_MEMBERS: [&str; 62] = [
     "waitFuture",
 ];
 
-/// The card's one element, the page element's first child: the element
-/// every exposure test below registers.
 fn first_card_element(elements: &DocumentProbe) -> terminus::link::NodeId {
     elements
         .tree()
@@ -9219,8 +8494,6 @@ fn first_card_element(elements: &DocumentProbe) -> terminus::link::NodeId {
         .id()
 }
 
-/// The observer the realm's exposure registration of `node` owns, if it is
-/// registered and detection runs.
 fn exposure_observer(
     elements: &DocumentProbe,
     node: terminus::link::NodeId,
@@ -9228,13 +8501,6 @@ fn exposure_observer(
     elements.slot.borrow().exposure.observer_of(node)
 }
 
-/// `rpx` in an exposure margin is the viewport width over 750 — stylo's
-/// rule — read from the document's viewport when the element registers: a
-/// `20rpx` top screen margin on this realm's 393px-wide viewport is
-/// `20 × 393 / 750` px of target margin, on the bottom, the side a positive
-/// screen margin lands on. Written through `__SetAttribute`,
-/// which reaches the registration through the host's `setAttribute`; the
-/// record listener the script files is what registers the element.
 #[test]
 fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9267,9 +8533,6 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         terminus::link::MarginLength::Px(20.0 * 393.0 / 750.0),
     );
 
-    // Removing the id through `__SetAttribute`'s `null` is the host's
-    // `removeAttribute`, which re-arms the element the listener keeps
-    // registered; removing the listener lets the registration go.
     runtime
         .evaluate_module(
             &mut js,
@@ -9300,14 +8563,6 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
     assert_eq!(exposure_observer(&elements, view), None);
 }
 
-/// The members exposure follows, from script: `listenerOpened` for the
-/// record event `bobcat:exposure` registers an element that has no
-/// `exposure-id` and `listenerClosed` lets it go again — the listener table
-/// is what exposure reads, and a `uiappear` row alone registers nothing —
-/// `switchExposure` stops and resumes detection for the elements it lists
-/// and answers the records it queued, and each refuses an argument that is
-/// not its shape: a flag is `0` or `1`, as every tree member's is, kinds are
-/// 1 to 7, and a list is comma-joined node ids.
 #[test]
 fn the_listener_members_register_exposure_and_switch_exposure_switches_detection() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9412,13 +8667,6 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     ");
 }
 
-/// An element is registered for exposure out of the listener table: the
-/// first `uiappear`/`uidisappear` handler `__AddEvent` files arms an observer
-/// for an element that has no `exposure-id`; a second handler, of the other
-/// name or the other kind, changes nothing — the observer is the one the
-/// first armed, where a second arming would have made a fresh one — and
-/// web-core's disable mark, a `null` handler, taking the last one away lets
-/// the registration go.
 #[test]
 fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9473,18 +8721,10 @@ fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
         "the last handler went, and the registration with it",
     );
 
-    // A worklet alone, `main-thread:binduiappear`, registers it as well.
     run("__AddEvent(view, 'bindEvent', 'uiappear', { type: 'worklet', value: {} });");
     assert!(exposure_observer(&elements, view).is_some());
 }
 
-/// A `uiappear` reaches an `__AddEventListener` closure through the
-/// intersection delivery, non-bubbling, with web-core's detail: the target's
-/// unique id, and its `exposure-id` and `exposure-scene` under both of
-/// web-core's spellings. The closure is itself what registers the element,
-/// as any registration form does. The element carries an `exposure-id` too,
-/// so the same delivery dispatches its `bobcat:exposure` record event, which
-/// the realm's Lynx layer takes — the delivery reports no failure.
 #[test]
 fn a_uiappear_listener_hears_web_cores_exposure_detail() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9566,13 +8806,6 @@ fn a_uiappear_listener_hears_web_cores_exposure_detail() {
         .expect("the listeners heard web-core's detail");
 }
 
-/// A page of three 100px views down the viewport for the record-event tests
-/// below, each with a record listener that reports
-/// `<type> <uid> <detail as JSON>` into `seen` ([`frame_lines`]): `a` and `b`
-/// carry an `exposure-id` (`b` an `exposure-scene` too) and `uiappear`/
-/// `uidisappear` listeners that report `<type> <uid>`, `bare` has no id. The
-/// script files the record listener itself, as the realm's Lynx layer does
-/// for an element it registers.
 const EXPOSURE_RECORDS: &str = r"
 globalThis.seen = [];
 globalThis.renderPage = function () {
@@ -9601,7 +8834,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// [`EXPOSURE_RECORDS`] booted, with the packed ids of `a`, `b` and `bare`.
 fn exposure_records() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe, [f64; 3]) {
     let (mut js, mut runtime, elements) = runtime();
     runtime
@@ -9616,15 +8848,11 @@ fn exposure_records() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe, [f64;
     (js, runtime, elements, ids)
 }
 
-/// One update and one intersection delivery entry, which reports no
-/// failure.
 fn deliver_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     runtime.update_intersection_observations();
     notify_exposure(js, runtime);
 }
 
-/// One intersection delivery entry with no update before it, which
-/// reports no failure.
 fn notify_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     let failures = runtime.notify_intersection_observers(js);
     assert!(
@@ -9637,8 +8865,6 @@ fn notify_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     );
 }
 
-/// Runs `source` in the page realm, with `bobcat:element`, the realm's
-/// `lynx` and the host's `switchExposure` imported.
 fn run_exposure_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
     runtime
         .evaluate_module(
@@ -9658,11 +8884,6 @@ fn run_exposure_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, 
         .expect("the exposure step");
 }
 
-/// Every change with an `exposure-id` is the `bobcat:exposure` event at its
-/// element, after every `uiappear`: non-bubbling, its `detail` the three
-/// extras — the id, the scene (`""` when absent) and `appeared` — and its
-/// target the element itself. `bare`, registered with no id, hears its
-/// `uiappear` and no record.
 #[test]
 fn a_change_with_an_id_is_the_record_event_at_its_element() {
     let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
@@ -9682,8 +8903,6 @@ fn a_change_with_an_id_is_the_record_event_at_its_element() {
         ]
     );
 
-    // Out of view: `uidisappear`s first, then the records, `appeared`
-    // false.
     run_exposure_script(
         &mut js,
         &mut runtime,
@@ -9709,9 +8928,6 @@ fn a_change_with_an_id_is_the_record_event_at_its_element() {
     );
 }
 
-/// `stopExposure` with `sendEvent` and an id change send records only: one
-/// `appeared: false` record per listed exposed element, under the id it was
-/// exposed under, and no `uidisappear`.
 #[test]
 fn a_stop_and_an_id_change_send_records_and_no_element_event() {
     let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
@@ -9759,11 +8975,6 @@ fn a_stop_and_an_id_change_send_records_and_no_element_event() {
     );
 }
 
-/// The realm's `lynx.stopExposure()` lists the elements it registered — the
-/// ones `bobcat:element` filed its record listener on — and stops those; an
-/// element it registers while stopped is stopped right after its listener
-/// is filed, so it is not detected, `uiappear` included, until
-/// `lynx.resumeExposure()`, which exposes it with the rest.
 #[test]
 fn the_realms_stop_reaches_what_it_registered_and_what_it_registers_while_stopped() {
     let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
@@ -9783,7 +8994,6 @@ fn the_realms_stop_reaches_what_it_registered_and_what_it_registers_while_stoppe
         ]
     );
 
-    // Registered while stopped: an `exposure-id` files the record listener.
     run_exposure_script(
         &mut js,
         &mut runtime,
@@ -9829,9 +9039,6 @@ fn the_realms_stop_reaches_what_it_registered_and_what_it_registers_while_stoppe
     );
 }
 
-/// An element that is detached but alive, its handle held, stops
-/// intersecting and still hears its record: its own row invites its realm,
-/// and its path starts at itself.
 #[test]
 fn a_detached_element_still_hears_its_record() {
     let (mut js, mut runtime, _elements, [a, _b, _bare]) = exposure_records();
@@ -9856,11 +9063,6 @@ fn a_detached_element_still_hears_its_record() {
     );
 }
 
-/// One entry's records are one microtask checkpoint per realm, after all of
-/// them: a record listener that collects into a list and flushes it from a
-/// microtask flushes once, with every record of the entry, as the realm's
-/// Lynx layer needs to send one `exposure` list. A promise job, because the
-/// MTS realm has no `queueMicrotask` (`element-papi.ts` says why).
 #[test]
 fn one_entrys_records_run_under_one_checkpoint() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -9896,16 +9098,6 @@ fn one_entrys_records_run_under_one_checkpoint() {
     assert_eq!(frame_lines(&mut js, &mut runtime), ["flush row0,row1,row2"]);
 }
 
-/// The `api-bindlauoutchange` card (`lynx-stack`'s
-/// `web-core-e2e/tests/reactlynx/api-bindlauoutchange/index.jsx`,
-/// `reactlynx.spec.ts:2327`) with a few additions: a column `view` holding a
-/// 10px-tall `before` row, then the 100×100 `box` with `margin: 50px`, which
-/// carries an id and a typed dataset and whose `layoutchange` closure reports
-/// `<type> <detail as JSON>` into `seen` ([`frame_lines`]). The card files its
-/// handler with `bindLayoutChange`; this one files a closure, which needs no
-/// background thread, and `a_bts_layoutchange_handler_hears_the_detail` in
-/// `worker_tests.rs` covers the string handler. The fixture has no `before`
-/// row: with it, the box sits 10px lower.
 const LAYOUT_CHANGE_PAGE: &str = r"
 globalThis.seen = [];
 globalThis.record = (event) => {
@@ -9929,9 +9121,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// Runs `source` in the page realm with `bobcat:element` imported and the
-/// card's `views` in scope, then commits what it wrote, as the epilogue of
-/// its entry would.
 fn run_layout_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
     runtime
         .evaluate_module(
@@ -9950,9 +9139,6 @@ fn run_layout_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, so
     runtime.commit_if_dirty();
 }
 
-/// The resize delivery as the page's epilogue and its posted entry run it:
-/// the update, and when it queued anything, the notification, which reports
-/// no failure. Answers whether the update queued anything.
 fn deliver_layout_changes(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> bool {
     let queued = runtime.update_resize_observations() || runtime.has_pending_resize_notifications();
     if queued {
@@ -9969,8 +9155,6 @@ fn deliver_layout_changes(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntim
     queued
 }
 
-/// The `layoutchange` detail of the box at `top`, `width` wide and 100 tall:
-/// the order and keys `element-papi.ts`'s `layoutDetailOf` writes.
 fn box_layout_change(top: u32, width: u32) -> String {
     format!(
         r#"layoutchange {{"id":"box","dataset":{{"row":7}},"width":{width},"height":100,"left":50,"top":{top},"right":{right},"bottom":{bottom}}}"#,
@@ -9979,13 +9163,6 @@ fn box_layout_change(top: u32, width: u32) -> String {
     )
 }
 
-/// `layoutchange` is a size observation (the user's ruling 1 of
-/// 2026-10-20): the first delivery after the registration reports the box
-/// once with its geometry — `left`/`top` its margin offset in the column,
-/// `right`/`bottom` the sums — a width change reports it once more with the
-/// new geometry, and a move that resizes nothing, the `before` row growing
-/// by 20px, reports nothing, though the box's `top` changed. A delivery with
-/// nothing new dispatches nothing.
 #[test]
 fn a_layoutchange_listener_hears_each_size_change_of_its_border_box_and_no_move() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -10025,10 +9202,6 @@ fn a_layoutchange_listener_hears_each_size_change_of_its_border_box_and_no_move(
     assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
 }
 
-/// The `api-bindlauoutchange` card itself: a 100×100 view with
-/// `margin: 50px` first in a flex column reports `top 50, bottom 150, left
-/// 50, right 150, width 100, height 100`, which is what the card's handler
-/// checks before it turns its target green.
 #[test]
 fn the_api_bindlauoutchange_card_reports_its_view_at_its_margin_offset() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -10065,12 +9238,6 @@ fn the_api_bindlauoutchange_card_reports_its_view_at_its_margin_offset() {
     );
 }
 
-/// Every registration form observes the element — `__AddEvent`'s string
-/// handler, its worklet, each of its kinds, and `__AddEventListener` — which
-/// is web-core's `registerEventEnableStatusChangeHandler('layoutchange')`;
-/// a second form changes nothing, and the last one leaving unobserves it, so
-/// the next resize dispatches nothing. A `layoutchange` row on another name
-/// or element is no registration of this one.
 #[test]
 fn every_registration_form_observes_layoutchange_and_the_last_one_leaving_unobserves() {
     let (mut js, mut runtime, elements) = runtime();
@@ -10123,7 +9290,6 @@ fn every_registration_form_observes_layoutchange_and_the_last_one_leaving_unobse
         assert!(!observed(&elements), "{undo} unobserves it");
     }
 
-    // Two forms, one leaving: still observed.
     run_layout_script(
         &mut js,
         &mut runtime,
@@ -10147,10 +9313,6 @@ fn every_registration_form_observes_layoutchange_and_the_last_one_leaving_unobse
     assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
 }
 
-/// A box that stops being rendered, `display: none`, is reported once as the
-/// primitive reports it, `0 × 0`, and its detail is all zeros, since
-/// `boundingClientRect` has no box to answer for it. Shown again, it reports
-/// its size again.
 #[test]
 fn a_box_that_stops_being_rendered_reports_a_zero_rect() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -10185,9 +9347,6 @@ fn a_box_that_stops_being_rendered_reports_a_zero_rect() {
     );
 }
 
-/// An element freed between its resize being queued and the delivery hears
-/// nothing: the primitive drops its registration and its queued entry with
-/// the node, so the delivery has nothing for it.
 #[test]
 fn a_freed_element_hears_no_layoutchange() {
     let (mut js, mut runtime, elements) = runtime();
@@ -10220,12 +9379,6 @@ fn a_freed_element_hears_no_layoutchange() {
     assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
 }
 
-/// An `x-overlay-ng`'s `layoutchange` observes its shadow `#dialog`, web-core's
-/// `layoutChangeTarget` (`XOverlayNg.ts:21-23`), since the host is
-/// `display: contents` and has no box: shown, it reports the dialog's rect,
-/// the whole 393×727 viewport, at the host — the event's target and current
-/// target are the overlay. Hidden, the dialog is `display: none`, and the
-/// host hears an all-zero rect.
 #[test]
 fn an_overlay_reports_its_shadow_dialogs_rect_at_the_host() {
     let (mut js, mut runtime, elements) = runtime();
@@ -10293,10 +9446,6 @@ fn an_overlay_reports_its_shadow_dialogs_rect_at_the_host() {
     );
 }
 
-/// A 20px Ahem `text` holding `abcde fghij`, styled by `style`, with a
-/// `layout` closure that reports `<type> <detail as JSON>` into `seen` when
-/// `listen` is set, and an empty `view` beside it that carries a `layout`
-/// closure too, which is no registration: only a `text` reports.
 fn text_layout_page(style: &str, maxline: Option<&str>, listen: bool) -> String {
     let maxline = maxline.map_or_else(String::new, |lines| {
         format!("__SetAttribute(text, 'text-maxline', '{lines}');")
@@ -10329,8 +9478,6 @@ fn text_layout_page(style: &str, maxline: Option<&str>, listen: bool) -> String 
     )
 }
 
-/// The `layout` component events of the epilogue's drain, delivered as the
-/// component-events entry delivers them, with no failure.
 fn deliver_text_layouts(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     runtime.queue_text_layout_events();
     let failures = runtime.dispatch_component_events(js);
@@ -10344,10 +9491,6 @@ fn deliver_text_layouts(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime)
     );
 }
 
-/// A one-line `text-maxline` cut states itself in its first line's
-/// `ellipsisCount` — `ab` and the three dots fill the five em squares, so
-/// three of the line's five units are cut — and `size` is the content box:
-/// the border box less its padding and border.
 #[test]
 fn a_maxline_text_reports_its_cut_and_its_content_box() {
     let (mut js, mut runtime, elements) = text_runtime();
@@ -10393,10 +9536,6 @@ fn a_maxline_text_reports_its_cut_and_its_content_box() {
     );
 }
 
-/// A `layout` listener filed after the paragraph laid out hears nothing
-/// until a committing layout recomputes the paragraph — native iOS's
-/// per-renderer latch (`LynxUIText.m:359-365`) — and then hears that layout:
-/// widened to 300px, the eleven units fit one line.
 #[test]
 fn a_layout_listener_filed_after_the_first_layout_hears_the_next_relayout_only() {
     let (mut js, mut runtime, _elements) = text_runtime();
@@ -10517,8 +9656,6 @@ fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
         assert_eq!(widths(), [20.0, 90.0, 95.0], "preloading does not adopt");
         let mut notices = far.0.notices;
         let host = std::thread::spawn(move || {
-            // This fetcher ignores preload hints and answers each adoption.
-            // Repeated A returns different CSS, proving core kept no result cache.
             for (expected, width) in [
                 (&url_b, "80px"),
                 (&url_a, "40px"),
@@ -10571,10 +9708,6 @@ fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
     }
 }
 
-// A plain test rather than a `tokio::test`: the adoption's wait is a
-// `block_on` of the realm's own engine thread, and starting a runtime from
-// inside another one is what tokio refuses. Production is the same shape — the
-// wait happens in a job, which the top loop runs outside its `block_on`.
 #[test]
 fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
     for outcome in ["success", "failure", "dropped", "cancelled"] {
@@ -10684,11 +9817,6 @@ fn collecting_a_js_style_handle_sends_no_native_release_or_load_request() {
     }
 }
 
-/// A stylesheet the view's fetcher does not hold is `null`, asked of the
-/// fetcher's probe with the composed URL and nothing else: no preload hint,
-/// no request. A held one is still the `{url}` handle, preloaded. What a card
-/// such as `rLynxPrepareLazyBundleMTS` does with `null` is adopt nothing,
-/// which is what native's `undefined` for a missing section makes it do.
 #[test]
 fn load_style_sheet_answers_null_for_a_sheet_the_fetcher_does_not_hold() {
     let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -10721,7 +9849,6 @@ fn load_style_sheet_answers_null_for_a_sheet_the_fetcher_does_not_hold() {
             "https://cdn.test/with-css.bundle/custom_section/CSS.css",
         ]
     );
-    // Only the held sheet was hinted, and nothing was requested at all.
     let mut preloads = Vec::new();
     while let Ok(notice) = far.0.notices.try_recv() {
         match notice {
@@ -10740,17 +9867,6 @@ fn load_style_sheet_answers_null_for_a_sheet_the_fetcher_does_not_hold() {
     );
 }
 
-/// One `Future` in a view's MTS realm, read both ways over the real
-/// boundary: a real page, its own token, and the settle task its epilogue
-/// spawns.
-///
-/// Nothing in production registers a future yet, so the operation is the
-/// host's test-only producer — `testFuture(delayMs, value, rejects)`, which
-/// is why this test is in the crate rather than beside it. `wait(20)` runs
-/// out its deadline against a 200 ms operation, and the `await` that follows
-/// is the *same* Future, which is what says the timeout cancelled nothing.
-/// Past that conversion the Future is a Promise, and a third read of it is
-/// refused.
 #[test]
 fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait() {
     let mut engine = crate::test_support::TestViewSpec::new(
@@ -10815,10 +9931,6 @@ fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait()
     );
 }
 
-/// `ShadowRealm` is a global of the MTS realm, like the W3C `Worker` a
-/// bucket-1 capability: a child evaluates in a global of its own, answers
-/// primitives, refuses objects with a `TypeError`, and wraps functions both
-/// ways.
 #[test]
 fn the_main_thread_realm_has_shadow_realms() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -10845,14 +9957,6 @@ fn the_main_thread_realm_has_shadow_realms() {
     assert_eq!(runtime.child_realms(), 1);
 }
 
-/// A function the page realm's tests define to make a `ShadowRealm` child
-/// with `bobcat:element` and `bobcat-internal:host` loaded in it, as `E` and
-/// `H` on the child's own global: what `bobcat:frame-boot` imports, reached
-/// here through `evaluate`.
-///
-/// `bobcat:runtime` first, as the boot module imports it: it and
-/// `bobcat:element` import each other, and the order is what lets
-/// `bobcat:element` evaluate ahead of the module that reads its classes.
 const FRAME_REALM: &str = r"
 async function frameRealm() {
     const realm = new ShadowRealm();
@@ -10869,13 +9973,6 @@ async function frameRealm() {
 }
 ";
 
-/// A child of the MTS realm has the core members and the document members
-/// the page realm has, over the same document and as the same code:
-/// `bobcat:timers` and `bobcat:element` both link in it, and its
-/// `createPage` is the document's `page`, as the page realm's is. It has
-/// the three `Worker` members too, over a side of its own, so
-/// `bobcat-internal` links in it. Its startup strings answer `undefined`;
-/// `bobcat-internal:native-modules` is the page realm's alone.
 #[test]
 fn a_shadow_realm_links_the_document_built_ins() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -10912,8 +10009,6 @@ fn a_shadow_realm_links_the_document_built_ins() {
         .unwrap();
 }
 
-/// The page realm cannot close itself, and its `createPage` is the
-/// document's `page`, as before frames existed.
 #[test]
 fn the_page_realm_cannot_close_itself() {
     let (mut js, mut runtime, elements) = runtime();
@@ -10934,8 +10029,6 @@ fn the_page_realm_cannot_close_itself() {
     assert_eq!(elements.tree().document_element().id(), node_id(2));
 }
 
-/// The first element child of the document's page: the frame the page
-/// realm's script appended first.
 fn first_frame(tree: &LynxDocument) -> terminus::link::NodeId {
     tree.document_element()
         .children()
@@ -10944,7 +10037,6 @@ fn first_frame(tree: &LynxDocument) -> terminus::link::NodeId {
         .expect("the page holds a frame")
 }
 
-/// The nested page the `frame` component built in `frame`'s shadow root.
 fn frame_page_of(tree: &LynxDocument, frame: terminus::link::NodeId) -> terminus::link::NodeId {
     let page = nested_page(tree, frame).expect("a frame holds its nested page");
     let node = tree.get(page).expect("live");
@@ -10953,11 +10045,6 @@ fn frame_page_of(tree: &LynxDocument, frame: terminus::link::NodeId) -> terminus
     page
 }
 
-/// A child handed a frame's nested page renders into it: `framePage` reads
-/// the page the component built, `__BobcatUsePageRoot` makes it what the
-/// child's `__CreatePage` answers, what the child builds under it lands in
-/// the frame's box, and the child's flush — the page realm's flush, the same
-/// code — commits it.
 #[test]
 fn a_child_renders_under_the_nested_page_it_was_handed() {
     let (mut js, mut runtime, elements) = runtime();
@@ -11021,8 +10108,6 @@ fn a_child_renders_under_the_nested_page_it_was_handed() {
         ),
         (20.0, 100.0, 50.0)
     );
-    // The UA sheet's `page` rule fills the frame, as web-core's
-    // `[part="page"]` does.
     assert_eq!(
         tree.bounding_client_rect(page).expect("laid out"),
         frame_box,
@@ -11039,9 +10124,6 @@ fn a_child_renders_under_the_nested_page_it_was_handed() {
     );
 }
 
-/// Every refusal `framePage` makes is a JavaScript exception and the view
-/// goes on: a node that is not a frame, an id that names nothing any more,
-/// and one that never named anything. It is a member of every realm.
 #[test]
 fn frame_page_refuses_what_is_no_frame() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -11070,10 +10152,6 @@ fn frame_page_refuses_what_is_no_frame() {
         .unwrap();
 }
 
-/// Frames nest — each one in the nested page of the one before — and
-/// `framePage` answers for the eighth frame deep and refuses the ninth, so
-/// a card that embeds itself stops there. Nothing about it is a child's:
-/// the page realm builds the whole chain.
 #[test]
 fn frame_page_refuses_past_eight_frames_deep() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -11101,12 +10179,6 @@ fn frame_page_refuses_past_eight_frames_deep() {
         .unwrap();
 }
 
-/// A child's adoption names the frame's shadow root, and mounts there: a
-/// `.box` inside the frame takes the sheet, and the host's own `.box` does
-/// not. A target that is no shadow root is refused before anything is
-/// requested. `resetFrame` then frees the nested page with what the child
-/// built under it, removes the sheet, and builds the next card a fresh
-/// page, which `framePage` answers.
 #[test]
 fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
     for text in [true, false] {
@@ -11213,10 +10285,6 @@ fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
     }
 }
 
-/// `closeRealm` retires the child that calls it, which the owner's release
-/// step frees though the page still holds its `ShadowRealm`; until then,
-/// the child's `dropElement` — what its handles' finalizers call — is
-/// silent, even for an id that names nothing.
 #[test]
 fn close_realm_retires_the_child_and_silences_its_drops() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -11244,14 +10312,6 @@ fn close_realm_retires_the_child_and_silences_its_drops() {
     assert_eq!(runtime.child_realms(), 0);
 }
 
-/// A frame whose handle the page realm lets go of is dropped like any
-/// element, and its shadow tree — the nested page and everything under it
-/// — goes with it. Nothing frame-specific runs in the host.
-///
-/// The removed frame's handle is held on `globalThis` until its nested page
-/// has been read, and let go of by a second script: a collection `QuickJS`
-/// starts on its own while the first script allocates would otherwise free
-/// the frame before the test reads it.
 #[test]
 fn dropping_a_frame_frees_its_nested_page() {
     let (mut js, mut runtime, elements) = runtime();
@@ -11274,8 +10334,6 @@ fn dropping_a_frame_frees_its_nested_page() {
         let page = frame_page_of(&tree, node_id(3));
         (page, tree.get(page).unwrap().child_ids()[0])
     };
-    // Let go of the handle only now: a collection the engine starts on its
-    // own may otherwise free it before the probe above.
     runtime
         .evaluate_module(
             &mut js,
@@ -11291,11 +10349,6 @@ fn dropping_a_frame_frees_its_nested_page() {
     assert!(tree.get(inner).is_none(), "and what was under the page");
 }
 
-/// The published names are the union of every realm's: a child that adds
-/// and removes `tap`, which the page also holds, leaves it published, and a
-/// name only a child held is unpublished when the child closes itself — its
-/// `closeRealm` takes its rows out of the listener table — not later, when
-/// the release step frees it.
 #[test]
 fn a_frame_realm_closes_only_its_own_listener_names() {
     let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
@@ -11347,13 +10400,6 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The kernel's walk calls each listening realm once, at the path's top.
-// ---------------------------------------------------------------------------
-
-/// The page realm's part of a dispatch as the one call before the listener
-/// table encoded it: every capture step read backwards, less every step
-/// inside a shadow tree.
 fn whole_path_encoding(
     document: &LynxDocument,
     steps: &terminus::link::event::EventSteps,
@@ -11367,7 +10413,6 @@ fn whole_path_encoding(
         .collect()
 }
 
-/// The pairs [`encode_path`] writes after its step count, read back.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -11399,14 +10444,6 @@ fn encoded_path(
         .collect()
 }
 
-/// The one encoding every realm is handed is the page realm's call as it
-/// always was, for a target in the document tree and one in a detached
-/// tree: the whole path, called at its first step. For a target in a UA
-/// shadow tree it carries the shadow content's steps beside those — every
-/// step but the shadow root — which the page realm holds no handle for and
-/// skips, so the steps it runs are the old ones. A non-composed event inside
-/// a shadow tree, whose path is the shadow tree's alone, invites no realm
-/// that holds nothing there.
 #[test]
 fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     let page_realm = RealmId::Page.listener_key();
@@ -11492,10 +10529,6 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     );
 }
 
-/// A name some element listens for, dispatched where nothing on the path
-/// listens and no realm holds a global registration for it, calls no realm
-/// at all: the dispatch answers that nothing was published. At the element
-/// that does listen, the page realm is called and its listener runs.
 #[test]
 fn an_event_nothing_on_its_path_listens_for_calls_no_realm() {
     let (mut js, mut runtime, elements) = runtime();
@@ -11542,9 +10575,6 @@ fn an_event_nothing_on_its_path_listens_for_calls_no_realm() {
         .unwrap();
 }
 
-/// A `global-bindEvent` registration alone is enough for the page realm to
-/// be called for an event of its name anywhere, with the registering element
-/// as the delivery's `currentTarget` and the event's own target.
 #[test]
 fn a_global_registration_alone_calls_its_realm() {
     let (mut js, mut runtime, elements) = runtime();
@@ -11591,15 +10621,6 @@ fn a_global_registration_alone_calls_its_realm() {
         .unwrap();
 }
 
-/// The page every frame-call test runs: a 20px spacer, then a 100×50 frame,
-/// whose border box therefore starts at (0, 20); the page realm
-/// `capture-catch`es `tap` on the frame and binds `keydown` on its page. A
-/// `ShadowRealm` child is made the frame's card: it renders a 100×50 `inner`
-/// under the nested page, binds `tap` there and files a `global-bindEvent`
-/// for `keydown` on it. Every handler, in either realm, reports
-/// `<label> <type> <target uid>` and the `detail`'s `x,y` when it has them to
-/// the page realm's `seen`, through a function the page handed the child, so
-/// the order across realms is the order they ran in.
 const FRAME_CALLS: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.seen = [];
@@ -11633,7 +10654,6 @@ realm.evaluate(`(frame, report) => {
 }`)(__GetElementUniqueID(frame), (text) => report(text));
 ";
 
-/// [`FRAME_CALLS`] booted: the frame and the child's `inner`.
 fn frame_calls() -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -11645,8 +10665,6 @@ fn frame_calls() -> (
     (js, runtime, elements, frame, inner)
 }
 
-/// [`frame_calls`], with the far end of the view's outbox, where what the
-/// engine reports arrives.
 fn frame_calls_watching() -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -11672,7 +10690,6 @@ fn frame_calls_watching() -> (
     (js, runtime, elements, far, frame, inner)
 }
 
-/// What the realms of [`FRAME_CALLS`] reported, in order, and empties it.
 fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<String> {
     runtime
         .evaluate_module(
@@ -11696,15 +10713,6 @@ fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<S
     probe.split('|').map(str::to_owned).collect()
 }
 
-/// For a synthetic `ping` over [`FRAME_CALLS`]: a page-realm
-/// `__AddEventListener` on the frame, which runs `page_extra` (the event is
-/// `e`) after it reports, a page `global-bindEvent` on the spacer, and the
-/// card's own `__AddEventListener` on its `inner`; each reports
-/// `<label> <type> <target uid> <detail as JSON>`. The card gets
-/// `dispatchAt(uid, name, composed, detail)`, which dispatches a bubbling
-/// event its `__CreateEvent` made, the `detail` named by a key of its
-/// `details`, and answers what `__DispatchEvent` answered, or the error it
-/// threw; `card_extra` runs in the card after that.
 fn file_ping_listeners(
     js: &mut ScriptRuntime,
     runtime: &mut MainThreadRuntime,
@@ -11764,9 +10772,6 @@ globalThis.realm.evaluate(`(report) => {{
         .unwrap();
 }
 
-/// Has the card of [`FRAME_CALLS`] dispatch a synthetic bubbling `ping` at
-/// its `inner`, with `detail` one of [`file_ping_listeners`]' keys, and
-/// report `card-answer <what __DispatchEvent answered>`.
 fn card_pings(
     js: &mut ScriptRuntime,
     runtime: &mut MainThreadRuntime,
@@ -11788,7 +10793,6 @@ fn card_pings(
         .unwrap();
 }
 
-/// The listener failures the engine reported so far, by their messages.
 fn listener_failures(far: &mut PublishedNames) -> Vec<String> {
     std::iter::from_fn(|| far.0.notices.try_recv().ok())
         .filter_map(|notice| match notice {
@@ -11800,13 +10804,6 @@ fn listener_failures(far: &mut PublishedNames) -> Vec<String> {
         .collect()
 }
 
-/// A frame's card dispatching a composed synthetic event at its nested page
-/// reaches the page realm as a routed event does (user ruling, 2026-10-23):
-/// its `__AddEventListener` on the frame, the event retargeted to the frame,
-/// and its `global-bindEvent` for the name, whose tree root, the document
-/// node, is on the path. Each is handed the card's `detail` as a structured
-/// clone. The order is the routed one: the page realm is called first, and
-/// the dispatching card after it, in its own place in the kernel's order.
 #[test]
 fn a_cards_composed_synthetic_event_reaches_the_page_realm_first() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -11825,9 +10822,6 @@ fn a_cards_composed_synthetic_event_reaches_the_page_realm_first() {
     assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
-/// A non-composed synthetic event at a card's node ends at the frame's
-/// shadow root, so neither page-realm registration is reached: only the
-/// card's own listener hears it.
 #[test]
 fn a_cards_non_composed_synthetic_event_stays_in_the_card() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -11846,9 +10840,6 @@ fn a_cards_non_composed_synthetic_event_stays_in_the_card() {
     );
 }
 
-/// A page-realm synthetic event at an element outside the frame does not
-/// call the card, whose `global-bindEvent` for the name sits in the frame's
-/// shadow tree, off the path: the page realm's own walk alone runs.
 #[test]
 fn a_pages_synthetic_event_outside_a_frame_does_not_call_its_card() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
@@ -11882,10 +10873,6 @@ fn a_pages_synthetic_event_outside_a_frame_does_not_call_its_card() {
     );
 }
 
-/// What a listener of another realm throws is that realm's listener
-/// failure, reported on the view's engine-event channel: the dispatching
-/// realm's `__DispatchEvent` still answers `true`, and its own listeners
-/// still run, after the page realm's, where the kernel calls the card.
 #[test]
 fn a_throwing_listener_of_another_realm_is_reported_and_the_dispatch_goes_on() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -11902,7 +10889,6 @@ fn a_throwing_listener_of_another_realm_is_reported_and_the_dispatch_goes_on() {
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [
-            // The throw ends the page realm's walk, its global pass included.
             format!("page-frame ping {} {detail}", packed_node_id(frame)),
             format!("card-inner ping {} {detail}", packed_node_id(inner)),
             "card-answer true".to_owned(),
@@ -11917,15 +10903,6 @@ fn a_throwing_listener_of_another_realm_is_reported_and_the_dispatch_goes_on() {
     );
 }
 
-/// A listener of another realm may dispatch a synthetic event of its own
-/// from inside the call, and that dispatch may call back into the realm
-/// whose `__DispatchEvent` is still running, whose `dispatchEvent` member is
-/// then entered again: the page's listener on the frame dispatches a
-/// `keyup`, which calls the card by its document-level `global-bindEvent`,
-/// whose handler dispatches a `pong` in the card. Everything runs, inner
-/// dispatches to their end first. The card is called for the `keyup` while
-/// its own `ping` waits for its call, and walks a new event for it; the
-/// `pong` walks the `pong` object, and the `ping` the `ping` object.
 #[test]
 fn a_listener_of_another_realm_dispatches_into_the_dispatching_realm_again() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -11973,9 +10950,6 @@ fn a_listener_of_another_realm_dispatches_into_the_dispatching_realm_again() {
     assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
-/// A detail the structured clone refuses — one holding a function — throws
-/// at `__DispatchEvent`, in the dispatching realm, before any realm hears
-/// the event.
 #[test]
 fn a_synthetic_detail_the_clone_refuses_throws_at_the_dispatch() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -11986,12 +10960,6 @@ fn a_synthetic_detail_the_clone_refuses_throws_at_the_dispatch() {
     assert!(lines[0].starts_with("card-answer TypeError"), "{lines:?}");
 }
 
-/// The invitees are read from the listener table again after each realm
-/// call that ran, so a realm an earlier call closed is skipped, and a realm
-/// freed since is not reached by a later dispatch. A second child, `other`, dispatches a `keyup` at
-/// an element of its own, outside every tree, so both the page realm and the card are
-/// invited by their document-level `global-bindEvent`s; the page's handler
-/// closes the card the first time.
 #[test]
 fn a_realm_closed_or_released_before_its_call_is_skipped() {
     let (mut js, mut runtime, _elements, mut far, _frame, inner) = frame_calls_watching();
@@ -12055,10 +11023,6 @@ other.evaluate(`(report) => {{
     assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
-/// What a listener of the dispatching realm itself throws is reported the
-/// same way: the realm is called by the host like every other, so the throw
-/// ends its walk inside that call and never reaches its `__DispatchEvent`,
-/// which answers `true` after the page realm's listeners have run.
 #[test]
 fn a_throwing_listener_of_the_dispatching_realm_is_reported_and_the_dispatch_answers_true() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -12090,13 +11054,6 @@ fn a_throwing_listener_of_the_dispatching_realm_is_reported_and_the_dispatch_ans
     );
 }
 
-/// A card's timer callback runs inside an operation on that card, and a
-/// synthetic event it dispatches can lead back into the card while that
-/// operation is still running: the page realm's listener on the frame
-/// dispatches a `keyup`, which invites the card by its document-level
-/// `global-bindEvent`. The card is in the realm table for the whole of its
-/// own operations, so that call reaches it, and so does the card's own call
-/// for its `ping`, after the page realm's.
 #[test]
 fn a_dispatch_reaches_a_card_whose_timer_callback_is_running() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -12139,12 +11096,6 @@ fn a_dispatch_reaches_a_card_whose_timer_callback_is_running() {
     assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
-/// The dispatching realm walks the event object its `__DispatchEvent` was
-/// given, whatever it dispatches in between: the card's `ping` listener at
-/// its `inner` dispatches a `pong` of its own there, whose listener sees the
-/// `pong` object, and then stops propagation on the `ping` object it holds,
-/// which ends the `ping`'s walk before the nested page's bubble step. The
-/// capture step before it saw the `ping` object too.
 #[test]
 fn a_nested_synthetic_dispatch_walks_its_own_object_and_keeps_the_outer_one() {
     let (mut js, mut runtime, _elements, mut far, frame, inner) = frame_calls_watching();
@@ -12184,10 +11135,7 @@ fn a_nested_synthetic_dispatch_walks_its_own_object_and_keeps_the_outer_one() {
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [
-            // Not composed: the path ends at the frame's shadow root, so no
-            // page-realm listener hears it.
             "ping-capture true".to_owned(),
-            // `file_ping_listeners`' own listener on `inner`, filed first.
             format!("card-inner ping {} {detail}", packed_node_id(inner)),
             "ping-own true".to_owned(),
             "pong-inner true".to_owned(),
@@ -12197,10 +11145,6 @@ fn a_nested_synthetic_dispatch_walks_its_own_object_and_keeps_the_outer_one() {
     assert_eq!(listener_failures(&mut far), [] as [String; 0]);
 }
 
-/// `__DispatchEvent` of an event no realm listens for still runs the
-/// engine's components on its path, and answers `true`: the host's
-/// dispatch is the same whoever made it, and calls no realm the listener
-/// table does not invite, the dispatching one included.
 #[test]
 fn a_synthetic_event_no_realm_hears_still_reaches_the_components() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -12253,13 +11197,6 @@ fn a_synthetic_event_no_realm_hears_still_reaches_the_components() {
     assert_eq!(*log.borrow(), ["custom:Capturing:inner:true"]);
 }
 
-/// A routed event's realm calls are what they were before the synthetic
-/// dispatch shared their body: at the path's top step each realm is called
-/// in the kernel's order, and each call ends in its realm's checkpoint
-/// before the next realm is called, so a promise job the page realm's
-/// listener queued runs before the card's listener does.
-/// (`one_entrys_records_run_under_one_checkpoint` pins the deferred mode,
-/// one checkpoint per realm after an entry's last record.)
 #[test]
 fn a_routed_events_realm_calls_each_end_in_that_realms_checkpoint() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -12292,12 +11229,6 @@ fn a_routed_events_realm_calls_each_end_in_that_realms_checkpoint() {
     );
 }
 
-/// A tap inside a frame's card calls the page realm at the path's top — its
-/// `capture-catch` on the frame hears it retargeted to the frame, the first
-/// step it holds a handle for, with the viewport's coordinates — and then
-/// the card's realm, directly, at the same step, handed the same path: its
-/// `bindtap` hears its own node as the target, `x`/`y` relative to the
-/// frame's border box. The page's `catch` ends the page's walk alone.
 #[test]
 fn a_cards_bindtap_is_called_in_its_own_realm_after_the_pages_walk() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -12315,13 +11246,6 @@ fn a_cards_bindtap_is_called_in_its_own_realm_after_the_pages_walk() {
     );
 }
 
-/// A key at the document element calls the page realm, whose `bindkeydown`
-/// on its page is on the path, and the card's realm by its
-/// `global-bindkeydown`, after the page's. The key's path does not pass
-/// through the frame's shadow root, so the card's global registration is
-/// not reached by the tree rule: the card is called by web-core's
-/// document-level rule ([`DOCUMENT_LEVEL_EVENTS`]), holds no step of the
-/// path, and runs its global pass, the registering element its target.
 #[test]
 fn a_key_calls_every_realm_that_registered_it() {
     let (mut js, mut runtime, _elements, _frame, inner) = frame_calls();
@@ -12360,10 +11284,6 @@ fn a_key_calls_every_realm_that_registered_it() {
     );
 }
 
-/// A card's `global-bindEvent` is reached only by an event whose path
-/// passes through the frame's shadow root, the root of the card's tree: a
-/// tap outside the frame, where the card holds nothing on the path, calls
-/// no realm at all, as web-core's card listens on its own shadow root.
 #[test]
 fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
     let (mut js, mut runtime, elements, _frame, inner) = frame_calls();
@@ -12392,7 +11312,6 @@ fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
     );
     assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
 
-    // Inside the frame it is reached, after the card's own `bindtap`.
     runtime
         .dispatch_for_test(&mut js, inner, &tap(), Point2D::new(30.0, 40.0))
         .expect("dispatch");
@@ -12402,10 +11321,6 @@ fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
     );
 }
 
-/// A page-level `global-bindtap`, on a light-tree node, still hears a tap
-/// inside a frame's card: the document node is on that composed path. Its
-/// target is the frame, the first step the page realm holds, and the page's
-/// `capture-catch` on the frame does not keep it from running.
 #[test]
 fn a_page_global_registration_hears_a_tap_inside_a_card() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
@@ -12438,8 +11353,6 @@ fn a_page_global_registration_hears_a_tap_inside_a_card() {
     );
 }
 
-/// A child's `closeRealm` takes every row it filed out of the listener table
-/// at once: the next tap inside its frame calls the page realm alone.
 #[test]
 fn close_realm_clears_the_childs_rows() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
@@ -12472,12 +11385,6 @@ fn close_realm_clears_the_childs_rows() {
     );
 }
 
-/// [`FRAME_CALLS`], with the card also binding `longpress` on its own page,
-/// a name nothing else holds, and filing a `global-bindtap` there; and a
-/// second `ShadowRealm` child, `next`, which has filed nothing and read no
-/// page yet: a new `src`'s card before its boot reads `framePage`. Each
-/// global handler reports whether the event's target is its own element. Answers the frame and its
-/// nested page beside the runtime.
 fn frame_calls_with_a_next_card() -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -12519,15 +11426,6 @@ next.evaluate(`(report) => {{
     (js, runtime, elements, names, frame, nested)
 }
 
-/// `resetFrame` frees the old card's page with everything under it, and the
-/// card's rows leave with its nodes: a name only it held is no longer
-/// routed by the painter from the next flush on, as for any freed element,
-/// though its realm is neither closed nor freed (its background thread's
-/// disposal runs first). The old card is not called afterwards — its
-/// `global-bindtap` went with its page — so a tap in the frame is the
-/// page's alone. The next card's `framePage` answers a different node, the
-/// fresh page, and a `global-bindtap` `next` files there is reached by the
-/// next tap in the frame.
 #[test]
 fn reset_frame_frees_the_old_cards_page_and_its_rows_with_it() {
     let (mut js, mut runtime, elements, mut names, frame, nested) = frame_calls_with_a_next_card();
@@ -12633,12 +11531,6 @@ fn reset_frame_frees_the_old_cards_page_and_its_rows_with_it() {
     );
 }
 
-/// A page listener that frees the card's nodes before the card's call — the
-/// page realm is called first, at the same step — leaves the card no
-/// registration for the name, and it is not called: the invitation was
-/// computed before the walk, and the call-time check finds the card's rows
-/// gone with its nodes. Freed here by the card's own removal and
-/// `dropElement`, which frees the node at once.
 #[test]
 fn a_realm_whose_steps_an_earlier_listener_freed_is_not_called() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
@@ -12680,8 +11572,6 @@ fn a_realm_whose_steps_an_earlier_listener_freed_is_not_called() {
     );
 }
 
-/// A listener that throws in one realm does not keep the next from hearing
-/// the event: both are called, and the failure is answered once.
 #[test]
 fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -12718,9 +11608,6 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
     );
 }
 
-/// Exposure follows the listener table, whichever realm's rows it holds: an
-/// element the page realm files the record listener on stays registered
-/// while a second realm's row for it remains, and goes with the last.
 #[test]
 fn exposure_follows_every_realms_rows_for_an_element() {
     let (mut js, mut runtime, elements) = runtime();
@@ -12761,10 +11648,6 @@ fn exposure_follows_every_realms_rows_for_an_element() {
     assert_eq!(exposure_observer(&elements, view), None);
 }
 
-/// A record reaches the realm whose row its element has, and that realm
-/// alone: the page realm's record listener on its `frame` hears the frame's
-/// record, the card's on its own `inner` hears `inner`'s, and neither hears
-/// the other's — the listener table is what decides, with no realm record.
 #[test]
 fn each_realm_hears_only_its_own_elements_records() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
@@ -12804,9 +11687,6 @@ fn each_realm_hears_only_its_own_elements_records() {
     );
 }
 
-/// A freed element takes its registrations with it, in the document's free
-/// path, and the last removal of a name only it held reaches the painter at
-/// the next flush, with no word from the realm.
 #[test]
 fn a_freed_elements_last_registration_unpublishes_its_name_at_the_next_flush() {
     let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
@@ -12841,12 +11721,6 @@ fn a_freed_elements_last_registration_unpublishes_its_name_at_the_next_flush() {
     assert!(!names.contains("longpress"));
 }
 
-/// A card's page goes with the card, and its exposure registration with it:
-/// with the card's record listener on its own page root and the page
-/// realm's row for the record event there too, `resetFrame` frees the nested page, so
-/// both rows and the page's exposure observer leave through the document's
-/// free path, and the fresh page the next card gets is registered for
-/// nothing. No realm needs forgetting for it.
 #[test]
 fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
     let (mut js, mut runtime, elements, frame, _inner) = frame_calls();
@@ -12895,9 +11769,6 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
     assert_eq!(exposure_observer(&elements, fresh), None);
 }
 
-/// The published names an editing-routing test is about: the pointer
-/// names, `click` and the keys. The components' own (`slotchange`) are
-/// published with the document and are not the editing account's.
 fn routed(names: &mut PublishedNames) -> Vec<String> {
     let mut routed = names.names();
     routed.retain(|name| {
@@ -12906,7 +11777,6 @@ fn routed(names: &mut PublishedNames) -> Vec<String> {
     routed
 }
 
-/// A primary mouse button event at (10, 10), with `button` and `buttons`.
 fn mouse(button: i16, buttons: u16) -> InputEventPayload {
     InputEventPayload {
         detail: EventDetail::Pointer {
@@ -12920,12 +11790,6 @@ fn mouse(button: i16, buttons: u16) -> InputEventPayload {
     }
 }
 
-/// The press and the tap are routed on the editing account from the page's
-/// first epilogue, whether or not it has an editing host; the focus a press
-/// takes opens the key, the press itself opens the drag inside its own job,
-/// the release closes it, and the last host going closes the key with the
-/// focus it held. A name the realm registers for itself is never closed by
-/// a route.
 #[test]
 fn an_editing_host_routes_its_names_by_state() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -13033,11 +11897,6 @@ fn an_editing_host_routes_its_names_by_state() {
     );
 }
 
-/// An engine component that observes the synthetic event `custom`. Records
-/// each delivery as `type:phase:target id:whether the detail is empty`,
-/// marks the target so script can tell it ran first, queues a `queued`
-/// event at the target through the document's component-event queue, and
-/// stops propagation — which must end only its own walk.
 struct SyntheticEventProbe {
     log: Rc<RefCell<Vec<String>>>,
     events: ComponentEvents,
@@ -13072,14 +11931,6 @@ impl terminus::link::CustomElement<()> for SyntheticEventProbe {
     }
 }
 
-/// `__DispatchEvent` of an event `__CreateEvent` made runs the routed
-/// dispatch: the realm is called at the path's top step, so its listeners
-/// run before the engine component on a step below it, as a routed event's
-/// do, and read nothing the component wrote yet; the component hears its
-/// step afterwards, with no detail — the script `detail` is the realms'
-/// alone — and its `stop_propagation` ends its own walk. What the component
-/// queued during the walk is delivered by the component-events entry, as
-/// anything a member call queues is.
 #[test]
 fn a_synthetic_event_reaches_the_realms_at_the_paths_top_before_the_components_below() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -13184,10 +12035,6 @@ fn a_synthetic_event_reaches_the_realms_at_the_paths_top_before_the_components_b
     );
 }
 
-/// The host's `dispatchEvent` answers nothing, whatever the event: the
-/// dispatch it runs calls the realms it invites, the calling one included,
-/// and has no path to hand back. It refuses a node that is not a live
-/// element and arguments that are not its shape.
 #[test]
 fn the_dispatch_event_member_answers_nothing_and_refuses_what_is_not_its_shape() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -13247,10 +12094,6 @@ fn the_dispatch_event_member_answers_nothing_and_refuses_what_is_not_its_shape()
         .expect("main-thread script");
 }
 
-/// `timelineMilliseconds` answers the newest reading of the view's timeline
-/// the host was handed — the time origin before any, a frame post's `now`
-/// in milliseconds, a vsync's as it came — and `__CreateEvent` stamps the
-/// event it builds with it.
 #[test]
 fn timeline_milliseconds_answers_what_the_last_frame_or_vsync_set() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -13293,9 +12136,6 @@ fn timeline_milliseconds_answers_what_the_last_frame_or_vsync_set() {
     expect_timeline(&mut js_runtime, &mut runtime, 2000.5);
 }
 
-/// A `__lynx_timing_flag` attribute binds the next flush to the frame it
-/// commits, with that commit's timing; a flush with no flag records nothing
-/// and leaves the document's last commit timing as it was.
 #[test]
 fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
     let (mut js, mut runtime, elements) = runtime();
@@ -13313,8 +12153,6 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
         )
         .unwrap();
     let registry = Arc::clone(elements.slot.borrow().outbox.registry());
-    // Boot's own flush ended the page's load, which waits for a present no
-    // painter here makes.
     let records = registry.records_for_test();
     assert!(
         records
@@ -13370,7 +12208,6 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
         .commit_id();
     let [record] = flagged().try_into().expect("one flagged record");
     assert_eq!(record.flags, ["f1"]);
-    // No pipeline named it and none was opened natively: the flag's own.
     assert_eq!(
         record.origin,
         crate::performance::PipelineOrigin::UpdateTriggeredByNative
@@ -13382,10 +12219,6 @@ fn a_timing_flag_attribute_binds_the_next_flush_to_its_commit() {
     assert!(timing.frame_build_start <= timing.frame_build_end);
 }
 
-/// A pre-parsed page stylesheet sizing the type selector `lynx_tag`, as
-/// `bobcat-source` lowers a `StyleInfo` `Type` component: written as the
-/// document tag (`bobcat_core::document_tag`), so `svg` as `lynx-svg` and
-/// `input` as `x-input`.
 fn type_sheet(lynx_tag: &str) -> crate::resource::LoadedSource {
     use crate::resource::{LoadedSource, StyleSheetSource};
     let rule = |selectors: &str, property: &'static str, value: &str| crate::PreparsedRule::Style {
@@ -13408,14 +12241,6 @@ fn type_sheet(lynx_tag: &str) -> crate::resource::LoadedSource {
     )))
 }
 
-/// The Lynx `svg` is the document element `lynx-svg`
-/// (`crate::main::tree::tag_map`): `__CreateElement('svg')` creates a
-/// `lynx-svg`, `__GetTag` answers `svg` for it and for a `lynx-svg` the page
-/// created itself, a pre-parsed sheet's type selector sizes it, and the
-/// component's UA rule still hides what is inside it. A selector query is
-/// not mapped, as in web-core, which hands it to the browser unchanged
-/// (`web-core/ts/client/mainthread/elementAPIs/pureElementPAPIs.ts:242`):
-/// `svg` finds nothing, `lynx-svg` and a class find the elements.
 #[test]
 fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
     use terminus::link::stylo::values::computed::Display;
@@ -13493,14 +12318,6 @@ fn the_lynx_svg_tag_is_lynx_svg_in_the_document_and_svg_to_the_page() {
     );
 }
 
-/// The Lynx `input` and `textarea` are the document elements `x-input` and
-/// `x-textarea` (`crate::main::tree::tag_map`, user ruling 2026-11-26):
-/// `__CreateElement` of the Lynx tag creates the field, `__GetTag` answers
-/// the Lynx tag for it and for the field the page created under its
-/// document tag, and a pre-parsed sheet's type selector sizes both. The
-/// `-ng` aliases are not mapped. A selector query is not mapped, as for
-/// `svg`: the Lynx tag finds nothing, the document tag finds the two
-/// elements.
 #[test]
 fn the_lynx_input_and_textarea_tags_are_the_fields_in_the_document() {
     for (lynx, document, ng) in [
@@ -13583,10 +12400,6 @@ fn the_lynx_input_and_textarea_tags_are_the_fields_in_the_document() {
     }
 }
 
-/// Each canvas entry lives in the realm's table until `canvasDrop` names
-/// it: a collection drops nothing, since no JavaScript object stands for
-/// an entry. A canvas drawn and not read keeps its draws recorded until
-/// the per-entry step replays them, once per canvas drawn.
 #[test]
 fn canvas_entries_live_until_dropped_and_draws_are_settled_per_entry() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -13610,13 +12423,11 @@ fn canvas_entries_live_until_dropped_and_draws_are_settled_per_entry() {
         )
         .unwrap();
     let canvases = Rc::clone(&runtime.core().canvases);
-    // Canvases, paths, gradients, patterns, bitmaps.
     assert_eq!(canvases.census(), [2, 1, 1, 0, 1]);
     assert!(canvases.has_pending_draws(), "nothing has read the draw");
     runtime.core().settle_drawn_canvases();
     assert!(!canvases.has_pending_draws());
     assert_eq!(canvases.settled.get(), 1, "the one canvas drawn");
-    // An entry that drew nothing settles nothing.
     runtime.core().settle_drawn_canvases();
     assert_eq!(canvases.settled.get(), 1);
 
@@ -13640,9 +12451,6 @@ fn canvas_entries_live_until_dropped_and_draws_are_settled_per_entry() {
     assert_eq!(canvases.census(), [1, 0, 0, 0, 0]);
 }
 
-/// A realm's table keeps the thread's canvas replay state while it holds a
-/// canvas and lets go of it when `canvasDrop` removes its last canvas; a
-/// bitmap left behind keeps nothing.
 #[test]
 fn a_realm_keeps_the_canvas_replay_state_while_it_holds_a_canvas() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -13680,11 +12488,6 @@ fn a_realm_keeps_the_canvas_replay_state_while_it_holds_a_canvas() {
     assert!(!canvases.keeps_replay_state());
 }
 
-/// The replay state follows the last canvas out of a table and into it:
-/// `canvasDetach` of the realm's last canvas lets go of it, an image bitmap
-/// detached or attached changes nothing, and `canvasAttach` of a canvas
-/// takes it again. A canvas detached with draws not replayed is listed as
-/// drawn where it is attached.
 #[test]
 fn the_canvas_replay_state_follows_the_last_canvas_out_and_in() {
     let (mut js, mut runtime, _elements) = runtime();

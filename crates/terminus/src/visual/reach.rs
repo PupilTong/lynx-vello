@@ -25,7 +25,6 @@ use stylo::values::generics::transform::GenericTransformOperation;
 
 use crate::kurbo::{Affine, Point, Rect};
 
-/// A closed interval `[low, high]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Interval {
     pub(crate) low: f64,
@@ -47,7 +46,6 @@ impl Interval {
         }
     }
 
-    /// `from + (to − from)·y` over `y` in `self`.
     fn lerp(self, from: f64, to: f64) -> Self {
         let a = from + (to - from) * self.low;
         let b = from + (to - from) * self.high;
@@ -57,7 +55,6 @@ impl Interval {
         }
     }
 
-    /// `1 − y` over `y` in `self`.
     pub(crate) fn flipped(self) -> Self {
         Self {
             low: 1.0 - self.high,
@@ -69,29 +66,22 @@ impl Interval {
         self.low <= 0.0 && self.high >= 0.0
     }
 
-    /// The smallest `|y|` over `y` in `self`, which excludes 0.
     fn least_magnitude(self) -> f64 {
         self.low.abs().min(self.high.abs())
     }
 }
 
-/// Every eased progress `timing` yields over progress `[0, 1]`: a cubic
-/// Bézier stays inside its control points' hull, overshoot included, and
-/// steps inside `[0, 1]`. `None` for `linear()`, which the Lynx grammar does
-/// not parse.
 pub(crate) fn eased_range(timing: &TimingFunction) -> Option<Interval> {
     let hull = |y1: f32, y2: f32| Interval {
         low: 0.0_f64.min(f64::from(y1)).min(f64::from(y2)),
         high: 1.0_f64.max(f64::from(y1)).max(f64::from(y2)),
     };
     Some(match *timing {
-        // Every keyword's control points lie inside the unit square.
         TimingFunction::Keyword(_) | TimingFunction::Steps(..) => Interval {
             low: 0.0,
             high: 1.0,
         },
         TimingFunction::CubicBezier { y1, y2, .. } => hull(y1, y2),
-        // The cubic stylo evaluates it as.
         TimingFunction::SquareBezier { y, .. } => {
             hull(y * (2.0 / 3.0), 1.0 + (y - 1.0) * (2.0 / 3.0))
         }
@@ -99,8 +89,6 @@ pub(crate) fn eased_range(timing: &TimingFunction) -> Option<Interval> {
     })
 }
 
-/// One segment a transform contributor interpolates over, with the eased
-/// progress it samples there; `None` when that is unknown.
 #[derive(Clone, Copy)]
 pub(crate) struct Segment<'a> {
     pub(crate) from: &'a ComputedTransform,
@@ -108,18 +96,14 @@ pub(crate) struct Segment<'a> {
     pub(crate) eased: Option<Interval>,
 }
 
-/// The transform primitives with a reach, by stylo's matching: any two of
-/// one kind interpolate op by op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Translate,
     Scale,
-    /// About z, where a 2D composition sees it.
     Rotate,
 }
 
 impl Kind {
-    /// The parameters of this kind's identity, which pads a shorter list.
     const fn identity(self) -> [f64; 2] {
         match self {
             Self::Translate | Self::Rotate => [0.0, 0.0],
@@ -128,8 +112,6 @@ impl Kind {
     }
 }
 
-/// One op's planar part: translation in CSS px, scale factors, or a
-/// rotation's degrees in the first slot.
 #[derive(Debug, Clone, Copy)]
 struct Op {
     kind: Kind,
@@ -137,8 +119,6 @@ struct Op {
 }
 
 impl Op {
-    /// `op`'s planar part, `%` resolved against `reference`; `None` for an op
-    /// without a reach.
     fn of(op: &ComputedTransformOperation, reference: Size2D<f32>) -> Option<Self> {
         use GenericTransformOperation as T;
         let width = |length: &stylo::values::computed::LengthPercentage| {
@@ -174,7 +154,6 @@ impl Op {
     }
 }
 
-/// One op's parameter ranges: the second unused for a rotation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct OpReach {
     kind: Kind,
@@ -182,8 +161,6 @@ pub(crate) struct OpReach {
 }
 
 impl OpReach {
-    /// The parameters between `from` and `to`, of one kind, over eased
-    /// progress `eased`.
     fn between(from: Op, to: Op, eased: Interval) -> Self {
         debug_assert_eq!(from.kind, to.kind, "the shape pairs kinds");
         Self {
@@ -205,8 +182,6 @@ impl OpReach {
         }
     }
 
-    /// The bounding box of every point this op maps some point of `bounds`
-    /// to at some parameter in range.
     fn carry(self, bounds: Rect) -> Rect {
         let [x, y] = self.ranges;
         match self.kind {
@@ -231,8 +206,6 @@ impl OpReach {
         }
     }
 
-    /// The bounding box of every point this op maps into `region` at some
-    /// parameter in range.
     fn pull_back(self, region: Rect) -> Rect {
         let [x, y] = self.ranges;
         match self.kind {
@@ -258,8 +231,6 @@ impl OpReach {
     }
 }
 
-/// `[low, high] · s` over `s` in `scale`: the product is bilinear, so the
-/// extremes sit at the ends of both ranges.
 fn rescale(low: f64, high: f64, scale: Interval) -> (f64, f64) {
     let ends = [
         low * scale.low,
@@ -273,8 +244,6 @@ fn rescale(low: f64, high: f64, scale: Interval) -> (f64, f64) {
     )
 }
 
-/// `[low, high] / s` over `s` in `scale`, which excludes 0: `1/s` is
-/// monotone there, so the extremes sit at the ends of both ranges.
 fn unscale(low: f64, high: f64, scale: Interval) -> (f64, f64) {
     let ends = [
         low / scale.low,
@@ -288,9 +257,6 @@ fn unscale(low: f64, high: f64, scale: Interval) -> (f64, f64) {
     )
 }
 
-/// The bounding box of `region` rotated about the origin by every angle in
-/// `angles` (radians): the union of its corners' arcs, since each rotated
-/// box is bounded by its rotated corners.
 fn swept(region: Rect, angles: Interval) -> Rect {
     let corners = [
         Point::new(region.x0, region.y0),
@@ -305,8 +271,6 @@ fn swept(region: Rect, angles: Interval) -> Rect {
         .expect("a rect has corners")
 }
 
-/// The bounding box of `point` rotated about the origin by every angle in
-/// `angles`: the arc's two ends plus each axis direction it passes.
 fn arc_bounds(point: Point, angles: Interval) -> Rect {
     let radius = point.to_vec2().hypot();
     let span = angles.high - angles.low;
@@ -316,10 +280,6 @@ fn arc_bounds(point: Point, angles: Interval) -> Rect {
     let start = Affine::rotate(angles.low) * point;
     let end = Affine::rotate(angles.high) * point;
     let mut bounds = Rect::from_points(start, end);
-    // Headings run from `start`'s, in `[−π, π]`, through `span`: read off the
-    // rotated point, not summed with `angles.low`, which may be too large to
-    // add a heading to. Under a full turn, at most four axis directions lie
-    // in between.
     let from = start.y.atan2(start.x);
     let quarter = std::f64::consts::FRAC_PI_2;
     let first = (from / quarter).ceil();
@@ -342,32 +302,20 @@ fn arc_bounds(point: Point, angles: Interval) -> Rect {
     bounds
 }
 
-/// Where a transform track's delta `pre·L(t)·Lc⁻¹·pre⁻¹` can carry content,
-/// over the curve's whole domain; see the module documentation for when it
-/// has no bound.
 #[derive(Debug, Clone)]
 pub(crate) struct Reach(Option<Bounded>);
 
 #[derive(Debug, Clone)]
 struct Bounded {
-    /// `pre`: the transform list's output into the space above the node.
     pre: Affine,
     pre_inverse: Affine,
-    /// Per op of `L`, in list order.
     ops: Vec<OpReach>,
-    /// `pre·Lc`: the transform list's input into the node's space.
     lift: Affine,
     lift_inverse: Affine,
-    /// An upper bound on the spectral norm of every delta's inverse — how
-    /// far one CSS px above the node can reach in its space. `None` when a
-    /// scale range reaches or crosses 0.
     inverse_norm: Option<f64>,
 }
 
 impl Reach {
-    /// The reach of a track sampling `segments`, the committed list
-    /// `committed` among them, on an element of border box `reference` whose
-    /// world is `pre·L·origin⁻¹`, committed at `L = committed_matrix`.
     pub(crate) fn of<'a>(
         segments: impl IntoIterator<Item = Segment<'a>>,
         committed: &'a ComputedTransform,
@@ -384,7 +332,6 @@ impl Reach {
         Self(ops.map(|ops| Bounded::new(ops, pre, committed_matrix)))
     }
 
-    /// The reach of a curve that never moves.
     #[cfg(test)]
     pub(crate) fn still() -> Self {
         Self(Some(Bounded::new(
@@ -394,30 +341,20 @@ impl Reach {
         )))
     }
 
-    /// Whether the reach bounds anything.
     pub(crate) fn is_bounded(&self) -> bool {
         self.0.is_some()
     }
 
-    /// The bounding box, in the node's space, of every point some delta in
-    /// reach maps into `region`, given in the space above the node. `None`
-    /// when there is no bound, or a scale range reaches 0: a vanishing scale
-    /// draws content in from arbitrarily far.
     pub(crate) fn pull_back(&self, region: Rect) -> Option<Rect> {
         let reach = self.0.as_ref()?;
         reach.inverse_norm?;
         let mut region = reach.pre_inverse.transform_rect_bbox(region);
-        // `L = op₁·op₂·…` applies op₁ last, so op₁ is undone first.
         for op in &reach.ops {
             region = op.pull_back(region);
         }
         Some(reach.lift.transform_rect_bbox(region))
     }
 
-    /// The bounding box, in the space above the node, of every point some
-    /// delta in reach maps `bounds`, given in the node's space, to. Bounded
-    /// whatever the scale range, 0 included; the whole plane without a
-    /// reach, which the builder keeps out of every group.
     pub(crate) fn carry(&self, bounds: Rect) -> Rect {
         let Some(reach) = &self.0 else {
             return Rect::new(
@@ -428,16 +365,12 @@ impl Reach {
             );
         };
         let mut bounds = reach.lift_inverse.transform_rect_bbox(bounds);
-        // The last op applies first.
         for op in reach.ops.iter().rev() {
             bounds = op.carry(bounds);
         }
         reach.pre.transform_rect_bbox(bounds)
     }
 
-    /// An upper bound on how far one CSS px above the node can reach in its
-    /// space under any delta in reach; `None` without a bound or when a
-    /// scale range reaches 0.
     pub(crate) fn inverse_norm(&self) -> Option<f64> {
         self.0.as_ref()?.inverse_norm
     }
@@ -445,9 +378,6 @@ impl Reach {
 
 impl Bounded {
     fn new(ops: Vec<OpReach>, pre: Affine, committed: Affine) -> Self {
-        // `Δ⁻¹ = pre·Lc·L(t)⁻¹·pre⁻¹`, and the norm is submultiplicative:
-        // translations and rotations leave distances alone, a scale divides
-        // them by its least magnitude.
         let pre_inverse = pre.inverse();
         let conjugate = pre.spectral_norm() * pre_inverse.spectral_norm();
         let inverse_norm =
@@ -475,16 +405,11 @@ impl Bounded {
     }
 }
 
-/// One segment's ops paired as stylo pairs them: position by position while
-/// the kinds match, the longer list's remainder against identities. `None`
-/// for an op without a reach, a remainder on both sides — which stylo
-/// decomposes as matrices — or an unknown eased range.
 fn paired(segment: &Segment<'_>, reference: Size2D<f32>) -> Option<(Vec<(Op, Op)>, Interval)> {
     let eased = segment.eased?;
     let (from, to) = (&segment.from.0, &segment.to.0);
     let mut pairs = Vec::with_capacity(from.len().max(to.len()));
     for index in 0..from.len().max(to.len()) {
-        // Absent is `Some(None)`; an op without a reach, `None`.
         let at = |list: &[ComputedTransformOperation]| match list.get(index) {
             Some(op) => Op::of(op, reference).map(Some),
             None => Some(None),
@@ -499,9 +424,6 @@ fn paired(segment: &Segment<'_>, reference: Size2D<f32>) -> Option<(Vec<(Op, Op)
     Some((pairs, eased))
 }
 
-/// The per-op ranges over `committed` and every other segment, paired, when
-/// their kinds agree position by position; a segment shorter than another
-/// holds identities at the positions it lacks.
 fn op_ranges<'a>(
     committed: Segment<'a>,
     segments: impl IntoIterator<Item = Segment<'a>>,
@@ -524,7 +446,6 @@ fn op_ranges<'a>(
         }
         let known = ops.len();
         for &(from, to) in pairs.iter().skip(known) {
-            // Every segment before this one holds the identity here.
             let identity = Op::identity(from.kind);
             let before = OpReach::between(identity, identity, Interval::point(0.0));
             ops.push(before.union(OpReach::between(from, to, eased)));
@@ -571,8 +492,6 @@ mod tests {
         high: 1.0,
     };
 
-    /// The reach of `segments`, each `(from, to, eased)`, conjugated by
-    /// `pre` and lifted by `committed`, committed at the first one's `from`.
     fn reach_of(
         segments: &[(ComputedTransform, ComputedTransform, Interval)],
         pre: Affine,
@@ -615,9 +534,6 @@ mod tests {
         assert!(error < 1e-9, "got {got:?}, want {want:?}");
     }
 
-    /// A cubic Bézier's hull covers its overshoot; steps and every keyword
-    /// stay in `[0, 1]`; `square-bezier` reads the cubic stylo converts it
-    /// to.
     #[test]
     fn an_easing_reaches_its_control_point_hull() {
         let overshoot = TimingFunction::CubicBezier {
@@ -647,7 +563,6 @@ mod tests {
         );
     }
 
-    /// An overshooting segment reaches past both keyframes.
     #[test]
     fn a_bezier_segment_reaches_its_control_point_overshoot() {
         let reach = reach(&[(
@@ -668,7 +583,6 @@ mod tests {
                 Interval::point(0.0),
             )],
         );
-        // A region at x = 140 is reached by the overshoot alone.
         let region = Rect::new(240.0, 0.0, 250.0, 10.0);
         assert_rect(
             reach.pull_back(region).expect("bounded"),
@@ -676,9 +590,6 @@ mod tests {
         );
     }
 
-    /// `translateX` and `translate` are one primitive, `%` resolves against
-    /// the border box, and a shorter list pads with identities, as stylo
-    /// pairs them — `none` included.
     #[test]
     fn primitives_pair_and_pad_as_stylo_interpolates_them() {
         let half = GenericTransformOperation::TranslateY(LengthPercentage::new_percent(
@@ -719,9 +630,6 @@ mod tests {
         );
     }
 
-    /// A list holding an op the reach does not model — a `matrix()`, a skew
-    /// or a turn out of the plane — or a mismatched remainder stylo
-    /// decomposes has no reach.
     #[test]
     fn unmodeled_ops_and_decomposed_remainders_have_no_reach() {
         let matrix =
@@ -748,13 +656,10 @@ mod tests {
         }
     }
 
-    /// `translate(100px, 0) rotate(90deg)` rotates first and translates
-    /// last, so a pullback undoes the translation first.
     #[test]
     fn a_pullback_undoes_the_last_applied_op_first() {
         let turned = || list(vec![translate(100.0, 0.0), rotate(90.0)]);
         let reach = reach(&[(turned(), turned(), LINEAR)]);
-        // L(50, 0) = translate(rotate(50, 0)) = (0, 50) + (100, 0).
         let region = Rect::new(99.0, 49.0, 101.0, 51.0);
         assert_rect(
             reach.pull_back(region).expect("bounded"),
@@ -762,8 +667,6 @@ mod tests {
         );
     }
 
-    /// A sweep over 30°..120° carries a point through the +y axis, whose
-    /// extreme neither end of the arc reaches.
     #[test]
     fn a_rotation_crossing_an_axis_reaches_the_axis_extreme() {
         let reach = reach(&[(
@@ -771,7 +674,6 @@ mod tests {
             list(vec![rotate(-30.0)]),
             LINEAR,
         )]);
-        // Undoing −120°..−30° rotates by 30°..120°: (10, 0) passes (0, 10).
         let pulled = reach
             .pull_back(Rect::new(10.0, 0.0, 10.0, 0.0))
             .expect("bounded");
@@ -782,7 +684,6 @@ mod tests {
         );
     }
 
-    /// A full turn or more is the bounding square of each corner's circle.
     #[test]
     fn a_full_turn_sweeps_the_whole_circle() {
         let reach = reach(&[(list(vec![rotate(0.0)]), list(vec![rotate(360.0)]), LINEAR)]);
@@ -822,7 +723,6 @@ mod tests {
                 "scaleY({from}) to scaleY({to})",
             );
         }
-        // An overshooting ease carries `0.1 → 1` below 0 as well.
         assert!(
             reach(&[(
                 list(vec![scale(0.1, 0.1)]),
@@ -837,9 +737,6 @@ mod tests {
         );
     }
 
-    /// `pre` and `Lc` conjugate the op ranges: a quarter-turn curve about an
-    /// origin at (50, 50), committed at 0°, reaches a region about that
-    /// origin only.
     #[test]
     fn the_fixed_maps_conjugate_the_op_ranges() {
         let reach = reach_of(
@@ -847,8 +744,6 @@ mod tests {
             Affine::translate((50.0, 50.0)),
             Affine::IDENTITY,
         );
-        // Content at (50 + 10·cos a, 50 + 10·sin a) for a in 0..90° is
-        // carried onto (50, 60) at some instant.
         assert_rect(
             reach
                 .pull_back(Rect::new(50.0, 60.0, 50.0, 60.0))
@@ -857,9 +752,6 @@ mod tests {
         );
     }
 
-    /// Content baked mid-curve at `Lc = scale(1.5)` sits at `L(t)·Lc⁻¹` of
-    /// its baked place, so the pullback lifts through `Lc`: over `s ∈ [1, 2]`,
-    /// `x·s/1.5 ∈ [10, 30]` holds for `x ∈ [7.5, 45]`.
     #[test]
     fn a_curve_committed_mid_scale_lifts_through_the_committed_scale() {
         let reach = reach_of(
@@ -879,8 +771,6 @@ mod tests {
         );
     }
 
-    /// An angle too large to add a heading to still sweeps in bounded time:
-    /// a constant rotation reaches its own rotation of the region alone.
     #[test]
     fn a_huge_constant_rotation_reaches_its_own_rotation() {
         let region = Rect::new(3.0, -4.0, 6.0, 8.0);
@@ -894,8 +784,6 @@ mod tests {
         }
     }
 
-    /// Whole turns before the sweep change nothing: 30°..120° after ten
-    /// thousand turns still passes the +y axis.
     #[test]
     fn a_sweep_after_many_turns_reaches_the_axis_it_passes() {
         let turns = 10_000.0 * 360.0;
@@ -914,8 +802,6 @@ mod tests {
         );
     }
 
-    /// A pop-in from `scale(0)` has no pullback, yet carries content forward
-    /// into the hull of its box and the origin.
     #[test]
     fn a_scale_through_zero_still_carries_forward() {
         let reach = reach(&[(
@@ -930,8 +816,6 @@ mod tests {
         );
     }
 
-    /// The exported curve of an element running `animation` inside a
-    /// transformed parent, committed at 0.3 s.
     fn exported(keyframes: &str, animation: &str) -> std::sync::Arc<crate::visual::CommittedFrame> {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; width: 800px; height: 600px; }}
@@ -950,10 +834,6 @@ mod tests {
         dom.commit()
     }
 
-    /// Every delta the exported curve samples keeps `bounds` inside the
-    /// carry, pulls `region` back inside the pullback, and its inverse
-    /// stretches no distance past the inverse norm — with a parent world
-    /// that neither commutes with the ops nor is rigid.
     #[test]
     fn every_sampled_delta_stays_inside_the_reach() {
         for (keyframes, animation) in [
@@ -1023,9 +903,6 @@ mod tests {
         }
     }
 
-    /// Running reversed, a segment eases by its upper keyframe's function
-    /// over flipped progress: `100 + (0 − 100)·y` over `y ∈ [−1, 1]` reaches
-    /// 200 px, where the same curve forward never passes 100.
     #[test]
     fn a_reversed_segment_eases_by_its_upper_keyframe() {
         let keyframes = "from { transform: translateX(0px); }

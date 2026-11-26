@@ -91,26 +91,14 @@ use terminus::link::{CustomElement, DocumentKind, NodeId};
 use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
 
-/// The document tag of Lynx's vector picture element, whose Lynx tag is
-/// `svg` ([`super::tag_map`]), and the two attributes this module reflects.
 pub(super) const SVG_TAG: &str = "lynx-svg";
 const SRC_ATTRIBUTE: &str = "src";
 const CONTENT_ATTRIBUTE: &str = "content";
 
-/// The box an `svg` draws into, and the suppression of its children.
-///
-/// The border box and the rest of `web-elements`' common block come from
-/// [`super::ua_sheet`], which lists `lynx-svg` beside `image`. `display:
-/// flex` is `x-svg.css`'s, and keeps the tag out of the
-/// `defaultDisplayLinear` list as `image` is. Nothing here is `!important`:
-/// see `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
 pub(super) const UA_RULES: &str = r"lynx-svg { display: flex; }
 lynx-svg > * { display: none; }
 ";
 
-/// Installs the component, over the queue its write-time outcomes go into
-/// and the record of its elements' sources. Must run before any element
-/// could carry the tag.
 pub(super) fn define(
     document: &mut LynxDocument,
     outcomes: ComponentEvents,
@@ -119,8 +107,6 @@ pub(super) fn define(
     document.define(SVG_TAG, Box::new(Svg { outcomes, sources }));
 }
 
-/// Whether `node` is a live `lynx-svg` element: the runtime builds an `svg`
-/// node's `load` detail from its layout box and dispatches no `error` for it.
 pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
@@ -128,18 +114,8 @@ pub(crate) fn is_svg(document: &LynxDocument, node: NodeId) -> bool {
         .is_some_and(|tag| tag == SVG_TAG)
 }
 
-/// Points the element at whatever its last written attribute names.
-///
-/// `attribute_changed_callback` is the whole of the reflection, for the
-/// reasons [`super::image`]'s component gives: the reaction that carries a
-/// source always follows the element's creation, and a free drops the
-/// element's record ([`CustomElement::freed`]) while `terminus`'s own free
-/// releases what the box presents.
 struct Svg {
-    /// Where a source that settles at the write leaves its outcome. The
-    /// reaction runs inside a JavaScript call, so it cannot dispatch.
     outcomes: ComponentEvents,
-    /// The sources every `image` and `svg` element names.
     sources: ImageSources,
 }
 
@@ -159,8 +135,6 @@ impl CustomElement<()> for Svg {
         let new = new.filter(|value| !value.is_empty());
         let outcome = match name {
             SRC_ATTRIBUTE => self.sources.set(document, element, ImageRole::Source, new),
-            // No `content` keeps the current source (web-core's
-            // `_handleContent`; see the module docs).
             CONTENT_ATTRIBUTE => new.and_then(|content| {
                 self.sources
                     .set_document(document, element, content.as_bytes(), DocumentKind::Svg)
@@ -180,8 +154,6 @@ impl CustomElement<()> for Svg {
 
 #[cfg(test)]
 mod tests {
-    // Every size asserted here is an authored pixel count or a natural size
-    // set by hand, so no tolerance.
     #![allow(clippy::float_cmp)]
 
     use std::sync::Arc;
@@ -201,9 +173,7 @@ mod tests {
 
     const SOURCE: &str = "app:///a.svg";
     const OTHER_SOURCE: &str = "app:///b.svg";
-    /// Markup whose natural size, 10x5, tells its load from a `src`'s 30x15.
     const MARKUP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="5"/>"#;
-    /// Other markup, 20x20.
     const OTHER_MARKUP: &str =
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"/>"#;
 
@@ -228,12 +198,10 @@ mod tests {
         }
     }
 
-    /// The default document with the record of its elements' sources.
     fn images() -> (LynxDocument, ComponentEvents, ImageSources) {
         with_image_sources(PageConfig::default())
     }
 
-    /// The source `element` presents.
     fn source_of(document: &LynxDocument, element: NodeId) -> Option<String> {
         document
             .picture(element)
@@ -241,14 +209,10 @@ mod tests {
             .map(str::to_owned)
     }
 
-    /// How many documents are queued for the host to parse, draining them.
     fn parses(document: &mut LynxDocument) -> usize {
         document.take_document_requests().len()
     }
 
-    /// Answers every document request as a host does, with the engine's
-    /// parser over its bytes reported for its source, and applies the
-    /// reports.
     fn answer_requests(document: &mut LynxDocument, sources: &ImageSources) -> Vec<ImageOutcome> {
         let reports: Vec<ImageEvent> = document
             .take_document_requests()
@@ -258,7 +222,6 @@ mod tests {
         apply_image_events(document, sources, &reports)
     }
 
-    /// The outcomes queued at a bind, as the runtime would drain them.
     fn queued(events: &ComponentEvents) -> Vec<ImageOutcome> {
         events
             .take()
@@ -303,8 +266,6 @@ mod tests {
         }
     }
 
-    /// The reverse of `<image>`'s rule: an unsized `<svg>` takes its natural
-    /// size, and a sized one keeps its CSS size, for both attributes.
     #[test]
     fn an_unsized_svg_lays_out_at_its_natural_size_and_a_sized_one_at_its_css_size() {
         let (mut document, _, sources) = images();
@@ -340,10 +301,6 @@ mod tests {
         assert_eq!(parses(&mut document), 0, "a URL is the host's to fetch");
     }
 
-    /// `content` is not a source to fetch: no image is asked of the host,
-    /// the markup's bytes are queued as a document request as they were
-    /// written, and the element presents the synthetic source they are filed
-    /// under.
     #[test]
     fn content_is_queued_as_a_document_request() {
         let mut document = document();
@@ -361,8 +318,6 @@ mod tests {
         assert_eq!(source_of(&document, element).as_deref(), Some(&**source));
     }
 
-    /// Both attributes write the one source, so whichever was written last
-    /// is what the element draws and what its `load` answers for.
     #[test]
     fn the_last_attribute_written_wins() {
         let (mut document, _, sources) = images();
@@ -388,7 +343,6 @@ mod tests {
         );
     }
 
-    /// An empty value or a removal of `src` names nothing, as in `<image>`.
     #[test]
     fn an_empty_or_removed_src_names_no_source() {
         let (mut document, _, sources) = images();
@@ -416,9 +370,6 @@ mod tests {
         }
     }
 
-    /// An empty value or a removal of `content` keeps whatever source the
-    /// element has, as web-core's `_handleContent` does: the `src` written
-    /// after it, or the `content`'s own document.
     #[test]
     fn an_empty_or_removed_content_keeps_the_current_source() {
         for clear in [Some(""), None] {
@@ -438,7 +389,6 @@ mod tests {
                 "an empty `content` names nothing: {clear:?}"
             );
 
-            // `src` written after `content` stays when `content` goes.
             document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
             document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
             let _ = document.take_wanted_images();
@@ -450,8 +400,6 @@ mod tests {
                 "`src` is still the source: {clear:?}"
             );
 
-            // So does the `content`'s own document when it was the last
-            // written.
             let (mut document, _, sources) = images();
             let element = svg(&mut document, "");
             document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
@@ -464,13 +412,10 @@ mod tests {
         }
     }
 
-    /// A source this document has already settled answers at the bind, and is
-    /// queued rather than dispatched, for both attributes.
     #[test]
     fn a_settled_source_is_queued_at_the_bind() {
         let (mut document, events, sources) = images();
         let _ = apply_image_events(&mut document, &sources, &[loaded(SOURCE)]);
-        // Another element settles the markup first and keeps it bound.
         let first = svg(&mut document, "");
         document.set_attribute(first, CONTENT_ATTRIBUTE, MARKUP);
         let _ = answer_requests(&mut document, &sources);
@@ -486,8 +431,6 @@ mod tests {
         assert_eq!(parses(&mut document), 0, "the markup was already parsed");
     }
 
-    /// Two elements with the same `content` present one source, parsed once,
-    /// and both settle when it applies.
     #[test]
     fn two_elements_with_the_same_content_share_one_source() {
         let (mut document, _, sources) = images();
@@ -504,10 +447,6 @@ mod tests {
         );
     }
 
-    /// A `content` change parses once per distinct markup: writing the
-    /// current markup again parses nothing, another element's settled markup
-    /// parses nothing, and markup no element presents any more is forgotten,
-    /// so writing it later parses it afresh.
     #[test]
     fn a_content_change_reparses_once_per_distinct_markup() {
         let (mut document, events, sources) = images();
@@ -554,10 +493,6 @@ mod tests {
         assert!(!is_svg(&document, image));
     }
 
-    /// The check for [`super::UA_RULES`]' ordering constraint, as
-    /// `nothing_inside_an_image_generates_a_box` is for `image`. Without a
-    /// source the element is not replaced, so the cascade alone has to hide
-    /// its children.
     #[test]
     fn nothing_inside_an_svg_generates_a_box() {
         for sourced in [None, Some(SRC_ATTRIBUTE), Some(CONTENT_ATTRIBUTE)] {

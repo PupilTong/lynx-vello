@@ -22,12 +22,8 @@ use crate::main::quickjs::ScriptEngine;
 use crate::realm::string_argument;
 use crate::script::ScriptError;
 
-/// The largest pipeline id a realm is handed: every integer up to it is an
-/// exact `f64`.
 const MAX_PIPELINE_ID: u64 = 1 << 53;
 
-/// A pipeline id argument: an integer in `1..=2^53`, or 0 — "none" — for
-/// anything else, which every member then ignores.
 pub(crate) fn pipeline_argument(arguments: &[HostArgument<'_>], index: usize) -> u64 {
     #[expect(
         clippy::cast_precision_loss,
@@ -50,7 +46,6 @@ pub(crate) fn pipeline_argument(arguments: &[HostArgument<'_>], index: usize) ->
     }
 }
 
-/// A `0`/`1` flag argument, or a boolean.
 fn flag_argument(arguments: &[HostArgument<'_>], index: usize) -> bool {
     match arguments.get(index) {
         Some(&HostArgument::Number(value)) => value != 0.0,
@@ -68,15 +63,6 @@ fn register(
     engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, callback)
 }
 
-/// Installs the four pipeline hooks `ReactLynx` calls through
-/// `lynx.performance`, in a realm that opens records as `opener`:
-///
-/// - `generatePipelineId()`: a fresh id, from one atomic increment;
-/// - `onPipelineStart(id, origin, dsl, stage, needTimestamps)`: opens the record, with `origin` a
-///   Lynx origin name (`""` for the realm kind's own: `updateTriggeredByBts` in a worker,
-///   `updateTriggeredByNative` in a main-thread realm) and `needTimestamps` `0` or `1`;
-/// - `markPipelineTiming(id, key)`: one instant into the record;
-/// - `bindPipelineTimingFlag(id, flag)`: the record reports `flag`.
 pub(crate) fn install_pipeline_members(
     engine: &mut ScriptEngine,
     registry: &Arc<PipelineRegistry>,
@@ -118,21 +104,6 @@ pub(crate) fn install_pipeline_members(
     Ok(())
 }
 
-/// Installs a worker realm's performance members, the pipeline hooks
-/// included, and answers the flag `observePerformance` sets: whether this
-/// realm's `bobcat:bts-runtime` has an observer, which is what a
-/// `PerformanceReady` is delivered to.
-///
-/// - `observePerformance(on, paint, resource)`: the realm has an observer (`on` `1`) or no longer
-///   has one (`0`), one of its observers asked for `paint` entries (`paint` `1`) or none did (`0`),
-///   and one asked for `resource` entries (`resource` `1`), which times every `lynx.fetchBundle`
-///   the view's realms make, or none did (`0`);
-/// - `takePerformanceEntries()`: every entry this worker is owed, assembled here on the worker's
-///   thread, as one record string — per entry its pair count, then key and value fields, a value
-///   `n<number>`, `b1`/`b0` or `s<text>`;
-/// - `markLoadTiming(key)`: `loadCoreEnd`, `loadBackgroundStart` or `loadBackgroundEnd` (anything
-///   else does nothing), answering whether the mark completed entries this realm is owed — the load
-///   waits for `loadBackgroundEnd` — so the caller can take them at once.
 pub(crate) fn install_worker_members(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
@@ -172,7 +143,6 @@ pub(crate) fn install_worker_members(
         };
         let completion = pipelines.mark_worker_load(key, mark);
         if completion.completed {
-            // The embedder's next `pump` reports it; wake it for that turn.
             waking.wake();
         }
         Ok(HostValue::Boolean(completion.owed_to_caller))

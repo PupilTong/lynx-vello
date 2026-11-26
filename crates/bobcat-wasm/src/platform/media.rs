@@ -42,8 +42,6 @@ use wasm_bindgen::prelude::*;
 
 use super::BrowserFrame;
 
-/// What the table of open videos reaches a sink through, its type erased:
-/// the table is the module's, and every sink type is the resource system's.
 trait OpenVideo {
     fn frame(&self, frame: BrowserFrame);
     fn event(&self, event: MediaEvent);
@@ -65,29 +63,22 @@ impl<S: MediaSink<BrowserFrame>> OpenVideo for S {
 }
 
 thread_local! {
-    /// Every open video of this Worker, by the number its messages carry.
     static OPEN: RefCell<HashMap<u32, Rc<dyn OpenVideo>>> = RefCell::new(HashMap::new());
     static NEXT: Cell<u32> = const { Cell::new(1) };
 }
 
-/// The browser's [`Media`]: posts the facade's `<video>` half its
-/// instructions through `post`, the Render Worker's own function that
-/// `postMessage`s one `bobcat-media` message (transferring its bytes).
 #[derive(Clone, Debug)]
 pub struct BrowserMedia {
     post: js_sys::Function,
 }
 
 impl BrowserMedia {
-    /// The player over `post`, called with each message as one object.
     #[must_use]
     pub fn new(post: js_sys::Function) -> Self {
         Self { post }
     }
 }
 
-/// Posts `{type: 'bobcat-media', player, op, ...fields}`. A message that
-/// cannot be posted is lost: the facade is gone, and with it every video.
 fn post(function: &js_sys::Function, player: u32, op: &str, fields: &[(&str, JsValue)]) {
     let message = Object::new();
     let set = |key: &str, value: &JsValue| {
@@ -124,8 +115,6 @@ impl Media<BrowserFrame> for BrowserMedia {
                 media_type,
             } => (
                 url,
-                // A copy in an `ArrayBuffer` of its own: the Wasm memory is
-                // shared, and a `Blob` may not be built over it.
                 Uint8Array::from(&bytes[..]).into(),
                 media_type.map_or(JsValue::NULL, |media_type| JsValue::from_str(&media_type)),
             ),
@@ -153,9 +142,6 @@ impl Media<BrowserFrame> for BrowserMedia {
     }
 }
 
-/// One open video: its number, and the function its instructions are
-/// posted through. Dropping it closes the facade's `<video>` and forgets
-/// the sink, so a frame still in flight is closed on arrival.
 #[derive(Debug)]
 pub struct BrowserPlayer {
     player: u32,
@@ -197,15 +183,10 @@ impl Drop for BrowserPlayer {
     }
 }
 
-/// The sink of open video `player`.
 fn open_video(player: u32) -> Option<Rc<dyn OpenVideo>> {
     OPEN.with(|open| open.borrow().get(&player).cloned())
 }
 
-/// One frame of open video `player`, transferred from the facade's
-/// `<video>`: handed to its sink, which keeps it as the newest and publishes
-/// it while the picture is drawn. A frame of a video closed since is closed
-/// here.
 #[wasm_bindgen(js_name = deliverMediaFrame)]
 pub fn deliver_media_frame(player: u32, frame: web_sys::VideoFrame) {
     let frame = BrowserFrame::video(frame);
@@ -214,10 +195,6 @@ pub fn deliver_media_frame(player: u32, frame: web_sys::VideoFrame) {
     }
 }
 
-/// One report of open video `player`'s `<video>`: `firstframe` with its
-/// natural size and its duration in seconds (`NaN` or infinite for none),
-/// `ended`, or `error` with `kind` (`"source"` or `"playback"`) and the
-/// browser's message. A report of a video closed since is dropped.
 #[wasm_bindgen(js_name = deliverMediaEvent)]
 pub fn deliver_media_event(
     player: u32,

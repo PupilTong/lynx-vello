@@ -127,56 +127,19 @@ use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot
 
 const MAX_REACTION_DEPTH: usize = 64;
 
-/// [DOM §4.2.2.5](https://dom.spec.whatwg.org/#signal-a-slot-change)'s
-/// event: fired by the document itself at a slot whose assigned nodes
-/// changed, with `bubbles: true` and `composed: false`, so it ends at the
-/// slot's shadow root, where the host's own handler hears it.
 pub(crate) const SLOT_CHANGE: &str = "slotchange";
 
 const MAX_REACTIONS_PER_SCOPE: usize = 1 << 20;
 
-/// Lifecycle behavior shared by elements with one local name.
-///
-/// No `Send + Sync` supertrait. It was justified as what kept `Document<T>`
-/// `Send`, which is no longer a property a document has or wants, and nothing
-/// else ever needed it: the registry holding these handlers lives on the
-/// document, a `Node` carries only a `DefinitionId` into it, and a node is
-/// all Stylo's parallel traversal can reach — so no Rayon worker can name a
-/// handler, and the document itself cannot leave the thread that built it.
 pub trait CustomElement<T> {
     fn observed_attributes(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// The event types [`Self::handle_event`] is called for, by their W3C
-    /// names (`"slotchange"`, `"pointerdown"`): the analogue of
-    /// [`Self::observed_attributes`] for events.
-    ///
-    /// Read once, by [`Document::define`], which unions every definition's
-    /// list into one set for the document. A dispatch whose type is in no
-    /// definition's list is one set lookup and walks nothing, which is what
-    /// keeps the Rust walk free for an event no component handles. There is
-    /// no per-element registration: every element of a kind hears what its
-    /// definition names, and a handler that cares about one element filters
-    /// by `element`.
-    ///
-    /// A name is *live* while at least one element of a definition naming it
-    /// exists ([`Document::take_observed_name_changes`]): the host publishes
-    /// the live names as listened-for names, so its input router routes them
-    /// whether or not a realm listens too, and only while an element is there
-    /// to hear them.
     fn observed_events(&self) -> &'static [&'static str] {
         &[]
     }
 
-    /// Whether an element of this definition is a Lynx text element: one
-    /// that lays out as a Lynx paragraph, or a run of the paragraph around it,
-    /// whatever its computed `display` is, other than `none` and `contents`.
-    ///
-    /// This is the element's kind, not its style — as an HTML `img` is
-    /// replaced content whatever `display` says — so the computed value keeps
-    /// what the author wrote. Read once, by [`Document::define`]; an element
-    /// takes it from its definition at creation and keeps it for life.
     fn is_lynx_text(&self) -> bool {
         false
     }
@@ -204,92 +167,14 @@ pub trait CustomElement<T> {
         let _ = (document, element, name, old, new);
     }
 
-    /// `element` is being freed: its [`NodeId`] is retired, never to be
-    /// reissued, and its node dropped. The last chance for a definition to
-    /// drop state it keys by that id.
-    ///
-    /// Not a lifecycle reaction, and not `disconnected_callback`, which a
-    /// removal that keeps the node also raises: it is called inline, once
-    /// per element of this definition, from the free itself — for each
-    /// defined element of a freed subtree, its shadow trees included, as each
-    /// node of it is freed. There is no document access, because the node is
-    /// half gone (out of the arenas, its subtree partly freed) and nothing
-    /// may run against the tree mid-free; the id is all a handler gets.
     fn freed(&self, element: NodeId) {
         let _ = element;
     }
 
-    /// One event reaching this element, on the standard's path, for a type
-    /// this definition names in [`Self::observed_events`].
-    ///
-    /// Not a lifecycle callback: it is called by the Rust walk
-    /// ([`Document::dispatch_element_event_over`], or
-    /// [`Document::dispatch_element_event`] for an event only the engine
-    /// hears), which walks the capture and bubble passes of
-    /// [`Document::event_steps`] and delivers to every defined element on
-    /// them — so `element` is the event's `currentTarget`, and
-    /// [`ElementEvent::target`] is what the event was fired at. A component
-    /// hears events aimed at its descendants exactly as a listener on it
-    /// would. [`ElementEvent::type_name`] says which event this is and
-    /// [`ElementEvent::detail`] what it carries.
-    ///
-    /// Two kinds of event arrive here. One is the engine's own, which never
-    /// reaches script: a `slotchange`, a `content-visibility: auto` element
-    /// starting or stopping to skip its contents. The other is every event
-    /// script hears too (routed input, a component's `load`, `scroll`), on
-    /// the path the host's one dispatch also hands to the realm.
-    /// [`ElementEvent::stop_propagation`] ends the walk, and with it every
-    /// later step a host drives with [`Document::advance`]; a host that runs
-    /// script after a walk run to its end
-    /// ([`Document::dispatch_element_event_over`]) runs it regardless. The
-    /// listener table ([`Document::add_listener`]) is not consulted here:
-    /// whether a component hears an event is its definition's answer, and
-    /// the walk calls this only for a type [`Self::observed_events`] names.
-    ///
-    /// Called *inline*, unlike a reaction: the walk has no queue of its own,
-    /// because it is not inside a tree mutation that a callback could
-    /// observe half-finished. What it does share is the drain boundary —
-    /// each call is its own `[CEReactions]` scope, so the reactions this
-    /// handler's mutations raise run before the next node on the path is
-    /// visited.
-    ///
-    /// One event a component hears without being on the path is a
-    /// non-composed one fired inside its own shadow tree, such as the
-    /// standard's `slotchange` at one of its slots, or the non-composed `tap`
-    /// a host fires at the shadow node a tap hit: the path ends at the
-    /// shadow root, and the shadow root's step is delivered here with
-    /// `element` the host — where a script component would listen on
-    /// `this.shadowRoot`. The shadow root cannot be the `currentTarget` of a
-    /// call that is the host's, so [`ElementEvent::current_target`] is the
-    /// host there too; [`ElementEvent::target`] is the node inside the shadow
-    /// tree the event was fired at.
-    ///
-    /// For such an event that also does not bubble (the W3C `scroll` of a
-    /// scroll container inside the component's shadow tree), that boundary
-    /// step exists in the capture pass only, so the host's one delivery
-    /// reports [`EventPhase::Capturing`](crate::event::EventPhase::Capturing).
-    /// A handler that keeps only [`EventPhase::Bubbling`](crate::event::EventPhase::Bubbling)
-    /// deliveries, which is right for `slotchange` because it bubbles, never
-    /// sees one: filter on the phase only for an event that bubbles.
     fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
         let _ = (document, element, event);
     }
 
-    /// One imperative method of this element kind: HTML's per-interface
-    /// method surface, what `HTMLDialogElement` adds beyond `HTMLElement`.
-    ///
-    /// Called by [`Document::invoke_element_method`], inside one
-    /// `[CEReactions]` scope, so the reactions this method's mutations raise
-    /// run before that call returns, as a browser's `[CEReactions]` method
-    /// runs them before it returns to script.
-    ///
-    /// [`MethodOutcome::NotFound`] is the default and means "this kind has no
-    /// method of that name". The host answers the methods every element
-    /// shares only after a `NotFound`, so a kind that overrides a shared name
-    /// is asked first, as a subclass method shadows the base's; a name the
-    /// host answers before asking any kind never reaches this method.
-    /// `call.params` is the text the host received; this crate does not read
-    /// it.
     fn invoke(
         &self,
         document: &mut Document<T>,
@@ -300,27 +185,6 @@ pub trait CustomElement<T> {
         MethodOutcome::NotFound
     }
 
-    /// Entries one of this element's intersection observers queued — the
-    /// observers created with an [`ElementHandler`](crate::visual::intersection::ElementHandler)
-    /// naming this element.
-    ///
-    /// Not a lifecycle callback either: it is called by that handler's
-    /// [`IntersectionEventHandler::notify`](crate::visual::intersection::IntersectionEventHandler::notify)
-    /// from [`Document::notify_intersection_observers`], which the host runs
-    /// from a delivery of its own, after the update that queued them, never
-    /// inside a render or a commit. `observer` says which of the element's
-    /// observers this is — the id
-    /// [`Document::create_intersection_observer`] answered; `entries` are in
-    /// the order the updates queued them.
-    ///
-    /// **This path never reaches script**, as [`Self::handle_event`]'s does
-    /// not: it is how the engine's own components observe intersection. A
-    /// realm's observer carries a handler of its own.
-    ///
-    /// Each call is its own `[CEReactions]` scope: the reactions the
-    /// handler's mutations raise run before the delivery returns. A panic
-    /// here leaves the document unspecified, as a panicking lifecycle
-    /// callback does.
     fn intersections_changed(
         &self,
         document: &mut Document<T>,
@@ -332,44 +196,27 @@ pub trait CustomElement<T> {
     }
 }
 
-/// One call of an element method: its name, and the parameters as the text
-/// the host received (JSON, by the Lynx contract). This crate passes both
-/// through unread; the kind that answers the call parses `params` if it needs
-/// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodCall<'a> {
     pub name: &'a str,
     pub params: &'a str,
 }
 
-/// What [`CustomElement::invoke`] answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MethodOutcome {
-    /// This kind has no method of that name.
     NotFound,
-    /// The method ran and has no data to return.
     Done,
-    /// The method ran and returns this text, which the host hands to the
-    /// caller unchanged. Its format is between the kind that writes it and the
-    /// caller that reads it; this crate does not read it.
     Data(String),
-    /// The method was found and refused the call.
     Failed(MethodError),
 }
 
-/// Why a found method refused its call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodError {
-    /// The parameters do not have the shape the method reads.
     InvalidParams,
-    /// The element is not in a state the method can run in: HTML's
-    /// `InvalidStateError`, such as `show()` on a modal dialog.
     InvalidState,
-    /// The method ran and its operation failed.
     Operation,
 }
 
-/// Index into the document's definition list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct DefinitionId(NonZeroU32);
 
@@ -400,46 +247,23 @@ enum Reaction {
 
 struct Definition<T> {
     observed: Box<[LocalName]>,
-    /// The handler's [`CustomElement::observed_events`], read once.
     events: &'static [&'static str],
-    /// The handler's [`CustomElement::is_lynx_text`], read once.
     lynx_text: bool,
-    /// How many elements of this definition exist: counted where a node is
-    /// given the definition, uncounted where it is freed
-    /// ([`CustomElement::freed`]'s call), which every such node reaches.
     instances: usize,
-    /// Shared, not owned: one handler can be defined under several names
-    /// ([`Document::define_shared`]).
     handler: Rc<dyn CustomElement<T>>,
 }
 
-/// Document-owned definitions and reaction queues.
 pub(crate) struct CustomElementRegistry<T> {
     definitions: Vec<Definition<T>>,
     by_name: FxHashMap<LocalName, DefinitionId>,
-    /// The union of every definition's [`CustomElement::observed_events`]:
-    /// the one lookup a dispatch of a type nothing observes costs.
     observed_events: FxHashSet<&'static str>,
-    /// Per observed name, how many definitions naming it have an element
-    /// alive: a name is live while this is non-zero.
     live_observers: FxHashMap<&'static str, usize>,
-    /// The names whose liveness changed since the last
-    /// [`Document::take_observed_name_changes`], each at most once, with the
-    /// liveness it changed to. A change that undoes a pending one removes it.
     observed_name_changes: Vec<(&'static str, bool)>,
-    /// Every pending reaction, in the order it was enqueued, with the
-    /// element it is for. A scope is the tail from its watermark
-    /// ([`Document::begin_reactions`]); an entry is `None` once it ran, so
-    /// an enclosing scope's cursor never runs it twice.
     queue: Vec<(NodeId, Option<Reaction>)>,
     pinned: SmallVec<[NodeId; 4]>,
     depth: Rc<Cell<usize>>,
     abandoned: Rc<Cell<bool>>,
-    /// The standard's *signal slots*: slots whose assigned nodes changed, in
-    /// signal order, each once, waiting for the drain boundary.
     signal_slots: Vec<NodeId>,
-    /// Set while the signal slots are being fired, so a handler's own
-    /// mutation leaves what it signals to the firing loop.
     firing_slots: Rc<Cell<bool>>,
 }
 
@@ -470,8 +294,6 @@ impl<T> CustomElementRegistry<T> {
         self.depth.get() != 0
     }
 
-    /// One more element of `definition`. Its first makes live each name it
-    /// observes that no other definition's element kept live.
     fn instance_created(&mut self, definition: DefinitionId) {
         let entry = &mut self.definitions[definition.index()];
         entry.instances += 1;
@@ -487,8 +309,6 @@ impl<T> CustomElementRegistry<T> {
         }
     }
 
-    /// One element of `definition` fewer. Its last ends the liveness of each name
-    /// it observes that no other definition's element keeps live.
     fn instance_freed(&mut self, definition: DefinitionId) {
         let entry = &mut self.definitions[definition.index()];
         entry.instances = entry
@@ -511,9 +331,6 @@ impl<T> CustomElementRegistry<T> {
         }
     }
 
-    /// Records that `name` became live or stopped being. A name's liveness
-    /// changes alternate, so a pending one for it is the opposite of this
-    /// one, and the two cancel.
     fn record_observed_name_change(
         changes: &mut Vec<(&'static str, bool)>,
         name: &'static str,
@@ -549,9 +366,6 @@ impl<T> Document<T> {
         if self.custom_elements.pinned.is_empty() {
             return;
         }
-        // The walk stays in slot space: the tree's own links are slots, so
-        // descending costs one load per child instead of a table hop, and the
-        // id is only recovered where the pin set is consulted.
         let Some(root) = self.slot(root) else {
             return;
         };
@@ -576,8 +390,6 @@ impl<T> Document<T> {
     }
 }
 
-/// Balances the reaction-depth counter on unwind, so a panicking callback does
-/// not leave every later drain reporting "recursed too deep".
 struct ReactionDepthToken {
     depth: Rc<Cell<usize>>,
     abandoned: Rc<Cell<bool>>,
@@ -609,8 +421,6 @@ impl Drop for ReactionDepthToken {
     }
 }
 
-/// Clears the firing flag on every exit, unwinding included, so a panicking
-/// `slotchange` handler does not stop every later one.
 struct FiringSlotsToken(Rc<Cell<bool>>);
 
 impl Drop for FiringSlotsToken {
@@ -620,16 +430,10 @@ impl Drop for FiringSlotsToken {
 }
 
 impl<T> Document<T> {
-    /// Registers a tag's behavior before any matching element exists.
     pub fn define(&mut self, local_name: &str, element: Box<dyn CustomElement<T>>) {
         self.define_shared(local_name, Rc::from(element));
     }
 
-    /// [`Self::define`] for a handler the caller may also define under other
-    /// names: one instance then serves every name it is defined under, while
-    /// each name stays its own definition (its own instance count and
-    /// liveness), so a handler shared this way must key any per-element
-    /// state by element.
     pub fn define_shared(&mut self, local_name: &str, element: Rc<dyn CustomElement<T>>) {
         assert!(
             !local_name.is_empty(),
@@ -676,8 +480,6 @@ impl<T> Document<T> {
         let arenas = self.arenas();
         let existing = arenas.ids().find(|&id| {
             let node = arenas.live(id);
-            // An SVG element of the same local name never takes the
-            // definition, so it is no element created before it.
             id != DOCUMENT_ELEMENT_NODE_ID
                 && !node.in_svg_namespace()
                 && node.local_name.as_ref() == Some(&name)
@@ -724,20 +526,11 @@ impl<T> Document<T> {
         self.custom_elements.queue.len()
     }
 
-    /// Runs the reactions queued since `base`, then fires the signal slots
-    /// when this is the outermost boundary.
     pub(crate) fn drain_reactions(&mut self, base: usize) {
         self.run_reactions(base);
         self.fire_slot_changes();
     }
 
-    /// The reaction half of [`Self::drain_reactions`] alone, for a removal
-    /// that frees: it fires the signal slots itself once the free is done,
-    /// so no `slotchange` handler runs with a free pending.
-    ///
-    /// Runs the scope's reactions in the order they were enqueued, a nested
-    /// scope's (a callback's own mutations) as soon as that callback's
-    /// mutation returns. See the module doc's recorded limit on the order.
     pub(crate) fn run_reactions(&mut self, base: usize) {
         if self.custom_elements.queue.len() == base {
             return;
@@ -746,8 +539,6 @@ impl<T> Document<T> {
             ReactionDepthToken::enter(&self.custom_elements.depth, &self.custom_elements.abandoned);
         let mut budget = MAX_REACTIONS_PER_SCOPE;
         let mut cursor = base;
-        // Indexed afresh each turn: a callback's mutation may push, which
-        // can move the buffer.
         while cursor < self.custom_elements.queue.len() {
             let (element, reaction) = &mut self.custom_elements.queue[cursor];
             let (element, reaction) = (*element, reaction.take());
@@ -764,9 +555,6 @@ impl<T> Document<T> {
         self.custom_elements.queue.truncate(base);
     }
 
-    /// The standard's *signal a slot change*: `slot`'s assigned nodes are no
-    /// longer what they were. Nothing can hear it in a document that defines
-    /// no component, so nothing is recorded there.
     pub(crate) fn signal_slot_change(&mut self, slot: NodeId) {
         if !self.observes_event(SLOT_CHANGE) {
             return;
@@ -777,14 +565,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Fires `slotchange` at every signalled slot, in signal order — the
-    /// standard's "notify mutation observers" step for *signal slots*, run at
-    /// the outermost drain boundary in place of the microtask checkpoint.
-    ///
-    /// The one check a mutation pays is the set's emptiness. Inside a reaction
-    /// or a firing already under way this returns, leaving the set to the
-    /// boundary that encloses it. A slot freed since it was signalled
-    /// dispatches nothing.
     pub(crate) fn fire_slot_changes(&mut self) {
         if self.custom_elements.signal_slots.is_empty()
             || self.custom_elements.is_draining()
@@ -850,57 +630,23 @@ impl<T> Document<T> {
         }
     }
 
-    /// Whether any definition names `type_name` in its
-    /// [`CustomElement::observed_events`]: whether the Rust walk has anyone
-    /// to deliver an event of that type to.
-    ///
-    /// One set lookup, the whole cost of a dispatch nothing observes.
     #[must_use]
     pub fn observes_event(&self, type_name: &str) -> bool {
         self.custom_elements.observed_events.contains(type_name)
     }
 
-    /// Every event type some definition observes, in no particular order,
-    /// whether or not an element of it exists: the set
-    /// [`Self::observes_event`] reads. What a host routes is the live subset,
-    /// which [`Self::take_observed_name_changes`] reports as it changes.
     pub fn observed_event_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.custom_elements.observed_events.iter().copied()
     }
 
-    /// The observed names whose liveness changed since the last call, each
-    /// once, with what it changed to: `true` for a name that became live —
-    /// the first element of any definition observing it was created — and
-    /// `false` for one whose last such element was freed.
-    ///
-    /// A name is live while at least one element of a definition naming it
-    /// in [`CustomElement::observed_events`] exists, connected or not; an
-    /// element of a shadow tree counts as any other. A change undone before
-    /// the call (an element created and freed in between) is not reported,
-    /// so applying the changes in order to the set of live names the previous
-    /// calls described gives the set of live names now. Empty, and
-    /// allocation-free, when nothing changed: what a host drains after every
-    /// mutation batch to keep the names its router routes per instance
-    /// rather than per definition. [`Self::observes_event`] stays per
-    /// definition.
     pub fn take_observed_name_changes(&mut self) -> Vec<(&'static str, bool)> {
         std::mem::take(&mut self.custom_elements.observed_name_changes)
     }
 
-    /// The set's own `'static` spelling of `type_name`, which is how the
-    /// walk names an event whose caller only had a borrowed name.
     pub(crate) fn custom_elements_observed_event(&self, type_name: &str) -> Option<&&'static str> {
         self.custom_elements.observed_events.get(type_name)
     }
 
-    /// The handler of a node that is a *constructed* custom element, for a
-    /// caller that reaches one outside the reaction queue.
-    ///
-    /// `Constructing` is excluded along with `Uncustomized`: an element whose
-    /// constructor has not returned is not an instance yet, which is the same
-    /// line [`Document::observes_attribute`] draws. A freed node answers
-    /// `None`, which is how an event path that outlived one of its steps
-    /// delivers nothing there rather than somewhere else.
     pub(crate) fn custom_element_handler(
         &self,
         element: NodeId,
@@ -912,10 +658,6 @@ impl<T> Document<T> {
         self.dispatch_target(element)
     }
 
-    /// [`Self::custom_element_handler`], for an element whose definition
-    /// names `type_name` in its [`CustomElement::observed_events`]: the
-    /// handler an event walk step delivers to. Every other step is skipped
-    /// without a call, a handler hearing only what its definition observes.
     pub(crate) fn custom_element_hearing(
         &self,
         element: NodeId,
@@ -932,15 +674,6 @@ impl<T> Document<T> {
             .then(|| Rc::clone(&definition.handler))
     }
 
-    /// Runs `call` against `element`'s definition: [`CustomElement::invoke`]
-    /// inside one `[CEReactions]` scope, as
-    /// [`Document::dispatch_element_event`] runs each `handle_event`, so the
-    /// reactions the method raised have run when this returns.
-    ///
-    /// An element with no constructed definition answers
-    /// [`MethodOutcome::NotFound`] without a scope: an undefined tag, a
-    /// freed node, and an element whose constructor has not returned, which
-    /// is not an instance yet.
     pub fn invoke_element_method(
         &mut self,
         element: NodeId,
@@ -985,8 +718,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Gives a new HTML-namespace element the definition of its local name,
-    /// if there is one. An SVG-namespace element is never passed here.
     pub(crate) fn note_custom_element_created(&mut self, element: NodeId, local_name: &LocalName) {
         debug_assert!(
             !self.live(element).in_svg_namespace(),
@@ -1115,10 +846,6 @@ impl<T> Document<T> {
         );
     }
 
-    /// Tells `element`'s definition, if it has one, that the element is
-    /// freed ([`CustomElement::freed`]), and uncounts it. Called by the free
-    /// of every node, after the node left the arenas, with the definition it
-    /// had.
     pub(crate) fn note_custom_element_freed(
         &mut self,
         element: NodeId,

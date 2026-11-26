@@ -10,8 +10,6 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, solo_view, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -55,13 +53,6 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     assert_eq!(painter.frame_size().width, 786);
     assert_eq!(painter.frame_size().height, 1454);
 
-    // Warming is the only image call an embedder makes now: there is no
-    // "load and tell me when", because the paint walk discovers sources by
-    // itself. A source the store carries and one it does not are both
-    // accepted — a missing image is a load failure the document records, not
-    // an error the host has to handle.
-    //
-    // It applies immediately: the fetcher is this thread.
     view.prefetch_images(["app:///pixel.png", "app:///missing.png"]);
     assert!(
         images.was_asked_for("app:///missing.png"),
@@ -73,13 +64,6 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     );
 }
 
-/// An unavailable default family fails construction, including when the
-/// supplied font container carries no usable face.
-///
-/// And the host is asked for nothing at all. The fonts are validated inside
-/// `create_lynx_view`, ahead of the startup requests that call issues, so
-/// there is no view, no document that could commit, and no turn in which an
-/// image could be named.
 #[tokio::test]
 async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {

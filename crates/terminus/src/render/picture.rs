@@ -63,63 +63,42 @@ use crate::clock::ClockInstant;
 use crate::peniko::ImageData;
 use crate::render::image::{FrameImage, ImageDescriptor};
 
-/// What the owner of an `Id` picture asks of the store that produces its
-/// frames.
-///
-/// `Send`: it crosses from the thread that builds the document to the
-/// host's, as the image requests do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlaybackRequest {
-    /// `picture` shows the frames of `source`, a URL the host has already
-    /// reported loaded, under a playhead of its own that starts on the first
-    /// frame under `policy`. Asked once per picture.
     Play {
         picture: PictureId,
         source: Arc<str>,
         policy: PlayPolicy,
     },
-    /// One instruction to `picture`'s playhead.
     Control {
         picture: PictureId,
         control: PlaybackControl,
     },
-    /// `picture` shows the video at `source`, a URL as the page wrote it,
-    /// played by the platform's media player, which starts paused on its
-    /// first frame under `settings`. Asked once per picture.
     Open {
         picture: PictureId,
         source: Arc<str>,
         settings: MediaSettings,
     },
-    /// One instruction to the media player `picture` was opened with.
     Media {
         picture: PictureId,
         command: MediaCommand,
     },
-    /// `picture` is gone: the store lets go of everything it held for it,
-    /// its player included.
-    End { picture: PictureId },
+    End {
+        picture: PictureId,
+    },
 }
 
-/// What a playing picture's store reports of its player.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PlaybackReport {
-    /// A loop completed, the last of a finite count included.
     LoopComplete,
-    /// The final loop of a finite count completed, after its
-    /// [`Self::LoopComplete`]; the last frame stays shown.
     FinalLoopComplete,
-    /// What a media player reported ([`PlaybackRequest::Open`]).
     Media(MediaEvent),
 }
 
-/// A picture one element owns, unique in the process: two ids are never
-/// equal unless one was copied from the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PictureId(NonZeroU64);
 
 impl PictureId {
-    /// An id no other picture in the process has had.
     #[must_use]
     #[expect(
         clippy::new_without_default,
@@ -131,26 +110,19 @@ impl PictureId {
         Self(NonZeroU64::new(id).expect("the counter starts at one and does not wrap"))
     }
 
-    /// The id as a number, for logs and hashing.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
     }
 }
 
-/// What an image draw names its picture by.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PictureKey {
-    /// The raw source string the page wrote. A document's registry hands out
-    /// one allocation per source, so every draw of one URL in one frame
-    /// shares it.
     Url(Arc<str>),
-    /// A picture one element owns, whose frames a producer publishes.
     Id(PictureId),
 }
 
 impl PictureKey {
-    /// The URL, for a [`Self::Url`] picture.
     #[must_use]
     pub fn url(&self) -> Option<&str> {
         match self {
@@ -159,7 +131,6 @@ impl PictureKey {
         }
     }
 
-    /// The id, for a [`Self::Id`] picture.
     #[must_use]
     pub const fn id(&self) -> Option<PictureId> {
         match self {
@@ -168,9 +139,6 @@ impl PictureKey {
         }
     }
 
-    /// Whether `self` and `other` name the same picture, by the cheapest
-    /// test that is exact for keys a frame holds: a URL by its allocation,
-    /// since one frame's draws of one URL share it, and an id by value.
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Url(a), Self::Url(b)) => Arc::ptr_eq(a, b),
@@ -192,63 +160,31 @@ impl From<PictureId> for PictureKey {
     }
 }
 
-/// Where a platform frame is written: the texture the painter created for
-/// it, on the device and queue every texture it draws lives on.
-///
-/// The texture is two-dimensional, [`wgpu::TextureFormat::Rgba8Unorm`], one
-/// mip level, exactly [`Self::size`], with the usages
-/// `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT` — the last because the
-/// browser's `copyExternalImageToTexture` requires it of its destination.
-/// `vello_gpu` samples it as premultiplied RGBA from mip level 0 of a
-/// filterable float view, in sRGB, which is what a writer has to leave in it.
 #[derive(Debug)]
 pub struct FrameTarget<'a> {
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
     pub texture: &'a wgpu::Texture,
-    /// The texture's size in pixels, which is the frame's: what the store
-    /// described it as.
     pub size: (u32, u32),
 }
 
-/// A platform frame's writer: the embedder's own code that copies one of its
-/// frames into a texture the painter chose.
-///
-/// The frame type implements it, so the writer travels with the frame and no
-/// object is passed beside it. It runs on the painter's thread, in
-/// [`Painter::adopt`](crate::painter::Painter::adopt), before a swap-chain
-/// image is acquired, once per frame the painter takes.
 pub trait FrameWriter {
-    /// Queues a copy of the whole frame into `target.texture` at mip level
-    /// 0 and origin zero, premultiplied, in sRGB, so that a render submitted
-    /// after this call samples it. Must not block.
-    ///
-    /// Answers whether the copy was queued: `false` for a frame that can no
-    /// longer be read (closed, or not the size it was described as), which
-    /// leaves the picture drawing what it drew before, or nothing.
     fn write(&self, target: &FrameTarget<'_>) -> bool;
 }
 
-/// A store with no platform frames needs no writer.
 impl FrameWriter for Infallible {
     fn write(&self, _target: &FrameTarget<'_>) -> bool {
         match *self {}
     }
 }
 
-/// A frame taken out of a slot, with the generation it was published as.
 #[derive(Clone, Debug)]
 pub struct TakenFrame<P = Infallible> {
-    /// The generation [`FrameImage::generation`] answered for this frame.
     pub generation: u64,
-    /// What [`FrameImage::descriptor`] answered for this frame: a platform
-    /// frame's size is read from here.
     pub descriptor: ImageDescriptor,
     pub frame: PictureFrame<P>,
 }
 
-/// What a slot holds: its newest frame, until the painter takes it, and
-/// what describes that frame after it has been taken.
 #[derive(Debug)]
 struct SlotState<P> {
     frame: Option<PictureFrame<P>>,
@@ -257,12 +193,6 @@ struct SlotState<P> {
     next_change: Option<ClockInstant>,
 }
 
-/// One picture's newest frame, shared between the producer that publishes
-/// it and the store that answers the painter for it.
-///
-/// Cloning shares the slot. A producer on any thread publishes; the store,
-/// on the painter's thread, describes and takes. The generation starts at
-/// zero, with no frame, and each publish moves it on by one.
 #[derive(Debug)]
 pub struct PictureSlot<P = Infallible> {
     state: Arc<Mutex<SlotState<P>>>,
@@ -283,7 +213,6 @@ impl<P> Default for PictureSlot<P> {
 }
 
 impl<P> PictureSlot<P> {
-    /// An empty slot: nothing published yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -297,25 +226,15 @@ impl<P> PictureSlot<P> {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SlotState<P>> {
-        // A producer that panicked mid-publish left a whole frame or none.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Replaces the newest frame with `pixels`, moving the generation on,
-    /// and records `next_change`, the instant the picture will next change
-    /// by itself when the producer knows it. Answers whether the host has to
-    /// be woken: `true` unless an earlier frame was still waiting to be
-    /// taken, whose wake is still owed.
     #[must_use = "a wake the host is owed is lost"]
     pub fn publish_pixels(&self, pixels: ImageData, next_change: Option<ClockInstant>) -> bool {
         let descriptor = ImageDescriptor::of(&pixels);
         self.publish(PictureFrame::Pixels(pixels), descriptor, next_change)
     }
 
-    /// [`Self::publish_pixels`] for a frame of either kind, named by
-    /// `descriptor`: for CPU pixels their own, for a platform frame the one
-    /// minted for it ([`ImageDescriptor::platform`]), whose size is the
-    /// frame's.
     #[must_use = "a wake the host is owed is lost"]
     pub fn publish(
         &self,
@@ -331,9 +250,6 @@ impl<P> PictureSlot<P> {
         !waiting
     }
 
-    /// What the painter is told about the picture: the newest frame's
-    /// descriptor, its generation and the next change, with no pixels —
-    /// those are [`Self::take`]n. `None` before the first publish.
     #[must_use]
     pub fn describe(&self) -> Option<FrameImage<P>> {
         let state = self.lock();
@@ -345,7 +261,6 @@ impl<P> PictureSlot<P> {
         })
     }
 
-    /// Takes the newest frame, if it has not been taken yet.
     #[must_use]
     pub fn take(&self) -> Option<TakenFrame<P>> {
         let mut state = self.lock();
@@ -376,10 +291,6 @@ mod tests {
         }
     }
 
-    /// A slot holds the newest frame only: a publish over a frame nobody
-    /// took replaces it and owes no second wake, the generation moves on by
-    /// one per publish, a frame is taken once, and the description outlives
-    /// the take.
     #[test]
     fn a_slot_holds_the_newest_frame_and_owes_one_wake_per_take() {
         let slot: PictureSlot = PictureSlot::new();
@@ -412,7 +323,6 @@ mod tests {
         );
     }
 
-    /// Ids are unique, and a URL key names its picture by allocation.
     #[test]
     fn keys_name_one_picture_each() {
         assert_ne!(PictureId::new(), PictureId::new());

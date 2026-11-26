@@ -21,16 +21,6 @@ use serde_json::Value;
 
 use crate::web::style_info::StyleInfoRead;
 
-/// Every named stylesheet a template carries, by section name: the legacy
-/// JSON descriptors among its `custom_sections`, and `style_infos`, its
-/// `CustomSectionsStyleInfo` entries, owned or still archived.
-///
-/// A name the `CustomSectionsStyleInfo` section carries wins over a legacy
-/// JSON descriptor of the same name; an encoder writes a CSS section in only
-/// one of the two. Each `StyleInfo` is lowered like the bundle's own: a
-/// section holds css id 0 only, so no `l-css-id` guard appears, and a
-/// hand-made section carrying other ids is scoped the way any fragment is.
-/// Invalid legacy descriptors remain un-loadable.
 pub(crate) fn named_style_sheets<'s, S: StyleInfoRead + 's>(
     custom_sections: Option<&Value>,
     style_infos: impl IntoIterator<Item = (&'s str, &'s S)>,
@@ -53,9 +43,6 @@ pub(crate) fn named_style_sheets<'s, S: StyleInfoRead + 's>(
     sheets
 }
 
-/// Lowers one legacy JSON descriptor's `content`. Invalid or unsupported
-/// descriptors cannot produce a loadable sheet; native `LoadStyleSheet`
-/// likewise returns null when CSS decoding fails.
 pub(crate) fn decode(content: &Value) -> Option<PreparsedStyleSheet> {
     let rules = content
         .get("ruleList")?
@@ -152,8 +139,6 @@ fn declaration(property: String, source: &str) -> PreparsedDeclaration {
                 | cssparser::Token::SquareBracketBlock
                 | cssparser::Token::CurlyBracketBlock,
             ) => {
-                // Consume the whole block now: otherwise the next try_parse
-                // skips it implicitly, leaving `start` inside the function.
                 let _ = parser.parse_nested_block::<_, (), ()>(|nested| {
                     while nested.next().is_ok() {}
                     Ok(())
@@ -216,9 +201,6 @@ mod tests {
             .collect()
     }
 
-    /// The label-7 map and the legacy JSON descriptors both name sheets; the
-    /// map wins a name both carry, and a JSON section of another encoding is
-    /// no stylesheet.
     #[test]
     fn the_style_info_map_wins_over_a_legacy_descriptor_of_the_same_name() {
         let template = crate::web::WebTemplate {
@@ -306,8 +288,6 @@ mod tests {
         assert_eq!(name, "pulse");
         assert_eq!(keyframes[0].selector, "from,50%");
         assert_eq!(keyframes[0].declarations[0].value, "0.5");
-        // Invalid !important font descriptors must reach Stylo unchanged so
-        // that it rejects them, rather than accidentally accepting a src.
         assert_eq!(
             sheet.rules[1],
             PreparsedRule::FontFace {

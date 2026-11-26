@@ -13,14 +13,10 @@ use super::{MARKDOWN_TAG, X_MARKDOWN_TAG, markdown_root};
 
 const AHEM: &[u8] = include_bytes!("../../../../../seldon/tests/fixtures/Ahem.ttf");
 
-/// Ahem at 10px on a 300px-wide element: every glyph a 10px square, every
-/// line `1.4 × 10 = 14px` tall.
 const AHEM_HOST: &str = "font-family: Ahem; font-size: 10px; width: 300px";
 
-/// web-core's `basic.html` fixture content.
 const BASIC: &str = "# Title\n\nthis is **bold** and *italic*.\n\n- item 1\n- item 2\n\ninline code: `code`.\n\n```\nblock code\n```";
 
-/// A document that shapes Ahem, with an `x-markdown` under the page.
 fn markdown(style: &str) -> (LynxDocument, ComponentEvents, NodeId) {
     markdown_tag(X_MARKDOWN_TAG, style)
 }
@@ -32,8 +28,6 @@ fn markdown_tag(tag: &str, style: &str) -> (LynxDocument, ComponentEvents, NodeI
     (document, events, element)
 }
 
-/// `markdown(AHEM_HOST)` rendering `content`, laid out, with the events of
-/// the render taken.
 fn rendered(content: &str) -> (LynxDocument, ComponentEvents, NodeId) {
     let (mut document, events, element) = markdown(AHEM_HOST);
     document.set_attribute(element, "content", content);
@@ -46,8 +40,6 @@ fn root(document: &LynxDocument, element: NodeId) -> NodeId {
     markdown_root(document, element).expect("every markdown element has its root")
 }
 
-/// The shadow tree under `#markdown-root` as an outline: one line per node,
-/// indented by depth, `tag.class` for an element and the text quoted.
 fn outline(document: &LynxDocument, element: NodeId) -> String {
     let mut out = String::new();
     let mut stack: Vec<(NodeId, usize)> = document
@@ -81,7 +73,6 @@ fn outline(document: &LynxDocument, element: NodeId) -> String {
     out
 }
 
-/// Every element named `tag` under `element`'s root, in tree order.
 fn all(document: &LynxDocument, element: NodeId, tag: &str) -> Vec<NodeId> {
     let mut found = Vec::new();
     let mut stack = vec![root(document, element)];
@@ -102,7 +93,6 @@ fn first(document: &LynxDocument, element: NodeId, tag: &str) -> NodeId {
         .unwrap_or_else(|| panic!("a `{tag}` in the shadow tree"))
 }
 
-/// One computed longhand, as a string.
 fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
     let id = PropertyId::parse_enabled_for_all_content(property)
         .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -129,7 +119,6 @@ fn invoke(document: &mut LynxDocument, element: NodeId, name: &str, params: &str
     document.invoke_element_method(element, MethodCall { name, params })
 }
 
-/// A record answer split into its fields (`<units>:<text>` each).
 fn fields(outcome: &MethodOutcome) -> Vec<String> {
     let MethodOutcome::Data(record) = outcome else {
         panic!("a data answer, not {outcome:?}");
@@ -154,8 +143,6 @@ fn fields(outcome: &MethodOutcome) -> Vec<String> {
     fields
 }
 
-/// `getParseResult({tags})`'s answer as `tag:[start,end]...` per tag, after
-/// the id.
 fn parse_result(document: &mut LynxDocument, element: NodeId, tags: &[&str]) -> Vec<String> {
     let params = serde_json::json!({ "tags": tags }).to_string();
     let fields = fields(&invoke(document, element, "getParseResult", &params));
@@ -179,8 +166,6 @@ fn parse_result(document: &mut LynxDocument, element: NodeId, tags: &[&str]) -> 
     out
 }
 
-/// The rendered text the offsets count in, with markdown-it's line breaks
-/// (the component's test-only `renderedText` method).
 fn rendered_text(document: &mut LynxDocument, element: NodeId) -> String {
     let answer = invoke(document, element, super::RENDERED_TEXT_METHOD, "{}");
     fields(&answer).remove(0)
@@ -233,7 +218,6 @@ pre
                 .tag_name()
                 == Some("p")
             {
-                // Inline code is a run of its paragraph.
                 assert_eq!(
                     document.paragraph_of(paragraph),
                     document.get(paragraph).unwrap().parent_id()
@@ -247,23 +231,19 @@ pre
             );
         }
     }
-    // The heading: 2em of 10px, 1.4 line height, after its 0.8em margin.
     let heading = first(&document, element, "h1");
     assert_eq!(rect(&document, heading), (0.0, 16.0, 300.0, 28.0));
     assert_eq!(value(&document, heading, "font-weight"), "700");
-    // Bold and italic are runs with HTML's weight and style.
     let bold = first(&document, element, "strong");
     assert_eq!(value(&document, bold, "font-weight"), "700");
     let italic = first(&document, element, "em");
     assert_eq!(value(&document, italic, "font-style"), "italic");
-    // A list item's text starts 1.5em + 40px in, its marker before it.
     let items = all(&document, element, "md-line");
     let markers = all(&document, element, "md-marker");
     let (item_x, item_y, _, _) = rect(&document, items[0]);
     let (marker_x, marker_y, marker_width, _) = rect(&document, markers[0]);
     assert_eq!(item_x, 55.0);
     assert_eq!((marker_x + marker_width, marker_y), (item_x, item_y));
-    // The code block keeps its line and scrolls sideways.
     let pre = first(&document, element, "pre");
     assert_eq!(value(&document, pre, "overflow-x"), "scroll");
     assert_eq!(value(&document, pre, "overflow-y"), "hidden");
@@ -293,8 +273,6 @@ fn both_tags_render_the_same_tree() {
     }
 }
 
-/// web-core's `style.html` fixture: `markdown-style` reaches the link and
-/// the inline code, and a new value replaces the old one.
 #[test]
 fn markdown_style_styles_the_link_and_inline_code_and_is_replaced_on_change() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -331,16 +309,12 @@ fn markdown_style_styles_the_link_and_inline_code_and_is_replaced_on_change() {
     );
     assert_eq!(value(&document, root, "font-size"), "10px");
 
-    // Without it, the template's link colour.
     document.remove_attribute(element, "markdown-style");
     document.layout();
     assert_eq!(value(&document, link, "color"), "rgb(3, 102, 214)");
     assert_eq!(value(&document, link, "text-decoration-line"), "underline");
 }
 
-/// Inline code is an inline box in its paragraph's inline formatting
-/// context, as web-core's `<code>` is in the browser: `markdown-style`'s
-/// inline padding on it takes room in the line, once at each end.
 #[test]
 fn markdown_style_padding_on_inline_code_takes_room_in_the_line() {
     let measure = |style: Option<&str>| {
@@ -367,8 +341,6 @@ fn markdown_style_padding_on_inline_code_takes_room_in_the_line() {
     assert_eq!(padded_code - code, 8.0, "and the code's own box");
 }
 
-/// The paragraphs are not `text`, so they wear the host's colour, as
-/// web-core's `.markdown-body { color: inherit }` does.
 #[test]
 fn the_rendered_text_inherits_the_hosts_color() {
     let (mut document, _events, element) = markdown("color: rgb(1, 2, 3)");
@@ -383,8 +355,6 @@ fn the_rendered_text_inherits_the_hosts_color() {
     }
 }
 
-/// web-core's `html-tags.html` fixture: a kept `span` and `p` carry only
-/// their classes, and the refused `div` is text.
 #[test]
 fn raw_html_keeps_span_and_p_with_their_classes_only() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -429,8 +399,6 @@ fn raw_html_keeps_span_and_p_with_their_classes_only() {
     );
 }
 
-/// web-core's `table.html` fixture: the cells stand in two columns and two
-/// rows of a grid.
 #[test]
 fn a_table_places_its_cells_in_columns() {
     let (document, _events, element) = rendered("\n| A | B |\n| - | :-: |\n| 1 | 2 |\n");
@@ -442,8 +410,6 @@ fn a_table_places_its_cells_in_columns() {
         rect(&document, cells[0]),
         rect(&document, cells[1]),
     );
-    // 2px spacing around and between the cells, 1px cell padding, one Ahem
-    // glyph each.
     assert_eq!(a, (2.0, 2.0, 12.0, 16.0));
     assert_eq!(b, (16.0, 2.0, 12.0, 16.0));
     assert_eq!(one, (2.0, 20.0, 12.0, 16.0));
@@ -454,8 +420,6 @@ fn a_table_places_its_cells_in_columns() {
     assert_eq!(value(&document, cells[0], "text-align"), "start");
 }
 
-/// web-core's `image.html` fixture: the image is the engine's `image`,
-/// sized from its bitmap.
 #[test]
 fn an_image_is_an_auto_sized_image_element() {
     let (document, _events, element) =
@@ -471,8 +435,6 @@ fn an_image_is_an_auto_sized_image_element() {
     assert_eq!(node.parent().unwrap().tag_name(), Some("p"));
 }
 
-/// web-core's `inlineview.html` fixture: the light child named by the slot
-/// sits in the line of text.
 #[test]
 fn an_inline_view_shows_its_slotted_child_in_the_line() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -495,16 +457,12 @@ fn an_inline_view_shows_its_slotted_child_in_the_line() {
     assert!(container.has_class("md-inline-view"));
     assert_eq!(container.parent().unwrap().tag_name(), Some("p"));
     assert_eq!(document.assigned_nodes(slot), [badge]);
-    // "inline view here " is 17 glyphs; the badge sits in the first 14px
-    // line, its bottom on the baseline.
     let (x, y, width, height) = rect(&document, badge);
     assert_eq!((x, width, height), (170.0, 10.0, 10.0));
     assert!((0.0..=4.0).contains(&y), "{y}");
     assert_eq!(rect(&document, first(&document, element, "p")).3, 14.0);
 }
 
-/// web-core's `incremental.html` fixture: appended content keeps the
-/// elements the earlier content built.
 #[test]
 fn appended_content_keeps_the_elements_of_unchanged_blocks() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -517,7 +475,6 @@ fn appended_content_keeps_the_elements_of_unchanged_blocks() {
         paragraphs[0], line,
         "the first paragraph is the same element"
     );
-    // A change inside the first block rebuilds it and what follows.
     document.set_attribute(element, "content", "Line one\n\nLine 2\n");
     let rebuilt = all(&document, element, "p");
     assert_ne!(rebuilt[0], line);
@@ -525,13 +482,10 @@ fn appended_content_keeps_the_elements_of_unchanged_blocks() {
         document.get(line).is_none(),
         "the replaced paragraph is freed"
     );
-    // Empty content empties the root.
     document.set_attribute(element, "content", "");
     assert_eq!(outline(&document, element), "");
 }
 
-/// `content-range` renders a UTF-16 slice of `content`; an invalid value
-/// keeps the range in force, and removing it renders everything.
 #[test]
 fn content_range_renders_a_slice() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -549,8 +503,6 @@ fn content_range_renders_a_slice() {
     );
 }
 
-/// `parseEnd` follows every render of non-empty content, bubbling, with the
-/// `content-id` when there is one.
 #[test]
 fn parse_end_is_queued_per_render_with_the_content_id() {
     let (mut document, events, element) = markdown("");
@@ -577,9 +529,6 @@ fn parse_end_is_queued_per_render_with_the_content_id() {
     );
 }
 
-/// The rendered text and `getParseResult`'s ranges, against what markdown-it
-/// 15 and a browser's `textContent` give for the same content (computed
-/// under Node with jsdom, web-core's pipeline).
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -674,10 +623,6 @@ fn get_parse_result_counts_offsets_in_web_cores_text_content() {
         ["id=", "H1:[3,4]", "li:[1,5][6,7]", "ul:[0,8]"]
     );
 
-    // Raw HTML blocks, through web-core's raw-HTML policy and DOMPurify: a
-    // kept block's last line break is a text node after its elements, a
-    // refused block's is part of its text, and the last block of the
-    // content has none.
     let (mut document, _events, element) = rendered(
         "### Hello <span class=\"mark-red other\" style=\"color: red\" onclick=\"noop()\">World</span>\n\n<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>\n\n<div class=\"not-allowed\">Not allowed</div>",
     );
@@ -701,8 +646,6 @@ fn get_parse_result_counts_offsets_in_web_cores_text_content() {
         parse_result(&mut document, element, &["p"]),
         ["id=", "p:[0,3][4,7][8,13][38,41]"]
     );
-    // The line break between the two raw paragraphs lays out nothing: the
-    // second sits under the first's 0.75em margin, as with none.
     let paragraphs = all(&document, element, "p");
     assert_eq!(rect(&document, paragraphs[1]).1, 22.0);
 
@@ -748,7 +691,6 @@ fn get_parse_result_refuses_params_without_tags() {
             "{params}"
         );
     }
-    // A name that is not a string is skipped, as native skips it.
     assert_eq!(
         parse_result_raw(&mut document, element, r#"{"tags":[1,"p"]}"#),
         ["", "1", "p", "1", "0", "4"]
@@ -792,8 +734,6 @@ fn get_images_lists_every_image_source_in_tree_order() {
     );
 }
 
-/// The `{start, end}` range of rendered text, on one line and across
-/// paragraphs, in viewport px; and the character under a point.
 #[test]
 fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -811,12 +751,10 @@ fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
             .map(|field| field.parse::<f32>().unwrap())
             .collect::<Vec<_>>()
     };
-    // "link" is rendered 8..12: the first paragraph's line, 80px in.
     assert_eq!(
         boxes(&mut document, r#"{"start":8,"end":12}"#),
         [80.0, 0.0, 40.0, 14.0]
     );
-    // The same characters by their source offsets, `[link]` at 9..13.
     assert_eq!(
         boxes(
             &mut document,
@@ -824,15 +762,11 @@ fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
         ),
         [80.0, 0.0, 40.0, 14.0]
     );
-    // From " end" across the "\n" between the paragraphs into "next": one
-    // box in each paragraph. The second starts after the first's 0.75em
-    // bottom margin, at 21.5px, which the rounded layout puts at 22.
     assert_eq!(
         boxes(&mut document, r#"{"start":12,"end":19}"#),
         [120.0, 0.0, 40.0, 14.0, 0.0, 22.0, 20.0, 14.0]
     );
     let operation = MethodOutcome::Failed(MethodError::Operation);
-    // No range is the selection, and there is none.
     assert_eq!(
         invoke(&mut document, element, "getTextBoundingRect", "{}"),
         operation
@@ -855,7 +789,6 @@ fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
         index(&mut document, r#"{"x":85,"y":5,"indexType":"source"}"#),
         ["9"]
     );
-    // "next" is rendered 17..21, on the second paragraph's line.
     assert_eq!(index(&mut document, r#"{"x":15,"y":25}"#), ["18"]);
     assert_eq!(
         invoke(
@@ -871,7 +804,6 @@ fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
         invoke(&mut document, element, "getCharIndexByPoint", r#"{"x":1}"#),
         MethodOutcome::Failed(MethodError::InvalidParams)
     );
-    // The unbuilt methods are the kind's unknown names.
     for name in [
         "pauseAnimation",
         "resumeAnimation",
@@ -886,8 +818,6 @@ fn get_text_bounding_rect_and_get_char_index_by_point_read_the_rendered_text() {
     }
 }
 
-/// Taps the topmost element the committed frame shows at `(x, y)`, as the
-/// runtime delivers a `tap` to the component whose shadow content it hit.
 fn tap(document: &mut LynxDocument, x: f32, y: f32) {
     let hit = document
         .commit()
@@ -923,7 +853,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
     document.layout();
     events.take();
 
-    // A glyph of the link, inside its `strong` and outside it.
     for x in [85.0, 105.0] {
         tap(&mut document, x, 5.0);
         assert_eq!(
@@ -940,7 +869,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
             "x = {x}"
         );
     }
-    // Plain text, and the paragraph's box past its text.
     for x in [15.0, 250.0] {
         tap(&mut document, x, 5.0);
         assert_eq!(events.take(), [], "x = {x}");
@@ -961,9 +889,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
     );
 }
 
-/// A code block keeps its line breaks, its indentation and its runs of
-/// spaces (HTML's `pre`, `white-space-collapse: preserve`), does not wrap,
-/// and scrolls sideways in its `pre`.
 #[test]
 fn a_code_block_keeps_its_lines_and_indentation_without_wrapping() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
@@ -980,7 +905,6 @@ fn a_code_block_keeps_its_lines_and_indentation_without_wrapping() {
     document.layout();
     let code = first(&document, element, "code");
     let size = document.text_block_size(code).expect("the code paragraph");
-    // Three lines, the longest 48 glyphs on one line.
     assert_eq!(size.height, 42.0);
     assert_eq!(size.width, 480.0);
     let pre = first(&document, element, "pre");
@@ -989,23 +913,18 @@ fn a_code_block_keeps_its_lines_and_indentation_without_wrapping() {
         300.0,
         "the pre stays the element's width"
     );
-    // `  d` keeps its two leading spaces: three glyphs from the line's start.
     let boxes = document
         .text_range_boxes(code, 4, 7)
         .expect("the second line");
     assert_eq!(boxes.len(), 1);
     assert_eq!(boxes[0].origin.x, 0.0);
     assert_eq!(boxes[0].size.width, 30.0);
-    // `d` itself sits two advances in.
     let d = document
         .text_range_boxes(code, 6, 7)
         .expect("the indented glyph");
     assert_eq!(d[0].origin.x, 20.0);
 }
 
-/// The definition's entry for a host goes with the host's free — the
-/// runtime frees a collected element with `drop_element` — and not with a
-/// removal, after which the element can come back.
 #[test]
 fn a_freed_host_drops_its_state() {
     let (mut document, _events, element) = rendered("one");
@@ -1025,10 +944,6 @@ fn a_freed_host_drops_its_state() {
     assert_eq!(count(&mut document), "1");
 }
 
-/// A markdown paragraph is a block container's inline formatting context,
-/// never a Lynx `text` paragraph, so it keeps css-text-3: its soft line
-/// break is a `"\n"` text node that collapses to one space, as the browser
-/// does with web-core's `<p>`.
 #[test]
 fn a_paragraph_s_soft_break_collapses_to_a_space() {
     let (document, _events, element) = rendered("a\nb");

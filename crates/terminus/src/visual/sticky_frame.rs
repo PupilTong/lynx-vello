@@ -15,37 +15,24 @@ use crate::paint::compose::snap_offset;
 
 #[derive(Debug)]
 pub(crate) struct StickySlot {
-    /// The sticky box, which an anchored box's scroll compensation looks its
-    /// slot up by.
     pub(crate) node: crate::tree::document::NodeId,
     pub(crate) parent: Option<u32>,
     pub(crate) scroll: [Option<u32>; 2],
-    /// Sticky movement shared with the selected scrollport cancels out.
     pub(crate) scroll_sticky: [Option<u32>; 2],
     pub(crate) axes: [StickyAxis; 2],
     pub(crate) parent_transform: Transform3D<f32>,
 }
 
-/// The sampled displacements of a frame's sticky slots.
 pub(crate) type StickySamples = SlotSamples<StickySample>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StickySample {
-    /// Cumulative movement before transforms, the input of nested sticky
-    /// constraints.
     layout: Vector2D<f32>,
-    /// This box's own movement before transforms: what an anchored box's
-    /// default scroll shift adds for a sticky box between its anchor and its
-    /// containing block.
     pub(crate) own: Vector2D<f32>,
-    /// This box's own movement mapped through its parent transform, in
-    /// viewport CSS px: its sticky node's shift in the space tree.
     pub(crate) mapped: Vector2D<f32>,
 }
 
 impl PaintOrder {
-    /// Every sticky slot's displacement at these offsets, in slot order —
-    /// what a hit test reads.
     pub(crate) fn sample_stickies(
         &self,
         ratio: f32,
@@ -56,9 +43,6 @@ impl PaintOrder {
         self.solve_stickies(every, ratio, offsets)
     }
 
-    /// [`Self::sample_stickies`] over only `composed`, the boxes a program
-    /// composes and the boxes those solve against; see
-    /// [`Self::mark_composed_spaces`].
     pub(crate) fn sample_composed_stickies(
         &self,
         composed: &[u32],
@@ -68,7 +52,6 @@ impl PaintOrder {
         self.solve_stickies(composed.iter().copied(), ratio, offsets)
     }
 
-    /// Solves `slots`, ascending and closed under each box's solve inputs.
     fn solve_stickies(
         &self,
         slots: impl Iterator<Item = u32>,
@@ -103,8 +86,6 @@ impl PaintOrder {
                 StickySample {
                     layout: inherited.layout + own,
                     own,
-                    // Insets retain subpixel precision. Only the scroll input
-                    // follows the engine's per-scrollport device-grid snapping.
                     mapped,
                 },
             );
@@ -112,8 +93,6 @@ impl PaintOrder {
         samples
     }
 
-    /// The `(low, high)` range one sticky node's own mapped shift covers —
-    /// every displacement its constraints permit, in viewport CSS px.
     pub(crate) fn sticky_slot_range(&self, slot: u32) -> (Vector2D<f32>, Vector2D<f32>) {
         let slot = &self.stickies[slot as usize];
         let (x0, x1) = slot.axes[0].offset_bounds();
@@ -129,9 +108,6 @@ impl PaintOrder {
         )
     }
 
-    /// A conservative range for content movement relative to its effect group.
-    /// Shared sticky chains cancel exactly; differing chains include every
-    /// permitted displacement so an offscreen normal box can still stick.
     pub(crate) fn sticky_range(
         &self,
         mut content: Option<u32>,

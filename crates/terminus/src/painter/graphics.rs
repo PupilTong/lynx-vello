@@ -42,69 +42,33 @@ use crate::render::raster::Raster;
 use crate::render::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
-/// The draw target an embedder lends a painter.
-///
-/// `'static` deliberately: the painter owns the surface built from it for the
-/// rest of its life, which outlives any borrow the host could lend. A
-/// windowing embedder passes a shared handle — an `Arc<winit::Window>` —
-/// rather than a reference.
 pub type WindowTarget = wgpu::SurfaceTarget<'static>;
 
-/// The swap-chain image a frame will be presented in, taken before the frame
-/// is produced. Dropping it without [`WindowGraphics::present`] discards it,
-/// which is what an abandoned frame does.
 pub(super) struct AcquiredFrame {
     texture: wgpu::SurfaceTexture,
-    /// The surface handed over a suboptimal image and wants reconfiguring
-    /// once this frame is on screen.
     reconfigure_after: bool,
 }
 
-/// What the surface had to give this frame.
 pub(super) enum FrameAcquisition {
     Ready(AcquiredFrame),
-    /// Nothing available — transiently, so the caller asks for another frame
-    /// rather than treating it as a failure.
     Retry,
 }
 
 pub(super) struct WindowGraphics {
-    /// The device the surface was configured on, which every render and
-    /// present of this window uses: the process's shared stack, unless its
-    /// adapter could not present to this window.
     gpu: Arc<SharedGpu>,
     surface: WindowSurface,
-    /// The texture frames are rendered into and presented from; see
-    /// [`RetainedTarget`].
     target: RetainedTarget,
-    /// This window's rasterizer on the shared renderer, which its frames
-    /// and bakes render through; see [`crate::render::raster::Raster`].
     raster: Raster,
-    /// The `filter: blur()` bakes of the frame this renderer last composed;
-    /// see [`crate::render::blur::FilterTextures`].
     filters: FilterTextures,
-    /// The textures the vector images drawn through this renderer were
-    /// baked into, kept across frames under a byte budget; see
-    /// [`crate::render::vector_textures::VectorTextures`].
     vectors: VectorTextures,
 }
 
-/// The swap chain: the surface built from the embedder's target, its
-/// configuration, and the blit that copies the retained target into its
-/// images.
 struct WindowSurface {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     blitter: wgpu::util::TextureBlitter,
 }
 
-/// The RGBA8 texture a window's frames are rendered into, retained across
-/// presents so a re-exposure re-presents it with a blit alone.
-///
-/// Its usage is [`Raster::TARGET_USAGE`] plus the texture binding the
-/// present blit samples and, outside Wasm, the copy source a capture reads back: a
-/// screenshot is the pixels the window pipeline rendered, read the way
-/// [`crate::render::gpu::Headless`] reads its own target.
 struct RetainedTarget {
     width: u32,
     height: u32,
@@ -172,15 +136,11 @@ impl WindowGraphics {
         Self::from_surface(gpu, surface, size)
     }
 
-    /// Builds the stack over `surface`, which `gpu`'s adapter can present
-    /// to.
     fn from_surface(
         gpu: Arc<SharedGpu>,
         surface: wgpu::Surface<'static>,
         size: FrameSize,
     ) -> Result<Self, PainterError> {
-        // The swap chain's own format; the retained target is RGBA8 either
-        // way, and the present blit converts.
         let format = surface
             .get_capabilities(gpu.adapter())
             .formats
@@ -226,12 +186,6 @@ impl WindowGraphics {
         })
     }
 
-    /// Reconfigures the surface, and rebuilds the retained target, when the
-    /// target size moved.
-    ///
-    /// What was rendered into the retained target is not carried over: the
-    /// painter's own record of it carries the size it was rendered for, so a
-    /// resize already fails to match and the next frame is painted.
     fn configure_for(&mut self, size: FrameSize) {
         if size.width != 0
             && size.height != 0
@@ -247,20 +201,11 @@ impl WindowGraphics {
         }
     }
 
-    /// Configures the surface again with the configuration it holds, which
-    /// is what an outdated or suboptimal swap chain asks for.
     fn reconfigure(&self) {
         self.gpu
             .configure(&self.surface.surface, &self.surface.config);
     }
 
-    /// Takes the swap-chain image this frame will be presented in, before any
-    /// of the frame's work is done.
-    ///
-    /// The surface is brought to `size` first, so the image handed back is the
-    /// one the coming render actually fits. This call is the frame's vsync
-    /// wait; a caller that gets [`FrameAcquisition::Retry`] has no image this
-    /// frame and must ask for another.
     pub(super) fn acquire(&mut self, size: FrameSize) -> Result<FrameAcquisition, PainterError> {
         self.configure_for(size);
         let (texture, reconfigure_after) = match self.surface.surface.get_current_texture() {
@@ -290,8 +235,6 @@ impl WindowGraphics {
         }))
     }
 
-    /// Renders one composed scene into the retained target texture, which
-    /// [`Self::present`] then blits into a swap-chain image.
     pub(super) fn render_to_target(
         &mut self,
         scene: &DisplayList,
@@ -309,11 +252,6 @@ impl WindowGraphics {
             .map_err(|error| PainterError::Render(error.to_string()))
     }
 
-    /// Bakes the textures of `frame`'s vector image draws not already
-    /// resident, on the window's device.
-    ///
-    /// Call before [`Self::prepare_filters`] and before composing; a frame
-    /// with no vector draw asks nothing of the device.
     pub(super) fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
@@ -329,12 +267,6 @@ impl WindowGraphics {
             .map_err(|error| PainterError::Gpu(error.to_string()))
     }
 
-    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
-    /// elements on the window's device.
-    ///
-    /// Call before composing, with the `vectors` table
-    /// [`Self::prepare_vectors`] answered for this frame; a frame with no
-    /// filter entry asks nothing of the device.
     pub(super) fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
@@ -365,26 +297,18 @@ impl WindowGraphics {
             .map_err(|error| PainterError::Gpu(error.to_string()))
     }
 
-    /// The stack this window draws through.
     pub(super) fn gpu(&self) -> &Arc<SharedGpu> {
         &self.gpu
     }
 
-    /// See [`Raster::lost_pixels`].
     pub(super) fn lost_pixels(&self) -> u64 {
         self.raster.lost_pixels()
     }
 
-    /// Forgets which frame the filter bakes belong to. The window keeps its
-    /// surface and its last presented frame; only the bake cache's identity
-    /// is given up, because commit ids restart per document.
     pub(super) fn forget_filters(&mut self) {
         self.filters.forget();
     }
 
-    /// Presents the retained target into the image [`Self::acquire`] took:
-    /// blits and presents. Pure composition — no document anywhere, nobody
-    /// blocked behind this.
     pub(super) fn present(&mut self, acquired: AcquiredFrame) {
         let AcquiredFrame {
             texture: surface_texture,
@@ -407,14 +331,6 @@ impl WindowGraphics {
         }
     }
 
-    /// Reads back the frame most recently rendered into the retained target,
-    /// on the window's device, as tightly-packed RGBA8 pixels.
-    ///
-    /// # Errors
-    ///
-    /// [`PainterError::Render`] if the target is not at `size` — what it
-    /// holds was not rendered for this capture — and [`PainterError::Gpu`]
-    /// if the read fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, PainterError> {
         if self.target.width != size.width || self.target.height != size.height {
@@ -428,9 +344,6 @@ impl WindowGraphics {
     }
 }
 
-/// The window stack against [`crate::render::gpu::Headless`], over a
-/// `CAMetalLayer` in no window: a real swap chain, acquired from, presented
-/// to and resized, without an `NSWindow` or the main thread.
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::sync::Arc;
@@ -444,9 +357,6 @@ mod tests {
     use crate::peniko::{Color, Fill, Gradient, Mix};
     use crate::render::gpu::{Headless, SharedGpu};
 
-    /// Fills, a stroke, a gradient (a ramp patch) and a clipped translucent
-    /// layer: every kind of draw a composed frame is made of short of images
-    /// and glyphs.
     fn scene(size: FrameSize) -> DisplayList {
         let (width, height) = (f64::from(size.width), f64::from(size.height));
         let mut scene = DisplayList::new();
@@ -491,8 +401,6 @@ mod tests {
         scene
     }
 
-    /// Acquires, renders, presents and captures one frame of [`scene`] at
-    /// `size` through `window`.
     fn present_and_capture(window: &mut WindowGraphics, size: FrameSize) -> Vec<u8> {
         let acquired = loop {
             match window
@@ -512,7 +420,6 @@ mod tests {
             .expect("the window target reads back")
     }
 
-    /// A window over `layer` at `size`, on the process's shared stack.
     fn window_over(layer: &CAMetalLayer, size: FrameSize) -> WindowGraphics {
         let shared = SharedGpu::offscreen().expect("a usable GPU adapter is mandatory");
         let instance = shared.instance().clone();
@@ -536,8 +443,6 @@ mod tests {
             .expect("the window stack builds over the layer")
     }
 
-    /// A window and a headless target draw through one stack, and a frame
-    /// of either reads back the same.
     #[test]
     fn a_window_frame_reads_back_as_the_headless_render_of_its_scene() {
         let layer = CAMetalLayer::new();
@@ -552,7 +457,6 @@ mod tests {
             "the window and the headless target share one stack"
         );
 
-        // The first size, then a resize, which rebuilds the retained target.
         let second = FrameSize {
             width: 130,
             height: 50,
@@ -589,7 +493,6 @@ mod tests {
         drop(window);
         drop(layer);
     }
-    /// Clears its flag when dropped.
     struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
 
     impl Drop for Stop<'_> {
@@ -598,10 +501,6 @@ mod tests {
         }
     }
 
-    /// wgpu waits for the device to go idle before it configures a surface
-    /// and fails the configuration if a submit lands meanwhile, so a window
-    /// resizing while another target on its stack renders from another
-    /// thread must not see that submit.
     #[test]
     fn a_window_resizes_while_another_target_renders_on_its_stack() {
         let layer = CAMetalLayer::new();
@@ -626,8 +525,6 @@ mod tests {
                         .expect("the headless render succeeds");
                 }
             });
-            // Stops the renders however this thread leaves the scope, so a
-            // failing resize fails the test rather than hanging it.
             let _stop = Stop(&rendering);
             for step in 0..24 {
                 let size = FrameSize {

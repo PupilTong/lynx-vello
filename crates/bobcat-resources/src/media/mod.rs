@@ -66,25 +66,16 @@ use vant::media::{Media, MediaPlayer, MediaSink, MediaSource};
 use crate::executor::Wakeup;
 use crate::{FrameOf, Resources, SharedHandle};
 
-/// The player `P`'s media capability opens.
 pub(crate) type PlayerOf<P> = <<P as Platform>::Media as Media<FrameOf<P>>>::Player;
 
-/// What one picture's player hands over, shared between the player, on
-/// whatever thread it produces frames on, and the store, on the painter's.
 struct Output<F> {
     slot: PictureSlot<F>,
-    /// Whether a view draws the picture: frames are published only then.
     drawn: AtomicBool,
-    /// The newest frame published, published again when the painter wants
-    /// the picture and has no texture for it.
     newest: Mutex<Option<(PictureFrame<F>, ImageDescriptor)>>,
-    /// Reports not drained into the view yet, in order.
     events: Mutex<Vec<MediaEvent>>,
     wakeup: Wakeup,
 }
 
-/// A picture's output, as its player holds it: the [`MediaSink`] this store
-/// hands every [`Media::open`].
 pub(crate) struct Sink<F>(Arc<Output<F>>);
 
 impl<F> Clone for Sink<F> {
@@ -110,14 +101,12 @@ impl<F> Sink<F> {
 }
 
 impl<F: Clone> Sink<F> {
-    /// Publishes `frame` into the slot, waking the host when a wake is owed.
     fn publish(&self, frame: PictureFrame<F>, descriptor: ImageDescriptor) {
         if self.0.slot.publish(frame, descriptor, None) {
             (self.0.wakeup)();
         }
     }
 
-    /// Publishes the newest frame again, if there is one.
     fn republish(&self) {
         let newest = self
             .0
@@ -136,10 +125,6 @@ impl<F: Clone + vant::Threaded> MediaSink<F> for Sink<F> {
         self.0.drawn.load(Ordering::Acquire)
     }
 
-    /// Keeps `frame` as the newest, and publishes it while the picture is
-    /// drawn. A frame handed over while nobody draws the picture (a
-    /// player's first, the one it stops on, or every one from a player that
-    /// skips none) is kept for the draw that comes.
     fn frame(&self, frame: PictureFrame<F>, descriptor: ImageDescriptor) {
         *self.0.newest.lock().unwrap_or_else(PoisonError::into_inner) =
             Some((frame.clone(), descriptor));
@@ -158,28 +143,20 @@ impl<F: Clone + vant::Threaded> MediaSink<F> for Sink<F> {
     }
 }
 
-/// Where a picture's player is.
 enum Player<P: Platform> {
-    /// Its bytes are being fetched; these commands wait for the open.
     Fetching(Vec<MediaCommand>),
     Open(PlayerOf<P>),
-    /// It failed before it could play, with this error.
     Failed(MediaError),
 }
 
-/// One picture a view opened.
 struct Picture<P: Platform> {
     sink: Sink<FrameOf<P>>,
     player: Player<P>,
-    /// What the open asked for; a command that waited for the bytes is
-    /// sent after it.
     settings: MediaSettings,
     reports: ImageReports,
     view: ViewKey,
 }
 
-/// Every video of one scope: the pictures, keyed by id, and each view's
-/// drawn set of them.
 pub(crate) struct MediaPictures<P: Platform> {
     pictures: FxHashMap<PictureId, Picture<P>>,
     views: FxHashMap<ViewKey, Vec<PictureId>>,
@@ -204,15 +181,10 @@ impl<P: Platform> std::fmt::Debug for MediaPictures<P> {
 }
 
 impl<P: Platform> MediaPictures<P> {
-    /// Whether `picture` is a video this store opened.
     pub(crate) fn contains(&self, picture: PictureId) -> bool {
         !self.pictures.is_empty() && self.pictures.contains_key(&picture)
     }
 
-    /// Opens `picture` for `view`, whose reports go to `reports`: the
-    /// player opened at once on `source` when it is `Some`, otherwise the
-    /// picture waits for its bytes ([`Self::fetched`]). A picture already
-    /// open is left as it is.
     #[expect(
         clippy::too_many_arguments,
         reason = "the request's two parts, its view's two, the platform and the wake"
@@ -247,7 +219,6 @@ impl<P: Platform> MediaPictures<P> {
         );
     }
 
-    /// Opens a player, reporting a failure to open at once.
     fn start(
         media: &P::Media,
         source: MediaSource,
@@ -268,8 +239,6 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// The bytes of `picture`'s source arrived, or failed to: its player is
-    /// opened on them and handed the commands that waited.
     pub(crate) fn fetched(
         &mut self,
         media: &P::Media,
@@ -306,7 +275,6 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// Sends `command` to `picture`'s player.
     pub(crate) fn command(&mut self, picture: PictureId, command: MediaCommand) {
         if let Some(entry) = self.pictures.get_mut(&picture) {
             Self::apply(entry, picture, command);
@@ -328,7 +296,6 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// `picture` is gone: its player is closed and its slot let go of.
     pub(crate) fn end(&mut self, picture: PictureId) {
         self.pictures.remove(&picture);
         for drawn in self.views.values_mut() {
@@ -336,42 +303,30 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// Ends every picture `view` opened, and forgets its drawn set.
     pub(crate) fn release_view(&mut self, view: ViewKey) {
         self.pictures.retain(|_, entry| entry.view != view);
         self.views.remove(&view);
         self.restate();
     }
 
-    /// What a frame drawing `picture` draws: its slot's newest frame, with
-    /// no next change, since a player says when it has a frame rather than
-    /// when it will. A describe is a draw: frames are published from now.
-    /// `None` while nothing has been published.
     pub(crate) fn describe(&self, picture: PictureId) -> Option<FrameImage<FrameOf<P>>> {
         let entry = self.pictures.get(&picture)?;
         if !entry.sink.0.drawn.swap(true, Ordering::AcqRel) {
-            // Drawn again: what the player published while it was not is
-            // gone, and a paused player publishes nothing new.
             entry.sink.republish();
         }
         entry.sink.0.slot.describe()
     }
 
-    /// The painter draws `picture` with neither a frame to take nor a
-    /// texture: the newest frame is published again.
     pub(crate) fn want(&self, picture: PictureId) {
         if let Some(entry) = self.pictures.get(&picture) {
             entry.sink.republish();
         }
     }
 
-    /// Takes the newest frame of `picture`'s slot, if it has not been taken.
     pub(crate) fn take_frame(&self, picture: PictureId) -> Option<TakenFrame<FrameOf<P>>> {
         self.pictures.get(&picture)?.sink.0.slot.take()
     }
 
-    /// Records `view`'s drawn set: a picture is drawn while some view's set
-    /// includes it.
     pub(crate) fn retain(&mut self, view: ViewKey, pictures: &[PictureId]) {
         if self.pictures.is_empty() {
             return;
@@ -385,8 +340,6 @@ impl<P: Platform> MediaPictures<P> {
         self.restate();
     }
 
-    /// Moves every picture to whether the union of the views' sets includes
-    /// it.
     fn restate(&self) {
         for (picture, entry) in &self.pictures {
             let drawn = self.views.values().any(|drawn| drawn.contains(picture));
@@ -394,8 +347,6 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// Drains what every player reported since the last turn into the view
-    /// that opened its picture, in order.
     pub(crate) fn service(&self) {
         for (picture, entry) in &self.pictures {
             for event in entry.sink.take_events() {
@@ -406,17 +357,12 @@ impl<P: Platform> MediaPictures<P> {
         }
     }
 
-    /// The pictures open, for tests.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.pictures.len()
     }
 }
 
-/// Serves one of a view's requests for a video: an open, a command or an
-/// end. An open whose source the player cannot read itself fetches it first,
-/// as a job whose completion opens the player
-/// ([`crate::images::Completion::MediaSource`]).
 pub(crate) fn request<P: Platform>(
     resources: &Resources<P>,
     view: ViewKey,
@@ -470,8 +416,6 @@ pub(crate) fn request<P: Platform>(
     }
 }
 
-/// What a fetch for a player answers: the bytes, with the type they came
-/// labelled with, or why there are none.
 fn fetched_source(
     url: Url,
     fetched: Result<crate::transport::Fetched, vant::error::Failure>,
@@ -484,8 +428,6 @@ fn fetched_source(
     })
 }
 
-/// Fetches `url`'s bytes for `picture`'s player on the transport's blocking
-/// pool.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_fetch<P: Platform>(resources: &Resources<P>, picture: PictureId, url: Url) {
     let shared = SharedHandle::clone(&resources.shared);
@@ -512,8 +454,6 @@ fn spawn_fetch<P: Platform>(resources: &Resources<P>, picture: PictureId, url: U
     });
 }
 
-/// Fetches `url`'s bytes for `picture`'s player, in a local task on the
-/// Render Worker.
 #[cfg(target_arch = "wasm32")]
 fn spawn_fetch<P: Platform>(resources: &Resources<P>, picture: PictureId, url: Url) {
     let shared = SharedHandle::clone(&resources.shared);

@@ -68,7 +68,6 @@ fn returned_buffers_are_freed_by_detach_transfer_and_collection() {
             Ok(HostValue::Bytes(vec![1u8; CHUNK].into_boxed_slice()))
         })
         .unwrap();
-    // One round first, so whatever the realm allocates once is already live.
     let round = "for (let i = 0; i < 64; i++) { \
                    const a = make(); \
                    if (i % 4 === 1) a.transfer(); \
@@ -87,8 +86,6 @@ fn returned_buffers_are_freed_by_detach_transfer_and_collection() {
         runtime.run_gc();
     }
     let grown = LIVE.load(Ordering::Relaxed) - before;
-    // 512 buffers of 1 MiB went through the realm; a leak of even one round's
-    // would be 48 MiB.
     #[allow(clippy::cast_possible_wrap, reason = "a small constant")]
     let bound = 4 * CHUNK as isize;
     assert!(

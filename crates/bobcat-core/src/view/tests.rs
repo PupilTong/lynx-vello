@@ -11,11 +11,6 @@ use super::*;
 use crate::resource::{LoadedSource, SourceCompletion};
 use crate::test_support::TestViewSpec;
 
-/// The goodbye is structural: nothing sends it, and nothing can forget to.
-///
-/// That this test returns at all is half the assertion. Dropping the last
-/// view drops the last handle on its group, which joins `bobcat-main`, and
-/// that thread cannot return while a view task is still serving.
 #[test]
 fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
     let view = TestViewSpec::new(
@@ -26,7 +21,6 @@ fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
         ",
     )
     .create_view(Arc::new(NoWakeup));
-    // A source the host is still holding when the view goes.
     let (completion, answer) = SourceCompletion::new(view.cancel().clone());
     drop(view);
     assert!(
@@ -43,12 +37,6 @@ fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
     );
 }
 
-/// A view runs its own clock: once it has booted, its realm's timers come due
-/// on `bobcat-main` and their commits publish — with no host call between the
-/// boot and the frame beyond the turns the host takes anyway.
-///
-/// The painter is here only to bind the view. It is never pumped, so nothing
-/// in the loop below drives the timer.
 #[test]
 fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
     let mut engine = TestViewSpec::new(
@@ -88,8 +76,6 @@ fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
         .expect("boot's flush published a frame")
         .commit_id();
 
-    // Nothing in this loop drives the timer: `published_frame` reads the
-    // watch and sends nothing at all.
     loop {
         let commit = engine
             .published_frame()
@@ -119,16 +105,6 @@ fn a_view_runs_its_own_timers_with_no_host_call_behind_them() {
     );
 }
 
-/// A view boots, commits and publishes with no host turn behind it, which is
-/// what makes its whole startup overlap the painter the embedder builds next.
-///
-/// Nothing here pumps the view before the assertion, and nothing could: the
-/// author sheets and the entry were handed to the fetcher inside
-/// `create_lynx_view`, and this host answers them in that same call, so the
-/// realm opens, the entry runs and its flush commits on `bobcat-main` alone.
-/// Attaching the painter is not a turn either — it writes the metrics watch,
-/// which is what releases that first flush. The host's first `pump` only
-/// collects what already happened.
 #[test]
 fn a_view_boots_and_publishes_before_the_host_takes_a_turn() {
     let mut engine = TestViewSpec::new(
@@ -245,9 +221,6 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
     ));
 }
 
-/// A listed sheet the host has nothing for fails boot's own flush, which is
-/// a startup failure: the view never becomes ready, and refuses page updates
-/// from the first turn to the last.
 #[test]
 fn failed_startup_never_makes_a_view_ready() {
     let mut view = TestViewSpec::new("__CreatePage();")
@@ -273,14 +246,6 @@ fn failed_startup_never_makes_a_view_ready() {
     }
 }
 
-/// An entry that throws is the app's failure, not the view's: it is reported
-/// as a `ScriptRunError`, and boot goes on to render and flush, so the view
-/// becomes ready after it and takes page updates.
-///
-/// The view has a painter, and the loop is this test's own rather than
-/// `wait_for_boot`, which fails on the `ScriptRunError` this test waits for:
-/// boot's first flush parks until a painter binds the view, and
-/// `ScriptFinished` follows that flush.
 #[test]
 fn an_entry_that_throws_is_reported_and_the_view_still_becomes_ready() {
     let mut engine = TestViewSpec::new(
@@ -320,8 +285,6 @@ fn an_entry_that_throws_is_reported_and_the_view_still_becomes_ready() {
         .expect("a ready view takes page updates");
 }
 
-/// [`EngineEvent::is_fatal`] is what [`LynxView::pump`] ends a view on, so its
-/// set is fixed here one variant at a time.
 #[test]
 fn only_fatal_events_end_the_view() {
     let error = || crate::threads::platform_script_error("failed".to_owned());
@@ -353,8 +316,6 @@ fn only_fatal_events_end_the_view() {
             },
             false,
         ),
-        // A report at the `"fatal"` level included: it is a diagnostic, and
-        // the engine does nothing more for it than for the other levels.
         (
             EngineEvent::ScriptReported {
                 source: background(),
@@ -386,9 +347,6 @@ fn preloading_fonts_is_idempotent_from_any_thread() {
     preload_system_fonts();
 }
 
-/// A group asks the platform for the scripts the host names before any view
-/// exists, and refuses a locale every view would refuse or a script the
-/// platform cannot be asked for, having done nothing.
 #[test]
 fn a_group_preloads_the_scripts_its_host_names() {
     let group =
@@ -411,9 +369,6 @@ fn a_group_preloads_the_scripts_its_host_names() {
         .expect("a second call");
 }
 
-/// A view that names a locale builds its text context on the embedder's
-/// thread and boots on it like any other: the locale changes which face a
-/// fallback cluster is set in, not whether the view starts.
 #[test]
 fn a_view_with_a_locale_boots() {
     let mut engine = TestViewSpec::new(
@@ -453,9 +408,6 @@ fn a_view_with_a_locale_boots() {
     }
 }
 
-/// A view's locale is validated where its fonts are, before anything is
-/// requested: a tag that is not a language is `InvalidLocale`, and every view
-/// builds its text context with the locale it names.
 #[test]
 fn a_locale_is_validated_with_the_fonts_before_anything_is_requested() {
     let error = stage_text_context(Vec::new(), None, Vec::new(), "not a tag")
@@ -473,10 +425,6 @@ fn a_locale_is_validated_with_the_fonts_before_anything_is_requested() {
     );
 }
 
-/// What an embedder prints a script event's source as: `main`, or `worker`
-/// with the worker's id and its script URL. The view's background thread is
-/// printed as the worker it is, at the URL `bobcat:bts`, and the id is what
-/// tells two workers over one URL apart.
 #[test]
 fn a_source_prints_as_main_or_as_a_workers_id_and_url() {
     let worker = |key, url: &str| ScriptSource::Worker {
@@ -496,10 +444,6 @@ fn a_source_prints_as_main_or_as_a_workers_id_and_url() {
     );
 }
 
-/// Each of a group's two threads aligns its clock to the thread that spawned
-/// it as its first statement, `bobcat-main` before it reports startup. The
-/// exchange runs natively too, where its offset is measured and not applied:
-/// one process clock, so what it measures is the estimate's own error.
 #[test]
 fn both_group_threads_align_their_clocks_as_they_start() {
     let patience = Duration::from_secs(30);
@@ -528,8 +472,6 @@ fn both_group_threads_align_their_clocks_as_they_start() {
         matches!(started.blocking_recv(), Ok(Ok(()))),
         "bobcat-main reports startup after aligning"
     );
-    // The group's teardown order: the attach sender, then bobcat-main, then
-    // bobcat-workers.
     drop(attach);
     drop(home);
     drop(workers);

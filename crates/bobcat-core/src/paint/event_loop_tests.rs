@@ -9,21 +9,14 @@ use crate::test_support::{
     IntersectionWatcher, TestEngine, TestViewSpec, WatcherLog, take_watched,
 };
 
-/// The handle a packed id names, the way script spells one.
 fn node_id(bits: u64) -> terminus::link::NodeId {
     terminus::link::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
-/// Boots a script and waits for it to finish, leaving the view's task parked
-/// on its channels with the boot's frame published.
-///
-/// This suite reads the document and the decisions, never pixels, so the view
-/// it builds has nowhere to draw.
 fn booted(source: &str) -> TestEngine {
     TestViewSpec::new(source).boot()
 }
 
-/// One attribute of one node, read on the view's own thread through a probe.
 fn attribute_of(engine: &mut TestEngine, node: u64, name: &'static str) -> Option<String> {
     engine
         .probe_document(move |tree| {
@@ -33,9 +26,6 @@ fn attribute_of(engine: &mut TestEngine, node: u64, name: &'static str) -> Optio
         .flatten()
 }
 
-/// The whole loop: input arrives on this thread, is routed against the
-/// published frame and decided here, and delivered to a listener on the
-/// thread that owns the realm and the document.
 #[test]
 fn a_host_input_event_reaches_a_listener_in_the_realm() {
     let mut engine = booted(
@@ -63,8 +53,6 @@ fn a_host_input_event_reaches_a_listener_in_the_realm() {
         PointerPhase::Down,
     ));
 
-    // Delivery is asynchronous by construction: this thread queued a
-    // command and moved on.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let seen = attribute_of(&mut engine, 3, "seen");
@@ -79,8 +67,6 @@ fn a_host_input_event_reaches_a_listener_in_the_realm() {
     }
 }
 
-/// A listener that throws must not take the loop with it: the failure is
-/// reported rather than swallowed, and the next event still delivers.
 #[test]
 fn a_throwing_listener_keeps_the_loop_alive_and_is_reported() {
     let mut engine = booted(
@@ -127,7 +113,6 @@ fn a_throwing_listener_keeps_the_loop_alive_and_is_reported() {
         std::thread::yield_now();
     }
 
-    // And the loop still works: a second event routes and is delivered.
     engine.dispatch_input(InputEvent::pointer(
         Point2D::new(10.0, 10.0),
         1,
@@ -147,8 +132,6 @@ fn a_throwing_listener_keeps_the_loop_alive_and_is_reported() {
     }
 }
 
-/// A node with no registration must not cost a trip into the realm, and a
-/// script that registered nothing must not keep the loop from working.
 #[test]
 fn an_event_with_no_listener_changes_nothing() {
     let mut engine = booted(
@@ -175,9 +158,6 @@ fn an_event_with_no_listener_changes_nothing() {
     assert!(attribute_of(&mut engine, 3, "seen").is_none());
 }
 
-/// The gesture suite's page: one 200x200 view whose listeners append
-/// `type:x` to a `log` attribute. The placeholder line opts a variant
-/// into a `longpress` registration.
 const GESTURE_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -211,11 +191,6 @@ fn touch(id: u32, phase: PointerPhase, x: f32) -> InputEvent {
     InputEvent::pointer(Point2D::new(x, 10.0), id, PointerKind::Touch, phase)
 }
 
-/// Polls until the view's `log` attribute equals `expected` — equality,
-/// not containment, so an event that should have been suppressed fails
-/// the wait by showing up in the actual value. The deadline is generous
-/// because the whole suite's realm boots share the machine with this
-/// spin.
 fn wait_for_log(engine: &mut TestEngine, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -231,8 +206,6 @@ fn wait_for_log(engine: &mut TestEngine, expected: &str) {
     }
 }
 
-/// A press released within the slop synthesizes `tap` at the release
-/// point, delivered through the same path as the raw pointer events.
 #[test]
 fn a_quick_release_delivers_tap_to_the_realm() {
     let mut engine = booted(&gesture_page(false));
@@ -241,8 +214,6 @@ fn a_quick_release_delivers_tap_to_the_realm() {
     wait_for_log(&mut engine, "tap:12");
 }
 
-/// Two 100x100 views side by side in a row (node 3 the row, 4 and 5 the
-/// views); the page's listeners append `type@uid` to the row's `log`.
 const CLICK_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -272,10 +243,6 @@ fn touch_xy(id: u32, phase: PointerPhase, x: f32, y: f32) -> InputEvent {
     InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Touch, phase)
 }
 
-/// `click` end to end: a press that leaves one view for its sibling clicks
-/// their common parent (and is no `tap`, at 100px of travel); two quick
-/// presses on one view click it twice and add a `dblclick` after the
-/// second, each before that release's `tap`.
 #[test]
 fn a_click_reaches_the_common_ancestor_and_two_quick_ones_a_dblclick() {
     let mut engine = booted(CLICK_PAGE);
@@ -296,8 +263,6 @@ fn a_click_reaches_the_common_ancestor_and_two_quick_ones_a_dblclick() {
     );
 }
 
-/// The page a `timestamp`/`params` test reads: one `tap` listener that
-/// logs what every dispatched event carries beside its detail.
 const STAMPED_GESTURE_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -318,10 +283,6 @@ const STAMPED_GESTURE_PAGE: &str = r"
         };
         ";
 
-/// Every dispatched event carries a `timestamp` and a `params`. The clock
-/// is pinned before the release, so the value the listener reads is that
-/// arrival reading in milliseconds — this engine's time origin is the
-/// view's timeline, as web-core's is the document's.
 #[test]
 fn a_delivered_event_carries_its_timestamp_and_params() {
     let mut engine = booted(STAMPED_GESTURE_PAGE);
@@ -331,9 +292,6 @@ fn a_delivered_event_carries_its_timestamp_and_params() {
     wait_for_log(&mut engine, "number:250:object:{}");
 }
 
-/// Travel beyond the 50px tap slop disqualifies the sequence; the later
-/// fence tap proves the suppressed one was never sent, because the
-/// command channel is ordered.
 #[test]
 fn travel_beyond_the_tap_slop_suppresses_the_tap() {
     let mut engine = booted(&gesture_page(false));
@@ -345,9 +303,6 @@ fn travel_beyond_the_tap_slop_suppresses_the_tap() {
     wait_for_log(&mut engine, "tap:150");
 }
 
-/// Holding past the deadline delivers `longpress` on the engine's own
-/// timeline, and the sequence's release is then not a tap — Lynx's
-/// `long_press_consumed` rule. The fence tap pins the suppression.
 #[test]
 fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
     let mut engine = booted(&gesture_page(true));
@@ -362,9 +317,6 @@ fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
     wait_for_log(&mut engine, "longpress:10,tap:30");
 }
 
-/// With no `longpress` listener anywhere, the deadline lapses silently
-/// and a slow release is still a tap — the listener-presence gate read
-/// through the shared name table.
 #[test]
 fn a_long_hold_without_longpress_listener_still_taps() {
     let mut engine = booted(&gesture_page(false));
@@ -374,9 +326,6 @@ fn a_long_hold_without_longpress_listener_still_taps() {
     wait_for_log(&mut engine, "tap:10");
 }
 
-/// Input processed after the deadline resolves the deadline first: the
-/// decision order is the delivery order on the ordered channel, so
-/// `longpress` precedes the release that follows it.
 #[test]
 fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     let mut engine = booted(&gesture_page(true));
@@ -388,8 +337,6 @@ fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     wait_for_log(&mut engine, "longpress:10,tap:30");
 }
 
-/// The touch suite's page: the same 200x200 view, with listeners that log
-/// what only a touch event carries — the detail point and the three lists.
 const TOUCH_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -415,10 +362,6 @@ const TOUCH_PAGE: &str = r"
         };
         ";
 
-/// One finger's move and release reach a listener with their lists decoded:
-/// the move while the finger is down reports it in all three, and the
-/// release reports it in `changedTouches` alone, with the detail point
-/// falling back to the finger that lifted.
 #[test]
 fn a_touch_sequence_delivers_its_lists_to_the_realm() {
     let mut engine = booted(TOUCH_PAGE);
@@ -428,8 +371,6 @@ fn a_touch_sequence_delivers_its_lists_to_the_realm() {
     wait_for_log(&mut engine, "touchmove:20:1:1:1:1,touchend:22:0:0:1:1");
 }
 
-/// A scrollable page: the 200x200 view scrolls a 1000px-tall child, and
-/// its `tap` listener logs `type:x` exactly as the gesture page does.
 const SCROLLING_GESTURE_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -456,13 +397,6 @@ fn scroll_offset_of(engine: &mut TestEngine, node: u64) -> terminus::link::Vecto
         .expect("the view's task answers probes")
 }
 
-/// A drag the user-agent scroll consumed is the claim that suppresses
-/// `tap` — end to end: recognition against the published scroll-slot
-/// table, consumption arbitrated against published bounds, the offset
-/// posted to the main thread and adopted there. The drag travels 30px:
-/// past the 8px drag slop so it scrolls, inside the 50px tap slop so the
-/// claim is the only suppressor. The fence tap at another x pins that
-/// the suppressed one never crossed the channel.
 #[test]
 fn a_scroll_consuming_drag_suppresses_the_tap() {
     let mut engine = booted(SCROLLING_GESTURE_PAGE);
@@ -488,9 +422,6 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
     wait_for_log(&mut engine, "tap:150");
 
-    // The router's scroll decision landed in the intents: 30px of
-    // travel minus the 8px drag slop moved the scroller 22px, and the
-    // document followed: the marker queued ahead of the probe.
     let offset = engine
         .painter
         .scroll_intents()
@@ -507,9 +438,6 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     );
 }
 
-/// A 200px column scroller (node 3, max offset 800) whose `scroll` and
-/// `scrollend` listeners log their type into its `log`; its first `tap`
-/// scrolls it instantly to 100 through the `scrollTo` UI method.
 const SCROLL_EVENTS_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -539,11 +467,6 @@ const SCROLL_EVENTS_PAGE: &str = r"
         };
         ";
 
-/// Runs display passes at `at` — the gesture clock, the rebase onto the
-/// newest commit (which carries out its scroll requests), then the pass's
-/// publish, as a drawn frame does — until the scroller's `log` equals
-/// `expected`. Equality, as [`wait_for_log`]: an extra event shows up in
-/// the value.
 fn drive_until_log(engine: &mut TestEngine, at: f64, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -561,13 +484,6 @@ fn drive_until_log(engine: &mut TestEngine, at: f64, expected: &str) {
     }
 }
 
-/// CSSOM-View's `scroll` and `scrollend`, end to end. An instant
-/// `scrollTo` fires `scroll` in the task that scrolled; its `scrollend`
-/// comes from the painter, which carries the request out and posts the
-/// container at rest — once. A drag that comes to rest fires one `scroll`
-/// for the offset its move posted and a `scrollend` for the rest its quiet
-/// release posted. Two wheel ticks 30 ms apart are one wheel gesture: a
-/// `scroll` per tick, and one `scrollend` once the quiet interval passes.
 #[test]
 fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
     let mut engine = booted(SCROLL_EVENTS_PAGE);
@@ -579,8 +495,6 @@ fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
         terminus::link::Vector2D::new(0.0, 100.0)
     );
 
-    // Slow: 30px over half a second, then held still before the release,
-    // so the release has no speed to fling with.
     touch_at(&mut engine, 1.0, PointerPhase::Down, 150.0);
     touch_at(&mut engine, 1.5, PointerPhase::Move, 120.0);
     touch_at(&mut engine, 2.0, PointerPhase::Move, 120.0);
@@ -591,8 +505,6 @@ fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
         terminus::link::Vector2D::new(0.0, 122.0)
     );
 
-    // Each tick is adopted before the next, so each is a `scroll` of its
-    // own; ticks adopted together would be one.
     for (at, log) in [
         (3.0, "scroll,scrollend,scroll,scrollend,scroll"),
         (3.03, "scroll,scrollend,scroll,scrollend,scroll,scroll"),
@@ -616,9 +528,6 @@ fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
     );
 }
 
-/// A key reaches a listener on the page through the painter, named by the
-/// router and targeted at the document element, with the W3C members on
-/// the event object.
 #[test]
 fn a_key_reaches_a_page_listener_with_its_keyboard_members() {
     let mut engine = booted(
@@ -650,9 +559,6 @@ fn a_key_reaches_a_page_listener_with_its_keyboard_members() {
     wait_for_log(&mut engine, "keydown,A,KeyA,true");
 }
 
-/// An outer column scroller (node 3, max offset 800) whose first child is
-/// an inner scroller (node 4, 200×100, max offset 900) carrying
-/// `inner_css`; the outer's own filler sits below the inner.
 fn nested_scrollers_page(inner_css: &str) -> String {
     format!(
         r"
@@ -677,9 +583,6 @@ fn nested_scrollers_page(inner_css: &str) -> String {
     )
 }
 
-/// A 200px column scroller (node 3) of five `card_height`px cards carrying
-/// `container_css` and `card_css`, behind a `lead`px spacer that snaps to
-/// nothing, for the snapping tests.
 fn snapping_page(container_css: &str, card_css: &str, card_height: u32, lead: u32) -> String {
     format!(
         r"
@@ -728,8 +631,6 @@ fn drag(engine: &mut TestEngine, from_y: f32, to_y: f32) {
     ));
 }
 
-/// Asserts the painter shows `node` at `expected` on y, whether a live
-/// intent holds it there or a commit has already adopted it.
 fn assert_shown_at(engine: &mut TestEngine, node: u64, expected: f32) {
     let offset = live_offset(engine, node);
     assert!(
@@ -738,9 +639,6 @@ fn assert_shown_at(engine: &mut TestEngine, node: u64, expected: f32) {
     );
 }
 
-/// `scroll-capture: nearest` on the inner scroller: the drag that starts in
-/// it moves the scroller above it, and the inner one stays — the router
-/// latched the inner, the published chain policy reordered the walk.
 #[test]
 fn a_capturing_container_hands_its_drag_to_the_scroller_above() {
     let mut engine = booted(&nested_scrollers_page("scroll-capture:nearest"));
@@ -753,8 +651,6 @@ fn a_capturing_container_hands_its_drag_to_the_scroller_above() {
     );
 }
 
-/// `overscroll-behavior: contain` on the inner scroller: a wheel far past
-/// its end pins it there and hands nothing to the scroller above.
 #[test]
 fn overscroll_contain_keeps_a_wheel_inside_its_container() {
     let mut engine = booted(&nested_scrollers_page("overscroll-behavior:contain"));
@@ -770,11 +666,6 @@ fn overscroll_contain_keeps_a_wheel_inside_its_container() {
     );
 }
 
-/// A drag on a `mandatory` snapping scroller is raw while it lasts and
-/// settles onto the nearest snap position after its release: 130px of
-/// travel less the 8px slop leaves it at 122, nearer the second card's start
-/// (200) than the first's (0). Let go without velocity, it glides there over
-/// the frames that follow rather than jumping on the release.
 #[test]
 fn a_released_drag_settles_onto_the_nearest_snap_position() {
     let mut engine = booted(&snapping_page(
@@ -801,8 +692,6 @@ fn a_released_drag_settles_onto_the_nearest_snap_position() {
     assert!(!engine.is_animating());
 }
 
-/// A wheel tick on a `mandatory` snapping scroller lands on the next snap
-/// position in its direction, however small the tick.
 #[test]
 fn a_wheel_tick_moves_to_the_next_snap_position() {
     let mut engine = booted(&snapping_page(
@@ -823,10 +712,6 @@ fn a_wheel_tick_moves_to_the_next_snap_position() {
     assert_shown_at(&mut engine, 3, 0.0);
 }
 
-/// A `mandatory` scroller whose initial offset is no snap position (a 50px
-/// spacer ahead of the first card puts the first position at 50) is settled
-/// as soon as its first commit is adopted, with no gesture at all: the
-/// zero-delta wheel here decides nothing, it only lets the painter adopt.
 #[test]
 fn a_snapping_container_rests_on_a_position_after_its_first_commit() {
     let mut engine = booted(&snapping_page(
@@ -842,9 +727,6 @@ fn a_snapping_container_rests_on_a_position_after_its_first_commit() {
     assert_shown_at(&mut engine, 3, 50.0);
 }
 
-/// `scroll-initial-target: nearest` on the third card sets the scroller's
-/// initial position in the document itself, inside the boot's own commit,
-/// so the published frame — and the painter's at-rest rule — start from it.
 #[test]
 fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
     let page = snapping_page("", "", 200, 0).replace(
@@ -869,7 +751,6 @@ fn an_initial_scroll_target_positions_the_container_in_the_boot_commit() {
     );
 }
 
-/// Pins the painter's clock and feeds one touch at `y`.
 fn touch_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, y: f32) {
     engine.painter.clock_mut().pin(at);
     engine.dispatch_input(InputEvent::pointer(
@@ -880,14 +761,11 @@ fn touch_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, y: f32) {
     ));
 }
 
-/// Runs the painter's gesture clock at `at`, the way a display frame does.
 fn frame_at(engine: &mut TestEngine, at: f64) {
     engine.painter.clock_mut().pin(at);
     engine.painter.service_gesture_clock(at);
 }
 
-/// A flick: 60px of upward finger travel over 20ms, released at speed —
-/// 52px of drag after the slop, then a release velocity of 3 px/ms.
 fn flick(engine: &mut TestEngine, at: f64) {
     touch_at(engine, at, PointerPhase::Down, 150.0);
     touch_at(engine, at + 0.01, PointerPhase::Move, 120.0);
@@ -895,11 +773,6 @@ fn flick(engine: &mut TestEngine, at: f64) {
     touch_at(engine, at + 0.02, PointerPhase::Up, 90.0);
 }
 
-/// A flick keeps the scroller moving after the finger lifts: the release
-/// velocity decays per frame along `motion`'s curve, the frames are owed
-/// while it does, and it comes to rest where the curve is spent — the
-/// drag's 52px plus a 3 px/ms fling's whole travel, `−v₀/ln 0.998` ≈
-/// 1498px, clamped here by the 800px maximum.
 #[test]
 fn a_flick_keeps_scrolling_after_its_release_and_comes_to_rest() {
     let mut engine = booted(&snapping_page("", "", 200, 0));
@@ -909,7 +782,6 @@ fn a_flick_keeps_scrolling_after_its_release_and_comes_to_rest() {
 
     frame_at(&mut engine, 0.1);
     let early = live_offset(&mut engine, 3).y;
-    // 80ms at 3 px/ms decaying at 0.998: 3·(0.998^80 − 1)/ln 0.998 ≈ 222.
     assert!(
         (early - (52.0 + 222.0)).abs() < 3.0,
         "the first frame moved by the curve, got {early}"
@@ -928,11 +800,6 @@ fn a_flick_keeps_scrolling_after_its_release_and_comes_to_rest() {
     assert!(!engine.is_animating(), "at rest, no frame owed");
 }
 
-/// The same flick on a slower start — a 1 px/ms release — travels
-/// `−1/ln 0.998` ≈ 500px and stops short of the end, and a `mandatory`
-/// scroller aims the fling at the snap position that travel settles on:
-/// 52 + 500 = 552 is nearest the fourth card's start at 600, so the fling
-/// lands there exactly rather than snapping after it stops.
 #[test]
 fn a_fling_on_a_snapping_scroller_lands_on_a_snap_position() {
     let slow_flick = |engine: &mut TestEngine| {
@@ -974,11 +841,6 @@ fn a_fling_on_a_snapping_scroller_lands_on_a_snap_position() {
     assert!(!engine.is_animating());
 }
 
-/// `overscroll-behavior: contain-bounce`: a drag past the start edge
-/// stretches the scroller by the rubber band — 92px of finger travel past
-/// the edge (100 less the slop) on a 200px scrollport stretches
-/// `(1 − 1/(92·0.55/200 + 1))·200` ≈ 40.4px — and a release from rest
-/// springs it back to the edge on the critically damped curve.
 #[test]
 fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
     let mut engine = booted(&snapping_page(
@@ -992,8 +854,6 @@ fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
     let stretched = live_offset(&mut engine, 3).y;
     assert!((stretched - -40.4).abs() < 0.2, "got {stretched}");
     assert!(!engine.is_animating(), "under the finger nothing animates");
-    // Held still, then let go: no velocity, so the bounce back starts at
-    // once from the stretch.
     touch_at(&mut engine, 0.4, PointerPhase::Up, 150.0);
     assert!(engine.is_animating(), "the bounce back owes frames");
     frame_at(&mut engine, 0.41);
@@ -1014,8 +874,6 @@ fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
     assert!(!engine.is_animating());
 }
 
-/// A fling into a bouncing end edge overshoots past it — raw, at the
-/// overshoot decay — and springs back to rest on the edge.
 #[test]
 fn a_fling_into_a_bouncing_edge_overshoots_and_springs_back() {
     let mut engine = booted(&snapping_page(
@@ -1050,8 +908,6 @@ fn a_fling_into_a_bouncing_edge_overshoots_and_springs_back() {
     assert!(!engine.is_animating());
 }
 
-/// Without `contain-bounce` the same fling stops dead at the edge: the
-/// boundary is a wall, and nothing chains past a lone scroller.
 #[test]
 fn a_fling_into_a_plain_edge_stops_there() {
     let mut engine = booted(&snapping_page("", "", 200, 0));
@@ -1068,20 +924,12 @@ fn a_fling_into_a_plain_edge_stops_there() {
     assert!(!engine.is_animating(), "spent against the wall");
 }
 
-/// A [`snapping_page`] whose scroller is `overscroll-behavior: circular`:
-/// five 200px cards in a 200px scrollport, so `max_offset` 800 and a
-/// period of 1000 — the last card's end meets the first card's start.
 const CIRCULAR_PERIOD: f32 = 1000.0;
 
-/// Where the painter shows `node` on a circular y axis, normalized into
-/// the period: its raw live offset may stand anywhere until the next
-/// rebase brings it back.
 fn wrapped_y(engine: &mut TestEngine, node: u64) -> f32 {
     live_offset(engine, node).y.rem_euclid(CIRCULAR_PERIOD)
 }
 
-/// Runs display frames from `at` until nothing animates, and answers the
-/// clock reading it came to rest at.
 fn frames_until_still(engine: &mut TestEngine, mut at: f64) -> f64 {
     let deadline = at + 10.0;
     while engine.is_animating() {
@@ -1092,14 +940,6 @@ fn frames_until_still(engine: &mut TestEngine, mut at: f64) -> f64 {
     at
 }
 
-/// `overscroll-behavior: circular` with `mandatory` snapping: a gentle
-/// flick forward from the last card (800) pages on to the first card's
-/// next copy, 1000, rather than stopping at the end. The flick is 10px of
-/// finger travel per 20ms after the 8px slop — 812 at the release, a
-/// release velocity of 0.5 px/ms whose whole fling travels
-/// `−0.5/ln 0.998` ≈ 250px — so its predicted end, ≈ 1062, is nearest
-/// the periodic position 1000, 188px away: inside one scrollport, so a
-/// glide. Once posted, the document adopts 1000 modulo the period: 0.
 #[test]
 fn a_flick_forward_from_the_last_page_wraps_to_the_first() {
     let mut engine = booted(&snapping_page(
@@ -1137,14 +977,6 @@ fn a_flick_forward_from_the_last_page_wraps_to_the_first() {
     );
 }
 
-/// The other way round: a drag back from the first card (finger moving
-/// down) shows the last card's end above the seam, and the document, which
-/// admits the whole period on a circular axis, holds the offset the screen
-/// shows meanwhile. 150px of travel less the 8px slop leaves the live
-/// offset at −142, 858 in the period, past `max_offset`; let go without
-/// velocity, it is nearer the last card's previous copy (−200, 58px off)
-/// than the first card (142px off), and glides there: 800 in the period,
-/// which the document adopts at rest.
 #[test]
 fn a_drag_back_from_the_first_page_shows_the_last_and_posts_it_across_the_seam() {
     let mut engine = booted(&snapping_page(
@@ -1160,7 +992,6 @@ fn a_drag_back_from_the_first_page_shows_the_last_and_posts_it_across_the_seam()
         "−142 in the period, got {}",
         live_offset(&mut engine, 3).y
     );
-    // The probe queues behind the marker the drag step sent.
     let held = scroll_offset_of(&mut engine, 3);
     assert!(
         held.x == 0.0 && (held.y - 858.0).abs() < 0.5,
@@ -1181,9 +1012,6 @@ fn a_drag_back_from_the_first_page_shows_the_last_and_posts_it_across_the_seam()
     );
 }
 
-/// `overscroll-behavior: circular` on the inner of two nested scrollers
-/// (inner `max_offset` 900, so a period of 1000): a wheel of 1500 is all
-/// the inner's — it wraps to 500 — and nothing chains out to the outer.
 #[test]
 fn a_circular_axis_never_chains_out() {
     let mut engine = booted(&nested_scrollers_page("overscroll-behavior:circular"));
@@ -1208,11 +1036,6 @@ fn a_circular_axis_never_chains_out() {
     );
 }
 
-/// A fling on a circular axis without snapping meets no wall: wheeled to
-/// 700, the [`flick`] adds its 52px of drag and a 3 px/ms fling's whole
-/// travel, `−3/ln 0.998` ≈ 1498px, so the scroller runs through the end
-/// and on round the circle to ≈ 2250 unwrapped — 250 in the period —
-/// ending by its decay alone. The document adopts the wrapped offset.
 #[test]
 fn a_fling_on_a_plain_circular_axis_runs_past_the_end() {
     let mut engine = booted(&snapping_page("overscroll-behavior:circular", "", 200, 0));
@@ -1222,8 +1045,6 @@ fn a_fling_on_a_plain_circular_axis_runs_past_the_end() {
     ));
     assert_shown_at(&mut engine, 3, 700.0);
     flick(&mut engine, 0.0);
-    // Summed modulo the period frame by frame, so a rebase that brings
-    // the live offset back into the period does not lose the travel.
     let mut previous = wrapped_y(&mut engine, 3);
     let mut travelled = previous;
     let mut at = 0.02;
@@ -1248,11 +1069,6 @@ fn a_fling_on_a_plain_circular_axis_runs_past_the_end() {
     );
 }
 
-/// A drag landing on a flinging scroller takes it over: a finger's down
-/// alone stops nothing (the router decides nothing before the slop), the
-/// drag's first step stops the fling where it finds the container, and a
-/// quiet release settles there. Its tap was suppressed by the consumed
-/// scroll as any drag's is, which the fence tap pins.
 #[test]
 fn a_drag_on_a_flinging_scroller_takes_it_over() {
     let mut engine = booted(SCROLLING_GESTURE_PAGE);
@@ -1266,7 +1082,6 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
     assert!(engine.is_animating(), "a down alone decides nothing");
     let found = live_offset(&mut engine, 3).y;
     assert!(found > moving);
-    // 10px of travel: the 8px slop, then a 2px step that takes over.
     touch_at(&mut engine, 0.25, PointerPhase::Move, 90.0);
     assert!(!engine.is_animating(), "the drag stopped the fling");
     let held = live_offset(&mut engine, 3).y;
@@ -1287,8 +1102,6 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
     wait_for_log(&mut engine, "tap:150");
 }
 
-/// A 200px row pager (node 3) of five 200px pages (nodes 4–8) snapping
-/// `mandatory` on x, each page carrying `page_css`: a `<viewpager>`'s shape.
 fn pager_page(page_css: &str) -> String {
     format!(
         r"
@@ -1310,7 +1123,6 @@ fn pager_page(page_css: &str) -> String {
     )
 }
 
-/// Pins the painter's clock and feeds one touch at `x`, halfway down.
 fn touch_x_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, x: f32) {
     engine.painter.clock_mut().pin(at);
     engine.dispatch_input(InputEvent::pointer(
@@ -1321,7 +1133,6 @@ fn touch_x_at(engine: &mut TestEngine, at: f64, phase: PointerPhase, x: f32) {
     ));
 }
 
-/// Where the painter shows `node`: its live offset, else the committed one.
 fn live_offset(engine: &mut TestEngine, node: u64) -> terminus::link::Vector2D<f32> {
     let node = node_id(node);
     engine
@@ -1338,8 +1149,6 @@ fn live_offset(engine: &mut TestEngine, node: u64) -> terminus::link::Vector2D<f
         })
 }
 
-/// Adopts whatever the view has published and rebases onto it at `at`,
-/// the way a display frame does before it composes.
 fn adopt_at(engine: &mut TestEngine, at: f64) {
     frame_at(engine, at);
     let frame = engine
@@ -1349,8 +1158,6 @@ fn adopt_at(engine: &mut TestEngine, at: f64) {
     engine.painter.scroll_intents_mut().rebase(&frame, at);
 }
 
-/// A horizontal flick on the pager: 60px of leftward travel over 20ms —
-/// 52px of drag after the slop, then a release velocity of 3 px/ms.
 fn flick_x(engine: &mut TestEngine, at: f64) {
     touch_x_at(engine, at, PointerPhase::Down, 150.0);
     touch_x_at(engine, at + 0.01, PointerPhase::Move, 120.0);
@@ -1358,9 +1165,6 @@ fn flick_x(engine: &mut TestEngine, at: f64) {
     touch_x_at(engine, at + 0.02, PointerPhase::Up, 90.0);
 }
 
-/// A release without velocity on a pager glides to the nearest page over
-/// several frames — never past it — lands on it exactly and stops asking
-/// for frames; the document follows.
 #[test]
 fn a_quiet_release_on_a_pager_glides_onto_the_nearest_page() {
     let mut engine = booted(&pager_page(""));
@@ -1397,9 +1201,6 @@ fn a_quiet_release_on_a_pager_glides_onto_the_nearest_page() {
     );
 }
 
-/// A flick on a pager whose pages are `scroll-snap-stop: always` lands on
-/// the next page — the stop its whole fling would have passed — well within
-/// 0.7s, keeping the release velocity, and never passes it.
 #[test]
 fn a_flick_on_a_pager_lands_on_the_next_page_without_passing_it() {
     let mut engine = booted(&pager_page("scroll-snap-stop:always"));
@@ -1424,9 +1225,6 @@ fn a_flick_on_a_pager_lands_on_the_next_page_without_passing_it() {
     assert!((live_offset(&mut engine, 3).x - 200.0).abs() < f32::EPSILON);
 }
 
-/// A snap position farther than one scrollport is still reached by the
-/// aimed fling: without `always` stops the same flick's whole travel
-/// settles on the last page, 748px on.
 #[test]
 fn a_far_snap_position_is_still_reached_by_a_fling() {
     let mut engine = booted(&pager_page(""));
@@ -1457,8 +1255,6 @@ fn a_far_snap_position_is_still_reached_by_a_fling() {
     assert!(!engine.is_animating());
 }
 
-/// A drag's first step on a gliding pager stops the glide where it finds
-/// the pager, and the pager moves with the finger from there.
 #[test]
 fn a_drag_interrupts_a_glide() {
     let mut engine = booted(&pager_page(""));
@@ -1470,7 +1266,6 @@ fn a_drag_interrupts_a_glide() {
     assert!(found > 112.0 && found < 200.0, "mid-glide, got {found}");
 
     touch_x_at(&mut engine, 0.5, PointerPhase::Down, 100.0);
-    // 10px of travel: the 8px slop, then a 2px step that takes over.
     touch_x_at(&mut engine, 0.55, PointerPhase::Move, 90.0);
     assert!(!engine.is_animating(), "the drag stopped the glide");
     let held = live_offset(&mut engine, 3).x;
@@ -1482,9 +1277,6 @@ fn a_drag_interrupts_a_glide() {
     assert!((live_offset(&mut engine, 3).x - held).abs() < f32::EPSILON);
 }
 
-/// A smooth programmatic scroll leaves the document where it was and the
-/// painter glides the pager to the target from rest; the offsets it posts
-/// name the request, so main adopts them and the request ends.
 #[test]
 fn a_smooth_request_glides_to_its_target() {
     let mut engine = booted(&pager_page(""));
@@ -1498,7 +1290,6 @@ fn a_smooth_request_glides_to_its_target() {
         })
         .expect("the view's task answers probes");
     assert_eq!(target, terminus::link::Vector2D::new(400.0, 0.0));
-    // A later entry, so the request's own commit has been published too.
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         terminus::link::Vector2D::zero()
@@ -1532,10 +1323,6 @@ fn a_smooth_request_glides_to_its_target() {
     );
 }
 
-/// An auto-scroll end to end: the document's change reaches the painter in
-/// a frame, the painter owes frames while it moves the container at the
-/// rate, its posts move the document and acknowledge the change, and a
-/// stop ends it where it stands with nothing owed.
 #[test]
 fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
     let mut engine = booted(SCROLLING_GESTURE_PAGE);
@@ -1543,7 +1330,6 @@ fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
     engine
         .probe_document(|document| document.auto_scroll(node_id(3), 120.0, false, true))
         .expect("the view's task answers probes");
-    // A later entry, so the change's own commit has been published too.
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         terminus::link::Vector2D::zero()
@@ -1557,7 +1343,6 @@ fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
         at += 1.0 / 60.0;
         frame_at(&mut engine, at);
     }
-    // The first frame starts the count; thirty more are half a second.
     let live = live_offset(&mut engine, 3);
     assert!((live.y - 60.0).abs() < 0.01, "got {live:?}");
     assert!(engine.is_animating(), "still on its way");
@@ -1585,10 +1370,6 @@ fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
     assert_eq!(live_offset(&mut engine, 3), live, "where it stood");
 }
 
-/// An `x-swiper` with `autoplay` turns by itself, end to end: the page's
-/// clock task waits the interval out with no script armed, the turn that
-/// comes due commits a scroll request, the painter glides to the next item,
-/// and its posts move the document there.
 #[test]
 fn an_autoplaying_swiper_turns_by_itself() {
     let mut engine = booted(
@@ -1644,9 +1425,6 @@ fn an_autoplaying_swiper_turns_by_itself() {
     }
 }
 
-/// An instant programmatic scroll lands in one frame even while a fling is
-/// carrying the container: the fling stops, and a post the painter made
-/// before it saw the request does not undo the document's move.
 #[test]
 fn an_instant_request_lands_at_once_over_a_fling() {
     let mut engine = booted(SCROLLING_GESTURE_PAGE);
@@ -1665,8 +1443,6 @@ fn an_instant_request_lands_at_once_over_a_fling() {
             )
         })
         .expect("the view's task answers probes");
-    // The fling's last step, posted before the painter adopted the frame
-    // carrying the request.
     engine.painter.publish_scroll(0.1, None);
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
@@ -1693,10 +1469,6 @@ fn an_instant_request_lands_at_once_over_a_fling() {
     );
 }
 
-/// A wheel tick on a container a smooth request is gliding ends the glide:
-/// the wheel's own landing position, snapped as a wheel tick snaps, is
-/// where the container rests, and no later frame of the glide overwrites
-/// it. The post that follows names the request, so main adopts it.
 #[test]
 fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
     let mut engine = booted(&viewpager_page(""));
@@ -1709,7 +1481,6 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
             )
         })
         .expect("the view's task answers probes");
-    // A later entry, so the request's own commit has been published too.
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         terminus::link::Vector2D::zero()
@@ -1757,13 +1528,6 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
     );
 }
 
-// --- `<viewpager>` built from its own tags -----------------------------------
-
-/// A 200px `viewpager` (node 3) of five `viewpager-item` pages (nodes 4–8),
-/// styled by the UA sheet alone apart from the pager's size, with `setup`
-/// run before the first flush. A tap on the pager calls
-/// `selectTab({index: 2, smooth: false})` and logs the answer's code in the
-/// pager's `log` attribute.
 fn viewpager_page(setup: &str) -> String {
     format!(
         r"
@@ -1790,8 +1554,6 @@ fn viewpager_page(setup: &str) -> String {
     )
 }
 
-/// Runs display frames until nothing animates, and answers where the
-/// pager came to rest.
 fn frames_until_rest(engine: &mut TestEngine, mut at: f64) -> f32 {
     let deadline = at + 3.0;
     while engine.is_animating() {
@@ -1802,8 +1564,6 @@ fn frames_until_rest(engine: &mut TestEngine, mut at: f64) -> f32 {
     live_offset(engine, 3).x
 }
 
-/// A quiet release under half a page glides back to the page; one past half
-/// glides on to the next.
 #[test]
 fn a_viewpager_drag_returns_under_half_a_page_and_turns_past_it() {
     for (to, dragged, rest) in [(100.0, 42.0, 0.0), (30.0, 112.0, 200.0)] {
@@ -1822,11 +1582,6 @@ fn a_viewpager_drag_returns_under_half_a_page_and_turns_past_it() {
     }
 }
 
-/// `select-index="2"`: the first frame the painter adopts is on page 2 and
-/// rests there. The user then swipes to page 3, main adopts it without a
-/// commit, and the card changes the attribute to 0: the commit that follows
-/// carries the new initial target as an instant request, so the painter
-/// shows page 0 rather than keeping the offset it held for the swipe.
 #[test]
 fn a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe() {
     let mut engine = booted(&viewpager_page(
@@ -1858,7 +1613,6 @@ fn a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe() {
     engine
         .probe_document(|document| document.set_attribute(node_id(3), "select-index", "0"))
         .expect("the view's task answers probes");
-    // A later entry, so the attribute's own commit has been published too.
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         terminus::link::Vector2D::zero()
@@ -1874,8 +1628,6 @@ fn a_selected_page_is_the_first_frame_and_a_new_index_overrides_a_swipe() {
     assert!(!engine.is_animating());
 }
 
-/// A flick moves exactly one page: the UA sheet's `scroll-snap-stop:
-/// always` on every page stops the fling the flick would carry past it.
 #[test]
 fn a_viewpager_flick_turns_exactly_one_page() {
     let mut engine = booted(&viewpager_page(""));
@@ -1893,8 +1645,6 @@ fn a_viewpager_flick_turns_exactly_one_page() {
     assert!((live_offset(&mut engine, 3).x - 200.0).abs() < f32::EPSILON);
 }
 
-/// `enable-scroll="false"`: a drag moves nothing, and `selectTab` still turns
-/// the pager — in the document at once, on the painter at its next frame.
 #[test]
 fn a_viewpager_that_cannot_scroll_ignores_drags_but_not_select_tab() {
     let mut engine = booted(&viewpager_page(
@@ -1920,8 +1670,6 @@ fn a_viewpager_that_cannot_scroll_ignores_drags_but_not_select_tab() {
     assert!(!engine.is_animating());
 }
 
-/// `bounces`: a drag past the first page and one past the last stretch the
-/// pager, and each springs back to its edge. Without it, neither edge moves.
 #[test]
 fn a_bouncing_viewpager_stretches_at_both_ends_and_springs_back() {
     for bounces in [true, false] {
@@ -1942,7 +1690,6 @@ fn a_bouncing_viewpager_stretches_at_both_ends_and_springs_back() {
                         )
                     })
                     .expect("the view's task answers probes");
-                // A later entry, so the request's own commit is published.
                 assert_eq!(
                     scroll_offset_of(&mut engine, 3),
                     terminus::link::Vector2D::new(800.0, 0.0)
@@ -1954,8 +1701,6 @@ fn a_bouncing_viewpager_stretches_at_both_ends_and_springs_back() {
             touch_x_at(&mut engine, start + 0.05, PointerPhase::Move, to);
             let stretch = live_offset(&mut engine, 3).x - edge;
             if bounces {
-                // 92px past the edge on a 200px scrollport: the rubber band's
-                // `(1 − 1/(92·0.55/200 + 1))·200` ≈ 40.4px.
                 assert!(
                     (stretch.abs() - 40.4).abs() < 0.2,
                     "stretched past {edge}: {stretch}"
@@ -1974,9 +1719,6 @@ fn a_bouncing_viewpager_stretches_at_both_ends_and_springs_back() {
     }
 }
 
-/// A vertical `scroll-view` filling the first page scrolls vertically under
-/// a vertical drag and leaves the pager alone; a horizontal drag starting on
-/// it passes through to the pager, which turns.
 #[test]
 fn a_vertical_scroller_inside_a_page_scrolls_and_hands_horizontal_drags_to_the_pager() {
     let mut engine = booted(&viewpager_page(
@@ -2017,11 +1759,6 @@ fn a_vertical_scroller_inside_a_page_scrolls_and_hands_horizontal_drags_to_the_p
     );
 }
 
-// --- `<x-swiper>` through a resize --------------------------------------------
-
-/// A 200px `x-swiper` (node 3) of three `x-swiper-item`s, styled by the UA
-/// sheet alone apart from the swiper's size, with `setup` run before the
-/// first flush.
 fn swiper_page(setup: &str) -> String {
     format!(
         r"
@@ -2043,8 +1780,6 @@ fn swiper_page(setup: &str) -> String {
     )
 }
 
-/// The swiper's scroll container, its shadow `#content`: the one scroll
-/// slot of the published frame that snaps.
 fn swiper_scroller(engine: &mut TestEngine) -> u64 {
     let frame = engine
         .painter
@@ -2059,19 +1794,6 @@ fn swiper_scroller(engine: &mut TestEngine) -> u64 {
         .to_bits()
 }
 
-/// A swiper at rest on an item stays on it when its width changes
-/// (css-scroll-snap-1 §4.1.3), end to end: the user swipes, main adopts
-/// where the swiper came to rest, and the card resizes the swiper from
-/// 200px to 300px. The commit that lays the new width out carries the
-/// document's offset on the same item's new position, and the painter,
-/// which holds an offset of its own from the swipe, moves there on
-/// adoption at once.
-///
-/// Bounded, a forward swipe rests on the second item: 200, then 300.
-/// `circular`, a backward swipe from the first item rests on the last one
-/// across the seam — one period back for the painter, 400 for main — and
-/// the period grows from 600 to 900 with the width: the last item is at
-/// 600.
 #[test]
 fn a_swiper_resized_at_rest_stays_on_its_item() {
     for (circular, to, rested, adopted, resized) in [
@@ -2110,7 +1832,6 @@ fn a_swiper_resized_at_rest_stays_on_its_item() {
                 document.set_inline_style(node_id(3), "width:300px;height:200px");
             })
             .expect("the view's task answers probes");
-        // A later entry, so the resize's own commit has been published too.
         assert_eq!(
             scroll_offset_of(&mut engine, content),
             terminus::link::Vector2D::new(resized, 0.0),
@@ -2135,9 +1856,6 @@ fn a_swiper_resized_at_rest_stays_on_its_item() {
     }
 }
 
-/// A wheel over scrollable content scrolls it (the router's decision,
-/// landing in the intents) and dispatches `wheel` with its delta in
-/// the detail — in that order.
 #[test]
 fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     let page = SCROLLING_GESTURE_PAGE.replace(
@@ -2167,10 +1885,6 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     );
 }
 
-/// A stationary hold produces no further input, so only the frame half
-/// — `service_gesture_clock` plus the `needs_frame` continuation — can
-/// resolve it. This drives that half exactly as `draw`/`post_frame`
-/// do, without needing a GPU output.
 #[test]
 fn a_stationary_hold_longpresses_on_the_frame_clock() {
     let mut engine = booted(&gesture_page(true));
@@ -2190,8 +1904,6 @@ fn a_stationary_hold_longpresses_on_the_frame_clock() {
     );
 }
 
-/// A 200x200 scroller over two 200px rows, each logging its own tap into
-/// its own attribute — so a hit's row is observable from out here.
 const TWO_ROW_SCROLLER_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -2214,12 +1926,6 @@ const TWO_ROW_SCROLLER_PAGE: &str = r"
         };
         ";
 
-/// The composed-scroll law, from the engine's side: a user scroll
-/// inside the encode window is composed from the painting side's intents;
-/// the document adopts the posted offset, but inside the window and short
-/// of half its headroom nothing recommits — and hit testing follows the
-/// intent offsets, not the committed ones, so a tap lands on what the
-/// screen shows.
 #[test]
 fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -2227,8 +1933,6 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     let boot_commit = frame.commit_id();
     drop(frame);
 
-    // 30px is inside half the encode-window headroom (the 200px
-    // scrollport), so no recentering commit is due either.
     engine.dispatch_input(InputEvent::wheel(
         Point2D::new(100.0, 100.0),
         terminus::link::Vector2D::new(0.0, 30.0),
@@ -2238,8 +1942,6 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         terminus::link::Vector2D::new(0.0, 30.0),
         "the document adopts the posted offset"
     );
-    // The probe round-tripped the main thread, so the epilogue of that entry
-    // has already run its commit-if-dirty — and found nothing.
     assert_eq!(
         engine
             .published_frame()
@@ -2255,9 +1957,6 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         "the intent carries the offset composition draws at"
     );
 
-    // Screen y=180 plus the 30px intent offset is content y=210: the
-    // second row. Routed against the committed offsets it would be the
-    // first.
     engine.dispatch_input(InputEvent::pointer(
         Point2D::new(100.0, 180.0),
         1,
@@ -2292,10 +1991,6 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     );
 }
 
-/// An adopted offset past half the encode-window headroom is
-/// `recenter_due` on the committed slot, so main recommits: the frame
-/// re-centers its window on the scrolled offset, all without any script
-/// involvement.
 #[test]
 fn main_recenters_when_the_adopted_offset_is_recenter_due() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -2304,8 +1999,6 @@ fn main_recenters_when_the_adopted_offset_is_recenter_due() {
         .expect("boot published a frame")
         .commit_id();
 
-    // max_offset is 200 (400px of rows in a 200px scrollport), so the
-    // window tops out at 200 and 150 is past half its headroom.
     let boot = engine.published_frame().expect("boot published a frame");
     let boot_slot = boot.scroll_slots()[boot.slot_of(node_id(3)).expect("a slot") as usize];
     assert!(boot_slot.recenter_due(terminus::link::Vector2D::new(0.0, 150.0)));
@@ -2341,8 +2034,6 @@ fn main_recenters_when_the_adopted_offset_is_recenter_due() {
     );
 }
 
-/// A layout read on the main thread sees the user's scroll once the marker
-/// is serviced: `boundingClientRect` subtracts the adopted offset.
 #[test]
 fn a_bounding_client_rect_follows_an_adopted_scroll() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -2360,17 +2051,12 @@ fn a_bounding_client_rect_follows_an_adopted_scroll() {
     );
 }
 
-/// Polls `log` until it holds `count` entries, then answers them. The
-/// delivery is an entry of its own, queued behind the one that updated, so
-/// one probe round trip is not enough to have seen it.
 fn wait_for_watched(engine: &mut TestEngine, log: &WatcherLog, count: usize) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = Vec::new();
     loop {
         seen.extend(take_watched(log));
         if seen.len() >= count {
-            // A later entry: the delivery's own epilogue has run by the time
-            // this answers, so whatever it committed is published.
             engine
                 .probe_document(|_| ())
                 .expect("the view's task answers probes");
@@ -2385,18 +2071,6 @@ fn wait_for_watched(engine: &mut TestEngine, log: &WatcherLog, count: usize) -> 
     }
 }
 
-/// An engine component's intersection observer, end to end through the real
-/// painter: a wheel scroll inside the encode window is composed on the
-/// painting side, its offset posted and adopted on the main thread, the
-/// update run against it by that entry's epilogue, and the entries delivered
-/// to the component by the entry after — with no commit anywhere along the
-/// way, because a windowed scroll recommits nothing.
-///
-/// Rooted at the 200px scroller, the first row starts wholly visible and the
-/// second sits exactly at the scrollport's bottom edge: intersecting, at
-/// ratio 0, because intersection is edge-inclusive. The 0.1 threshold is
-/// what makes the second row's arrival a crossing — under `[0, 1]` alone,
-/// ratio 0 on the edge and ratio 0.15 thirty pixels later share a band.
 #[test]
 fn a_windowed_scroll_delivers_intersections_to_an_engine_component() {
     let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -2465,12 +2139,6 @@ fn a_windowed_scroll_delivers_intersections_to_an_engine_component() {
     );
 }
 
-/// A 200×200 scroller (node 3) over eight 60px rows, `row0` to `row7`, each
-/// with that `exposure-id`. At offset 0 the scrollport shows rows 0 to 3 —
-/// row 3 in part — and row 4 starts 40px below its bottom edge; at 70, row 0
-/// ends 10px above its top edge and row 4 shows its top 30px. The rows' 480px
-/// make 280px of scroll range, so 70px is inside the encode window and short
-/// of half its headroom: the scroll recommits nothing.
 const EXPOSURE_ROWS_PAGE: &str = r"
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
@@ -2491,10 +2159,6 @@ const EXPOSURE_ROWS_PAGE: &str = r"
         };
         ";
 
-/// The BTS entry of [`EXPOSURE_ROWS_PAGE`]: one `GlobalEventEmitter`
-/// listener per record list, logging the list's name and the `exposure-id`
-/// of each record in it — and `:malformed` after them if a record is not
-/// web-core's shape for that list.
 const EXPOSURE_LISTENER: &str = r"
         import { lynx, console } from 'bobcat:bts-runtime';
         const emitter = lynx.getJSModule('GlobalEventEmitter');
@@ -2514,9 +2178,6 @@ const EXPOSURE_LISTENER: &str = r"
         }
         ";
 
-/// Turns the host until the view's realms have logged `count` console
-/// messages in all, appending each to `heard` in order. A failure any realm
-/// reports, or a view that ends, fails the wait with what it said.
 fn wait_for_console(engine: &mut TestEngine, heard: &mut Vec<String>, count: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while heard.len() < count {
@@ -2542,17 +2203,6 @@ fn wait_for_console(engine: &mut TestEngine, heard: &mut Vec<String>, count: usi
     }
 }
 
-/// Exposure end to end through the real painter: a wheel scroll inside the
-/// encode window is composed on the painting side, its offset posted and
-/// adopted on the main thread, the intersection update run against it by that
-/// entry's epilogue, and the entry after it hands the BTS one `exposure` list
-/// for the row that entered and then one `disexposure` list for the row that
-/// left — each reaching a `GlobalEventEmitter` listener as its one argument —
-/// with no commit anywhere along the way.
-///
-/// The view is turned by hand rather than booted with `wait_for_boot`, which
-/// would drop whatever arrived behind `ScriptFinished` in the same turn: the
-/// boot's own `exposure` list can.
 #[test]
 fn a_windowed_scroll_delivers_exposure_records_to_the_bts() {
     let mut engine = TestViewSpec::new(EXPOSURE_ROWS_PAGE)
@@ -2565,8 +2215,6 @@ fn a_windowed_scroll_delivers_exposure_records_to_the_bts() {
         ["exposure:row0,row1,row2,row3"],
         "boot's update exposed every row the scrollport shows, the one it shows in part included",
     );
-    // A later entry: the delivery's own epilogue has run by the time this
-    // answers, so whatever it committed is published.
     engine
         .probe_document(|_| ())
         .expect("the view's task answers probes");
@@ -2600,9 +2248,6 @@ fn a_windowed_scroll_delivers_exposure_records_to_the_bts() {
     );
 }
 
-/// A 200px scroller (node 3) whose first row (node 4) recolors along a
-/// `scroll()` timeline of 1000px: `color` never exports, so only the main
-/// thread's cascade moves it.
 fn booted_scroll_driven() -> TestEngine {
     TestViewSpec::new(
         r"
@@ -2630,7 +2275,6 @@ fn booted_scroll_driven() -> TestEngine {
     .boot()
 }
 
-/// The row's blue channel as the document computes it, in `[0, 1]`.
 fn blue_of(engine: &mut TestEngine, node: u64) -> f32 {
     engine
         .probe_document(move |tree| {
@@ -2642,11 +2286,6 @@ fn blue_of(engine: &mut TestEngine, node: u64) -> f32 {
         .expect("the row is styled")
 }
 
-/// A scroll-driven animation the painter does not sample follows the user's
-/// scroll on the main thread: the offset the painter posts is adopted at the
-/// marker and re-samples the row, and the commit that follows carries its
-/// color. Nothing ticks: the frame asks for no frame posts, and the painter
-/// is idle at rest.
 #[test]
 fn a_scroll_driven_color_follows_the_users_scroll() {
     let mut engine = booted_scroll_driven();
@@ -2660,7 +2299,6 @@ fn a_scroll_driven_color_follows_the_users_scroll() {
     );
 
     drag(&mut engine, 150.0, 50.0);
-    // Whatever the release flung comes to rest first.
     let mut at = 1.0;
     while engine.is_animating() {
         assert!(at < 10.0, "the fling never came to rest");
@@ -2690,14 +2328,10 @@ fn a_scroll_driven_color_follows_the_users_scroll() {
         engine.painter.begin_frame(at + 1.0, false).is_none(),
         "no frame post crosses for a scroll-driven animation"
     );
-    // The wheel gesture ends once its quiet interval has passed.
     frame_at(&mut engine, at + 1.0);
     assert!(!engine.is_animating(), "the painter is idle at rest");
 }
 
-/// A tap finds a header a list below it drives by a named scroll timeline
-/// where the list's scroll carries it: hit testing samples the exported
-/// curve at the painter's offsets, with no commit in between.
 #[test]
 fn a_tap_finds_a_scroll_driven_header_where_the_scroll_carries_it() {
     let mut engine = TestViewSpec::new(
@@ -2734,7 +2368,6 @@ fn a_tap_finds_a_scroll_driven_header_where_the_scroll_carries_it() {
     .boot();
     let boot = engine.published_frame().expect("boot committed a frame");
     assert!(boot.has_exported_curves() && !boot.has_live_curves());
-    // 100px of travel less the 8px slop: the header slides 92px right.
     touch_at(&mut engine, 0.0, PointerPhase::Down, 250.0);
     touch_at(&mut engine, 0.05, PointerPhase::Move, 150.0);
     touch_at(&mut engine, 0.5, PointerPhase::Up, 150.0);
@@ -2756,11 +2389,6 @@ fn a_tap_finds_a_scroll_driven_header_where_the_scroll_carries_it() {
     wait_for_log(&mut engine, "tap:110");
 }
 
-/// Boots a card whose one view runs `animation_css`, waiting for the
-/// boot flush like [`booted`] does.
-///
-/// The sheet is an author stylesheet like any other now: the host answers it
-/// before the entry, which is the order every view mounts one in.
 fn booted_animated(animation_css: &str) -> TestEngine {
     TestViewSpec::new(
         r"
@@ -2777,7 +2405,6 @@ fn booted_animated(animation_css: &str) -> TestEngine {
     .boot()
 }
 
-/// Posts one frame request and waits for the commit it implies to publish.
 fn synchronized_tick(engine: &mut TestEngine, now: f64) {
     let seq = engine
         .painter
@@ -2791,7 +2418,6 @@ fn synchronized_tick(engine: &mut TestEngine, now: f64) {
     );
 }
 
-/// The heights of the `.row`s, in tree order, from the view's own thread.
 fn row_heights(engine: &mut TestEngine) -> Vec<f32> {
     engine
         .probe_document(|document| {
@@ -2812,12 +2438,6 @@ fn row_heights(engine: &mut TestEngine) -> Vec<f32> {
         .expect("the view's task answers probes")
 }
 
-/// A `content-visibility: auto` reveal the pass cap left owed goes on at the
-/// next frame ticks, end to end. Each placeholder is one scrollport tall and
-/// each row a fifth of that, as a `<list>` cell with no estimate is, so every
-/// reveal pulls more rows into the window than one commit's passes reach: the
-/// boot frame asks for main-thread ticks, and each tick's commit reveals on
-/// until no skipped row is left in the window.
 #[test]
 fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
     let mut engine = TestViewSpec::new(
@@ -2849,8 +2469,6 @@ fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
          .cell { height: 20px; }",
     )
     .boot();
-    // The painter's adopted frame, not the view's: the post below is decided
-    // on what the painter holds, so each turn polls the link first.
     let boot = engine
         .painter
         .published_frame()
@@ -2869,7 +2487,6 @@ fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
     {
         now += 0.016;
         assert!(now < 0.5, "the reveals settle within a few ticks");
-        // Not forced: the frame's own request is what makes the post cross.
         let seq = engine
             .painter
             .begin_frame(now, false)
@@ -2885,8 +2502,6 @@ fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
         engine.painter.begin_frame(now + 0.016, false).is_none(),
         "a settled frame asks for no more ticks"
     );
-    // The window is the scrollport and one more below it, 0..=200px: the
-    // rows starting inside it are revealed, every later one still waits.
     let heights = row_heights(&mut engine);
     assert!(
         heights[..=10]
@@ -2902,10 +2517,6 @@ fn a_reveal_owed_at_the_pass_cap_continues_on_the_next_ticks() {
     );
 }
 
-/// An exported curve animates on the painting side: after the tick
-/// that promotes it to running, the committed frame carries the curve,
-/// wants no per-frame main-thread ticks, and `begin_frame` sends
-/// nothing.
 #[test]
 fn an_exported_curve_stops_asking_for_main_thread_ticks() {
     let mut engine = booted_animated(
@@ -2933,9 +2544,6 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
     );
 }
 
-/// The tick that anchors a delayed animation changes no style, yet it
-/// settles the animation's start, so it commits: the frame it publishes
-/// carries the curve and frees the main thread for the whole delay.
 #[test]
 fn the_tick_anchoring_a_delayed_animation_commits_its_curve() {
     let mut engine = booted_animated(
@@ -2957,9 +2565,6 @@ fn the_tick_anchoring_a_delayed_animation_commits_its_curve() {
     assert!(!frame.needs_main_ticks());
 }
 
-/// A transparent tap target sliding by an exported curve draws nothing, so
-/// the compose program names no curve; a tap still finds it where the curve
-/// carries it at the tap's clock reading, not where it was committed.
 #[test]
 fn a_tap_finds_an_inkless_mover_where_its_curve_carries_it() {
     let mut engine = TestViewSpec::new(
@@ -2988,17 +2593,12 @@ fn a_tap_finds_an_inkless_mover_where_its_curve_carries_it() {
     let frame = engine.published_frame().expect("the promotion committed");
     assert!(frame.has_exported_curves(), "the slide exported");
     assert!(!frame.has_live_curves(), "and draws nothing");
-    // Committed at x ≤ 25; at 0.9 the slide has carried it to x ≥ 200,
-    // whether its first tick was at 0 or at 0.1.
     engine.painter.clock_mut().pin(0.9);
     engine.dispatch_input(touch(1, PointerPhase::Down, 260.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 260.0));
     wait_for_log(&mut engine, "tap:260");
 }
 
-/// A finite curve's expiry is the one moment the main thread must hear
-/// about: the boundary tick runs the finish restyle and the next frame
-/// reports the timeline idle.
 #[test]
 fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     let mut engine = booted_animated(
@@ -3031,13 +2631,7 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     assert!(!finished.has_live_curves());
 }
 
-/// One windowed-painter frame: adopt whatever the view published, then post a
-/// frame request only if that frame asks for one — the protocol
-/// [`crate::Painter::pump`] runs, rather than the unconditional tick an
-/// offscreen painter takes.
 fn windowed_frame(engine: &mut TestEngine, now: f64) {
-    // The adoption has to come first: `begin_frame` decides from the frame
-    // this painter holds, not from the one the view has published.
     engine.painter.published_frame();
     if let Some(seq) = engine.painter.begin_frame(now, false) {
         assert!(
@@ -3055,11 +2649,6 @@ fn is_animating(engine: &mut TestEngine) -> bool {
         .expect("the view is live")
 }
 
-/// A windowed painter sends no frame post while nothing is moving, so an
-/// idle page leaves the timeline wherever the last frame left it — here, at
-/// boot. The animation a tap starts ten seconds later must still run its whole
-/// duration from the frame that follows the tap, rather than being created ten
-/// seconds in the past and finishing on its first frame.
 #[test]
 fn an_animation_started_after_idle_time_runs_from_the_next_frame() {
     let mut engine = TestViewSpec::new(
@@ -3085,9 +2674,6 @@ fn an_animation_started_after_idle_time_runs_from_the_next_frame() {
     )
     .boot();
 
-    // Ten idle seconds. Nothing on the page asked for a frame, so no
-    // frame post has crossed since boot and the document's timeline still
-    // reads zero.
     let tapped_at = 10.0;
     engine.painter.clock_mut().pin(tapped_at);
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
@@ -3145,9 +2731,6 @@ fn independent_views_can_own_live_script_threads_in_one_process() {
     }
 }
 
-/// A timer still ahead is the engine's own to wait out. Nothing here drives
-/// it — no pump, no command, no deadline handed to the host — and its
-/// callback's commit is already published by the first turn that looks.
 #[test]
 fn a_timer_still_ahead_fires_on_the_engines_own_clock() {
     let mut engine = booted(
@@ -3172,8 +2755,6 @@ fn a_timer_still_ahead_fires_on_the_engines_own_clock() {
         "a command must not stand in for the deadline"
     );
 
-    // `published_frame` reads what has been published and sends nothing, so
-    // nothing in this loop can be what ran the callback.
     let bound = Instant::now() + Duration::from_secs(10);
     loop {
         let commit = engine
@@ -3196,9 +2777,6 @@ fn a_timer_still_ahead_fires_on_the_engines_own_clock() {
     );
 }
 
-/// A deadline already behind the engine needs no wait at all: the entry that
-/// armed it is the entry whose epilogue fires it, and the commit that
-/// epilogue publishes is already the callback's.
 #[test]
 fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
     let mut engine = booted(
@@ -3216,25 +2794,16 @@ fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
             };
             ",
     );
-    // Read without sending anything: boot is over, so this is the frame the
-    // engine published on its own.
     let booted_commit = engine
         .published_frame()
         .expect("boot published a frame")
         .commit_id();
 
-    // One probe, and one only. A probe is a command, and a command is exactly
-    // the nudge this test says a due timer does not need — but it is applied
-    // before the epilogue that runs timers, so an engine that waited for a
-    // host turn would answer this first one with nothing.
     assert_eq!(
         attribute_of(&mut engine, 3, "ticked").as_deref(),
         Some("now"),
         "a zero-delay callback must not wait on the host"
     );
-    // And nothing was published after boot's frame, so the commit the
-    // callback's own flush produced is that very frame: the timer ran inside
-    // boot's own epilogue rather than in an entry of its own.
     assert_eq!(
         engine
             .published_frame()
@@ -3245,8 +2814,6 @@ fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
     );
 }
 
-/// A timer that throws has an event listener's standing, not a script
-/// failure's: it is reported, the repeat stays armed, and the loop goes on.
 #[test]
 fn a_throwing_interval_is_reported_and_keeps_its_place_in_the_schedule() {
     let mut engine = booted(
@@ -3281,9 +2848,6 @@ fn a_throwing_interval_is_reported_and_keeps_its_place_in_the_schedule() {
     }
 }
 
-/// A 400px containing block (node 3) holding a scroller (node 4) whose
-/// content (node 5) carries the anchor (node 6) at `anchor_css`'s place, and,
-/// outside the scroller, the anchored box (node 7) styled `anchored_css`.
 fn booted_anchored(sheet: &str) -> TestEngine {
     TestViewSpec::new(
         r"
@@ -3313,9 +2877,6 @@ fn booted_anchored(sheet: &str) -> TestEngine {
     .boot()
 }
 
-/// The page [`booted_anchored`] builds with a 200×100 scroller over 500px
-/// square content, the anchor 40×30 at (50, 50), and `anchored` added to the
-/// anchored box's 10px square.
 fn anchor_sheet(anchored: &str) -> String {
     format!(
         ".cb {{ display: flex; flex-direction: column; position: relative;
@@ -3331,7 +2892,6 @@ fn anchor_sheet(anchored: &str) -> String {
     )
 }
 
-/// What the painter's hit test finds at `(x, y)`, at its own offsets.
 fn painter_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<terminus::link::NodeId> {
     let frame = engine.published_frame()?;
     let intents = engine.painter.scroll_intents();
@@ -3344,8 +2904,6 @@ fn painter_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<terminus::link
         .map(|target| target.node)
 }
 
-/// What the document's own hit test finds at `(x, y)`, at its adopted
-/// offsets.
 fn main_hit(engine: &mut TestEngine, x: f32, y: f32) -> Option<terminus::link::NodeId> {
     engine
         .probe_document(move |tree| {
@@ -3363,16 +2921,10 @@ fn wheel(engine: &mut TestEngine, dx: f32, dy: f32) {
     ));
 }
 
-/// css-anchor-position-1 §3.3 from the engine's side (WPT `anchor-scroll-001`
-/// adapted): a box placed below its anchor by `position-area` follows the
-/// anchor on both axes while the scroller between them moves — composed by
-/// the painter at its intents, hit where it is drawn on both threads, and
-/// never committed.
 #[test]
 fn an_anchored_box_follows_its_anchor_through_a_scroll_on_both_axes() {
     let mut engine = booted_anchored(&anchor_sheet("position-area: bottom center;"));
     let anchored = node_id(7);
-    // Centered under the anchor: (65, 80), 10×10.
     assert_eq!(painter_hit(&mut engine, 70.0, 85.0), Some(anchored));
     let boot = engine
         .published_frame()
@@ -3398,8 +2950,6 @@ fn an_anchored_box_follows_its_anchor_through_a_scroll_on_both_axes() {
     );
 }
 
-/// §3.3's compensation is per axis: a box whose only anchor reference is a
-/// vertical `anchor()` follows the anchor up and stays where it is across.
 #[test]
 fn an_anchored_box_follows_only_on_the_axes_it_compensates() {
     let mut engine = booted_anchored(&anchor_sheet("top: anchor(bottom); left: 150px;"));
@@ -3418,20 +2968,12 @@ fn an_anchored_box_follows_only_on_the_axes_it_compensates() {
     );
 }
 
-/// §6.6 `position-visibility: anchor-visible`, the initial value, flips
-/// while scrolling: the box hides once its anchor is scrolled wholly out of
-/// the scroller's clip and shows again when it comes back — each frame, on
-/// the painter. (The 70px step is past half the 100px scrollport's encode
-/// headroom, so a recentering commit follows it; the flips do not wait on
-/// one.)
 #[test]
 fn an_anchored_box_hides_while_its_anchor_is_scrolled_away() {
     let mut engine = booted_anchored(&anchor_sheet("position-area: bottom center;"));
     let anchored = node_id(7);
-    // The anchor at y −20..10 still shows 10px: the box at y 10..20 shows.
     wheel(&mut engine, 0.0, 70.0);
     assert_eq!(painter_hit(&mut engine, 70.0, 15.0), Some(anchored));
-    // At −35..−5 it is gone, and so is the box at −5..5.
     wheel(&mut engine, 0.0, 15.0);
     assert!((scroll_offset_of(&mut engine, 4).y - 85.0).abs() < 0.5);
     assert_ne!(painter_hit(&mut engine, 70.0, 2.0), Some(anchored));
@@ -3440,8 +2982,6 @@ fn an_anchored_box_hides_while_its_anchor_is_scrolled_away() {
     assert_eq!(painter_hit(&mut engine, 70.0, 85.0), Some(anchored));
 }
 
-/// §6.6 `no-overflow` flips while scrolling: the box shifted past its
-/// containing block's top edge hides.
 #[test]
 fn a_no_overflow_box_hides_once_the_shift_pushes_it_out() {
     let mut engine = booted_anchored(&anchor_sheet(
@@ -3449,7 +2989,6 @@ fn a_no_overflow_box_hides_once_the_shift_pushes_it_out() {
          position-visibility: no-overflow;",
     ));
     let anchored = node_id(7);
-    // Above the anchor: y 10..50.
     assert_eq!(painter_hit(&mut engine, 55.0, 20.0), Some(anchored));
     wheel(&mut engine, 0.0, 5.0);
     assert_eq!(painter_hit(&mut engine, 55.0, 10.0), Some(anchored));
@@ -3458,7 +2997,6 @@ fn a_no_overflow_box_hides_once_the_shift_pushes_it_out() {
     assert_ne!(painter_hit(&mut engine, 55.0, 10.0), Some(anchored));
 }
 
-/// Waits for a commit newer than `after` to publish, and answers its id.
 fn next_commit(engine: &mut TestEngine, after: u64) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -3474,12 +3012,6 @@ fn next_commit(engine: &mut TestEngine, after: u64) -> u64 {
     }
 }
 
-/// §6.5 on scroll (WPT `anchor-scroll-position-try-001` adapted): a box
-/// above its anchor, scrolled up past its containing block's top edge,
-/// switches to its `flip-block` fallback below the anchor in the commit that
-/// answers the adopted offset; scrolled back until the fallback overflows
-/// the bottom edge, it switches back. The painter's post is the whole wake:
-/// main re-runs the determination where it adopts the offsets.
 #[test]
 fn a_scroll_that_pushes_an_anchored_box_out_switches_its_fallback_and_back() {
     let mut engine = booted_anchored(
@@ -3495,14 +3027,12 @@ fn a_scroll_that_pushes_an_anchored_box_out_switches_its_fallback_and_back() {
                      position-try-fallbacks: flip-block; width: 10px; height: 150px; }",
     );
     let anchored = node_id(7);
-    // Above the anchor, y 100..250, centered on it at x 15..25.
     assert_eq!(painter_hit(&mut engine, 20.0, 200.0), Some(anchored));
     let boot = engine
         .published_frame()
         .expect("boot published a frame")
         .commit_id();
 
-    // 100px up still fits: 0..150, no commit.
     wheel(&mut engine, 0.0, 100.0);
     assert!((scroll_offset_of(&mut engine, 4).y - 100.0).abs() < 0.5);
     assert_eq!(painter_hit(&mut engine, 20.0, 100.0), Some(anchored));
@@ -3511,26 +3041,17 @@ fn a_scroll_that_pushes_an_anchored_box_out_switches_its_fallback_and_back() {
         boot
     );
 
-    // 200px up would put it at −100..50: below the anchor at 50..80
-    // instead, 80..230.
     wheel(&mut engine, 0.0, 100.0);
     let switched = next_commit(&mut engine, boot);
     assert_eq!(painter_hit(&mut engine, 20.0, 150.0), Some(anchored));
     assert_eq!(main_hit(&mut engine, 20.0, 150.0), Some(anchored));
 
-    // Back to the top: below the anchor at 250..280 it would overflow
-    // (280..430), and above it fits again.
     wheel(&mut engine, 0.0, -200.0);
     next_commit(&mut engine, switched);
     assert_eq!(painter_hit(&mut engine, 20.0, 200.0), Some(anchored));
     assert_ne!(painter_hit(&mut engine, 20.0, 300.0), Some(anchored));
 }
 
-/// A `<scroll-coordinator>`'s shape in plain CSS: a 400px column scroller
-/// (node 3) carrying `outer_css`, holding a 200px header block (node 4) and
-/// a 400px-tall inner column scroller (node 5) of ten 100px items with
-/// `scroll-capture-y: nearest forward`. The outer's range is 200 (header plus
-/// inner, 600, less its 400px scrollport), the inner's 600.
 fn coordinator_page(outer_css: &str) -> String {
     format!(
         r"
@@ -3558,42 +3079,29 @@ fn coordinator_page(outer_css: &str) -> String {
     )
 }
 
-/// A drag at `at` from `from_y` to `to_y` in one move, released half a
-/// second later so it carries no velocity: a scroll of
-/// `from_y − to_y` less the 8px slop, and no fling after it.
 fn quiet_drag(engine: &mut TestEngine, at: f64, from_y: f32, to_y: f32) {
     touch_at(engine, at, PointerPhase::Down, from_y);
     touch_at(engine, at + 0.01, PointerPhase::Move, to_y);
     touch_at(engine, at + 0.5, PointerPhase::Up, to_y);
 }
 
-/// The coordinator's and the inner scroller's vertical offsets.
 fn coordinator_offsets(engine: &mut TestEngine) -> (f32, f32) {
     (live_offset(engine, 3).y, live_offset(engine, 5).y)
 }
 
-/// A forward drag that starts in the inner scroller folds the coordinator
-/// first: 100px of scroll all go to the coordinator, the inner stays.
 #[test]
 fn a_forward_drag_in_the_inner_scroller_folds_the_coordinator_first() {
     let mut engine = booted(&coordinator_page(""));
-    // The inner scroller spans 200..600 in the coordinator; 350 is in it.
     quiet_drag(&mut engine, 0.0, 350.0, 242.0);
     assert_eq!(coordinator_offsets(&mut engine), (100.0, 0.0));
 }
 
-/// The fold, then the inner content, then the other way round: forward 300
-/// folds the coordinator to its 200 maximum and gives the inner the rest;
-/// backward 50 goes to the inner first; backward 300 empties the inner's 50
-/// and unfolds the coordinator by the 250 left — all 200 of it, the last
-/// 50 going nowhere.
 #[test]
 fn forward_folds_before_the_inner_scroller_and_backward_unfolds_after_it() {
     let mut engine = booted(&coordinator_page(""));
     quiet_drag(&mut engine, 0.0, 390.0, 82.0);
     assert_eq!(coordinator_offsets(&mut engine), (200.0, 100.0));
 
-    // Folded, the inner scroller spans the whole 0..400 scrollport.
     quiet_drag(&mut engine, 1.0, 100.0, 158.0);
     assert_eq!(coordinator_offsets(&mut engine), (200.0, 50.0));
 
@@ -3601,14 +3109,9 @@ fn forward_folds_before_the_inner_scroller_and_backward_unfolds_after_it() {
     assert_eq!(coordinator_offsets(&mut engine), (0.0, 0.0));
 }
 
-/// A forward fling from the inner scroller is captured on every frame: it
-/// folds the coordinator, and once that is at its maximum the rest of the
-/// fling carries on into the inner content until it comes to rest there.
 #[test]
 fn a_forward_fling_folds_the_coordinator_then_scrolls_the_inner_content() {
     let mut engine = booted(&coordinator_page(""));
-    // The flick of `flick`, inside the inner scroller: 52px of drag after
-    // the slop, then a release at 3 px/ms.
     touch_at(&mut engine, 0.0, PointerPhase::Down, 350.0);
     touch_at(&mut engine, 0.01, PointerPhase::Move, 320.0);
     touch_at(&mut engine, 0.02, PointerPhase::Move, 290.0);
@@ -3616,8 +3119,6 @@ fn a_forward_fling_folds_the_coordinator_then_scrolls_the_inner_content() {
     assert_eq!(coordinator_offsets(&mut engine), (52.0, 0.0));
     assert!(engine.is_animating(), "a fling owes frames");
 
-    // 80ms of fling is about 222px: 148 fold the coordinator, the rest
-    // scrolls the inner content.
     frame_at(&mut engine, 0.1);
     let (outer, inner) = coordinator_offsets(&mut engine);
     assert!((outer - 200.0).abs() < f32::EPSILON, "folded, got {outer}");
@@ -3633,12 +3134,9 @@ fn a_forward_fling_folds_the_coordinator_then_scrolls_the_inner_content() {
         assert!(at < 10.0, "never came to rest");
         frame_at(&mut engine, at);
     }
-    // A 3 px/ms fling travels about 1498px: past both ranges.
     assert_eq!(coordinator_offsets(&mut engine), (200.0, 600.0));
 }
 
-/// A wheel over the inner scroller folds the coordinator before it scrolls
-/// the inner content.
 #[test]
 fn a_forward_wheel_over_the_inner_scroller_folds_the_coordinator_first() {
     let mut engine = booted(&coordinator_page(""));
@@ -3654,9 +3152,6 @@ fn a_forward_wheel_over_the_inner_scroller_folds_the_coordinator_first() {
     assert_eq!(coordinator_offsets(&mut engine), (200.0, 50.0));
 }
 
-/// A drag that starts on the header latches the coordinator itself, whose
-/// chain the inner scroller is not on: it scrolls as any scroller does, and
-/// the inner never moves.
 #[test]
 fn a_drag_on_the_coordinators_own_content_scrolls_it_as_before() {
     let mut engine = booted(&coordinator_page(""));
@@ -3670,9 +3165,6 @@ fn a_drag_on_the_coordinators_own_content_scrolls_it_as_before() {
     );
 }
 
-/// `overflow-y: hidden` on the coordinator (its `enable-scroll="false"`):
-/// not user-scrollable, so the walk admits it nothing and the inner
-/// scroller scrolls from the first pixel.
 #[test]
 fn a_coordinator_that_is_not_user_scrollable_never_folds() {
     let mut engine = booted(&coordinator_page("overflow-y:hidden"));
@@ -3680,11 +3172,6 @@ fn a_coordinator_that_is_not_user_scrollable_never_folds() {
     assert_eq!(coordinator_offsets(&mut engine), (0.0, 100.0));
 }
 
-/// An `<x-refresh-view>` 200px x 400px: a 50px header, a `scroll-view` of
-/// the view's full height holding 1000px of content, a 50px footer. Its
-/// shadow `#container` scrolls 740px (two 120px placeholders, the header,
-/// the content, the footer) in a 400px port and opens on the content at
-/// 170. Answers the engine and `#container`'s handle bits.
 fn booted_refresh_view() -> (TestEngine, u64) {
     let mut engine = booted(
         r"
@@ -3724,12 +3211,6 @@ fn booted_refresh_view() -> (TestEngine, u64) {
     (engine, container)
 }
 
-/// The pull on the inner scroller at its top chains into the shadow
-/// `#container`, which the drag then holds: a commit landing mid-drag — the
-/// one that publishes the header's new snap alignment — does not settle it.
-/// Released with the header fully shown (`#container` at 70, the header at
-/// 120..170), it glides to the header's start; released with the header 60%
-/// shown, back to the content at 170.
 #[test]
 fn a_pull_on_a_refresh_view_holds_its_container_then_settles_on_release() {
     for (to_y, pulled, shown, rest) in [(308.0, 70.0, true, 120.0), (238.0, 140.0, false, 170.0)] {
@@ -3744,8 +3225,6 @@ fn a_pull_on_a_refresh_view_holds_its_container_then_settles_on_release() {
             "the pull reached `#container`: {:?}",
             live_offset(&mut engine, container)
         );
-        // Main adopts the pulled offset and re-samples the header; when its
-        // alignment changed, it commits the new snap positions.
         if shown {
             next_commit(&mut engine, commit);
         }
@@ -3770,12 +3249,6 @@ fn a_pull_on_a_refresh_view_holds_its_container_then_settles_on_release() {
     }
 }
 
-/// A 200px x 400px refresh view (node 3) with a 50px header, a content
-/// `scroll-view` over a 1000px child and a 50px footer: `#container` opens
-/// on `#content` at 170, with the header's start at 120. Each tap on the
-/// view runs the next of `autoStartRefresh` and `finishRefresh` and logs
-/// `<method>:<code>` in the view's `log` attribute. Answers the engine and
-/// `#container`'s node.
 fn booted_refresh_view_with_methods() -> (TestEngine, u64) {
     let mut engine = booted(
         r"
@@ -3824,8 +3297,6 @@ fn booted_refresh_view_with_methods() -> (TestEngine, u64) {
     (engine, container)
 }
 
-/// Taps the refresh view at `at`, waits for its method's answer and for
-/// the commit that carries the request, and adopts that commit.
 fn tap_refresh_view(engine: &mut TestEngine, at: f64, log: &str) {
     let before = engine.published_frame().expect("booted").commit_id();
     engine.painter.clock_mut().pin(at);
@@ -3836,8 +3307,6 @@ fn tap_refresh_view(engine: &mut TestEngine, at: f64, log: &str) {
     adopt_at(engine, at);
 }
 
-/// Runs display frames from `at` until nothing animates; answers where
-/// `#container` came to rest and the time it did.
 fn refresh_frames_until_rest(engine: &mut TestEngine, container: u64, mut at: f64) -> (f32, f64) {
     let deadline = at + 3.0;
     while engine.is_animating() {
@@ -3848,11 +3317,6 @@ fn refresh_frames_until_rest(engine: &mut TestEngine, container: u64, mut at: f6
     (live_offset(engine, container).y, at)
 }
 
-/// `autoStartRefresh` from rest: the instant request puts `#container` on
-/// the header's start (120) in the document and on the painter, and the
-/// frame that carries it publishes the header as a snap position, so the
-/// at-rest snap rule leaves it there rather than settling back on
-/// `#content` (170).
 #[test]
 fn auto_start_refresh_rests_the_refresh_view_on_its_header() {
     let (mut engine, container) = booted_refresh_view_with_methods();
@@ -3871,8 +3335,6 @@ fn auto_start_refresh_rests_the_refresh_view_on_its_header() {
     );
 }
 
-/// From the header, `finishRefresh` glides `#container` back to `#content`
-/// (170) over several frames and rests there.
 #[test]
 fn finish_refresh_glides_the_refresh_view_back_to_its_content() {
     let (mut engine, container) = booted_refresh_view_with_methods();

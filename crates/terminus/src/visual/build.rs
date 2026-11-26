@@ -68,12 +68,6 @@ use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, Tre
 use crate::tree::node::Node;
 use crate::tree::top_layer;
 
-/// Builds one frame's paint order into `buffers`, using and returning
-/// `scratch`.
-///
-/// Both come from the painter: `buffers` is the storage of the frame it last
-/// retired and `scratch` is the working set of the last build, so a document
-/// whose page shape has stopped growing allocates nothing here per frame.
 pub(crate) fn build<T: Sync>(
     document: &Document<T>,
     scratch: BuildScratch,
@@ -133,8 +127,6 @@ pub(crate) fn build<T: Sync>(
             ClipContexts::default(),
         );
     }
-    // css-position-4 §3.1: the top layer paints after everything in the
-    // root stacking context. One test on a page with an empty layer.
     let inert_floor = if tree.top_layer().is_empty() {
         None
     } else {
@@ -151,8 +143,6 @@ pub(crate) fn build<T: Sync>(
             u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"),
         )
     }));
-    // Copied only for a document that has one pending, which is almost
-    // none: the list allocates nothing otherwise.
     let auto_scroll_requests = state
         .auto_scroll_requests
         .iter()
@@ -184,20 +174,6 @@ pub(crate) fn build<T: Sync>(
     (order, builder.scratch)
 }
 
-/// The working buffers one paint-order build fills, retained across frames.
-///
-/// Three of them are stacks. `collect` and `build_stacking_context` append
-/// their level's entries at the tail and truncate back to where they started
-/// on the way out, so one buffer serves every level of the recursion instead
-/// of one buffer per level.
-///
-/// The fourth cannot be a stack, for two independent reasons. A
-/// pseudo-stacking context's records are produced while the enclosing context
-/// is still producing its own, so on one buffer the two runs would interleave
-/// and neither would be contiguous. And every pseudo of one context stays
-/// live until that context emits its sorted member list, so they are all
-/// open at once. Each pseudo therefore takes a whole buffer out of the pool
-/// and returns it when its member is emitted.
 #[derive(Debug, Default)]
 pub(crate) struct BuildScratch {
     ranked: Vec<RankedChild>,
@@ -205,14 +181,10 @@ pub(crate) struct BuildScratch {
     stream: Vec<ItemRecord>,
     pseudo_pool: Vec<Vec<ItemRecord>>,
     pseudo_free: Vec<u32>,
-    /// Sticky chain carrying each scrollport, parallel with the current slot table.
     scroll_stickies: Vec<Option<u32>>,
 }
 
 impl BuildScratch {
-    /// The working buffers' capacities: children ranking, members, in-flow
-    /// records, the pseudo-context pool's length, then one entry per pooled
-    /// buffer.
     #[cfg(test)]
     pub(crate) fn capacities(&self) -> Vec<usize> {
         let mut out = vec![
@@ -225,11 +197,6 @@ impl BuildScratch {
         out
     }
 
-    /// Every stack is balanced and every pooled buffer is back in the pool.
-    ///
-    /// Checked on the way in as well as on the way out: a build that left a
-    /// level behind would otherwise corrupt the next frame rather than the
-    /// one that made the mistake.
     fn assert_settled(&self) {
         debug_assert!(
             self.ranked.is_empty(),
@@ -252,7 +219,6 @@ impl BuildScratch {
     }
 }
 
-/// One flattened child, keyed for the order-modified document-order sort.
 #[derive(Debug, Clone, Copy)]
 struct RankedChild {
     order: u32,
@@ -260,22 +226,12 @@ struct RankedChild {
     slot: NodeSlot,
 }
 
-/// Where the records a collection level produces are appended.
 #[derive(Debug, Clone, Copy)]
 enum StreamTarget {
-    /// The enclosing stacking context's in-flow stream.
     Context,
-    /// One pseudo-stacking context's pooled buffer, by pool index.
     Pseudo(u32),
 }
 
-/// Whether this box's children are flex or grid items, which is what lets a
-/// non-positioned child's `z-index` apply (CSS Position 3 §9.9.1, Flexbox 1
-/// §4.3, Grid 2 §6).
-///
-/// `grid-lanes` is in the list because its children are grid items: the fork's
-/// `Display::is_item_container` answers `true` for it, so they blockify exactly
-/// as `grid`'s do.
 const fn ranks_children_as_items(mode: DisplayMode) -> bool {
     matches!(
         mode,
@@ -283,10 +239,6 @@ const fn ranks_children_as_items(mode: DisplayMode) -> bool {
     )
 }
 
-/// The box a collection level is descending into: whose flattened children
-/// are being collected, the origin their locations count from, whether it
-/// ranks them as flex/grid items, and the clip and scroll state in force
-/// inside it.
 #[derive(Debug, Clone, Copy)]
 struct Cursor<'ctx> {
     node: NodeId,
@@ -295,11 +247,6 @@ struct Cursor<'ctx> {
     ctx: &'ctx ClipContexts,
 }
 
-/// One flattened child resolved into what the collection walk decides on.
-///
-/// `level` doubles as the stacking-context predicate: `Some` is the stack
-/// level of a real stacking context, `None` is a box that paints into the
-/// enclosing one.
 #[derive(Debug)]
 struct ChildBox<'doc, T> {
     node: NodeId,
@@ -312,9 +259,6 @@ struct ChildBox<'doc, T> {
     view: StyleView<'doc, T>,
 }
 
-/// The state one stacking context's whole collection walk shares: the
-/// context's world matrix, and the counter that puts its members in
-/// order-modified document order.
 #[derive(Debug)]
 struct Collection<'ctx> {
     world: &'ctx Transform3D<f32>,
@@ -329,28 +273,13 @@ impl Collection<'_> {
     }
 }
 
-/// What a box inherits from its containing-block chain: the innermost clip,
-/// the innermost space, and the nearest scroll container.
-///
-/// The frame is baked in *unscrolled* coordinates; every consumer — the
-/// composed scene, hit testing, culling — applies the space's map at use
-/// time. A member keyed `absolute` or `fixed` swaps in its containing
-/// block's context, space included (the containing-block escape of CSS2
-/// §11.1.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
-    /// The innermost space on this chain, in the frame's space table.
     space: Option<u32>,
-    /// The nearest scroll container on this chain, in the frame's slot table:
-    /// `space`'s nearest scroll node, carried because every item records it
-    /// as its recognition slot.
     chain: Option<u32>,
 }
 
-/// The flow contexts visible at one point of the walk: the in-flow one plus
-/// those captured at the nearest absolute-/fixed-containing-block ancestors
-/// (what an escaping positioned descendant swaps in).
 #[derive(Debug, Clone, Copy, Default)]
 struct ClipContexts {
     current: FlowContext,
@@ -358,8 +287,6 @@ struct ClipContexts {
     fixed: FlowContext,
 }
 
-/// A finished paint item minus its final matrix: `offset` is the border-box
-/// origin relative to the enclosing stacking context's origin.
 #[derive(Debug)]
 struct ItemRecord {
     node: NodeId,
@@ -371,16 +298,9 @@ struct ItemRecord {
     hit_testable: bool,
     slot: Option<u32>,
     space: Option<u32>,
-    /// Whether this is the box of an outermost `svg` element, whose
-    /// recording the emission appends after it (`svg`).
     svg_root: bool,
 }
 
-/// One member of a stacking context, awaiting the `(level, seq)` sort.
-///
-/// `Copy`, so the emission loop can lift one out of the shared member stack
-/// and release the borrow before recursing — which the `Context` payload
-/// does, back into `build_stacking_context`.
 #[derive(Debug, Clone, Copy)]
 struct Member {
     level: i32,
@@ -395,10 +315,9 @@ enum MemberPayload {
         offset: Point2D<f32>,
         clips: ClipContexts,
     },
-    /// A positioned box with `z-index: auto` and no other trigger. `stream`
-    /// indexes the pooled buffer holding the records it and its non-escaping
-    /// descendants produced.
-    Pseudo { stream: u32 },
+    Pseudo {
+        stream: u32,
+    },
 }
 
 struct Builder<'doc, T> {
@@ -412,18 +331,10 @@ struct Builder<'doc, T> {
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
     spaces: Vec<Space>,
-    /// Every anchor-positioned box given an anchored node, bound after the
-    /// walk ([`PaintOrder::bind_anchored`]).
     anchored: Vec<AnchoredSlot>,
-    /// Every `content-visibility: auto` box this build reached, in build
-    /// order. Independent of `items`: see [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
-    /// Every slot's snap positions; see [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
-    /// The frame's non-translation world matrices; see [`ItemTransform`].
     matrices: Vec<Transform3D<f32>>,
-    /// Every `scroll-initial-target: nearest` element reached, with the
-    /// slot it lives in.
     initial_targets: Vec<InitialTarget>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
@@ -438,7 +349,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         &self.state.slot_at(self.tree.live_slot(id)).rounded
     }
 
-    /// Appends a space node inside `parent` and returns it.
     fn push_space(&mut self, parent: Option<u32>, kind: SpaceKind) -> u32 {
         self.spaces.push(Space { parent, kind });
         u32::try_from(self.spaces.len() - 1).expect("a frame cannot hold 2^32 spaces")
@@ -448,17 +358,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         super::space::nearest_sticky(&self.spaces, space)
     }
 
-    /// Opens `node`'s anchored node inside `space` when the host reported
-    /// it anchor-positioned and its default scroll shift or its
-    /// `position-visibility` can change at compose time, and returns the
-    /// space its box starts from. `parent_world` is its containing block's
-    /// world, `clip` the clip chain its box is in. A page without
-    /// anchor-positioned boxes pays one `is_empty` test per box.
-    ///
-    /// When `position-visibility` can hide the box and the box is not
-    /// itself a fixed containing block, also opens the slot's visibility
-    /// node inside `fixed` — the context its escaping `position: fixed`
-    /// descendants take — so they hide with it.
     fn enter_anchored(
         &mut self,
         node: NodeId,
@@ -490,14 +389,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         Some(anchored)
     }
 
-    /// Records `node` in the frame's scroll-slot table when it is a scroll
-    /// container, linked to the nearest container on its containing-block
-    /// chain, and returns its slot.
-    ///
-    /// Allocated beside the element's own item — before any descend, and
-    /// whether or not the box is visible or a leaf — so every container the
-    /// frame lays out is a chain target, including one whose contents are
-    /// never painted.
     fn allocate_scroll_slot(
         &mut self,
         node: NodeId,
@@ -506,8 +397,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         sticky: Option<u32>,
         world: &Transform3D<f32>,
     ) -> Option<u32> {
-        // Asked of every box the build reaches; only a scroll container has
-        // an offset to look up (`scroll::resolve` answers `None` otherwise).
         if !scroll::is_scroll_container(style) {
             return None;
         }
@@ -527,9 +416,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 y: positions.y.map(|axis| self.push_snap_axis(&axis)),
             });
         let max_offset = scroll_box.max_offset();
-        // Re-admitted against the geometry this build lays out: the range,
-        // or on a circular axis the period, may have changed since the
-        // request was recorded.
         let request = self
             .state
             .scroll_requests
@@ -573,8 +459,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         )
     }
 
-    /// Appends one axis's snap positions to the frame's table and returns
-    /// the slot-side reference to them.
     fn push_snap_axis(&mut self, axis: &SnapAxisPositions) -> SnapSlotAxis {
         let start =
             u32::try_from(self.snap_points.len()).expect("a frame cannot hold 2^32 snap positions");
@@ -633,19 +517,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         Some(u32::try_from(self.stickies.len() - 1).expect("a frame cannot hold 2^32 sticky boxes"))
     }
 
-    /// The top-layer tail (`tree::top_layer`): each entry whose element is
-    /// rendered, in layer order, as a stacking context of its own — its
-    /// `::backdrop` first, when it generates a box, then the element. Both
-    /// are built like the root: at their viewport position, with an
-    /// identity parent world, no clip chain, no space and no group layer,
-    /// because a top-layer box is a sibling of the root, not a descendant of
-    /// its ancestors. Emitted directly rather than as members, so no
-    /// ancestor's `perspective` reaches them.
-    ///
-    /// Returns the inert floor: the index of the first item of the topmost
-    /// entry that blocks the document, recorded whether or not that entry
-    /// paints anything, since a modal dialog makes the document inert
-    /// whether or not it renders.
     fn build_top_layer(&mut self) -> Option<usize> {
         debug_assert!(
             self.current_layer.is_none(),
@@ -695,10 +566,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         floor
     }
 
-    /// `id`'s border-box origin in the frame's unscrolled viewport
-    /// coordinates: the sum of the rounded locations along its flat-tree
-    /// chain of elements, each of which the layout pass recorded relative to
-    /// its flat parent.
     fn viewport_origin(&self, id: NodeId) -> Point2D<f32> {
         let mut origin = Point2D::zero();
         let mut current = Some(self.node(id));
@@ -725,9 +592,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         mut seed: ClipContexts,
     ) {
         let values = style.values();
-        // Allocation order is space order: the element's own anchored,
-        // sticky and animation nodes enclose its box, its own scroll node
-        // only its content.
         let mut box_space = self.enter_anchored(
             root,
             values,
@@ -777,8 +641,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         if let Some(index) = own_animation {
             box_space = Some(self.push_space(box_space, SpaceKind::Animation(index)));
         }
-        // A current `opacity` animation gets the group an exported curve
-        // retargets, exported or not.
         let layer = self.open_layer(
             root,
             values,
@@ -797,14 +659,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         );
         let own_scroll =
             own_slot.map(|slot| (slot, self.push_space(box_space, SpaceKind::Scroll(slot))));
-        // Every `content-visibility: auto` box arrives here and nowhere else:
-        // `auto` implies `LAYOUT | PAINT` containment, so it is always a
-        // stacking context, and a stacking context is always built by this
-        // method. Recorded *before* the visibility branch below, because
-        // relevance is a geometric fact about the border box and a
-        // `visibility: hidden` element — which emits no item — still has to
-        // be determined, or its `visibility: visible` contents would never
-        // lay out.
         if *values.get_content_visibility() == ContentVisibility::Auto {
             let transform = intern(&mut self.matrices, world);
             self.auto_boxes.push(AutoBox {
@@ -817,8 +671,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             });
         }
         let (visible, hit_testable) = item_flags(values);
-        // An inline box that is a stacking context still paints as fragments
-        // of the paragraph around it; its group holds only its atoms.
         let visible = visible && !is_inline_box(self.node(root));
         if visible {
             let transform = intern(&mut self.matrices, world);
@@ -833,9 +685,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 slot: own_slot.or(seed.current.chain),
                 space: box_space,
             });
-            // An outermost `svg` element, replaced content, draws its
-            // recording after its own box and inside its own group (`svg`).
-            // One test per box on a document without one.
             if self.document.has_svg_roots() && self.node(root).is_replaced() {
                 svg::plan_root(
                     self.document,
@@ -862,17 +711,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         inner_seed.current.space = box_space;
         let ctx = self.enter_element(root, values, &world, inner_seed, own_scroll);
         if crate::layout::paragraph::establishes_paragraph(mode) && visible {
-            // A text block paints its whole subtree as one paragraph, over its
-            // own box and under whatever the collection walk below still finds
-            // — an atomic inline box, an out-of-flow child. Same order as the
-            // in-context path in `collect_in_context`.
             self.push_paragraph(root, &world, size, hit_testable, ctx);
         }
 
-        // This context's members and in-flow records occupy the tail of the
-        // two shared stacks. Anything a nested context pushes lands above
-        // `member_end` / `stream_end` and is truncated away before it
-        // returns, so these two ranges stay put across the emission below.
         let member_base = self.scratch.members.len();
         let stream_base = self.scratch.stream.len();
         let mut collection = Collection {
@@ -893,10 +734,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let stream_end = self.scratch.stream.len();
 
         let child_perspective = ParentPerspective::of(values, size);
-        // `(level, seq)` is a total order — `seq` is one monotone counter over
-        // this context's collection walk — so the permutation is unique and an
-        // unstable sort is exact. `partition_point` then names the boundary
-        // the in-flow stream paints at, with nothing moved.
         let split = {
             let members = &mut self.scratch.members[member_base..member_end];
             members.sort_unstable_by_key(|member| (member.level, member.seq));
@@ -910,8 +747,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             self.emit_member(member, root, child_perspective, &world);
         }
         {
-            // Disjoint field borrows: nothing in this loop recurses, so the
-            // records are read in place instead of copied out.
             let Builder {
                 document,
                 items,
@@ -995,18 +830,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
-    /// Appends `node`'s flattened children to the ranking stack in
-    /// order-modified document order, and returns where the run starts.
-    ///
-    /// `Layout::order` is the order-modified paint index the layout algorithm
-    /// assigned over this same flattened sibling space. The sort is skipped
-    /// when `order` arrives non-decreasing: `index` increases by
-    /// construction, so the whole key is already strictly increasing.
     fn rank_children(&mut self, node: NodeId) -> usize {
         let base = self.scratch.ranked.len();
-        // Copied out first: both are `&'doc`, so the iterator borrows the
-        // arenas rather than the builder, leaving the pushes below free to
-        // take `&mut self.scratch`.
         let tree = self.tree;
         let state = self.state;
         let mut previous = 0_u32;
@@ -1036,10 +861,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let base = self.rank_children(cursor.node);
         let end = self.scratch.ranked.len();
 
-        // Indices rather than an iterator: the recursion below pushes onto the
-        // ranking stack above `end` and truncates back to it, which may
-        // reallocate. Entries in `base..end` are never touched, so
-        // re-subscripting each step is both sound and stable.
         let mut position = base;
         while position < end {
             let child_slot = self.scratch.ranked[position].slot;
@@ -1049,12 +870,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         self.scratch.ranked.truncate(base);
     }
 
-    /// Resolves one flattened child into the facts the collection walk keys
-    /// on, or `None` when it produces no box at all.
-    ///
-    /// `offset` already carries the containing-block escape: a member keyed
-    /// `absolute` or `fixed` counts from its containing block's scroll frame,
-    /// not from the frame it was found in.
     fn resolve_child(
         &self,
         child_node: &'doc Node<T>,
@@ -1098,17 +913,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         })
     }
 
-    /// Emits the one item a paragraph-establishing element — a Lynx text
-    /// element or a block container — paints its whole paragraph through.
-    ///
-    /// The walk still descends past a text block, to reach an atomic inline
-    /// box or an out-of-flow child; what keeps the glyphs from being painted
-    /// twice is `collect_child`, which drops text nodes and the layout slots
-    /// `place_and_hide` hid, so an absorbed nested scope never reaches a
-    /// second record. Two details this must get right: the glyphs sit in the
-    /// element's *content* box, so the transform carries that origin; and they
-    /// take the element's *inner* clip, so an `overflow: hidden` block clips
-    /// its own paragraph.
     fn push_paragraph(
         &mut self,
         root: NodeId,
@@ -1158,11 +962,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
-    /// One hit-only record per fragment of every inline box in the inline
-    /// formatting context `root` establishes, by box in tree order, at
-    /// `content_offset` — where the paragraph's content box is — plus each
-    /// fragment's place in it. A `visibility: hidden` box has none; one
-    /// whose `pointer-events` is `none` has records that no hit takes.
     fn fragment_records(
         &self,
         root: NodeId,
@@ -1207,21 +1006,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let ctx = *cursor.ctx;
         let child_node = self.tree.at(child_slot);
         if child_node.is_text_node() {
-            // Content of the paragraph above it, never a box. The establishing
-            // element paints every glyph in one item.
             return;
         }
-        // A hidden layout generates nothing. This is what keeps a text block's
-        // absorbed children out of the frame while still letting the walk
-        // reach the out-of-flow ones it never consumed.
         if self.state.slot_at(child_slot).is_hidden() {
             return;
         }
         if !child_node.is_element() {
             return;
         }
-        // A top-layer element paints in the top-layer tail, not where its
-        // parent meets it (`build_top_layer`).
         let top_layer = self.tree.top_layer();
         if !top_layer.is_empty() && top_layer.contains(child_node.id()) {
             return;
@@ -1229,9 +1021,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let Some(child) = self.resolve_child(child_node, cursor) else {
             return;
         };
-        // A real stacking context paints atomically and out of order, so it is
-        // only recorded here; `emit_member` recurses into it once the whole
-        // enclosing context has been collected and sorted.
         if let Some(level) = child.level {
             let seq = collection.next_seq();
             self.scratch.members.push(Member {
@@ -1248,11 +1037,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         self.collect_in_context(&child, ctx, target, collection);
     }
 
-    /// Collects a child that paints inside the enclosing stacking context.
-    ///
-    /// A pseudo-stacking context (module doc) collects its records into a
-    /// pooled buffer and surfaces as one level-0 member; everything else
-    /// appends straight to `target`.
     fn collect_in_context(
         &mut self,
         child: &ChildBox<'doc, T>,
@@ -1262,23 +1046,16 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
-        // An inline box paints as fragments of the paragraph around it; only
-        // the atoms inside it are records of their own.
         let visible = visible && !is_inline_box(self.node(child.node));
         let descend =
             child.mode != DisplayMode::Leaf && !skips_contents(self.node(child.node), style);
         let is_item_container = ranks_children_as_items(child.mode);
-        // A pseudo-context takes its sequence number before descending, so it
-        // sorts where it was *found*, not where it finished; a static box takes
-        // none at all, because it is not a member.
         let pseudo = (child.position != PositionProperty::Static)
             .then(|| (collection.next_seq(), self.take_pseudo_stream()));
         let (target, mut outer) = match pseudo {
             Some((_, stream)) => (StreamTarget::Pseudo(stream), child.clips),
             None => (target, ctx),
         };
-        // An anchor-positioned box is positioned, so it is always a
-        // pseudo-context or a context: its anchored node encloses its box.
         outer.current.space = self.enter_anchored(
             child.node,
             style,
@@ -1287,9 +1064,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             &mut outer.fixed,
         );
 
-        // A scroll container that is no stacking context takes its slot and
-        // scroll space here, in the order `build_stacking_context` allocates
-        // them: beside its own box, before any descend.
         let world = translated(collection.world, child.offset);
         let own_slot = self.allocate_scroll_slot(
             child.node,
@@ -1305,9 +1079,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             )
         });
         self.record_initial_target(child.node, style, outer.current.chain);
-        // Entered before the records: the paragraph paints inside the
-        // element's own clip, as `push_paragraph` gives it on the stacking
-        // context path. The element's own box keeps the outer context.
         let inner =
             descend.then(|| self.enter_element(child.node, style, &world, outer, own_scroll));
         if visible {
@@ -1321,18 +1092,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 own_slot.or(outer.current.chain),
                 outer.current.space,
             );
-            // An outermost `svg` element's recording follows its box item
-            // when the record is emitted (`svg`). One test per box on a
-            // document without one.
             record.svg_root = self.document.has_svg_roots() && self.node(child.node).is_replaced();
             self.push_stream(target, record);
             if crate::layout::paragraph::establishes_paragraph(child.mode) {
-                // A second record, after the element's own box, so the glyphs
-                // paint over the background and border the block draws.
-                //
-                // Offset to the element's *content* box: a paragraph is laid
-                // out inside the border and padding, so its origin is not the
-                // element's own.
                 let content = inner.map_or(outer.current, |inner| inner.current);
                 let inset = self.rounded(child.node);
                 let content_offset = Point2D::new(
@@ -1382,7 +1144,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
-    /// An empty pooled record buffer for one pseudo-stacking context.
     fn take_pseudo_stream(&mut self) -> u32 {
         if let Some(index) = self.scratch.pseudo_free.pop() {
             debug_assert!(self.scratch.pseudo_pool[index as usize].is_empty());
@@ -1422,8 +1183,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 self.build_stacking_context(member_node, &style, offset, world, perspective, clips);
             }
             MemberPayload::Pseudo { stream } => {
-                // Disjoint field borrows at once; nothing here recurses, so
-                // the records are drained in place.
                 let Builder {
                     document,
                     items,
@@ -1460,14 +1219,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
-    /// Records `node` as an initial scroll target of the scroll slot `chain`
-    /// its box lives in, when its `scroll-initial-target` is `nearest`.
-    ///
-    /// Called for every box the build reaches, before the build decides
-    /// whether to enter the box's contents: css-scroll-snap-2 §3.1.1 makes an
-    /// element a target by its own box, so a replaced element and a
-    /// `content-visibility: auto` box whose contents skip are targets too —
-    /// a list's cell is the second.
     fn record_initial_target(&mut self, node: NodeId, style: &ComputedValues, chain: Option<u32>) {
         if *style.get_scroll_initial_target() == scroll_initial_target::T::Nearest
             && let Some(chain) = chain
@@ -1476,10 +1227,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
-    /// The contexts inside `node`'s box. `ctx.current` is already `node`'s
-    /// box context — its own sticky and animation nodes entered — which is
-    /// where its clip is established; `own_scroll` is its own scroll slot and
-    /// space, which only its content enters.
     fn enter_element(
         &mut self,
         node: NodeId,
@@ -1532,18 +1279,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     }
 }
 
-/// The rounded layout of a node the walk already holds a slot for. The paint
-/// walk descends through [`seldon::tree::LayoutTree`], which runs in slot
-/// space, so its children arrive resolved.
-///
-/// A free function, not a method, so the ranking loop can read layouts while
-/// it appends to the builder's own scratch.
 fn rounded_at(state: &DocumentLayoutState, slot: NodeSlot) -> &Layout {
     &state.slot_at(slot).rounded
 }
 
-/// A free function, not a method, so a caller can hold a disjoint borrow of
-/// the record buffer it is draining while pushing into `items`.
 fn push_record(
     items: &mut Vec<PaintItem>,
     matrices: &mut Vec<Transform3D<f32>>,
@@ -1605,16 +1344,7 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-/// The axes `node` clips its contents on: each axis whose `overflow` is not
-/// `visible`, and both under paint containment. `node` is threaded in for the
-/// same reason [`stacking::establishes_stacking_context`] takes one: the
-/// `skips_contents` answer must come from one place, even where — as here,
-/// which reads only `PAINT` — it cannot change the result.
 pub(super) fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
-    // Neither `overflow` nor paint containment applies to a non-atomic
-    // inline box (css-overflow-3, css-contain-2 §3.3), which has no box of
-    // its own to clip to: the UA sheet's `overflow: clip` on every element
-    // must not cut the atoms inside one away.
     if is_inline_box(node) {
         return ScrollAxes { x: false, y: false };
     }
@@ -1634,8 +1364,6 @@ pub(super) fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollA
     }
 }
 
-/// The padding box of a laid-out box, in its own border-box coordinates:
-/// the rect an `overflow` clip (and an element intersection root) clips to.
 pub(super) fn padding_box(layout: &Layout) -> Rect<f32> {
     Rect::new(
         Point2D::new(layout.border.left, layout.border.top),
@@ -1646,8 +1374,6 @@ pub(super) fn padding_box(layout: &Layout) -> Rect<f32> {
     )
 }
 
-/// `rect` on the axes `clipped` names, and an unbounded strip on the others:
-/// a one-axis clip clips only that axis.
 pub(super) fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
     const UNBOUNDED: f32 = 1.0e7;
     let mut rect = rect;
@@ -1672,10 +1398,6 @@ fn translated(world: &Transform3D<f32>, offset: Point2D<f32>) -> Transform3D<f32
     Transform3D::translation(offset.x, offset.y, 0.0).then(world)
 }
 
-/// `matrix` as a record stores it: inline when it is exactly a translation,
-/// otherwise in the frame's table. A context's own item, clip, layer and
-/// `auto` box are interned back to back with one world, so a matrix equal to
-/// the last one stored shares its entry.
 pub(super) fn intern(
     matrices: &mut Vec<Transform3D<f32>>,
     matrix: Transform3D<f32>,
@@ -1691,9 +1413,6 @@ pub(super) fn intern(
     )
 }
 
-/// What the track of an element's transform curve folds a sampled list
-/// with: the element's matrix around its list, its parent's world and its
-/// committed world, and the list committed. See [`TransformTrack::new`].
 pub(super) struct TrackInputs<'a> {
     pub(super) context: &'a ContextMatrix,
     pub(super) parent_world: &'a Transform3D<f32>,
@@ -1701,18 +1420,12 @@ pub(super) struct TrackInputs<'a> {
     pub(super) committed: &'a ComputedTransform,
 }
 
-/// An element asking for an animation slot: what its transform track folds
-/// with, `None` when its transform cannot follow a curve; the size its
-/// moving content spans (a CSS box's `max(size, content_size)`, an SVG
-/// element's ink extent); and the clip chain enclosing it.
 pub(super) struct Mover<'a> {
     pub(super) track: Option<TrackInputs<'a>>,
     pub(super) extent: Size2D<f32>,
     pub(super) clip: Option<usize>,
 }
 
-/// The tables of the frame being built that an animation slot is checked
-/// against and appended to, with the group layer open where it is asked.
 pub(super) struct SlotTables<'a> {
     pub(super) spaces: &'a [Space],
     pub(super) clips: &'a [ClipNode],
@@ -1721,19 +1434,6 @@ pub(super) struct SlotTables<'a> {
     pub(super) animations: &'a mut Vec<AnimationSlot>,
 }
 
-/// Records `node` in the frame's animation-slot table when it carries a
-/// composite-exportable animation, and answers its slot: a CSS box that
-/// is a stacking context (`Builder::build_stacking_context`) or an SVG
-/// element below an `svg` root (`svg::plan_root`).
-///
-/// Every refusal happens here, before the slot exists: a transform curve
-/// needs track inputs, a planar, invertible committed world and
-/// contributors that stay planar (see [`TransformTrack::new`]), a moving
-/// element's extent must fit [`MAX_MOVING_EXTENT_VIEWPORTS`], and the group
-/// enclosing it must bound it wherever its curve carries it
-/// ([`super::space::movers_bounded`]), which a curve without a bounded reach
-/// never is. A refusal allocates nothing; the element keeps animating
-/// through main-thread ticks, which cull it exactly.
 pub(super) fn allocate_animation_slot<T: Sync>(
     document: &Document<T>,
     node: &Node<T>,
@@ -1755,9 +1455,6 @@ pub(super) fn allocate_animation_slot<T: Sync>(
         opacity,
         transform,
     } = document.composite_export(node)?;
-    // The export reads the same set the driver's bits do, so the group an
-    // opacity curve retargets and the containing block a transform curve
-    // moves both exist.
     debug_assert!(!opacity || node.animates_opacity());
     debug_assert!(!transform || node.animates_transform());
     if transform {
@@ -1788,8 +1485,6 @@ pub(super) fn allocate_animation_slot<T: Sync>(
     Some(u32::try_from(animations.len() - 1).expect("a frame cannot hold 2^32 animation slots"))
 }
 
-/// Whether a moving element whose content spans `extent` has an area inside
-/// the moving-export budget. See [`MAX_MOVING_EXTENT_VIEWPORTS`].
 fn moving_extent_fits<T>(document: &Document<T>, extent: Size2D<f32>) -> bool {
     let viewport = document.viewport_size();
     extent.width * extent.height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height

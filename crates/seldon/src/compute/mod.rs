@@ -18,15 +18,6 @@ pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;
 pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
 
-/// The box-model wrapper a paragraph-establishing box lays out through: a
-/// Lynx text element's block ([`crate::text::block`]) or a block container's
-/// inline formatting context ([`crate::text::inline`]).
-///
-/// Not a general host-measurer door: leaf content stays closed, and this exists
-/// because a paragraph is content the host owns rather than a natural size it
-/// can report. `requires_known_measurement` is `true` and
-/// chosen here, where the reason lives — a paragraph must be laid out even when
-/// both dimensions are known, because its line breaks are what paint reads.
 pub fn compute_text_block_layout<Style, Measure>(
     input: crate::tree::LayoutInput,
     style: &Style,
@@ -40,37 +31,21 @@ where
     leaf::compute_leaf_layout_with_measurement(input, style, contained, None, true, measure)
 }
 
-/// The used margins of a box whose placement its host performs itself.
-///
-/// `auto` is zero here, unlike the root and absolute paths above: a host that
-/// places a box against a line rather than against a containing block has no
-/// free space to distribute. Negative margins survive — they legitimately
-/// shrink the advance a box occupies.
 #[must_use]
 pub fn used_margins<Style: CoreStyle>(style: &Style, inline_basis: Option<f32>) -> Edges<f32> {
     auto_edges_to_zero(resolve_margins(style.margin(), inline_basis))
 }
 
-/// The used padding of a box, percentages resolved against the inline basis —
-/// which for every edge, vertical ones included, is the containing block's
-/// *width*.
 #[must_use]
 pub fn used_padding<Style: CoreStyle>(style: &Style, inline_basis: Option<f32>) -> Edges<f32> {
     resolve_padding(style.padding(), inline_basis)
 }
 
-/// The used value of an inset on a box its host offsets itself — a sticky
-/// box's constraint rectangle, a relative nudge — which is never absolutely
-/// positioned: css-anchor-position-1 §5.1.1 resolves no `anchor-size()` for
-/// it, so the function takes its fallback, and one without a fallback leaves
-/// the inset `auto` (`None`), the initial value an invalid-at-computed-value
-/// time declaration computes to.
 #[must_use]
 pub fn used_inset(value: &Inset, basis: Option<f32>) -> Option<f32> {
     self::util::resolve_inset(value, basis)
 }
 
-/// The used border widths, with a `none`/`hidden` side reading zero.
 #[must_use]
 pub fn used_border<Style: CoreStyle>(style: &Style) -> Edges<f32> {
     resolve_border(&style.border())
@@ -106,8 +81,6 @@ pub fn compute_root_layout<T: LayoutTree>(
     available_space: Size<AvailableSpace>,
 ) {
     let parent_size = available_space.definite_values();
-    // The viewport imposes the root's constraints; no document content can
-    // move them, which is what lets style-imposed sizing chain down from here.
     let root_input = LayoutInput::commit(
         Size::NONE,
         parent_size,
@@ -117,13 +90,6 @@ pub fn compute_root_layout<T: LayoutTree>(
     commit_independent_box(tree, state, root, root_input);
 }
 
-/// Commits an atomic inline subtree at the same constraints used to measure it.
-/// The paragraph places its outer box afterwards; this writes its own box model
-/// and descendant geometry, which a measurement alone cannot restore after hiding.
-///
-/// `known_dimensions` is the border box a paragraph sized the box to itself —
-/// a CSS inline formatting context's shrink-to-fit width (CSS 2.2 §10.3.9) —
-/// or `Size::NONE` to let the box size itself against `available_space`.
 pub fn compute_inline_box_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -145,12 +111,6 @@ pub fn compute_inline_box_layout<T: LayoutTree>(
     )
 }
 
-/// The offset `position: relative` moves a box by after it was placed in
-/// flow (CSS 2.2 §9.4.3), for a box its host places itself: insets resolved
-/// against `basis` — the containing block's width for `left`/`right`, its
-/// height for `top`/`bottom`, an indefinite one leaving the inset `auto` —
-/// `left` winning over `right` unless the box is right-to-left, `top` over
-/// `bottom`.
 #[must_use]
 pub fn used_relative_offset<Style: CoreStyle>(
     style: &Style,
@@ -245,21 +205,6 @@ pub fn compute_boundary_relayout<T: LayoutTree>(
     tree.compute_layout(state, node, input)
 }
 
-/// Answers `input` from the node's cache, or runs `compute_uncached` and
-/// stores what it produced.
-///
-/// A box whose layout reads no percentage basis
-/// ([`CoreStyle::reads_percentage_basis`]) is computed and cached against
-/// none: the basis changes nothing it produces, so the entry then answers
-/// every basis a parent hands it — a flex base-size probe and the commit
-/// after it, or a grid track's probe and the next track's — instead of one
-/// entry per basis.
-///
-/// The question is asked of the style only on a miss in an empty cache:
-/// every entry records the answer it was stored under, so a lookup compares
-/// a basis-free entry without the request's basis, and a later miss reads
-/// the answer back. Both hold for as long as the entries do, since the styles
-/// the answer reads are layout inputs whose change clears the cache.
 pub fn compute_cached_layout<T, ComputeFn>(
     tree: &T,
     state: &mut T::State,
@@ -290,10 +235,6 @@ where
     let slot = tree.layout_mut(state, node);
     slot.store_cached_layout_recording_reads(input, output, reads);
     if input.goal.commits() {
-        // A commit that ran is the one thing that rewrites descendant boxes;
-        // a measurement pass reads them and writes none. Marking here is what
-        // gives the rounding tail its spine: a commit only reaches a node
-        // through an unbroken chain of committing ancestors.
         slot.mark_subtree_dirty();
     }
     output
@@ -303,7 +244,6 @@ pub fn hide_subtree<T: LayoutTree>(tree: &T, state: &mut T::State, node: T::Node
     hide_subtree_at_order(tree, state, node, 0);
 }
 
-/// Hides a `display: none` child's subtree while keeping its paint-order slot.
 pub(super) fn hide_child_at_order<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -320,8 +260,6 @@ fn hide_subtree_at_order<T: LayoutTree>(
     order: u32,
 ) {
     if tree.layout(state, node).is_hidden() {
-        // The subtree below is already zeroed and stays that way; only the
-        // paint-order slot this box keeps among its siblings can still move.
         tree.layout_mut(state, node).set_hidden_order(order);
         return;
     }
@@ -334,18 +272,6 @@ fn hide_subtree_at_order<T: LayoutTree>(
     }
 }
 
-/// Cleans the stale geometry under a box that skips its contents.
-///
-/// The **uncacheable half** of a skipped box. It answers to the box tree, not
-/// to the layout input: a child inserted, moved or re-styled under the box
-/// changes what has to be hidden while changing nothing the box's own size
-/// depends on. A host must therefore run it on **every committing call** —
-/// outside whatever cache serves [`compute_skipped_contents_size`] — or a
-/// subtree re-populated under a box whose size came back from a cache hit
-/// would keep geometry no algorithm ever laid out.
-///
-/// A measurement writes no durable geometry and so hides nothing, which is
-/// why the goal is read here rather than left to the caller.
 pub fn hide_skipped_contents<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -360,17 +286,6 @@ pub fn hide_skipped_contents<T: LayoutTree>(
     }
 }
 
-/// The size a box that skips its contents takes: its own styles with
-/// `contain-intrinsic-size` substituted for the content it does not lay out
-/// ([css-contain-2 §3.5](https://drafts.csswg.org/css-contain-2/#content-visibility)).
-///
-/// The **cacheable half**, and a pure function of this style and this input —
-/// no child is read, so nothing a subtree mutation can change is in it. That
-/// is what lets a host serve it through [`compute_cached_layout`] like any
-/// algorithm's output, and what makes the box a relayout boundary
-/// ([`crate::invalidate::is_relayout_boundary`]). Its counterpart is
-/// [`hide_skipped_contents`], which the same host call must run outside that
-/// cache.
 #[must_use]
 pub fn compute_skipped_contents_size<S: CoreStyle>(style: &S, input: LayoutInput) -> LayoutOutput {
     let metrics = resolve_container_box(style, input);
@@ -411,9 +326,6 @@ pub fn compute_absolute_layout<T: LayoutTree>(
     containing_block: Size<f32>,
     static_position: Point<f32>,
 ) -> Layout {
-    // A host places this box against a containing block it found itself,
-    // whose direction the engine does not see; the box's own `direction`
-    // stands in for it (they differ only when the box sets its own).
     let rtl = tree.style(node).direction() == direction::T::Rtl;
     compute_absolute_layout_in(
         tree,
@@ -424,20 +336,6 @@ pub fn compute_absolute_layout<T: LayoutTree>(
     )
 }
 
-/// Lays out `node`, a box [`LayoutTree::hoisted_children`] reports for
-/// `containing_block`, against that box's padding box as its last committed
-/// layout has it.
-///
-/// What a container's own absolute pass does for the hoisted boxes it
-/// reaches, for a host that has to place one whose containing block did not
-/// run: an in-place relayout of a subtree the box sits in, which its
-/// containing block above it never sees. Both read the same padding box, so
-/// they agree on the result — except for a box with a default anchor whose
-/// containing block is a scroll container: the container's own pass lays it
-/// out against css-position-4's scrollable containing block, which only that
-/// pass knows (its in-flow overflow, [`AbsoluteContainingBlock::scrollable`]),
-/// and this function cannot. A host does not place such a box here; it runs
-/// the containing block's pass instead.
 pub fn compute_hoisted_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -461,14 +359,6 @@ pub fn compute_hoisted_layout<T: LayoutTree>(
     );
 }
 
-/// css-position-4's scrollable containing block of a container whose border
-/// box is `outer` inside `border`, when it is a scroll container: its in-flow
-/// content's scrollable overflow `in_flow` (border-box coordinates, before
-/// any out-of-flow box adds to it) measured from the padding-box origin,
-/// never smaller than the padding box. Each algorithm computes it between its
-/// in-flow commit and its absolute pass, and hands it to that pass in
-/// [`AbsoluteContainingBlock::scrollable`]: the spec's area ignores
-/// absolutely positioned boxes, so a box laid out against it cannot grow it.
 #[inline]
 pub(super) fn scrollable_containing_block(
     scroll_container: bool,
@@ -489,12 +379,6 @@ pub(super) fn scrollable_containing_block(
     ))
 }
 
-/// Lays out every box [`LayoutTree::hoisted_children`] reports for `node`,
-/// whose padding box is `padding_box_size` inside `border`: the absolute
-/// pass of a host algorithm (a paragraph) that has no own out-of-flow
-/// children to interleave them with. A paragraph is laid out as no scroll
-/// container's algorithm, so the boxes see its padding box, never a
-/// scrollable containing block.
 pub fn compute_hoisted_children<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -506,9 +390,6 @@ pub fn compute_hoisted_children<T: LayoutTree>(
     HoistedPass::new(padding_box_size, border, rtl, None).rest(tree, state, node);
 }
 
-/// One hoisted box: its static position moved from its box parent's
-/// coordinates into the containing block's, laid out there, and its layout
-/// moved back.
 fn lay_out_hoisted<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -519,7 +400,6 @@ fn lay_out_hoisted<T: LayoutTree>(
 ) {
     let offset = tree.hoisted_parent_offset(state, containing_block_node, node);
     let static_position = tree.layout(state, node).static_position;
-    // The containing block's origin is zero except for a grid area.
     let origin = containing_block.origin;
     let static_in_block = Point::new(
         offset.x + static_position.x - border.left - origin.x,
@@ -536,31 +416,13 @@ fn lay_out_hoisted<T: LayoutTree>(
     tree.set_hoisted_layout(state, containing_block_node, node, layout);
 }
 
-/// The hoisted half of a container's absolute pass: the boxes
-/// [`LayoutTree::hoisted_children`] reports, laid out in flat tree order
-/// among the container's own out-of-flow children.
-///
-/// A hoisted box is placed against the container's padding box —
-/// css-position-3's containing block, with the container's direction and the
-/// author's self-alignment — whatever the container's algorithm does for its
-/// own children (Lynx's inset-only `linear` and `relative`): those are rules
-/// about a container's children, and a hoisted box is not one. The one rule
-/// about the containing block itself is Grid's (css-grid-2 §10.1: "If an
-/// absolutely positioned element's containing block is generated by a grid
-/// container, the containing block corresponds to the grid area determined
-/// by its grid-placement properties"), which the grid's pass hands in
-/// through the `_in` methods.
 pub(super) struct HoistedPass {
-    /// Every hoisted box whose `via` is below this has been laid out.
     next: usize,
     containing_block: AbsoluteContainingBlock,
     border: Edges<f32>,
 }
 
 impl HoistedPass {
-    /// `scrollable` is the container's scrollable containing block
-    /// ([`scrollable_containing_block`]), `None` unless it is a scroll
-    /// container.
     #[inline]
     pub(super) const fn new(
         padding_box_size: Size<f32>,
@@ -576,8 +438,6 @@ impl HoistedPass {
         }
     }
 
-    /// Lays out the hoisted boxes that come before the container's own
-    /// out-of-flow child at flattened index `index` in tree order.
     #[inline]
     pub(super) fn before<T: LayoutTree>(
         &mut self,
@@ -589,7 +449,6 @@ impl HoistedPass {
         self.before_in(tree, state, node, index, &padding_box_block::<T>);
     }
 
-    /// [`Self::before`], each box laid out against `block(box, padding box)`.
     #[inline]
     pub(super) fn before_in<T: LayoutTree>(
         &mut self,
@@ -605,10 +464,6 @@ impl HoistedPass {
         }
     }
 
-    /// Lays out the hoisted boxes inside the container's own out-of-flow
-    /// child at flattened index `index`, which was just laid out: they come
-    /// after it in tree order, and its own layout may be what registered
-    /// them.
     #[inline]
     pub(super) fn inside<T: LayoutTree>(
         &mut self,
@@ -620,7 +475,6 @@ impl HoistedPass {
         self.inside_in(tree, state, node, index, &padding_box_block::<T>);
     }
 
-    /// [`Self::inside`], each box laid out against `block(box, padding box)`.
     #[inline]
     pub(super) fn inside_in<T: LayoutTree>(
         &mut self,
@@ -634,14 +488,11 @@ impl HoistedPass {
         self.next = index + 1;
     }
 
-    /// Lays out every hoisted box left, after the container's last own
-    /// out-of-flow child.
     #[inline]
     pub(super) fn rest<T: LayoutTree>(&mut self, tree: &T, state: &mut T::State, node: T::NodeId) {
         self.rest_in(tree, state, node, &padding_box_block::<T>);
     }
 
-    /// [`Self::rest`], each box laid out against `block(box, padding box)`.
     #[inline]
     pub(super) fn rest_in<T: LayoutTree>(
         &mut self,
@@ -654,9 +505,6 @@ impl HoistedPass {
         self.next = usize::MAX;
     }
 
-    /// The hoisted boxes whose `via` is in `from..to`, in order. The common
-    /// answer — none — costs one [`LayoutTree::has_hoisted_children`] probe
-    /// and stays inline; the rest is out of line.
     #[inline]
     fn lay_out<T: LayoutTree>(
         &self,
@@ -673,8 +521,6 @@ impl HoistedPass {
         self.lay_out_listed(tree, state, node, from, to, block);
     }
 
-    /// The host is asked again after every box: laying one out can register
-    /// another inside it, which comes right after it in tree order.
     #[cold]
     #[inline(never)]
     fn lay_out_listed<T: LayoutTree>(
@@ -709,8 +555,6 @@ impl HoistedPass {
     }
 }
 
-/// A hoisted box's containing block outside a grid: its generator's padding
-/// box.
 #[inline]
 fn padding_box_block<T: LayoutTree>(
     _: T::NodeId,
@@ -719,35 +563,14 @@ fn padding_box_block<T: LayoutTree>(
     *padding_box
 }
 
-/// The containing block of an absolutely positioned box, as the absolute pass
-/// of the box that generates it knows it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AbsoluteContainingBlock {
-    /// Its origin in its generator's padding-box coordinates: a grid area's
-    /// offset, zero for every other containing block.
     pub(super) origin: Point<f32>,
     pub(super) size: Size<f32>,
-    /// Its generator's padding-box size. css-position-3 §2.1.1: "The
-    /// element's original containing block is its containing block before
-    /// applying any of these effects" — grid placement included.
     pub(super) padding_box_size: Size<f32>,
-    /// Whether it is its generator's whole padding box, the one
-    /// css-position-4's scrollable containing block replaces.
     pub(super) is_padding_box: bool,
-    /// css-position-4's scrollable containing block, when its generator is a
-    /// scroll container: the size of its in-flow scrollable overflow area
-    /// measured from the padding-box origin, never smaller than the padding
-    /// box ([`scrollable_containing_block`]). The generator's own algorithm
-    /// computed it in this run, before this pass; a box with a default anchor
-    /// is laid out against it where [`Self::is_padding_box`] holds.
     pub(super) scrollable: Option<Size<f32>>,
-    /// Its `direction`: what `start`/`end` mean in the horizontal axis.
     pub(super) rtl: bool,
-    /// Whether the author's `justify-self`/`align-self` place the box
-    /// (css-position-3 §4.3). Lynx's own `linear` and `relative` containers
-    /// place an absolutely positioned child by its insets alone, and those
-    /// algorithms are not extended; `anchor-center` and `position-area`'s
-    /// defaults, which are opt-in anchor positioning, still apply there.
     pub(super) honors_self_alignment: bool,
 }
 
@@ -765,14 +588,11 @@ impl AbsoluteContainingBlock {
         }
     }
 
-    /// This containing block with its generator's scrollable containing
-    /// block.
     #[inline]
     pub(super) const fn with_scrollable(self, scrollable: Option<Size<f32>>) -> Self {
         Self { scrollable, ..self }
     }
 
-    /// The original containing block in this one's coordinates.
     #[inline]
     pub(super) fn original(&self) -> Rect<f32> {
         Rect::new(
@@ -781,7 +601,6 @@ impl AbsoluteContainingBlock {
         )
     }
 
-    /// The padding box of a Lynx `linear` or `relative` container.
     #[inline]
     pub(super) const fn lynx_padding_box(size: Size<f32>, rtl: bool) -> Self {
         Self {
@@ -808,17 +627,6 @@ where
         node,
         &containing_block,
         &static_position,
-        // Every field of the input `absolute_layout` builds for this box is a
-        // function of the containing block, the box's own style and, when
-        // that style uses anchor positioning, its anchors' geometry — none of
-        // which the box's own subtree can move. The exceptions are an
-        // anchored axis sized from content, which is measured to build the
-        // input (`settle_anchored_axes` withdraws the claim on that axis),
-        // and a box with position options, whose choice among them depends on
-        // its own size (`anchor_fallback` withdraws both). And the box's
-        // content cannot move the containing block back: it contributes to no
-        // ancestor's used size, only to their scrollable overflow, which is an
-        // output the in-place path compares before it trusts anything.
         LayoutGoal::Commit {
             content_independent: Size::new(true, true),
         },
@@ -864,9 +672,6 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let style = tree.style(node);
-    // The style tests first: a box that names no anchor and lists no
-    // fallbacks — nearly every absolutely positioned box — decides here,
-    // without asking the host for an options list it cannot have.
     let base_uses = anchor::uses_anchor_positioning(&style);
     let count = if style.has_position_try_fallbacks() {
         tree.position_option_count(node)
@@ -899,8 +704,6 @@ where
     .layout
 }
 
-/// Lays `node` out with the geometry values of `style` as they are, without
-/// anchor positioning (`base` is the box's own style).
 #[allow(
     clippy::too_many_arguments,
     reason = "absolute_layout's inputs plus the style the values come from"
@@ -934,15 +737,9 @@ where
     )
 }
 
-/// The used self-alignment of an absolutely positioned box on one axis.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AxisAlignment {
-    /// The value with its overflow-position bits. `auto` is stored as
-    /// `normal`: css-align-3 §6.1 — "Behaves as normal … when determining the
-    /// actual position of an absolutely positioned box."
     pub(super) flags: AlignFlags,
-    /// `anchor-center` with a default anchor: where the margin box's center
-    /// goes, in the coordinates of the containing block it is laid out in.
     pub(super) anchor_center: Option<f32>,
 }
 
@@ -969,39 +766,22 @@ impl AxisAlignment {
         self.flags.value() == AlignFlags::NORMAL
     }
 
-    /// css-position-3 §4.1: an automatic size is the stretch-fit size only
-    /// under `stretch`, or `normal`, and both insets non-`auto`; css-align-3
-    /// §6.1.2: "Values other than stretch or normal cause non-replaced
-    /// absolutely-positioned boxes to use fit-content sizing".
     #[inline]
     fn stretches(self) -> bool {
         matches!(self.flags.value(), AlignFlags::NORMAL | AlignFlags::STRETCH)
     }
 }
 
-/// Where and against what an absolutely positioned box is laid out.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AbsolutePlacement {
-    /// The containing block the box is sized and positioned in, in the
-    /// coordinates of the one its generator's absolute pass handed over: that
-    /// one, or a `position-area` region.
     pub(super) area: Rect<f32>,
-    /// The original containing block (css-position-3 §2.1.1: the generator's
-    /// padding box, or its scrollable containing block), for css-align-3
-    /// §4.4.1.2's overflow limit rect.
     pub(super) original: Rect<f32>,
-    /// `justify-self` (horizontal) and `align-self` (vertical), used values.
     pub(super) align: Size<AxisAlignment>,
-    /// The insets whose computed value is `auto`, even where `position-area`
-    /// or `anchor-center` made their used value 0.
     pub(super) auto_inset: Edges<bool>,
-    /// Axes the box's own run would read differently from the values it is
-    /// laid out with, which the pass hands it as known dimensions.
     pub(super) sensitive: Size<bool>,
 }
 
 impl AbsolutePlacement {
-    /// The placement of a box that uses no anchor positioning.
     #[inline]
     fn plain(
         style: &impl CoreStyle,
@@ -1021,33 +801,20 @@ impl AbsolutePlacement {
     }
 }
 
-/// One absolute layout of a box, with what the position fallback test reads.
 pub(super) struct Placed {
     pub(super) layout: Layout,
-    /// The inset-modified containing block, in the handed-over containing
-    /// block's coordinates.
     pub(super) imcb: Rect<f32>,
-    /// The margin box, in the same coordinates.
     pub(super) margin_box: Rect<f32>,
-    /// css-anchor-position-1 §6.5: "If cb rect was negative-size in either
-    /// axis and corrected into zero-size".
     pub(super) negative_corrected: bool,
 }
 
 impl Placed {
-    /// §6.5: the margin box is "fully contained within" the inset-modified
-    /// containing block, which was not negative-size.
     #[inline]
     pub(super) fn fits(&self) -> bool {
-        // A layout unit of slack (1/64 px) keeps an exact fit a fit.
         !self.negative_corrected && self.imcb.contains_rect(&self.margin_box, 1.0 / 64.0)
     }
 }
 
-/// css-position-3 §4's absolute positioning layout model for one box:
-/// inset-modified containing block, size, auto margins, then alignment of the
-/// margin box — in `placement.area`, with `values` in place of the box's own
-/// geometry values.
 #[allow(
     clippy::too_many_arguments,
     reason = "the model's inputs; bundling them would only rename them"
@@ -1256,8 +1023,6 @@ where
     }
 }
 
-/// One axis of the inset-modified containing block, in the coordinates of
-/// the containing block it is cut from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct InsetModifiedAxis {
     start: f32,
@@ -1265,12 +1030,6 @@ struct InsetModifiedAxis {
     negative_corrected: bool,
 }
 
-/// css-position-3 §3.5.2: "the weaker inset in the affected axis is reduced
-/// … In the case that only one inset is auto, that is the weaker inset …;
-/// otherwise the weaker inset is the inset of the end edge (where end is
-/// interpreted relative to the writing mode of the containing block)."
-/// Whether that is the start (left or top) inset, from the computed-`auto`
-/// flags of the start and end insets.
 #[inline]
 fn weaker_is_start(auto_insets: (bool, bool), rtl: bool) -> bool {
     match auto_insets {
@@ -1280,13 +1039,6 @@ fn weaker_is_start(auto_insets: (bool, bool), rtl: bool) -> bool {
     }
 }
 
-/// The inset-modified containing block on one axis (css-position-3 §3.5):
-/// the containing block reduced by the insets, an `auto` one being 0 when
-/// the other is not (§3.5.1: "If only one inset property in a given axis is
-/// auto, it is set to zero") and both `auto` standing at the static
-/// position (§3.5.1: "Set its start-edge inset property to the static
-/// position, and its end-edge inset property to zero"). A negative size is
-/// brought up to zero by moving the weaker edge (§3.5.2).
 #[inline]
 fn inset_modified_axis(
     containing: f32,
@@ -1318,8 +1070,6 @@ fn inset_modified_axis(
     }
 }
 
-/// Resolved box-model and positioning inputs retained across the recursive
-/// child-layout call for one absolutely positioned node.
 #[derive(Clone, Copy)]
 struct ResolvedAbsoluteStyle {
     insets: Edges<Option<f32>>,
@@ -1327,8 +1077,6 @@ struct ResolvedAbsoluteStyle {
     padding: Edges<f32>,
     border: Edges<f32>,
     preferred_available: Size<Option<AvailableSpace>>,
-    /// Per axis, whether the preferred size is stretch-fit when the insets
-    /// and self-alignment allow it ([`absolute_size_may_stretch`]).
     auto_size: Size<bool>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
@@ -1374,22 +1122,6 @@ fn absolute_known_dimensions(
     )
 }
 
-/// Settles, for an absolutely positioned box laid out with values its own
-/// run would read differently — substituted anchor functions, a fallback
-/// option's values — the used border-box size on every such `sensitive`
-/// axis, and records it as that axis's known dimension (see
-/// [`anchor::AnchoredGeometry`] for why that is the whole job). Any other box
-/// passes through.
-///
-/// An axis with a definite preferred size takes it clamped by the min/max
-/// sizes, exactly the preferred size the box's own run derives from these
-/// values (`resolve_container_box`). An axis sized from content — `auto`, an
-/// intrinsic sizing keyword, or a size the substitution made `auto` — with an
-/// anchor-bearing min/max size or margin is measured with the box's size
-/// styles ignored, so none of its unresolvable reads enter the result, in the
-/// space its keyword asks for ([`content_available_space`]), and then clamped
-/// here; a height is measured at the used width. Returns the goal with content
-/// independence withdrawn on the axes it measured.
 #[allow(
     clippy::too_many_arguments,
     reason = "one step of absolute_layout, consuming its locals"
@@ -1449,9 +1181,6 @@ fn settle_anchored_axes<T: LayoutTree>(
         measured.width = true;
     }
     if sensitive.height && known.height.is_none() {
-        // The height of content depends on the width it is laid out at, which
-        // the measurement below would otherwise take from the very size
-        // styles it ignores.
         let width = known.width.unwrap_or_else(|| {
             let input = LayoutInput::measure(
                 Size::NONE,
@@ -1478,14 +1207,12 @@ fn settle_anchored_axes<T: LayoutTree>(
         content_independent,
     } = &mut goal
     {
-        // A size measured from the box's own content moves with it.
         content_independent.width &= !measured.width;
         content_independent.height &= !measured.height;
     }
     goal
 }
 
-/// The containing-block geometry `absolute_layout` has resolved for one box.
 #[derive(Clone, Copy)]
 struct AbsoluteSpace {
     parent_size: Size<Option<f32>>,
@@ -1493,8 +1220,6 @@ struct AbsoluteSpace {
     fixed_margin: Edges<f32>,
 }
 
-/// A measurement of the box's content alone: its own size, min and max sizes
-/// ignored.
 fn content_measure(
     known: Size<Option<f32>>,
     parent_size: Size<Option<f32>>,
@@ -1506,17 +1231,6 @@ fn content_measure(
     input
 }
 
-/// The space a content-sized anchored axis is measured in: the same space the
-/// box's own run gets when nothing is anchored — its intrinsic sizing keyword
-/// (`min-content`, `max-content`, `fit-content(<limit>)`), else the
-/// inset-modified containing block — so the keyword, not a formula of its
-/// own, decides the size.
-///
-/// The measurement ignores size styles but not margins: the run still
-/// subtracts the margins it reads from a definite space, and on an anchored
-/// axis it reads their unresolvable form. The space is widened by exactly
-/// that and narrowed by the substituted margins, so the run ends up
-/// subtracting the margins that apply.
 fn content_available_space(
     style: &impl CoreStyle,
     values: &GeometryValues<'_>,
@@ -1602,26 +1316,8 @@ fn resolve_absolute_style(
     }
 }
 
-/// Whether an absolutely positioned box's preferred size `value` is one the
-/// absolute pass may stretch-fit to the inset-modified containing block.
-///
-/// css-position-3 §4.1 stretch-fits only the box's *automatic* size
-/// (`auto`), and only when its self-alignment is `stretch` (or `normal` for a
-/// non-replaced box) and neither inset on the axis is `auto`; the `stretch`
-/// keywords are that size by definition. `fit-content` is not an automatic
-/// size: css-sizing-3 §3.2 makes it the fit-content size,
-/// `min(max-content, max(min-content, stretch-fit))` (§2.1), which never
-/// grows past the content's max-content size. The box therefore takes no
-/// known dimension on that axis: its own run sizes it with the
-/// inset-modified containing block as its definite available space, the
-/// way it sizes a box whose self-alignment does not stretch (§4.1's
-/// fit-content case), and its `auto` margins then share what is left.
-/// Flex and grid items do not come through here; they still read
-/// [`style_size_behaves_auto`] directly.
 #[inline]
 fn absolute_size_may_stretch(value: &StyleSize) -> bool {
-    // An anchor function's unresolvable form is a length or `auto`, never
-    // `fit-content`, so the tag test needs no anchor arm.
     !matches!(value, StyleSize::FitContent) && style_size_behaves_auto(value)
 }
 
@@ -1637,17 +1333,12 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
         | StyleSize::FitContent
         | StyleSize::Stretch
         | StyleSize::WebkitFillAvailable => None,
-        // `absolute_layout` hands over substituted values whenever the style
-        // references `anchor-size()`; a function still here resolves as
-        // §5.1.1's unresolvable form, which is never an intrinsic keyword.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
             unresolvable_preferred_available(value, basis)
         }
     }
 }
 
-/// The anchor arm of [`absolute_preferred_available`], out of line so the hot
-/// function does not call itself.
 #[cold]
 #[inline(never)]
 fn unresolvable_preferred_available(
@@ -1679,16 +1370,6 @@ pub fn round_layout_subtree<T: LayoutTree>(
     );
 }
 
-/// Rounds a subtree after a statically dispatched preorder hook.
-/// Returning `false` prunes only later hook calls; rounding still visits descendants.
-/// The hook runs before the current unrounded layout is cloned.
-///
-/// `rescale` says the rounding function itself changed under the caller — a new
-/// device scale, or a viewport that moves boxes no layout write touched — and
-/// forces the whole subtree. Otherwise the walk descends only where a box was
-/// written since the last rounding: a changed node carries its whole subtree
-/// with it, because everything under it shifts with its origin and anything
-/// positioned against it resolves against its new size.
 #[doc(hidden)]
 pub fn round_layout_subtree_with<T: LayoutTree>(
     tree: &T,
@@ -1802,8 +1483,6 @@ fn absolute_axis_location(axis: AbsoluteAxis) -> f32 {
     }
 }
 
-/// One physical-axis instance of the absolute-position equation used to turn
-/// insets, used margins, and the static fallback into a border-box offset.
 #[derive(Clone, Copy)]
 struct AbsoluteAxis {
     containing_size: f32,
@@ -1814,37 +1493,20 @@ struct AbsoluteAxis {
     end_margin: f32,
     static_position: f32,
     prefer_end: bool,
-    /// Self-alignment other than `normal` with both insets and both margins
-    /// non-`auto`: css-position-3 §4.3's last case. `None` keeps the
-    /// equation above — the stronger inset, or the margins' own solution.
     aligned: Option<AlignedAxis>,
 }
 
-/// css-position-3 §4.3: "the box is aligned as specified by its
-/// self-alignment property in the relevant axis (as defined by the writing
-/// mode of the containing block), using its margin box as the alignment
-/// subject and the inset-modified containing block as the alignment
-/// container."
 #[derive(Debug, Clone, Copy)]
 struct AlignedAxis {
     imcb_start: f32,
     imcb_size: f32,
     alignment: AxisAlignment,
-    /// css-align-3 §4.4.1.2's overflow limit rect on this axis: "the
-    /// bounding rectangle of the alignment subject's inset-modified
-    /// containing block and its original containing block", before the
-    /// bounding with the inset-modified containing block.
     limit: (f32, f32),
-    /// The containing block's inline direction runs right to left on this
-    /// axis.
     containing_rtl: bool,
-    /// The box's own inline direction runs right to left on this axis.
     self_rtl: bool,
     horizontal: bool,
 }
 
-/// Where the margin box of size `subject` starts (its left or top edge) under
-/// `axis`'s alignment.
 fn aligned_margin_box_start(axis: AlignedAxis, subject: f32) -> f32 {
     let AlignedAxis {
         imcb_start,
@@ -1858,52 +1520,30 @@ fn aligned_margin_box_start(axis: AlignedAxis, subject: f32) -> f32 {
     let free = imcb_size - subject;
     let toward = |at_end: bool| imcb_start + if at_end { free } else { 0.0 };
     let desired = match alignment.anchor_center {
-        // css-anchor-position-1 §4.2: "it is centered (insofar as possible)
-        // over the default anchor box in the relevant axis".
         Some(center) => center - subject / 2.0,
         None => match alignment.flags.value() {
             AlignFlags::CENTER => imcb_start + free / 2.0,
             AlignFlags::END | AlignFlags::FLEX_END => toward(!containing_rtl),
             AlignFlags::LEFT if horizontal => toward(false),
             AlignFlags::RIGHT if horizontal => toward(true),
-            // css-align-3 §4.2: a baseline's fallback alignment is "safe
-            // self-start" (first) or "safe self-end" (last); there is no
-            // baseline to share with an absolutely positioned box.
             AlignFlags::SELF_START | AlignFlags::BASELINE => toward(self_rtl),
             AlignFlags::SELF_END | AlignFlags::LAST_BASELINE => toward(!self_rtl),
-            // `start`, `flex-start`, a `stretch` that could not stretch
-            // (css-align-3 §6.1: it "falls back to flex-start"), and `left`
-            // or `right` in `align-self`, where they are not values.
             _ => toward(containing_rtl),
         },
     };
     if alignment.flags.flags().contains(AlignFlags::UNSAFE) {
-        // css-align-3 §4.4: "Regardless of the relative sizes of the
-        // alignment subject and alignment container, the given alignment
-        // value is honored."
         return desired;
     }
-    // css-align-3 §4.4.1.2, which both `safe` and the default follow for an
-    // absolutely positioned box whose alignment is not `normal`.
     let imcb_end = imcb_start + imcb_size;
-    // "If the alignment subject fits within the inset-modified containing
-    // block, align as specified to the extent possible without overflowing
-    // the inset-modified containing block."
     if subject <= imcb_size {
         return desired.clamp(imcb_start, imcb_end - subject);
     }
     let (limit_start, limit_end) = (limit.0.min(imcb_start), limit.1.max(imcb_end));
-    // "Otherwise, if the alignment subject fits within the overflow limit
-    // rect, align the alignment subject such that it fully covers the
-    // inset-modified containing block and is otherwise aligned as specified
-    // to the extent possible without overflowing the overflow limit rect."
     if subject <= limit_end - limit_start {
         return desired
             .clamp(imcb_end - subject, imcb_start)
             .clamp(limit_start, limit_end - subject);
     }
-    // "Otherwise, start-align the alignment subject within the overflow limit
-    // rect."
     if containing_rtl {
         limit_end - subject
     } else {
@@ -1993,9 +1633,6 @@ fn rounded_layout(
     (rounded, position)
 }
 
-/// Snaps a sticky item's recorded containing-block edges the way
-/// [`rounded_layout`] snaps the box they bound: in the box parent's
-/// coordinates, through the parent's own snapped position.
 fn rounded_containing_block(
     bounds: Edges<f32>,
     scale: f32,
@@ -2027,9 +1664,6 @@ fn round_layout_inner<T: LayoutTree>(
     ancestor_moved: bool,
 ) {
     if !ancestor_moved && !tree.layout(state, node).needs_rounding() {
-        // Nothing under here was written since the last rounding, and it
-        // rounds from the same accumulated position, so every `rounded` box in
-        // this subtree already holds the value this walk would recompute.
         return;
     }
     let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
@@ -2043,8 +1677,6 @@ fn round_layout_inner<T: LayoutTree>(
         );
     }
     let slot = tree.layout_mut(state, node);
-    // The hook writes the boxes of out-of-flow children here rather than
-    // during layout, so read the mark after it has run.
     let moved = ancestor_moved || slot.box_changed();
     slot.rounded = rounded;
     slot.clear_rounding_marks();
@@ -2145,9 +1777,6 @@ mod tests {
         }
     }
 
-    /// Two branches under one root, each with a leaf. The "algorithm" is a
-    /// commit that writes every child's box, so a pass over it leaves exactly
-    /// the marks a real one would.
     struct BranchTree;
 
     impl BranchTree {
@@ -2253,8 +1882,6 @@ mod tests {
             "a pass that rewrote nothing leaves the tail nothing to do",
         );
 
-        // What a host's invalidation does: clear the mutated node and the
-        // spine above it, leaving the other branch's caches alone.
         for node in [2, 1, 0] {
             tree.clear_layout_cache(&mut state, node);
         }
@@ -2265,10 +1892,6 @@ mod tests {
             "only the recomputed spine is walked; the untouched branch is skipped",
         );
 
-        // A box that actually moved carries its whole subtree with it: every
-        // descendant rounds from a new accumulated position. Both marks come
-        // from the same place a pass would leave them — the parent ran, and
-        // wrote one child a different box.
         let mut moved = BranchTree::box_of(3);
         moved.location.y += 4.0;
         tree.layout_mut(&mut state, 0).mark_subtree_dirty();
@@ -2320,8 +1943,6 @@ mod tests {
                 margin_box: Rect::new(Point::ZERO, Size::ZERO),
             },
         );
-        // Hoisting: a host that lowers no position reports nothing, and the
-        // default commit is a plain store.
         assert!(tree.hoisted_children(&state, 0).is_empty());
         assert_eq!(tree.hoisted_parent_offset(&state, 0, 1), Point::ZERO);
         let mut hoisted = Layout::with_order(0);
@@ -2339,8 +1960,6 @@ mod tests {
         run_branch_pass(&tree, &mut state);
         let _ = round_branches(&tree, &mut state);
 
-        // Hiding runs from the parent's own commit, which is what puts the
-        // spine mark on the parent.
         tree.layout_mut(&mut state, 0).mark_subtree_dirty();
         hide_subtree(&tree, &mut state, 1);
         assert_eq!(
@@ -2357,7 +1976,6 @@ mod tests {
             "hiding an already-hidden subtree writes nothing the tail must chase",
         );
 
-        // Laying the node out again takes the subtree back out of hiding.
         tree.set_unrounded_layout(&mut state, 1, BranchTree::box_of(1));
         assert!(!tree.layout(&state, 1).is_hidden());
     }
@@ -2433,7 +2051,6 @@ mod tests {
         }
     }
 
-    /// A style carrying exactly what the host-placement accessors read.
     #[derive(Debug)]
     struct HostPlacedStyle {
         margin: Edges<stylo::values::computed::Margin>,
@@ -2459,12 +2076,6 @@ mod tests {
         }
     }
 
-    /// The three accessors a host that places a box itself — the `<text>`
-    /// paragraph is the one in this workspace — resolves its box model with.
-    ///
-    /// There is deliberately no inset accessor beside them: insets on a box a
-    /// host places itself are ignored, following native Lynx
-    /// (`docs/tracking/deviations.md`).
     #[test]
     fn host_placement_accessors_resolve_margins_padding_and_border() {
         use stylo::Zero;

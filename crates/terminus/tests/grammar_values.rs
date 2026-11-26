@@ -41,8 +41,6 @@ fn length_grammar() {
     assert!(parses("width", "calc(2px + 3rpx)"), "rpx joins calc");
     assert!(parses("width", "calc(2px + 3cqw)"), "cqw joins calc");
     assert!(parses("width", "0"), "unitless zero is a length");
-    // Only the two physical container units are admitted; the logical family
-    // is not — see `docs/style-assumptions.md`.
     for logical in ["1cqi", "1cqb", "1cqmin", "1cqmax"] {
         assert!(
             !parses("width", logical),
@@ -54,9 +52,6 @@ fn length_grammar() {
     }
 }
 
-/// [css-contain-3 §2](https://drafts.csswg.org/css-contain-3/#container-queries):
-/// the `container-type` keywords `cqw`/`cqh` resolve against, the name
-/// nothing consumes yet, and the shorthand that is **name-first**.
 #[test]
 fn container_query_grammar() {
     for value in ["normal", "size", "inline-size"] {
@@ -73,8 +68,6 @@ fn container_query_grammar() {
         );
     }
 
-    // `container-name` cascades; no `@container` rule matches on it, because
-    // the rule stays gecko-only in the fork.
     assert_eq!(specified("container-name", "none").as_deref(), Some("none"));
     assert_eq!(
         specified("container-name", "card sidebar").as_deref(),
@@ -87,10 +80,6 @@ fn container_query_grammar() {
         );
     }
 
-    // The shorthand is `<container-name> [ / <container-type> ]?`, so a bare
-    // `container: size` names the container "size" and makes it no query
-    // container at all — csswg-drafts#7180. The name is not optional, so
-    // there is no type-only spelling of the shorthand: write `container-type`.
     assert_eq!(
         specified("container", "foo / size").as_deref(),
         Some("foo / size"),

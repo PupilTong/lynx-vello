@@ -198,20 +198,10 @@ use terminus::link::{
 };
 
 use super::text::TEXT_TAG;
-// `SELECTION_CHANGE` is the engine-only event the runtime fires at an editing
-// host after every command it applied, which this component reads its
-// `selection` from; the W3C event of the same name at the document node is
-// not heard here.
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
 use crate::main::record::write_record_field;
 
-/// The single-line tags: web-core's element name and its `-ng` alias. The
-/// Lynx tag `input` reaches the first through [`super::tag_map`]; the
-/// document tag `input` defines no field (module documentation).
 pub(super) const INPUT_TAGS: [&str; 2] = ["x-input", "x-input-ng"];
-/// The multi-line tags: web-core's element name and its `-ng` alias. The
-/// Lynx tag `textarea` reaches the first through [`super::tag_map`]; the
-/// document tag `textarea` defines no field.
 pub(super) const TEXTAREA_TAGS: [&str; 2] = ["x-textarea", "x-textarea-ng"];
 
 const VALUE: &str = "value";
@@ -225,38 +215,12 @@ const INPUT_FILTER: &str = "input-filter";
 const SEND_COMPOSING_INPUT: &str = "send-composing-input";
 const CONFIRM_ENTER: &str = "confirm-enter";
 const MAXLINES: &str = "maxlines";
-/// Where the editor keeps the filter pattern: `input-filter` and
-/// `setInputFilter` both write it, so the last write wins. web-core's
-/// `setInputFilter` writes the same attribute on its inner `<input>`.
 const PATTERN: &str = "pattern";
 
-/// web-core's default `maxlength` (`InputBaseAttributes.ts`), which the
-/// typings document as well.
 const DEFAULT_MAXLENGTH: usize = 140;
 
 const PLACEHOLDER_ID: &str = "placeholder";
 
-/// The light-tree UA rules: the host is a flex box carrying the field's
-/// box, 14px text (web-core's `font-size: 14px`), and the placeholder style
-/// attributes as inherited custom properties. A property whose attribute is
-/// absent and has no fallback is invalid at computed-value time, so the
-/// placeholder inherits that property from the host instead.
-///
-/// The `::placeholder` rules lay the placeholder's block out: a block
-/// filling its row and clipping, on one verbatim line in an input and
-/// wrapping verbatim lines in a textarea. They are UA rules because the
-/// block implements `::placeholder` (module documentation), whose property
-/// restriction Stylo applies to every author declaration for it, the shadow
-/// sheet's included, and not to a UA one.
-///
-/// A textarea's `min-height` and `max-height` attributes clamp the host's
-/// own box, the field's box here, through typed `attr()` used directly in
-/// the two properties (web-core binds them to its inner `<textarea>`'s
-/// inline style). A value that is no `<length>` takes the fallback, the
-/// value the field has without the attribute: `0px`, the common UA block's
-/// `min-height: 0` (`ua_sheet`), and `none`, `max-height`'s initial value.
-/// Without the fallback such a value would be invalid at computed-value
-/// time, and `min-height` would become its initial `auto`, not that `0`.
 pub(super) const UA_RULES: &str = r"
 x-input, x-input-ng, x-textarea, x-textarea-ng {
   display: flex; font-size: 14px;
@@ -280,15 +244,6 @@ x-textarea[max-height], x-textarea-ng[max-height] {
 }
 ";
 
-/// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
-/// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
-/// ([`terminus::link::Document::parse_engine_shadow_stylesheet`]): the input's editor is
-/// `display: block`, which the `lynx` grammar keeps from author sheets. The
-/// placeholder's block has no rule here: it is the `::placeholder`, laid
-/// out by [`UA_RULES`] (module documentation). The editor sets no
-/// `min-height`: an empty editor is one line tall because its paragraph lays
-/// out one empty line, a layout rule, not CSS (the `lh` unit is not parsed
-/// under the fork's `lynx` feature).
 const SHADOW_RULES: &str = r"
 .editor {
   min-width: 0; overflow: clip;
@@ -304,25 +259,17 @@ const SHADOW_RULES: &str = r"
 .editor:empty ~ #placeholder { display: flex; }
 ";
 
-/// One line, vertically centred, as a browser's `<input>` draws it, in the
-/// editor's own inline formatting context. A `password` editor masks its
-/// value as a browser's `<input type=password>` does: a disc per character,
-/// the value itself unchanged.
 const INPUT_SHADOW_RULES: &str = r#"
 .editor { display: block; flex: 1 1 0%; white-space: pre; }
 .editor[type="password"] { -webkit-text-security: disc; }
 #placeholder { align-items: center; }
 "#;
 
-/// Lines from the top, wrapping, in the editor's Lynx paragraph. `color:
-/// inherit` undoes `text`'s UA `color: initial`: the value wears the field's
-/// colour, as web-core's inner `<textarea>` does (`x-textarea.css`).
 const TEXTAREA_SHADOW_RULES: &str = r"
 .editor { flex: 1 1 auto; white-space: pre-wrap; color: inherit; }
 #placeholder { align-items: flex-start; }
 ";
 
-/// Which of the two fields an element is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Input,
@@ -330,7 +277,6 @@ enum Kind {
 }
 
 impl Kind {
-    /// The editor's id and part: web-core's inner element's.
     const fn editor_id(self) -> &'static str {
         match self {
             Self::Input => "input",
@@ -338,8 +284,6 @@ impl Kind {
         }
     }
 
-    /// The editor's tag: a `div` the shadow sheet makes a block container
-    /// for the single line, a Lynx `<text>` for the lines of a textarea.
     const fn editor_tag(self) -> &'static str {
         match self {
             Self::Input => "div",
@@ -348,9 +292,6 @@ impl Kind {
     }
 }
 
-/// What the component last told script about the focused editor: the value
-/// its last `input` reported (or the one it had at focus, or the one a
-/// script wrote), and the selection then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reported {
     editor: NodeId,
@@ -358,16 +299,12 @@ struct Reported {
     selection: Range<u32>,
 }
 
-/// State shared by the two kinds' components: the event queue and the
-/// focused editor's [`Reported`].
 #[derive(Default)]
 struct Shared {
     events: ComponentEvents,
     reported: RefCell<Option<Reported>>,
 }
 
-/// Installs one component per kind, each under the kind's two tag names.
-/// Must run before any element could carry them.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let shared = Rc::new(Shared {
         events,
@@ -385,16 +322,12 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     }
 }
 
-/// The `x-input`/`x-textarea` component; see the module documentation.
 struct TextField {
     kind: Kind,
     shared: Rc<Shared>,
-    /// [`SHADOW_RULES`] and the kind's rules, parsed by the first field of
-    /// the kind and mounted on every one's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }
 
-/// The kind of a text field host, `None` for any other node.
 fn kind_of(document: &LynxDocument, node: NodeId) -> Option<Kind> {
     let tag = document.get(node)?.tag_name()?;
     if INPUT_TAGS.contains(&tag) {
@@ -406,7 +339,6 @@ fn kind_of(document: &LynxDocument, node: NodeId) -> Option<Kind> {
     }
 }
 
-/// The editor in `field`'s shadow tree: its first element.
 fn editor(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(field)?;
     document
@@ -416,8 +348,6 @@ fn editor(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
         .map(terminus::link::Node::id)
 }
 
-/// The block holding the placeholder's text, the only child of
-/// `#placeholder`.
 fn placeholder_block(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(field)?;
     let placeholder = document
@@ -428,11 +358,6 @@ fn placeholder_block(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
     placeholder.first_child().map(terminus::link::Node::id)
 }
 
-/// The editing host a press at `node` focuses when `node` is in no editing
-/// host itself: the editor of the text field `node` is, or is inside (its
-/// shadow tree's content), when that editor can be edited. HTML's
-/// `delegatesFocus` for the one component that has an editor: a press in
-/// the field's padding, or above or below its centred line, focuses it.
 pub(crate) fn focus_delegate(document: &LynxDocument, node: NodeId) -> Option<NodeId> {
     let mut current = Some(node);
     while let Some(id) = current {
@@ -449,14 +374,10 @@ fn attribute<'a>(document: &'a LynxDocument, element: NodeId, name: &str) -> Opt
     document.get(element).and_then(|node| node.attribute(name))
 }
 
-/// A Lynx boolean attribute: present and not `"false"` (web-core removes a
-/// `"false"` attribute before its handlers see it).
 fn flag(document: &LynxDocument, element: NodeId, name: &str) -> bool {
     attribute(document, element, name).is_some_and(|value| value != "false")
 }
 
-/// JavaScript's `parseFloat`: the longest leading decimal number after
-/// white space, `None` for none.
 fn parse_float(text: &str) -> Option<f64> {
     let text = text.trim_start();
     let bytes = text.as_bytes();
@@ -481,13 +402,10 @@ fn parse_float(text: &str) -> Option<f64> {
     longest.and_then(|end| text[..end].parse().ok())
 }
 
-/// The UTF-16 length of `text`.
 fn units(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
 }
 
-/// The byte offset of UTF-16 unit `unit` in `text`, rounded down to a
-/// character boundary and clamped to the end.
 fn byte_of_unit(text: &str, unit: usize) -> usize {
     let mut seen = 0;
     for (byte, character) in text.char_indices() {
@@ -500,8 +418,6 @@ fn byte_of_unit(text: &str, unit: usize) -> usize {
     text.len()
 }
 
-/// UTF-16 unit `unit` of `text` moved back by what the byte ranges
-/// `removed` (ascending, disjoint) take out before it.
 fn shift_unit(text: &str, removed: &[Range<usize>], unit: usize) -> usize {
     let unit_byte = byte_of_unit(text, unit);
     let mut after = unit;
@@ -512,8 +428,6 @@ fn shift_unit(text: &str, removed: &[Range<usize>], unit: usize) -> usize {
     after
 }
 
-/// `text` with the byte ranges `removed` (ascending, disjoint) taken out,
-/// and `caret` (UTF-16) moved back by what was removed before it.
 fn remove_ranges(text: &str, removed: &[Range<usize>], caret: usize) -> (String, usize) {
     let mut kept = String::with_capacity(text.len());
     let mut at = 0;
@@ -525,7 +439,6 @@ fn remove_ranges(text: &str, removed: &[Range<usize>], caret: usize) -> (String,
     (kept, shift_unit(text, removed, caret))
 }
 
-/// The byte ranges of every line break: an `x-input`'s value sanitization.
 fn line_breaks(value: &str) -> Vec<Range<usize>> {
     value
         .char_indices()
@@ -534,8 +447,6 @@ fn line_breaks(value: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// web-core's `type="number"` filter, `/[^0-9.]|\.(?=.*\.)/g`: everything
-/// but ASCII digits and the last `.`.
 fn number_rejects(value: &str) -> Vec<Range<usize>> {
     let last_dot = value.rfind('.');
     value
@@ -547,9 +458,6 @@ fn number_rejects(value: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// A pattern web-core hands to `new RegExp`, compiled by `regex-lite`:
-/// ECMAScript's `\uXXXX` escapes become `\x{XXXX}`; a pattern it cannot
-/// compile filters nothing.
 fn compile_filter(pattern: &str) -> Option<regex_lite::Regex> {
     let mut translated = String::with_capacity(pattern.len());
     let mut chars = pattern.char_indices().peekable();
@@ -578,7 +486,6 @@ fn compile_filter(pattern: &str) -> Option<regex_lite::Regex> {
     regex_lite::Regex::new(&translated).ok()
 }
 
-/// The byte ranges `pattern` matches in `value`, empty matches skipped.
 fn filter_rejects(pattern: &str, value: &str) -> Vec<Range<usize>> {
     compile_filter(pattern).map_or_else(Vec::new, |regex| {
         regex
@@ -589,9 +496,6 @@ fn filter_rejects(pattern: &str, value: &str) -> Vec<Range<usize>> {
     })
 }
 
-/// The `maxlength` that applies: the attribute as `parseFloat` reads it,
-/// whole units, 140 when absent; `None` (no limit) for a negative or
-/// unreadable value, which a browser's `maxlength` ignores.
 fn max_length(document: &LynxDocument, field: NodeId) -> Option<usize> {
     let Some(text) = attribute(document, field, MAXLENGTH) else {
         return Some(DEFAULT_MAXLENGTH);
@@ -605,9 +509,6 @@ fn max_length(document: &LynxDocument, field: NodeId) -> Option<usize> {
     (limit >= 0.0).then_some(limit as usize)
 }
 
-/// The `maxlines` that applies to a textarea: the attribute as `parseFloat`
-/// reads it, whole lines; `None` (no limit) when absent, unreadable or not
-/// positive, as native Lynx's `maxLinesFilter` reads `maxLines <= 0`.
 fn max_lines(document: &LynxDocument, field: NodeId) -> Option<usize> {
     let limit = parse_float(&attribute(document, field, MAXLINES)?)?;
     #[expect(
@@ -618,9 +519,6 @@ fn max_lines(document: &LynxDocument, field: NodeId) -> Option<usize> {
     (limit >= 1.0).then_some(limit as usize)
 }
 
-/// The value as the editing session holds it so far, the caret, and the
-/// UTF-16 range of the value the edit inserted (it ends at the caret), as
-/// [`TextField::sanitize`] corrects them one rule at a time.
 struct Correction {
     value: String,
     caret: usize,
@@ -628,8 +526,6 @@ struct Correction {
 }
 
 impl Correction {
-    /// Takes the byte ranges `removed` (ascending, disjoint) out of the
-    /// value, moving the caret and the inserted range's start with them.
     fn remove(&mut self, removed: &[Range<usize>]) {
         if removed.is_empty() {
             return;
@@ -638,8 +534,6 @@ impl Correction {
         (self.value, self.caret) = remove_ranges(&self.value, removed, self.caret);
     }
 
-    /// The value with only the first `kept` UTF-16 units of the inserted
-    /// range left in it, and the caret after them.
     fn keeping(&self, kept: usize) -> (String, usize) {
         let start = byte_of_unit(&self.value, self.inserted_from + kept);
         let end = byte_of_unit(&self.value, self.caret);
@@ -649,7 +543,6 @@ impl Correction {
 }
 
 impl TextField {
-    /// Builds the shadow tree; see the module documentation.
     fn build(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         let sheet = self.shadow_sheet.get_or_init(|| {
@@ -666,7 +559,6 @@ impl TextField {
         document.set_attribute(editor, "part", id);
         document.set_classes(editor, "editor");
         document.set_attribute(editor, "contenteditable", "plaintext-only");
-        // One line tall when empty, editable or not (`disabled`, `readonly`).
         document.set_has_line_if_empty(editor, true);
         document.set_attribute(editor, "enterkeyhint", "send");
         document.set_attribute(editor, "inputmode", "text");
@@ -681,7 +573,6 @@ impl TextField {
         document.append_child(shadow, placeholder);
     }
 
-    /// The field's current value: the editor's text.
     fn value(document: &LynxDocument, editor: NodeId) -> String {
         let mut value = String::new();
         if let Some(node) = document.get(editor) {
@@ -694,11 +585,6 @@ impl TextField {
         value
     }
 
-    /// The value and the selection (UTF-16) of `editor`: the session's when
-    /// it is focused, otherwise the one it kept since it lost focus or a
-    /// script last wrote its value ([`terminus::link::Document::host_selection`]), as
-    /// a browser's field keeps its selection across a blur; a caret at the
-    /// end for a field that was never focused nor written.
     fn snapshot(document: &LynxDocument, editor: NodeId) -> (String, Range<u32>, bool) {
         if document.focused() == Some(editor) {
             let state = document.text_input_state();
@@ -713,9 +599,6 @@ impl TextField {
         (value, selection, false)
     }
 
-    /// Writes a value the way script does — no `input` — with the caret at
-    /// `caret` (UTF-16), and makes it the reported value when the editor is
-    /// focused.
     fn write_value(&self, document: &mut LynxDocument, editor: NodeId, value: &str, caret: usize) {
         document.set_host_value(editor, value, caret..caret);
         if document.focused() == Some(editor) {
@@ -728,9 +611,6 @@ impl TextField {
         }
     }
 
-    /// Writes the `value` attribute: cut to `maxlength` units when that
-    /// attribute is present, as web-core's `_handleValue` cuts it, and
-    /// nothing when the field already shows it.
     fn apply_value_attribute(&self, document: &mut LynxDocument, element: NodeId) {
         let Some(editor) = editor(document, element) else {
             return;
@@ -755,10 +635,6 @@ impl TextField {
         }
     }
 
-    /// Corrects the value after an edit outside a composition: line breaks,
-    /// `maxlength`, the `number` filter, `input-filter`, in that order.
-    /// `inserted` is the UTF-16 length of what the edit inserted, which is
-    /// the most `maxlength` takes back.
     fn sanitize(
         &self,
         document: &mut LynxDocument,
@@ -781,7 +657,6 @@ impl TextField {
             if length > limit {
                 let take = (length - limit).min(fix.caret - fix.inserted_from);
                 let end = byte_of_unit(&fix.value, fix.caret);
-                // Never half a pair: round the start down to its character.
                 let start = byte_of_unit(&fix.value, fix.caret - take);
                 fix.remove(std::slice::from_ref(&(start..end)));
             }
@@ -804,11 +679,6 @@ impl TextField {
         }
     }
 
-    /// `maxlines` after an edit (module documentation): with `fix` written,
-    /// keeps the longest prefix of the inserted text whose value lays out in
-    /// `limit` lines of the editor's paragraph, by bisection over the
-    /// inserted characters, one layout pass per probe. An editor with no
-    /// committed paragraph (not rendered) is left as it is.
     fn fit_lines(document: &mut LynxDocument, editor: NodeId, fix: &Correction, limit: usize) {
         let inserted = &fix.value
             [byte_of_unit(&fix.value, fix.inserted_from)..byte_of_unit(&fix.value, fix.caret)];
@@ -830,8 +700,6 @@ impl TextField {
                 .paragraph_line_count(editor)
                 .is_some_and(|count| count <= limit)
         };
-        // UTF-16 lengths of the inserted text's character prefixes: kept
-        // lengths never end inside a surrogate pair.
         let prefixes: Vec<usize> = inserted
             .chars()
             .scan(0, |length, character| {
@@ -840,8 +708,6 @@ impl TextField {
                 Some(before)
             })
             .collect();
-        // `prefixes[0]` (nothing kept) is the answer when nothing fits; the
-        // whole insertion is known not to.
         let (mut low, mut high) = (0, prefixes.len() - 1);
         while low < high {
             let middle = (low + high).div_ceil(2);
@@ -855,7 +721,6 @@ impl TextField {
         document.set_host_value(editor, &value, caret..caret);
     }
 
-    /// Queues `input` when the value differs from the last one reported.
     fn report_input(
         &self,
         document: &LynxDocument,
@@ -903,8 +768,6 @@ impl TextField {
             .queue_detailed(field, name, ComponentDetail::Value { value });
     }
 
-    /// Queues `selection` when the selection moved with no change of value
-    /// and leaves text selected; records it either way.
     fn report_selection(&self, document: &LynxDocument, field: NodeId, editor: NodeId) {
         let (value, selection, _) = Self::snapshot(document, editor);
         let mut reported = self.shared.reported.borrow_mut();
@@ -959,7 +822,6 @@ impl TextField {
         }
     }
 
-    /// Ends a field's editing state when it can no longer be edited.
     fn update_editable(document: &mut LynxDocument, element: NodeId) {
         let Some(editor) = editor(document, element) else {
             return;
@@ -971,17 +833,6 @@ impl TextField {
         }
     }
 
-    /// `focus()`: focuses the editor, which restores the selection it kept
-    /// since it lost focus or a script last wrote its value, as a browser's
-    /// `input.focus()` does. A field never focused nor written has none, and
-    /// gets a caret at the end of the value, where a browser's fresh
-    /// `<input>` reports its selection.
-    ///
-    /// The Lynx `focus` is queued here, inside the call, as a browser fires
-    /// `focus` inside `input.focus()`, so it goes ahead of a `selection` a
-    /// `setSelectionRange` in the same job queues; the standard `focus` the
-    /// runtime dispatches later finds the editor already reported and
-    /// queues nothing more.
     fn focus(&self, document: &mut LynxDocument, field: NodeId, editor: NodeId) -> MethodOutcome {
         if document.focused() == Some(editor) {
             return MethodOutcome::Done;
@@ -998,8 +849,6 @@ impl TextField {
         MethodOutcome::Done
     }
 
-    /// The editor gained focus: its value and selection become the reported
-    /// ones and the Lynx `focus` is queued, once per focus.
     fn on_focus(&self, document: &LynxDocument, field: NodeId, editor: NodeId) {
         let (value, selection, _) = Self::snapshot(document, editor);
         let mut reported = self.shared.reported.borrow_mut();
@@ -1016,8 +865,6 @@ impl TextField {
             .queue_detailed(field, "focus", ComponentDetail::Value { value });
     }
 
-    /// A selection a method set: applied when the editor is focused, then
-    /// reported as a `selection` would be.
     fn select_range(
         &self,
         document: &mut LynxDocument,
@@ -1033,7 +880,6 @@ impl TextField {
     }
 }
 
-/// The params object, or `InvalidParams`.
 fn params_object(params: &str) -> Result<serde_json::Map<String, Value>, InvalidParams> {
     match serde_json::from_str(params) {
         Ok(Value::Object(object)) => Ok(object),
@@ -1042,8 +888,6 @@ fn params_object(params: &str) -> Result<serde_json::Map<String, Value>, Invalid
     }
 }
 
-/// A non-negative whole number param, truncated; `None` when absent or not
-/// a number.
 fn index_param(params: &serde_json::Map<String, Value>, name: &str) -> Option<usize> {
     let number = params.get(name)?.as_f64()?;
     #[expect(
@@ -1082,8 +926,6 @@ impl CustomElement<()> for TextField {
         self.build(document, element);
     }
 
-    /// web-core replays its `value` handler at connection, after the other
-    /// attributes, so a `maxlength` written after `value` still cuts it.
     fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
         if attribute(document, element, VALUE).is_some() {
             self.apply_value_attribute(document, element);
@@ -1120,8 +962,6 @@ impl CustomElement<()> for TextField {
                 }
             }
             TYPE => {
-                // web-core's `_handleType`: the inner element is `password`
-                // or `text`, and the kind picks its `inputmode`.
                 let (kind, mode) = match new.unwrap_or_default() {
                     "digit" => ("text", "numeric"),
                     "number" => ("text", "decimal"),
@@ -1145,10 +985,6 @@ impl CustomElement<()> for TextField {
         }
     }
 
-    /// The editor's standard events, heard at the shadow root: `input` and
-    /// `compositionend` on their bubble pass, the non-bubbling `focus`,
-    /// `blur` and `selectionchange` on the capture pass, which is the only
-    /// one they have there.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
@@ -1211,7 +1047,6 @@ impl CustomElement<()> for TextField {
                 Ok(None)
             }
             "controlKeyBoard" => {
-                // web-core's `controlKeyBoard`: 0 and 1 focus, 2 and 3 blur.
                 match params().map(|params| params.get("action").and_then(Value::as_u64)) {
                     Ok(Some(0 | 1)) => {
                         return self.focus(document, element, editor);
@@ -1230,8 +1065,6 @@ impl CustomElement<()> for TextField {
                 let value = string_param(&params, VALUE)
                     .ok_or(InvalidParams)?
                     .to_owned();
-                // web-core places the caret only for a truthy `index`; a
-                // value setter otherwise leaves it at the end.
                 let caret = index_param(&params, "index")
                     .filter(|&index| index > 0)
                     .unwrap_or(usize::MAX)
@@ -1306,7 +1139,7 @@ impl CustomElement<()> for TextField {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Ahem at 10px lays out exactly.
+    #![allow(clippy::float_cmp)]
 
     use std::sync::Arc;
 
@@ -1328,8 +1161,6 @@ mod tests {
 
     const AHEM: &[u8] = include_bytes!("../../../../seldon/tests/fixtures/Ahem.ttf");
 
-    /// A field of `tag`, 200×40 with 5px padding, in 10px Ahem with a 10px
-    /// line, laid out.
     fn make(tag: &str, attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
         let (mut document, events) = with_component_events(PageConfig::default());
         assert_eq!(
@@ -1385,7 +1216,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The events queued since the last call, as `(name, detail)`.
     fn queued(events: &ComponentEvents) -> Vec<(&'static str, ComponentDetail)> {
         events
             .take()
@@ -1411,10 +1241,6 @@ mod tests {
         }
     }
 
-    /// What the runtime does for one command at the focused editor: the
-    /// edit, then the events after the change through the Rust walk —
-    /// non-composed, as an editor in a shadow tree dispatches them — then
-    /// the engine's `selectionchange`.
     fn edit(document: &mut LynxDocument, command: Command) {
         let host = document.focused().expect("a focused editor");
         let outcome = document.apply_editing(command);
@@ -1444,8 +1270,6 @@ mod tests {
         }
     }
 
-    /// Focus moves the way the runtime moves it: `terminus` queues the events and
-    /// they are dispatched, non-composed, at their targets.
     fn deliver_focus_events(document: &mut LynxDocument) {
         for event in document.take_focus_events() {
             document.dispatch_element_event(
@@ -1480,8 +1304,6 @@ mod tests {
         super::TextField::value(document, editor_of(document, field))
     }
 
-    // --- structure and style -------------------------------------------------
-
     #[test]
     fn every_tag_builds_an_editor_and_a_placeholder() {
         assert_eq!(
@@ -1506,10 +1328,6 @@ mod tests {
         }
     }
 
-    /// The document tags `input` and `textarea` define no field. `make`
-    /// creates document elements directly, past the Lynx tag map: the Lynx
-    /// tags `input` and `textarea` reach `x-input` and `x-textarea` through
-    /// `super::tag_map` (user ruling 2026-11-26).
     #[test]
     fn the_document_tags_input_and_textarea_are_not_text_fields() {
         for tag in ["input", "textarea"] {
@@ -1519,10 +1337,6 @@ mod tests {
         }
     }
 
-    /// `x-input`'s editor is a `div` laid out in its own standard inline
-    /// formatting context, with no Lynx text semantics; `x-textarea`'s is a
-    /// Lynx `<text>` whose Lynx paragraph lays its lines out and which wears
-    /// the field's colour.
     #[test]
     fn the_input_edits_an_inline_formatting_context_and_the_textarea_a_lynx_text() {
         let (document, _, input) = make("x-input", &[("value", "ab")]);
@@ -1541,16 +1355,11 @@ mod tests {
         assert_eq!(document.get(editor).unwrap().tag_name(), Some("text"));
         assert_eq!(document.paragraph_kind(editor), Some(ParagraphKind::Lynx));
         assert_eq!(value_of(&document, editor, "color"), "rgb(1, 2, 3)");
-        // The Lynx paragraph shows the empty line after a trailing break.
         document.set_attribute(textarea, "value", "ab\n");
         document.layout();
         assert_eq!(document.paragraph_line_count(editor), Some(2));
     }
 
-    /// The single-line editor keeps every character and does not wrap; the
-    /// textarea's wraps. Both fill the content box. An empty editor is one
-    /// line tall because its paragraph lays out one empty line, a layout
-    /// rule, not CSS.
     #[test]
     fn the_input_is_one_line_and_the_textarea_wraps() {
         let (mut document, _, input) = make("x-input", &[("value", "a  b")]);
@@ -1560,7 +1369,6 @@ mod tests {
             "preserve"
         );
         assert_eq!(value_of(&document, editor, "text-wrap-mode"), "nowrap");
-        // Centred on the 30px content box: one 10px line at y = 5 + 10.
         assert_eq!(rect(&document, editor), (5.0, 15.0, 190.0, 10.0));
         document.set_attribute(input, "value", &"x".repeat(40));
         document.layout();
@@ -1574,8 +1382,6 @@ mod tests {
         let editor = editor_of(&document, textarea);
         assert_eq!(value_of(&document, editor, "text-wrap-mode"), "wrap");
         assert_eq!(rect(&document, editor), (5.0, 5.0, 190.0, 30.0));
-        // Unsized, the textarea grows with its wrapped lines: 30 squares
-        // and spaces on 190px wrap into four 10px lines.
         document.set_inline_style(
             textarea,
             "width: 200px; padding: 5px; font-family: Ahem; font-size: 10px; line-height: 10px",
@@ -1585,8 +1391,6 @@ mod tests {
         assert_eq!(rect(&document, editor).3, 40.0);
     }
 
-    /// The placeholder shows only while the value is empty, in grey unless
-    /// `placeholder-color` says otherwise, over the content box.
     #[test]
     fn the_placeholder_shows_while_the_value_is_empty() {
         let (mut document, _, field) = make(
@@ -1628,12 +1432,6 @@ mod tests {
         );
     }
 
-    /// The placeholder's block is the field's `::placeholder`: an author's
-    /// `::placeholder` rule styles it, over the `placeholder-*` attributes'
-    /// defaults, and follows the host's class; what css-pseudo-4 keeps off
-    /// `::placeholder` (here `padding`) is not applied; the box over the
-    /// content box keeps the defaults; the `::placeholder` rules of the UA
-    /// sheet still lay the block out.
     #[test]
     fn a_placeholder_rule_styles_the_placeholder_text() {
         for tag in INPUT_TAGS.iter().chain(&TEXTAREA_TAGS) {
@@ -1694,8 +1492,6 @@ mod tests {
         }
     }
 
-    // --- attributes ----------------------------------------------------------
-
     #[test]
     fn type_and_confirm_type_reach_the_text_input_state() {
         let (mut document, _, field) = make("x-input", &[("type", "password")]);
@@ -1732,12 +1528,8 @@ mod tests {
         );
     }
 
-    /// `type=password` masks the input's editor with a disc per character,
-    /// through the shadow sheet; any other type, and a textarea, does not.
     #[test]
     fn a_password_input_masks_its_value_and_a_text_one_does_not() {
-        // A tab is the tell: shown, it runs to the stop at 80px under
-        // `white-space: pre`; masked, it is one 10px Ahem disc.
         let (mut document, _, field) = make("x-input", &[("type", "password"), ("value", "a\tb")]);
         let editor = editor_of(&document, field);
         assert_eq!(value_of(&document, editor, "-webkit-text-security"), "disc");
@@ -1760,8 +1552,6 @@ mod tests {
         assert_eq!(value_of(&document, editor, "-webkit-text-security"), "none");
     }
 
-    /// `value` is cut to `maxlength` only when that attribute is present,
-    /// and a later `maxlength` does not cut what is shown.
     #[test]
     fn the_value_attribute_is_cut_to_a_present_maxlength() {
         let (mut document, _, field) =
@@ -1797,10 +1587,6 @@ mod tests {
         }
     }
 
-    /// An empty field with no author height is one line tall whether or not
-    /// it can be edited (native measures it at its editor's height): its
-    /// editor keeps its one empty line while `disabled` or `readonly` take
-    /// its `contenteditable` away, set before the first layout or after.
     #[test]
     fn an_empty_field_is_one_line_tall_when_editing_is_off() {
         for tag in INPUT_TAGS.iter().chain(&TEXTAREA_TAGS) {
@@ -1825,7 +1611,6 @@ mod tests {
                 assert_eq!(rect(&document, editor).3, 10.0, "{tag} {attribute}");
                 assert_eq!(rect(&document, field).3, 20.0, "{tag} {attribute}");
 
-                // Turned off after a layout as a host, and on again.
                 let (mut document, _, field) = make(tag, &[]);
                 drop_height(&mut document, field);
                 assert_eq!(rect(&document, field).3, 20.0, "{tag}");
@@ -1839,8 +1624,6 @@ mod tests {
         }
     }
 
-    /// A press anywhere in the field — its own box, its placeholder — is
-    /// delegated to the editor.
     #[test]
     fn a_press_in_the_field_delegates_focus_to_the_editor() {
         let (mut document, _, field) = make("x-input", &[("placeholder", "p")]);
@@ -1851,13 +1634,9 @@ mod tests {
         let page = document.document_element().id();
         assert_eq!(focus_delegate(&document, page), None);
         document.commit();
-        // The placeholder takes no hit: the top hit in the padding is the
-        // host itself.
         let hits = document.elements_from_point(Point2D::new(2.0, 2.0));
         assert_eq!(hits.first(), Some(&field));
     }
-
-    // --- events --------------------------------------------------------------
 
     #[test]
     fn typing_fires_input_and_focus_and_blur_carry_the_value() {
@@ -1872,8 +1651,6 @@ mod tests {
         assert_eq!(queued(&events), [("blur", text_value("abc"))]);
     }
 
-    /// Enter in an `x-input` confirms and leaves the value as it was; the
-    /// line breaks of a paste are stripped.
     #[test]
     fn enter_confirms_an_input_and_line_breaks_are_stripped() {
         let (mut document, events, field) = make("x-input", &[("value", "hi")]);
@@ -1887,8 +1664,6 @@ mod tests {
         assert_eq!(queued(&events), [("input", input("hiab", 4..4, false))]);
     }
 
-    /// A textarea keeps its line breaks and confirms only with
-    /// `confirm-enter`.
     #[test]
     fn a_textarea_confirms_on_enter_only_with_confirm_enter() {
         let (mut document, events, field) = make("x-textarea", &[]);
@@ -1907,9 +1682,6 @@ mod tests {
         );
     }
 
-    /// The browser's `maxlength`: what is inserted past the limit is taken
-    /// back from the end of the insertion, the caret with it, and an edit
-    /// that changes nothing fires nothing. 140 when absent.
     #[test]
     fn maxlength_takes_back_what_an_insertion_put_past_the_limit() {
         let (mut document, events, field) = make("x-input", &[("maxlength", "4"), ("value", "ab")]);
@@ -1921,7 +1693,6 @@ mod tests {
         edit(&mut document, Command::Insert("q".to_owned()));
         assert_eq!(value(&document, field), "axyb");
         assert!(queued(&events).is_empty(), "nothing changed");
-        // A surrogate pair is never split: both halves go.
         edit(&mut document, Command::DeleteBackward);
         edit(&mut document, Command::Insert("😀".to_owned()));
         assert_eq!(value(&document, field), "axb");
@@ -1932,10 +1703,6 @@ mod tests {
         assert_eq!(value(&document, field).len(), 140);
     }
 
-    /// `maxlines`: an insertion that would lay the value out past the limit
-    /// keeps its longest prefix that fits, the caret after it; a value
-    /// within the limit is kept whole, and a deletion never cuts one already
-    /// over it.
     #[test]
     fn maxlines_takes_back_what_an_insertion_put_past_the_limit() {
         let (mut document, events, field) =
@@ -1953,20 +1720,16 @@ mod tests {
                 ("input", input("one\ntwo", 7..7, false))
             ]
         );
-        // A third line, from a break: refused whole, and no `input`.
         edit(&mut document, Command::InsertLineBreak);
         assert_eq!(value(&document, field), "one\ntwo");
         assert_eq!(document.text_input_state().selection, 7..7);
         assert!(queued(&events).is_empty(), "nothing changed");
-        // A paste whose third line starts at its break keeps what is before.
         edit(&mut document, Command::Insert("s\nthree".to_owned()));
         assert_eq!(value(&document, field), "one\ntwos");
         assert_eq!(
             queued(&events),
             [("input", input("one\ntwos", 8..8, false))]
         );
-        // Wrapping counts: 19 squares fill the 190px line, so what follows
-        // the 15th `x` starts a third line. Never half a surrogate pair.
         edit(
             &mut document,
             Command::Insert(format!("{}😀x", "x".repeat(15))),
@@ -1980,8 +1743,6 @@ mod tests {
             Some(2)
         );
 
-        // A value over the limit, written by script, is not cut by a
-        // deletion, and the field without `maxlines` takes every line.
         let (mut document, _, field) =
             make("x-textarea", &[("maxlines", "2"), ("value", "a\nb\nc")]);
         focus(&mut document, field);
@@ -2001,7 +1762,6 @@ mod tests {
         for text in ["1", ".", "2", "a", "."] {
             edit(&mut document, Command::Insert(text.to_owned()));
         }
-        // The last dot is kept, as web-core's `\.(?=.*\.)` keeps it.
         assert_eq!(value(&document, field), "12.");
         assert_eq!(document.text_input_state().selection, 3..3);
 
@@ -2011,7 +1771,6 @@ mod tests {
         queued(&events);
         edit(&mut document, Command::Insert("a1中b2".to_owned()));
         assert_eq!(queued(&events), [("input", input("1中2", 3..3, false))]);
-        // `setInputFilter` replaces the pattern.
         assert_eq!(
             invoke(&mut document, field, "setInputFilter", r#"{"pattern":"x"}"#),
             MethodOutcome::Done
@@ -2020,8 +1779,6 @@ mod tests {
         assert_eq!(value(&document, field), "1中2y");
     }
 
-    /// During a composition `input` waits for `compositionend`, unless
-    /// `send-composing-input` asks for each update.
     #[test]
     fn composing_input_waits_for_the_end_unless_asked() {
         let (mut document, events, field) = make("x-input", &[]);
@@ -2048,8 +1805,6 @@ mod tests {
         assert_eq!(queued(&events), [("input", input("你h", 2..2, true))]);
     }
 
-    /// `selection` fires for a selection that moved with no change of value
-    /// and leaves text selected.
     #[test]
     fn selection_fires_for_a_selected_range() {
         let (mut document, events, field) = make("x-input", &[("value", "hello")]);
@@ -2072,15 +1827,10 @@ mod tests {
         );
     }
 
-    /// `x-textarea`'s `min-height` and `max-height` attributes clamp the
-    /// host's box through UA `attr()` rules; removing one, or a value that
-    /// is no length, leaves the content height, and `x-input` reads neither.
     #[test]
     fn min_height_and_max_height_attributes_clamp_a_textarea() {
         const UNSIZED: &str =
             "width: 200px; padding: 5px; font-family: Ahem; font-size: 10px; line-height: 10px";
-        // The initial values, as a field with neither attribute computes
-        // them.
         let initial = |tag: &str| {
             let (mut document, _, field) = make(tag, &[]);
             document.set_inline_style(field, UNSIZED);
@@ -2100,14 +1850,12 @@ mod tests {
             assert_eq!(rect(&document, field).3, 60.0, "{tag}");
             assert_eq!(rect(&document, editor), (5.0, 5.0, 190.0, 50.0), "{tag}");
 
-            // One line of content: 10px and the padding.
             document.set_attribute(field, "value", "x");
             document.remove_attribute(field, "min-height");
             document.layout();
             assert_eq!(value_of(&document, field, "min-height"), min, "{tag}");
             assert_eq!(rect(&document, field).3, 20.0, "{tag}");
 
-            // Four wrapped lines would be 50px tall.
             document.set_attribute(field, "value", &"xx ".repeat(20));
             document.set_attribute(field, "max-height", "30px");
             document.layout();
@@ -2118,8 +1866,6 @@ mod tests {
             assert_eq!(value_of(&document, field, "max-height"), max, "{tag}");
             assert_eq!(rect(&document, field).3, 50.0, "{tag}");
 
-            // A value that is no length takes the fallback: what the field
-            // computes without the attribute.
             document.set_attribute(field, "min-height", "tall");
             document.set_attribute(field, "max-height", "30");
             document.layout();
@@ -2139,12 +1885,9 @@ mod tests {
         }
     }
 
-    // --- methods -------------------------------------------------------------
-
     #[test]
     fn get_value_set_value_and_set_selection_range() {
         let (mut document, events, field) = make("x-input", &[("value", "hello")]);
-        // Not focused: the caret is at the end.
         assert_eq!(
             invoke(&mut document, field, "getValue", "{}"),
             MethodOutcome::Data("5:hello1:51:51:0".to_owned())
@@ -2202,8 +1945,6 @@ mod tests {
         );
         assert_eq!(document.focused(), None);
         assert!(document.has_focus_events());
-        // Script's own writes fire no `input`; the focus events are the
-        // runtime's to deliver.
         deliver_focus_events(&mut document);
         let names: Vec<_> = queued(&events).into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["focus", "selection", "blur"]);
@@ -2213,11 +1954,6 @@ mod tests {
         );
     }
 
-    /// A field keeps its selection while it is not focused, as a browser's
-    /// `<input>` keeps `selectionStart`/`selectionEnd` across a blur:
-    /// `getValue` answers it, and `focus` restores it with no `selection`
-    /// event, since the `focus` report carries it. A script's write while
-    /// the field is not focused leaves its caret for the next focus.
     #[test]
     fn a_field_keeps_its_selection_while_it_is_not_focused() {
         let (mut document, events, field) = make("x-input", &[("value", "hello")]);
@@ -2256,7 +1992,6 @@ mod tests {
             "no `selection`: the focus report carries it"
         );
 
-        // `setValue` while not focused: the caret at the end, or at `index`.
         assert_eq!(
             invoke(&mut document, field, "blur", "{}"),
             MethodOutcome::Done
@@ -2294,7 +2029,6 @@ mod tests {
         assert_eq!(document.text_input_state().selection, 2..2);
         assert_eq!(document.focused(), Some(editor));
 
-        // A fresh field has kept nothing: `focus` puts the caret at the end.
         let (mut document, _, field) = make("x-textarea", &[]);
         let editor = editor_of(&document, field);
         assert_eq!(document.host_selection(editor), None);

@@ -12,8 +12,6 @@ use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -24,7 +22,6 @@ impl EventRequester for HostWakeup {
     }
 }
 
-/// Identifies where a source is requested, completed or cancelled.
 fn thread_tag() -> String {
     format!("{:?}", std::thread::current().id())
 }
@@ -203,54 +200,8 @@ impl Drop for PendingFetcher {
     }
 }
 
-/// How long a startup test may run before it is treated as hung.
-///
-/// A hang detector, **not** a performance assertion. It exists so a genuine
-/// deadlock fails with a message instead of blocking the suite until the CI
-/// job's own timeout, and nothing about it should discriminate a fast machine
-/// from a slow one.
-///
-/// The number is chosen against measurement rather than taste. Reaching the
-/// first fetch means building an offscreen GPU target and starting
-/// `bobcat-main`: ~5.4s warm on an M-series laptop, ~14.4s cold, and longer
-/// again when the whole workspace suite is competing for the machine. The
-/// budget these tests used to carry was 10s, which sits *between* the warm and
-/// cold figures — so it failed on a cold cache or a busy machine and passed
-/// otherwise, which is the definition of a flaky test rather than a slow one.
-/// Eight times the observed cold path leaves no plausible load that crosses
-/// it while still failing a real deadlock in under two minutes.
-///
-/// It is spent in two different shapes, and they see different things.
-/// [`hang_budget`] wraps an async test in `tokio::time::timeout`, which cannot
-/// expire inside a synchronously blocking poll. The one blocking use —
-/// `recv_timeout` around `dropping_the_group_joins_both_of_its_threads`, whose
-/// whole body is a pair of blocking joins — does measure synchronous work, and
-/// the budget is what fails that test rather than letting it hang. Anything
-/// that waits *inside* that test's own thread takes a smaller budget, so a
-/// step that never finishes is reported as that step rather than as a
-/// teardown that would not return.
 const HANG_BUDGET: Duration = Duration::from_mins(2);
 
-/// Fails `future` with a clear message if it has not finished within
-/// [`HANG_BUDGET`].
-///
-/// Every wall-clock deadline the async tests in this file carry lives here,
-/// once, around a whole test. Per-step deadlines are the thing to avoid: they
-/// turn "this step was slower than I guessed" into a failure, and there is no
-/// step here whose duration is a property worth asserting.
-///
-/// What it can and cannot see is worth stating, because it is what makes this
-/// safe. `timeout` polls the inner future before it consults the clock, so
-/// time spent inside one *synchronously blocking* poll — building the
-/// offscreen GPU target, which is most of a startup test's wall clock — is
-/// invisible to it and cannot expire it. An async stall is not: a future
-/// parked on a signal that never arrives yields, the runtime reaches the
-/// timer, and this fires. That asymmetry is the whole point. It detects the
-/// deadlock it is for and structurally cannot fail a machine that was only
-/// slow. Verified by shrinking the budget to 1ms: the tests that go through
-/// this wrapper still passed, and only an added async stall tripped it. That
-/// experiment says nothing about the blocking `recv_timeout` below, which has
-/// no such blind spot.
 async fn hang_budget<F: Future<Output = ()>>(future: F) {
     tokio::time::timeout(HANG_BUDGET, future)
         .await
@@ -295,23 +246,16 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     )
     .await
     .expect("creation returns a loading view even when the fetch never answers");
-    // The entry request went out inside `create_lynx_view`, so it is already
-    // held by the time the view exists.
     started
         .try_recv()
         .expect("creation handed the entry to the fetcher");
     assert!(view.pump().is_empty());
-    // Public operations are legal during loading, including offscreen's
-    // main-thread acknowledgement, which must not wait for the entry fetch.
     painter
         .resize(400.0, 800.0, 1.0)
         .expect("resize while loading");
     tick(&mut painter, false).expect("tick while loading");
     drop(view);
 
-    // Cancellation is visible before the view releases its concrete fetcher —
-    // and dropping the view alone releases it, because the painter still
-    // attached to it holds nothing but a weak handle.
     assert_eq!(
         dropped
             .recv()
@@ -329,17 +273,6 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     drop(painter);
 }
 
-/// Metrics that arrive while the entry fetch is outstanding reach the
-/// document through the seat's watch rather than through a command, and the
-/// document the boot module creates is the resized one: `createDocument`
-/// reads that watch, so a painter that bound before the realm's first
-/// statement has already named the metrics.
-///
-/// Asserted through the pixels, because the document is what an integration
-/// test cannot name: the UA sheet gives `page` `width: 100%; height: 100%`, so
-/// a document created at the resized viewport and device-pixel ratio paints
-/// the painter's whole target, while one still carrying the metrics the view
-/// was built at would cover a 32x24 corner of it.
 #[tokio::test]
 async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
     hang_budget(async {
@@ -361,21 +294,13 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
         )
         .await
         .expect("creation returns a loading view");
-        // Held from creation: the entry was requested there, not in a turn.
         started
             .try_recv()
             .expect("creation handed the entry to the fetcher");
 
-        // The painter owns device metrics, and this one is resized while the
-        // view it is attached to is still loading.
         painter
             .resize(400.0, 800.0, 2.0)
             .expect("resize while loading");
-        // A frame post behind it, waited out: its marker rides the command
-        // FIFO and the loading task acknowledges it itself, so the
-        // acknowledgement is proof that the resize ahead of it has already
-        // been staged — which is
-        // what lets the entry arrive afterwards rather than racing it.
         tick(&mut painter, false).expect("tick while loading");
         let completion = fetcher
             .pending
@@ -383,7 +308,6 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
             .expect("pending completion")
             .take()
             .expect("the entry fetch is outstanding");
-        // A card's MTS body, as `bobcat-source` registers a card's root.
         completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
             source: format!(
                 "{}globalThis.renderPage = function () {{
@@ -410,10 +334,6 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
     .await;
 }
 
-/// A default family nothing provides is a construction failure, not a
-/// lifecycle event: the check runs inside `create_lynx_view`, ahead of the
-/// startup requests that same call issues, so there is no view and nothing
-/// was asked of the host.
 #[tokio::test]
 async fn an_unknown_font_family_fails_construction_without_fetching() {
     hang_budget(async {
@@ -447,11 +367,6 @@ async fn an_unknown_font_family_fails_construction_without_fetching() {
     .await;
 }
 
-/// A view's URLs are resolved inside `create_lynx_view`, ahead of the
-/// startup requests, so a base that is not a URL and an entry or BTS entry
-/// that does not resolve against it are construction failures of the same
-/// kind as an unknown font family: no view, and nothing asked of the host.
-/// Each error names the string that failed.
 #[tokio::test]
 async fn an_unresolvable_url_fails_construction_without_fetching() {
     hang_budget(async {
@@ -501,19 +416,6 @@ async fn an_unresolvable_url_fails_construction_without_fetching() {
     .await;
 }
 
-/// A resolution failure is one event, however many of the answers the same
-/// call asked for failed.
-///
-/// All three startup sources — two sheets and the entry — are requested
-/// inside `create_lynx_view`, so the host has resolved all three before the
-/// view's own boot has read any of them, and every one of them fails here.
-/// What stops at the first failure is the *reading*. The entry is read first:
-/// the view's entry task reads its answer before boot can go on to render,
-/// and the listed sheets are read only by boot's first `__FlushElementTree`,
-/// which a boot whose entry failed never reaches. So one `StartupFailed` is
-/// reported — the fetcher's own `Resource` error, which is what the entry
-/// task was answered with, naming the entry as its locator and the reason in
-/// its message — and the sheets' answers are dropped unread.
 #[tokio::test]
 async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
@@ -536,9 +438,6 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         3,
         "creation hands over both sheets and the entry, before any turn"
     );
-    // Every event, the turn that reported the failure read to its end: a
-    // second report could share that turn, which `wait_for_script` stops in
-    // the middle of.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
     while !events.iter().any(EngineEvent::is_fatal) {
@@ -574,13 +473,6 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
     assert!(view.pump().is_empty(), "failure is delivered once");
 }
 
-/// A view whose entry is still in flight holds up nothing.
-///
-/// The boot module imports the entry by its URL, and nothing parks for it:
-/// the import stays pending until a task of that view's owner completes the
-/// module from the answer. So the pending view's job has already
-/// returned, and a sibling view in the same group opens its realm, boots and
-/// paints while the first view's fetch is outstanding.
 #[tokio::test]
 async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
     hang_budget(async {
@@ -596,8 +488,6 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             dropped: Mutex::new(Some(dropped_sender)),
             pending: Mutex::new(None),
         });
-        // No painter: this view's entry never arrives, so it never reaches
-        // the first flush that would wait for one.
         let mut pending = group
             .create_lynx_view(
                 32.0,
@@ -608,8 +498,6 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 ViewSources::new("app:///", "app:///pending.js", SCREEN, "en-US"),
             )
             .expect("pending view");
-        // Issued inside the construction above, so the fetcher is already
-        // holding it and no turn of this view's is needed to get there.
         started
             .try_recv()
             .expect("creation handed the entry to the fetcher");
@@ -648,8 +536,6 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
     .await;
 }
 
-/// A host that answers worker scripts with something other than the entry,
-/// which the shared double — one payload for every source — cannot do.
 struct TwoScriptFetcher {
     base: FetcherDouble,
     worker: &'static str,
@@ -677,9 +563,6 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
 
 impl ResourceFetcher for TwoScriptFetcher {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
-        // The entry is a `Module` request too, so the worker script is told
-        // apart by the URL Rust joined `./worker.js` to: the entry's response
-        // URL is `app:///main.js`.
         if matches!(&request, SourceRequest::Module(url) if url == "app:///worker.js") {
             completion.complete(Ok(bobcat_core::resource::LoadedSource::Module {
                 source: self.worker.to_owned(),
@@ -691,22 +574,10 @@ impl ResourceFetcher for TwoScriptFetcher {
     }
 }
 
-/// The entry the view in the test below boots: one worker whose interval
-/// throws, so that the worker's liveness is observable from the embedder.
 const WORKER_ENTRY: &str = "import { Worker } from 'bobcat-internal';
      globalThis.worker = new Worker('./worker.js');
      globalThis.renderPage = function () { __CreatePage('card', 0); };";
 
-/// Pumps until a worker of this view reports a throw carrying `message`,
-/// which for the test below is its interval callback throwing: proof that the
-/// worker booted and that its timer is armed and firing, rather than that some
-/// other worker of the view's went wrong. A throw rather than an end, because
-/// the worker that threw is still running.
-///
-/// A fraction of [`HANG_BUDGET`], because this runs inside the thread the
-/// budget is watching: a worker that never boots has to fail here, naming the
-/// worker, rather than run the outer wait out and be reported as a teardown
-/// that would not return.
 fn wait_for_worker_error<F: ResourceFetcher + 'static>(
     view: &mut bobcat_core::LynxView<F>,
     message: &str,
@@ -734,8 +605,6 @@ fn wait_for_worker_error<F: ResourceFetcher + 'static>(
     }
 }
 
-/// What a panic on the teardown thread said, so the failure the test reports
-/// is the one that happened rather than the wait that noticed it.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload.downcast_ref::<String>().map_or_else(
         || {
@@ -747,22 +616,6 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     )
 }
 
-/// A group is two threads, and dropping the group handle joins both of them
-/// within the deadline while a worker with an armed interval exists.
-///
-/// That is all this checks. The worker arms an interval that throws, which is
-/// what makes its liveness observable from the embedder: every tick is a
-/// nonfatal `WorkerThrew`, so reaching the drops means a worker is running
-/// and would go on running. Why its task then ends — the `Terminate` its realm
-/// sends, or the channel closing behind that message — is not something the
-/// two joins returning can tell apart.
-///
-/// A plain `#[test]` on a thread of its own because both joins are blocking:
-/// a deadline around a future cannot fire inside one, so the wait that fails
-/// this test has to be on a different thread from the joins it is watching.
-/// That is also why the body catches its own panic and sends the message
-/// across: an assertion inside the thread would otherwise reach the test only
-/// as a channel that never delivered, which reads as a teardown hang.
 #[test]
 fn dropping_the_group_joins_both_of_its_threads() {
     let (finished, teardown) = flume::bounded(1);
@@ -798,9 +651,6 @@ fn dropping_the_group_joins_both_of_its_threads() {
                             ViewSources::new("app:///", "app:///main.js", SCREEN, "en-US"),
                         )
                         .expect("the view is created");
-                    // Boot's first flush waits for a painter to bind the
-                    // view, so this teardown needs one before it can wait for
-                    // the entry.
                     let mut painter =
                         bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
                             .await

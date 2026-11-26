@@ -91,18 +91,14 @@ use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, SeamPass, Space, SpaceSamples};
 use crate::visual::{AnimationSamples, AnimationSlot};
 
-/// A shape captured at encode time, replayable without the document.
 #[derive(Debug)]
 pub(crate) enum CapturedShape {
     Rect(Rect),
     Box(BoxShape),
-    /// A path, shared with the SVG recording it came from: the shape of an
-    /// `svg` element's recorded layer or clip (`paint::svg`).
     Path(Arc<BezPath>),
 }
 
 impl CapturedShape {
-    /// The shape's bounding box in its own space.
     fn bounding_box(&self) -> Rect {
         match self {
             Self::Rect(rect) => rect.abs(),
@@ -112,27 +108,13 @@ impl CapturedShape {
     }
 }
 
-/// The shape a raster fill resolves to, decided from geometry alone.
-///
-/// The clip-layer pair of the rounded-partial case lives *inside* this
-/// variant rather than as surrounding program ops. That is not tidiness:
-/// `DisplayList::pop_layer` is a silent no-op with no layer open, so a
-/// fragment cut landing between a `push_clip_layer` and its `pop_layer` would
-/// produce a wrong picture with no error anywhere. Keeping the pair inside one
-/// op makes that cut unrepresentable.
 #[derive(Debug)]
 pub(crate) enum ImageArea {
-    /// The draw covers the clip, or a rectangular clip reduced to the
-    /// intersection: one fill, no layer.
     Fill(CapturedShape),
-    /// A rounded clip the draw only partly covers: clip layer, fill, pop.
     Clipped { clip: BoxShape, draw: Rect },
 }
 
 impl ImageArea {
-    /// Whether the fill, in a space `transform` maps to the target's, can
-    /// put ink in `within`: its shape's box, or the drawn rectangle of a
-    /// clipped one, is all it fills.
     fn reaches(&self, transform: Affine, within: Rect) -> bool {
         let bounds = match self {
             Self::Fill(shape) => shape.bounding_box(),
@@ -142,8 +124,6 @@ impl ImageArea {
     }
 }
 
-/// Runs `$body` with `$s` bound to the kurbo shape a [`CapturedShape`]
-/// holds.
 macro_rules! with_captured {
     ($shape:expr, |$s:ident| $body:expr) => {
         match $shape {
@@ -157,43 +137,17 @@ macro_rules! with_captured {
     };
 }
 
-/// One raster image fill whose only late input is the pixels.
-///
-/// Every CSS decision is already resolved here, on the document's thread,
-/// from the intrinsic dimensions the registry holds: `object-fit`, the tile
-/// grid, repeat, position, and which shape to fill. What is deliberately not
-/// resolved is the brush scale, because that is the one quantity that depends
-/// on the decoded bitmap.
-///
-/// `anchor` and `extent` are carried separately rather than pre-multiplied
-/// into a brush transform so the division by the bitmap's own dimensions
-/// happens at encode time. That lets a store decode at reduced scale and still
-/// compose correctly, and stops a superseded generation whose dimensions
-/// differ from silently drawing at the wrong size.
 #[derive(Debug)]
 pub(crate) struct ImageDraw {
-    /// The picture drawn: the raw source string the page wrote — the
-    /// registry's own key, so every draw of one source in one frame shares
-    /// one allocation — or a picture one element owns.
     pub(crate) image: PictureKey,
-    /// Item-local space to device px.
     pub(crate) transform: Affine,
-    /// Where one copy of the source image starts, item-local.
     pub(crate) anchor: Point,
-    /// How large one copy is, item-local.
     pub(crate) extent: Size,
-    /// Extend modes, `image-rendering` quality, alpha. Carries no pixels.
     pub(crate) sampler: ImageSampler,
     pub(crate) area: ImageArea,
 }
 
 impl ImageDraw {
-    /// How large this draw puts one copy of the image on the device: the
-    /// extent under the per-axis scale of its transform, rounded up.
-    ///
-    /// Rotation and skew fold into the axis lengths, which over-estimates a
-    /// rotated draw a little — the right direction for a hint that bounds a
-    /// decode. A non-finite length bounds nothing.
     pub(crate) fn size_hint(&self) -> ImageSizeHint {
         let [a, b, c, d, _, _] = self.transform.as_coeffs();
         ImageSizeHint::new(
@@ -203,8 +157,6 @@ impl ImageDraw {
     }
 }
 
-/// A device-pixel length as a hint axis: rounded up so a fractional draw is
-/// never decoded a pixel short, saturating past `u32`.
 fn device_length(length: f64) -> u32 {
     if !length.is_finite() {
         return u32::MAX;
@@ -218,34 +170,14 @@ fn device_length(length: f64) -> u32 {
     length
 }
 
-/// One vector image (an SVG document) drawn into a destination rectangle,
-/// with every CSS decision resolved on the document's thread and the pixels
-/// left to the painter's raster cache
-/// ([`crate::render::vector_textures::VectorTextures`]).
-///
-/// The frame carries the picture as its scene, never as pixels: the painter
-/// bakes the scene into a texture at the draw's device size and draws that
-/// texture exactly as it draws an [`ImageDraw`]'s bitmap, with the brush
-/// scale `extent / texture size`. `anchor`, `extent`, `sampler` and `area`
-/// mean what they mean on [`ImageDraw`]; the rest is what the bake needs:
-/// the scene, the identity its texture is cached under, the viewport the
-/// scene is encoded in, and how that viewport maps onto a box of another
-/// ratio.
 pub(crate) struct VectorDraw {
     pub(crate) scene: Arc<DisplayList>,
-    /// The image's process-unique identity (`VectorImage::key`), half of
-    /// the raster cache's key; the device size is the other half.
     pub(crate) key: u64,
-    /// The rectangle of scene units the draw maps onto `extent`.
     pub(crate) viewport: (f32, f32),
     pub(crate) aspect: AspectRatio,
-    /// Item-local space to device px.
     pub(crate) transform: Affine,
-    /// Where the destination rectangle starts, item-local.
     pub(crate) anchor: Point,
-    /// How large it is, item-local.
     pub(crate) extent: Size,
-    /// Extend modes, `image-rendering` quality, alpha.
     pub(crate) sampler: ImageSampler,
     pub(crate) area: ImageArea,
 }
@@ -265,8 +197,6 @@ impl std::fmt::Debug for VectorDraw {
 }
 
 impl VectorDraw {
-    /// The destination's size in device px: `extent` under the per-axis
-    /// scale of `transform`, neither rounded nor clamped.
     pub(crate) fn device_extent(&self) -> Size {
         let [a, b, c, d, _, _] = self.transform.as_coeffs();
         Size::new(
@@ -275,12 +205,6 @@ impl VectorDraw {
         )
     }
 
-    /// The device size the texture is baked at: [`Self::device_extent`]
-    /// rounded up — [`ImageDraw::size_hint`]'s rule — and clamped to
-    /// [`MAX_RENDERABLE_DIMENSION`] per axis, the longest texture side the
-    /// device is created with. A clamped texture is drawn stretched over the
-    /// extent, since the brush scale divides by its own size. Zero on an
-    /// axis with no device length, which bakes nothing.
     pub(crate) fn device_size(&self) -> (u32, u32) {
         let extent = self.device_extent();
         (
@@ -289,17 +213,6 @@ impl VectorDraw {
         )
     }
 
-    /// The map from scene units onto a `raster` box standing for a
-    /// destination of `size`: the viewport placed in `size` by `aspect`,
-    /// then scaled per axis onto `raster`.
-    ///
-    /// The bake passes the device extent and the texture size, which differ
-    /// where the size was rounded up or clamped. Drawing the texture over
-    /// the extent scales it back per axis, so the picture keeps the place
-    /// `aspect` gives it in the real destination; fitting it to a clamped
-    /// texture's own ratio instead would letterbox it there and then
-    /// stretch the letterbox. The inline encoding passes the item-local
-    /// extent as both.
     pub(crate) fn placement(&self, size: Size, raster: Size) -> Affine {
         let ratio = |raster: f64, size: f64| if size > 0.0 { raster / size } else { 1.0 };
         Affine::scale_non_uniform(
@@ -309,11 +222,6 @@ impl VectorDraw {
     }
 }
 
-/// The map from `viewport` scene units onto a box of `size` under
-/// `preserveAspectRatio` (SVG 2 §8.6): `align: None` is `none`, a stretch
-/// per axis; otherwise one uniform scale — the smaller ratio to `meet` the
-/// box, the larger to `slice` it — with the viewport aligned per axis at the
-/// box's start, middle or end.
 pub(crate) fn aspect_transform(viewport: (f32, f32), aspect: AspectRatio, size: Size) -> Affine {
     let (width, height) = (f64::from(viewport.0), f64::from(viewport.1));
     let (sx, sy) = (size.width / width, size.height / height);
@@ -336,12 +244,6 @@ pub(crate) fn aspect_transform(viewport: (f32, f32), aspect: AspectRatio, size: 
     ])
 }
 
-/// Encodes vector draw `index` through its baked texture, if the painter
-/// has one for it.
-///
-/// A draw with no texture — no GPU behind the composition, or a texture
-/// larger than the raster cache's whole budget — encodes nothing: nothing
-/// stands in for the picture, and nothing stands in its place either.
 fn encode_vector(
     scene: &mut DisplayList,
     draws: &[VectorDraw],
@@ -364,8 +266,6 @@ fn encode_vector(
     }
 }
 
-/// What a textured draw fills with: a bitmap's pixels, or a texture the
-/// rasterizer holds.
 #[derive(Clone, Copy)]
 enum Picture<'a> {
     Bitmap(&'a ImageRef),
@@ -373,7 +273,6 @@ enum Picture<'a> {
 }
 
 impl Picture<'_> {
-    /// The picture's size, which a draw's brush scale divides by.
     fn size(self) -> (u32, u32) {
         match self {
             Self::Bitmap(image) => (image.descriptor.width, image.descriptor.height),
@@ -381,7 +280,6 @@ impl Picture<'_> {
         }
     }
 
-    /// The paint drawing the picture through `sampler`.
     fn paint(self, sampler: ImageSampler) -> Paint {
         match self {
             Self::Bitmap(image) => Paint::Image(Arc::new(ImagePaint {
@@ -393,15 +291,6 @@ impl Picture<'_> {
     }
 }
 
-/// Encodes one vector draw by appending its scene, scaled onto the
-/// destination rectangle — the pre-cache shape, kept for the monolithic walk
-/// the equivalence tests run, which has no renderer to bake with.
-///
-/// The clip layers around the append are the ones the texture fill of the
-/// same [`ImageArea`] would open, closed in this one call so a fragment cut
-/// can never land between them. The append is never of an empty scene — the
-/// producers refuse one — so the `FORCE_NEXT_*` flags a preceding glyph run
-/// set are never cleared.
 pub(crate) fn encode_vector_inline(scene: &mut DisplayList, draw: &VectorDraw, outer: Affine) {
     let transform = outer * draw.transform;
     let layers = match &draw.area {
@@ -428,11 +317,6 @@ pub(crate) fn encode_vector_inline(scene: &mut DisplayList, draw: &VectorDraw, o
     }
 }
 
-/// Encodes draw `index`, if its pixels resolved.
-///
-/// A draw whose source had no pixels is simply absent from the table's
-/// answer, and draws nothing — the same one-frame gap a not-yet-loaded image
-/// already produces.
 fn encode_draw(
     scene: &mut DisplayList,
     draws: &[ImageDraw],
@@ -446,21 +330,12 @@ fn encode_draw(
     }
 }
 
-/// Encodes one image draw against pixels already resolved for it.
-///
-/// A read that misses draws nothing, which is the same one-frame gap a
-/// not-yet-loaded image already produces. `outer` is the device-px map of
-/// the space the draw composes in.
 pub(crate) fn encode_image(
     scene: &mut DisplayList,
     draw: &ImageDraw,
     outer: Affine,
     image: &ImageRef,
 ) {
-    // A bitmap the rasterizer cannot place draws as nothing — the same
-    // one-frame gap a not-yet-loaded image already produces. This is the
-    // only place the bound is enforced, because it is the only place the
-    // bitmap is known, and the only place the extent is divided by it.
     if !renders_at(image.descriptor.width, image.descriptor.height) {
         return;
     }
@@ -475,9 +350,6 @@ pub(crate) fn encode_image(
     );
 }
 
-/// Encodes one fill of `area` with `picture`, under `transform`, placed so
-/// one copy of it covers the `extent` at `anchor`. The shared encoder of an
-/// image draw and a vector draw's texture.
 fn encode_textured(
     scene: &mut DisplayList,
     transform: Affine,
@@ -512,20 +384,13 @@ fn encode_textured(
     }
 }
 
-/// What one pass over a filter entry's range found
-/// (`ComposeAssembly::scan_range`).
 struct RangeScan {
-    /// Some op rides another scroll, sticky or anchored node.
     scrolls: bool,
-    /// A curve moves or fades some op relative to the entry.
     animations: bool,
-    /// The image draws the range holds, as one covering range.
     pictures: Range<u32>,
-    /// Layers left open at the range's end.
     open_pushes: u32,
 }
 
-/// Grows `covering` to cover `more` as well; an empty range covers nothing.
 fn cover(covering: &mut Range<u32>, more: Range<u32>) {
     if more.start >= more.end {
         return;
@@ -537,15 +402,11 @@ fn cover(covering: &mut Range<u32>, more: Range<u32>) {
     };
 }
 
-/// One walker-level layer-stack operation, with the space its shape rides.
 pub(crate) enum ComposeOp {
-    /// Append `fragments[index]` mapped by `space`.
     Fragment {
         index: u32,
         space: Option<u32>,
     },
-    /// `DisplayList::push_layer` (or `push_clip_layer` when `clip_only`) with the
-    /// recorded parameters, the transform mapped by `space`.
     Push {
         clip_only: bool,
         fill: Fill,
@@ -554,48 +415,27 @@ pub(crate) enum ComposeOp {
         transform: Affine,
         shape: CapturedShape,
         space: Option<u32>,
-        /// The animation slot whose sampled opacity replaces `alpha` — set
-        /// only on the effect layer of an element exporting an opacity
-        /// curve.
         alpha_animation: Option<u32>,
     },
     Pop,
-    /// Draw `image_draws[index]`, whose pixels the composer supplies. A
-    /// raster image only; a vector image is a [`Self::Vector`].
     Image {
         index: u32,
         space: Option<u32>,
     },
-    /// Draw `vector_draws[index]` through the texture the composer's raster
-    /// cache baked for it, exactly as [`Self::Image`] draws a bitmap.
-    /// Without a texture it encodes nothing.
     Vector {
         index: u32,
         space: Option<u32>,
     },
-    /// Open `filter_groups[index]`: draw its baked texture and skip to
-    /// `ops.end` if the composer supplied one, otherwise replay the range.
     PushFilter {
         index: u32,
     },
-    /// Close the innermost open filter group. A no-op on replay — the bracket
-    /// exists so the group's op range is a fact about the program rather than
-    /// something a consumer has to rediscover.
     PopFilter,
-    /// Draw `filter_groups[index]`'s baked backdrop, shaped by the element's
-    /// rounded border box, and then that entry's post-blur passes over it.
-    ///
-    /// Unlike [`Self::PushFilter`] this opens nothing and skips nothing: the
-    /// entry's range lies *before* this op. Without a texture it encodes
-    /// nothing, which leaves the unfiltered backdrop showing through.
     PushBackdrop {
         index: u32,
     },
 }
 
 impl ComposeOp {
-    /// The space this op's own geometry rides, where it has one. `Pop` and
-    /// `PopFilter` carry none: they close whatever the matching push opened.
     #[expect(
         clippy::option_option,
         reason = "the outer level is whether the op rides a space at all; \
@@ -615,9 +455,6 @@ impl ComposeOp {
     }
 }
 
-/// Whether the paths of `a` and `b` differ in the innermost node `pick`
-/// selects — equivalently, whether the nodes on one path and not the other,
-/// on either side, include one of that kind.
 fn differs(
     spaces: &[Space],
     a: Option<u32>,
@@ -627,28 +464,13 @@ fn differs(
     pick(spaces, a) != pick(spaces, b)
 }
 
-/// The Backdrop Root (filter-effects-2 §2.2) a `backdrop-filter` entry reads:
-/// where its range begins, and what the pixels in that range were painted
-/// over.
-///
-/// The two are one fact. A group's own pixels start as transparent black and
-/// its content starts past the layers it pushed; the document's root element
-/// starts at the program's first op, and under everything it painted lies the
-/// canvas, which is the composite render's base colour rather than an op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackdropRoot {
-    /// The document's root element. The range begins at program index zero,
-    /// and the bake renders over the canvas colour.
     Document,
-    /// A group scope that is a Backdrop Root — `opacity`, `filter`, `mask`,
-    /// `clip-path`, `backdrop-filter` or `mix-blend-mode`. The range begins
-    /// at the scope's content start, and the bake renders over transparent
-    /// black.
     Group { content_start: u32 },
 }
 
 impl BackdropRoot {
-    /// The program index the root's own content begins at.
     pub(crate) fn content_start(self) -> u32 {
         match self {
             Self::Document => 0,
@@ -657,103 +479,30 @@ impl BackdropRoot {
     }
 }
 
-/// What a [`FilterGroup`] needs beyond σ and a rect to be a
-/// `backdrop-filter` entry rather than a `filter: blur()` group.
-///
-/// Its presence is what makes an entry a backdrop: the bake pops the layers
-/// its backward range left open, draws the `before` passes over the whole
-/// bake rect, and mirrors at the rect's edges rather than reading the
-/// transparent black a `filter` group's 3σ margin holds.
 #[derive(Debug)]
 pub(crate) struct Backdrop {
-    /// The element's border box with its radii, in the element's own CSS px.
-    /// Both the shape the texture is drawn through and the bound of the
-    /// `after` passes.
     pub(crate) shape: BoxShape,
-    /// Element-local CSS px to device px within the entry's space — the
-    /// walker's `scale * local`.
     pub(crate) transform: Affine,
-    /// The passes preceding the list's first `blur()`, drawn inside the bake.
     pub(crate) before: Vec<crate::paint::filters::Pass>,
-    /// The passes following it, drawn over the composed backdrop.
     pub(crate) after: Vec<crate::paint::filters::Pass>,
-    /// The Backdrop Root the entry's range begins at.
     pub(crate) root: BackdropRoot,
-    /// Layers the range leaves open at its end: the group scopes between the
-    /// Backdrop Root and this element. The bake pops exactly this many, so
-    /// the `before` passes do not land inside one.
     pub(crate) open_pushes: u32,
 }
 
-/// One baked entry: the ops whose composed pixels are baked offscreen,
-/// filtered, and drawn back as one image.
-///
-/// Two properties produce one: `filter: blur()`, whose range is the ops the
-/// entry *brackets*, and `backdrop-filter`, whose range is the ops already
-/// painted *before* it inside its Backdrop Root — `Self::backdrop` is
-/// which.
-///
-/// Everything here is decided at commit time on the document's thread, in
-/// device pixels, and carries no GPU resource: a frame stays `Send + Sync`
-/// and device-free. `rect` is integer-valued, so the bake's own render
-/// target size is `rect`'s and the texture composes at an integer offset —
-/// which is why nearest sampling reproduces it exactly in an unanimated
-/// space. For a `filter: blur()` group it already includes the 3σ ink
-/// margin; for a backdrop it is exactly the element's transformed border
-/// box, because `backdrop-filter` enlarges no ink overflow.
 #[derive(Debug)]
 pub struct FilterGroup {
-    /// The blur's standard deviation, in device px. Zero is a real value for
-    /// a backdrop — a colour-only list still bakes — and never occurs on a
-    /// `filter: blur()` group.
     pub sigma: f32,
-    /// The device-px region baked, integer-valued.
     pub rect: Rect,
-    /// The space the *texture* composes in. Ops inside the range may ride
-    /// other nodes; see [`Self::inner_chains`].
     pub(crate) space: Option<u32>,
-    /// For a `filter: blur()` group, the ops strictly between its
-    /// `PushFilter` and its `PopFilter`. For a backdrop, the ops from its
-    /// Backdrop Root's content start up to the element's own scope open.
     pub(crate) ops: Range<u32>,
-    /// Whether some op in `ops` and `space` differ in their innermost
-    /// scroll, sticky or anchored node — a node on one path and not the
-    /// other — or an
-    /// op draws a backdrop whose own flag is set: the one condition under
-    /// which the bake's pixels depend on a scroll offset, and therefore the
-    /// one condition under which a scroll invalidates the bake. A blurred
-    /// scroller's content is on a scroll node the group is not; a backdrop
-    /// inside a scroller is on a scroll node the page painted behind it is
-    /// not. A blurred box inside a scroller is neither: its range holds only
-    /// its own content, and the scroller's clip is one of the output clips
-    /// the walker pushes outside the scope.
     pub(crate) inner_chains: bool,
-    /// Whether `space::sampled_against` holds for some op in `ops` against
-    /// `space`, or an op draws a backdrop whose own flag is set — the one
-    /// condition under which the bake's pixels depend on the timeline
-    /// reading. For a backdrop that is another element's curve in its
-    /// prefix, or its own element's transform curve; for a `filter: blur()`
-    /// group, a curve on its own content. Its element's own transform curve
-    /// moves the texture, not what is in it: the ancestors' clips it moves
-    /// across are output clips, outside the range.
     pub(crate) inner_animations: bool,
-    /// The image draws whose pixels the bake holds: every
-    /// [`ComposeOp::Image`] in `ops`, and those of the backdrops drawn
-    /// there, as one range of draw indices covering them all (it may cover
-    /// draws between them too, which only makes the bake's picture reading
-    /// change more often than it has to). Empty when the bake draws no
-    /// image. A picture's frame or restore changes the bake through the
-    /// pictures these draws resolve to.
     pub(crate) pictures: Range<u32>,
-    /// The group this one nests inside, so the assembly needs no open-filter
-    /// stack of its own.
     pub(crate) parent: Option<u32>,
-    /// Set exactly for a `backdrop-filter` entry; see [`Backdrop`].
     pub(crate) backdrop: Option<Backdrop>,
 }
 
 impl FilterGroup {
-    /// A group over `rect` at `sigma`, before the assembly brackets it.
     pub(crate) fn new(sigma: f32, rect: Rect, space: Option<u32>) -> Self {
         Self {
             sigma,
@@ -768,8 +517,6 @@ impl FilterGroup {
         }
     }
 
-    /// A `backdrop-filter` entry over `rect` at `sigma`, before the assembly
-    /// records its backward range.
     pub(crate) fn with_backdrop(
         sigma: f32,
         rect: Rect,
@@ -782,18 +529,11 @@ impl FilterGroup {
         }
     }
 
-    /// Whether this entry filters a backdrop rather than a group's own
-    /// pixels — which is what decides its bake's edge mode.
     #[must_use]
     pub fn is_backdrop(&self) -> bool {
         self.backdrop.is_some()
     }
 
-    /// Whether this entry's Backdrop Root Image holds the canvas: a
-    /// `backdrop-filter` entry whose Backdrop Root is the document's root
-    /// element. Its bake renders over the colour the composite render clears
-    /// its target to, where every other entry's renders over transparent
-    /// black.
     #[must_use]
     pub fn reads_canvas(&self) -> bool {
         self.backdrop
@@ -801,16 +541,11 @@ impl FilterGroup {
             .is_some_and(|backdrop| backdrop.root == BackdropRoot::Document)
     }
 
-    /// Whether this entry's baked pixels depend on the timeline reading: a
-    /// curve moves or fades some op in its range relative to the entry, or
-    /// its range draws a backdrop whose own bake samples the timeline. An
-    /// opacity-only curve on the entry's own element changes no baked pixel.
     #[must_use]
     pub fn samples_animations(&self) -> bool {
         self.inner_animations
     }
 
-    /// The bake target's device-pixel size.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
         #[expect(
@@ -824,7 +559,6 @@ impl FilterGroup {
     }
 }
 
-/// The compose sink the walker fills: fragments plus the program over them.
 #[derive(Default)]
 pub(crate) struct ComposeAssembly {
     pub(crate) fragments: Vec<DisplayList>,
@@ -832,17 +566,13 @@ pub(crate) struct ComposeAssembly {
     pub(crate) image_draws: Vec<ImageDraw>,
     pub(crate) vector_draws: Vec<VectorDraw>,
     pub(crate) filter_groups: Vec<FilterGroup>,
-    /// The space of the currently open fragment, if one is open.
     #[expect(
         clippy::option_option,
         reason = "the outer level is whether a fragment is open; the inner \
                   is its space, the root or a node"
     )]
     current: Option<Option<u32>>,
-    /// The innermost open filter group; its own `parent` is the rest of the
-    /// stack, so nesting costs no allocation.
     open_filter: Option<u32>,
-    /// Emptied scenes to encode the next fragments into.
     pool: Vec<DisplayList>,
 }
 
@@ -857,9 +587,6 @@ impl std::fmt::Debug for ComposeAssembly {
 }
 
 impl ComposeAssembly {
-    /// An assembly over recycled storage: the emptied fragment and program
-    /// containers of a retired frame, and the pool of emptied scenes its
-    /// fragments encode into.
     pub(crate) fn with_storage(
         fragments: Vec<DisplayList>,
         program: Vec<ComposeOp>,
@@ -888,8 +615,6 @@ impl ComposeAssembly {
         }
     }
 
-    /// The scene content in `space` encodes into, cutting a fragment when
-    /// the space changed.
     pub(crate) fn fragment_for(&mut self, space: Option<u32>) -> &mut DisplayList {
         if self.current != Some(space) {
             self.seal_fragment();
@@ -903,28 +628,21 @@ impl ComposeAssembly {
             .expect("an open fragment was just ensured")
     }
 
-    /// Records a layer-stack op, sealing any open fragment first: the op
-    /// must land after the content already encoded.
     pub(crate) fn push_op(&mut self, op: ComposeOp) {
         self.seal_fragment();
         self.program.push(op);
     }
 
-    /// Records one image draw as a program op, sealing any open fragment
-    /// first so the draw lands after the content already encoded.
     pub(crate) fn push_image(&mut self, space: Option<u32>, draw: ImageDraw) {
         let index = u32::try_from(self.image_draws.len()).expect("a frame cannot hold 2^32 images");
         self.image_draws.push(draw);
         self.push_op(ComposeOp::Image { index, space });
     }
 
-    /// How many image and vector draws this assembly holds.
     pub(crate) fn content_draws(&self) -> usize {
         self.image_draws.len() + self.vector_draws.len()
     }
 
-    /// Records one vector draw as a program op, sealing any open fragment
-    /// first so the draw lands after the content already encoded.
     pub(crate) fn push_vector(&mut self, space: Option<u32>, draw: VectorDraw) {
         let index =
             u32::try_from(self.vector_draws.len()).expect("a frame cannot hold 2^32 vector draws");
@@ -932,18 +650,11 @@ impl ComposeAssembly {
         self.push_op(ComposeOp::Vector { index, space });
     }
 
-    /// Closes the open fragment: an empty one goes back to the pool and
-    /// leaves no op, everything else becomes a `Fragment` op in place.
     fn seal_fragment(&mut self) {
         let Some(space) = self.current.take() else {
             return;
         };
         let fragment = self.fragments.last().expect("an open fragment has a list");
-        // A cut between a `push_clip_layer` and its `pop_layer` is silently
-        // wrong rather than loud: `DisplayList::pop_layer` does nothing at
-        // zero open layers, so the pop is dropped and every later draw stays
-        // clipped. Painter-internal layers must therefore close inside the
-        // fragment that opened them.
         debug_assert_eq!(
             fragment.open_layers(),
             0,
@@ -963,13 +674,10 @@ impl ComposeAssembly {
         self.program.push(ComposeOp::Fragment { index, space });
     }
 
-    /// Opens a filter group: seals the open fragment, records the bracket,
-    /// and answers the group's index in the side table.
     pub(crate) fn push_filter(&mut self, mut group: FilterGroup) -> u32 {
         self.seal_fragment();
         let index =
             u32::try_from(self.filter_groups.len()).expect("a frame cannot hold 2^32 filters");
-        // The op right after the `PushFilter` this is about to record.
         let start =
             u32::try_from(self.program.len() + 1).expect("a frame cannot hold 2^32 program ops");
         group.parent = self.open_filter;
@@ -980,27 +688,11 @@ impl ComposeAssembly {
         index
     }
 
-    /// Seals any open fragment and answers the program length: the boundary
-    /// "everything painted so far" ends at.
-    ///
-    /// Records nothing of its own — the seal produces exactly the `Fragment`
-    /// op the next [`Self::push_op`] would have produced, at the same index —
-    /// so a walk that calls this leaves a byte-identical program.
     pub(crate) fn content_boundary(&mut self) -> u32 {
         self.seal_fragment();
         u32::try_from(self.program.len()).expect("a frame cannot hold 2^32 program ops")
     }
 
-    /// Records a `backdrop-filter` entry over the ops already emitted from
-    /// its Backdrop Root's content start up to `end`, answering whether one
-    /// was recorded. `spaces` is the frame's space tree the ops' spaces
-    /// index, and `slots` its animation slots.
-    ///
-    /// An empty range inside a group records nothing and answers `false`:
-    /// there is nothing behind the element to filter, so the op would bake a
-    /// transparent texture and draw it over nothing. An empty range at the
-    /// document's root still records, because the canvas is behind the
-    /// element there and a colour pass changes it.
     pub(crate) fn push_backdrop(
         &mut self,
         mut entry: FilterGroup,
@@ -1038,18 +730,6 @@ impl ComposeAssembly {
         true
     }
 
-    /// One pass over an entry's range: whether it holds an op on another
-    /// scroll or sticky node, whether it holds one a curve moves or fades
-    /// relative to the entry, which image draws it holds, and how many
-    /// layers it leaves open at its end.
-    ///
-    /// A `PushBackdrop` op also carries its entry's conditions and image
-    /// draws: the texture is re-baked on them, so a bake drawing it is stale
-    /// after them too. A backdrop's range lies before its op, so this is the only way
-    /// an entry learns what a backdrop drawn inside it reads — the element's
-    /// own blur group around its backdrop, and a child backdrop whose range
-    /// opens with its root's. A nested `PushFilter` needs no such arm: its
-    /// ops lie inside this range too, and are scanned here directly.
     fn scan_range(
         &self,
         ops: &Range<u32>,
@@ -1067,7 +747,6 @@ impl ComposeAssembly {
                 ComposeOp::Push { .. } => depth += 1,
                 ComposeOp::Pop => depth -= 1,
                 ComposeOp::Image { index, .. } => cover(&mut pictures, *index..*index + 1),
-                // Already scanned: a backdrop is recorded before its op.
                 ComposeOp::PushBackdrop { index } => {
                     let drawn = &self.filter_groups[*index as usize];
                     scrolls |= drawn.inner_chains;
@@ -1083,9 +762,6 @@ impl ComposeAssembly {
                 animations |= space::sampled_against(spaces, slots, anchored, op, own);
             }
         }
-        // The range starts and ends with an empty clip stack (every group
-        // scope restarts clip chains), and no scope enclosing the range can
-        // close inside it, so nothing in here pops a layer it did not push.
         debug_assert!(depth >= 0, "a range pops a layer it never pushed");
         RangeScan {
             scrolls,
@@ -1095,16 +771,6 @@ impl ComposeAssembly {
         }
     }
 
-    /// Closes the innermost open filter group, completing its op range and
-    /// deciding whether anything inside it rides another scroll or sticky
-    /// node of `spaces`, or moves or fades relative to it by a curve of
-    /// `slots`.
-    ///
-    /// Content a curve moves or fades inside the group rides that curve's
-    /// node, so the bake samples the instant. Nothing else in the range can:
-    /// `filter` contains its positioned descendants, so all of it rides the
-    /// group's own space or one below, and the ancestors' clips a curve on
-    /// the element moves it across are pushed outside the bracket.
     pub(crate) fn pop_filter(
         &mut self,
         spaces: &[Space],
@@ -1131,8 +797,6 @@ impl ComposeAssembly {
         self.program.push(ComposeOp::PopFilter);
     }
 
-    /// Finishes the assembly, returning fragments, program, the two side
-    /// tables, and the unused pool.
     pub(crate) fn finish(mut self) -> Finished {
         self.seal_fragment();
         debug_assert!(
@@ -1150,7 +814,6 @@ impl ComposeAssembly {
     }
 }
 
-/// What one sealed assembly hands back.
 pub(crate) struct Finished {
     pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
@@ -1160,7 +823,6 @@ pub(crate) struct Finished {
     pub(crate) pool: Vec<DisplayList>,
 }
 
-/// A scroll offset snapped to the device pixel grid.
 pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
     if ratio.is_finite() && ratio > 0.0 {
         Vector2D::new(
@@ -1172,19 +834,6 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
     }
 }
 
-/// Replays the program into `scene` with each op mapped by its space at the
-/// instant `samples` holds.
-///
-/// Each space composes at its CSS-px map conjugated into device px, since
-/// encoded content carries the device scale as its outermost factor — the
-/// map applies inside one scale and outside the other.
-///
-/// Besides pushes, appends and pops this also records image draws between
-/// appends; every item carries its own transform, so their order is all
-/// that matters.
-///
-/// What cannot reach `visible`, the device-px rectangle the target shows,
-/// is left out ([`replay_ops`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "one replay's full inputs: the program, its side tables, and the samples"
@@ -1224,15 +873,11 @@ pub(crate) fn replay(
     );
 }
 
-/// Where a replay draws, which decides the map each space composes under.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReplayTarget {
-    /// The composed frame, in device px: [`SpaceSamples::device_cached`].
-    /// `visible` is the part of it the target shows.
-    Frame { visible: Rect },
-    /// A filter entry's bake target: [`SpaceSamples::bake_map`] for the
-    /// entry's space and its rect's origin. The target is `size` device px
-    /// from that origin.
+    Frame {
+        visible: Rect,
+    },
     Bake {
         entry: Option<u32>,
         origin: (f64, f64),
@@ -1241,8 +886,6 @@ pub(crate) enum ReplayTarget {
 }
 
 impl ReplayTarget {
-    /// Runs `body` with this target's space map at the instant `samples`
-    /// holds, without boxing the map.
     fn with_map<R>(
         self,
         samples: &SpaceSamples<'_>,
@@ -1254,8 +897,6 @@ impl ReplayTarget {
         }
     }
 
-    /// The rectangle of this target's own space that its pixels cover:
-    /// what a replay for it may leave out everything outside of.
     fn visible(self) -> Rect {
         match self {
             Self::Frame { visible } => visible,
@@ -1263,10 +904,6 @@ impl ReplayTarget {
         }
     }
 
-    /// The space everything this target draws is relative to. A seam pass
-    /// for a slot this space rides is not drawn: moving the slot moves the
-    /// whole target with it, so the copy would land on the original. The
-    /// composed frame draws that entry's texture twice instead.
     fn within(self) -> Option<u32> {
         match self {
             Self::Frame { .. } => None,
@@ -1275,12 +912,8 @@ impl ReplayTarget {
     }
 }
 
-/// The op sequence a replay over a range visits, each op with the layer
-/// depth before it: a baked filter group is one op, its range skipped, as
-/// [`replay_ops`] skips it.
 struct OpWalk {
     ops: Vec<(usize, u32)>,
-    /// The depth after the last op.
     depth: u32,
 }
 
@@ -1311,28 +944,21 @@ impl OpWalk {
         Self { ops: walk, depth }
     }
 
-    /// The program index replay continues at after walked op `position`.
     fn next(&self, position: usize, end: usize) -> usize {
         self.ops.get(position + 1).map_or(end, |&(index, _)| index)
     }
 
-    /// The layer depth after walked op `position`.
     fn depth_after(&self, position: usize) -> u32 {
         self.ops
             .get(position + 1)
             .map_or(self.depth, |&(_, depth)| depth)
     }
 
-    /// Where the seam copy of `slot` goes, or `None` when nothing in the
-    /// walk rides it.
     fn seam_run(&self, tables: Tables<'_>, slot: u32, shift: Vector2D<f32>) -> Option<SeamRun> {
         let walk = &self.ops;
         let draws = |&(index, _): &(usize, u32)| draws_riding(tables, &tables.program[index], slot);
         let first = walk.iter().position(draws)?;
         let last = walk.iter().rposition(draws)?;
-        // The copy inherits the layers below its run from the original —
-        // but only layers that stay put: a layer riding the slot (a clip of
-        // the container's own content) must be re-encoded shifted with it.
         let mut stack: SmallVec<[usize; 8]> = SmallVec::new();
         for &(index, _) in &walk[..first] {
             match &tables.program[index] {
@@ -1371,40 +997,14 @@ impl OpWalk {
     }
 }
 
-/// One seam copy's place in the program, as positions in the walked op
-/// sequence (see [`replay_seams`]).
 struct SeamRun {
     slot: u32,
     shift: Vector2D<f32>,
-    /// The first walked op the copy replays.
     first: usize,
-    /// The last one; the copy is drawn right after the original replays it.
     last: usize,
-    /// Layers the copy's own replay leaves open, closed after it.
     open: u32,
 }
 
-/// Replays `ops` for `target` with each op mapped by its space at the
-/// instant `samples` holds, and draws the seam copies of every circular
-/// scroll container whose scrollport straddles its seam: `seams`, the
-/// instant's [`SpaceSamples::seam_passes_with`], each copy composing with
-/// its own animation table. Without a straddling slot this is one
-/// [`replay_ops`] over the range, byte for byte.
-///
-/// A copy replays the ops from the start of the innermost layer run that
-/// holds every op riding its slot, and no layer riding it, to the point
-/// where the layer stack is back at that run's depth: the layers enclosing
-/// the run are the original's, still open, so the copy is clipped by the
-/// container's scrollport like its original, while a layer of the
-/// container's own content is pushed again, shifted with the copy. Ops
-/// that do not ride the slot but sit inside the run are not drawn again,
-/// so the only paint-order difference from a frame with the content really
-/// repeated is that such an op ends up below the copy.
-///
-/// A bake ([`ReplayTarget::Bake`]) draws the copies of the slots its entry
-/// does not ride: a blurred scroll container's texture holds its own seam.
-/// Nested circular containers straddling at once each draw their own copy;
-/// the outer copy shows the inner container at its original offset.
 pub(crate) fn replay_seams(
     scene: &mut DisplayList,
     tables: Tables<'_>,
@@ -1473,8 +1073,6 @@ pub(crate) fn replay_seams(
     });
 }
 
-/// Whether `op` draws something that moves with scroll slot `slot`: what a
-/// seam copy of that slot's content has to draw again.
 fn draws_riding(tables: Tables<'_>, op: &ComposeOp, slot: u32) -> bool {
     match op {
         ComposeOp::Fragment { space, .. }
@@ -1497,8 +1095,6 @@ fn draws_riding(tables: Tables<'_>, op: &ComposeOp, slot: u32) -> bool {
     }
 }
 
-/// Everything one replay reads besides the transform and the op range: the
-/// program and every side table it indexes.
 #[derive(Clone, Copy)]
 pub(crate) struct Tables<'a> {
     pub(crate) fragments: &'a [DisplayList],
@@ -1506,49 +1102,13 @@ pub(crate) struct Tables<'a> {
     pub(crate) image_draws: &'a [ImageDraw],
     pub(crate) images: &'a [Option<ImageRef>],
     pub(crate) vector_draws: &'a [VectorDraw],
-    /// One entry per [`Tables::vector_draws`] entry: the texture the raster
-    /// cache baked for that draw, or `None` for a draw that encodes nothing.
     pub(crate) vectors: &'a [Option<Texture>],
     pub(crate) filter_groups: &'a [FilterGroup],
-    /// One entry per [`Tables::filter_groups`] entry: the baked texture for
-    /// that entry, or `None` for the unfiltered fallback.
     pub(crate) filtered: &'a [Option<Texture>],
-    /// The frame's space tree, which the ops' spaces index.
     pub(crate) spaces: &'a [Space],
     pub(crate) samples: &'a AnimationSamples,
 }
 
-/// Replays one contiguous slice of the program.
-///
-/// `device_transform` maps a space to the device-px transform its content
-/// composes under. A whole-frame replay passes the space map itself; a bake
-/// passes the same thing conjugated into the bake target's own origin and
-/// space, which is how one program serves both.
-///
-/// A `PushFilter` whose group has a baked texture draws that texture and
-/// skips the group's ops; one without replays them raw — the documented
-/// unblurred fallback. A `PushBackdrop` with a texture draws it through the
-/// element's border box; one without encodes nothing, and the unfiltered
-/// backdrop underneath is what shows.
-///
-/// With `riding` set to a scroll slot this is a seam copy's replay
-/// ([`replay_seams`]): only what moves with that slot draws — fragments,
-/// image draws, a baked filter group's texture and a backdrop — while every
-/// push and pop is still encoded, each under its own space's map, so the
-/// layer stack stays balanced and the clips of the slot's ancestors still
-/// apply. With `None` every op draws.
-///
-/// What cannot reach `visible`, the rectangle of the target's own space its
-/// pixels cover, cut to the clips and layers open around it, is left out:
-/// a fragment's chunks whose bounds miss it ([`DisplayList::append_visible`]),
-/// an image, vector or baked filter draw whose box misses it, and a push
-/// whose own shape misses it together with everything up to its matching
-/// pop. The rasterizer turns every path it is given into strips wherever it
-/// lands, so this is what keeps content composed off the target — the
-/// encode window's headroom, a moved sticky or animated box — from costing
-/// a frame anything. A push whose matching pop lies past the range is
-/// encoded, and only what it holds is tested, so the layers the range
-/// leaves open are the ones a replay without culling leaves.
 pub(crate) fn replay_ops(
     scene: &mut DisplayList,
     tables: Tables<'_>,
@@ -1572,10 +1132,6 @@ pub(crate) fn replay_ops(
     let draws = |space: Option<u32>| riding.is_none_or(|slot| space::rides(spaces, space, slot));
     let end = ops.end.min(program.len());
     let mut index = ops.start.min(end);
-    // The part of the target the ops at the current depth can reach,
-    // innermost last: `visible` cut to every push open in this replay. A
-    // push this replay did not open (a seam copy's, a bake's enclosing
-    // ones) is not on it, which only means less is left out.
     let mut reach: SmallVec<[Rect; 16]> = SmallVec::new();
     reach.push(visible);
     while index < end {
@@ -1633,15 +1189,11 @@ pub(crate) fn replay_ops(
                 let group_index = *group as usize;
                 let group = &filter_groups[group_index];
                 if let Some(&Some(texture)) = filtered.get(group_index) {
-                    // A seam copy that the group does not ride skips the
-                    // texture too: it holds the group's content, none of
-                    // which the copy draws.
                     if draws(group.space)
                         && reaches_filtered(group, texture, device_transform, within)
                     {
                         draw_filtered(scene, group, texture, spaces, device_transform);
                     }
-                    // Straight to the matching `PopFilter`, which is a no-op.
                     index = group.ops.end as usize;
                     continue;
                 }
@@ -1663,8 +1215,6 @@ pub(crate) fn replay_ops(
     }
 }
 
-/// Encodes push `op` under `transform`, its alpha the sampled opacity of
-/// the animation slot it names, if any.
 fn encode_push(
     scene: &mut DisplayList,
     op: &ComposeOp,
@@ -1694,9 +1244,6 @@ fn encode_push(
     }
 }
 
-/// The index of the `Pop` that closes the `Push` at `push`, if it lies
-/// before `end`. Filter brackets and backdrops open no layer, so only
-/// pushes and pops count.
 fn matching_pop(program: &[ComposeOp], push: usize, end: usize) -> Option<usize> {
     let mut depth = 0_usize;
     for (at, op) in program.iter().enumerate().take(end).skip(push + 1) {
@@ -1710,9 +1257,6 @@ fn matching_pop(program: &[ComposeOp], push: usize, end: usize) -> Option<usize>
     None
 }
 
-/// `within` cut to the box of a push's shape `bounds` under `transform`:
-/// what the ops inside the push can reach. A box that is not finite cuts
-/// nothing.
 fn cut_reach(within: Rect, bounds: Rect, transform: Affine) -> Rect {
     if !bounds.is_finite() || !transform.is_finite() {
         return within;
@@ -1725,8 +1269,6 @@ fn cut_reach(within: Rect, bounds: Rect, transform: Affine) -> Rect {
     }
 }
 
-/// Whether a baked group's texture, drawn where [`draw_filtered`] draws
-/// it, can reach `within`.
 fn reaches_filtered(
     group: &FilterGroup,
     texture: Texture,
@@ -1746,14 +1288,6 @@ fn reaches_filtered(
     )
 }
 
-/// Draws one baked `filter: blur()` group's texture in place of its ops.
-///
-/// The texture is the group's own pixels already blurred, in device px at
-/// `rect`'s origin; only the group's own space is left to apply.
-/// `Extend::Pad` never fires — the draw covers exactly the image — and
-/// nearest sampling reproduces the texture byte for byte at the integer
-/// offsets scroll and sticky nodes snap to. An animation node can land it
-/// anywhere, so that case samples bilinearly.
 fn draw_filtered(
     scene: &mut DisplayList,
     group: &FilterGroup,
@@ -1784,27 +1318,6 @@ fn draw_filtered(
     );
 }
 
-/// Draws one baked backdrop: the texture through the element's own rounded
-/// border box, then the entry's post-blur passes over it.
-///
-/// The texture is the backdrop already filtered, in device px at `rect`'s
-/// origin, so the brush transform undoes the element's own map and puts the
-/// image back where it was baked from: `transform * brush_transform` is
-/// exactly `device_transform(space) * translate(rect.origin)`. That is the
-/// spec's "inverse of the element's transforms, then the element's own
-/// transforms again", performed once rather than twice.
-///
-/// No clip layer is opened for the crop. The shape *is* the fill, which
-/// keeps the op a single draw and keeps a fragment cut from ever landing
-/// between a push and its pop.
-///
-/// The fill is source-over, which is how filter-effects-2 composites the
-/// filtered image into the element's parent. At the document's root the
-/// texture was baked over the canvas, so it is as opaque as the canvas and
-/// covers the unfiltered pixels under it. Inside a group
-/// ([`BackdropRoot::Group`]) it is translucent wherever the group painted
-/// nothing or the blur spread what it painted toward such a place, and the
-/// group's unfiltered pixels show through it there.
 fn draw_backdrop(
     scene: &mut DisplayList,
     entry: &FilterGroup,
@@ -1817,9 +1330,6 @@ fn draw_backdrop(
     let transform = outer * backdrop.transform;
     let brush_transform =
         backdrop.transform.inverse() * Affine::translate((entry.rect.x0, entry.rect.y0));
-    // Nearest reproduces the bake byte for byte wherever the composed
-    // placement is a whole-pixel translation, which is every space a scroll
-    // offset snaps; a sampled animation delta can land it anywhere.
     let quality = if !animated && is_integer_translation(outer) {
         ImageQuality::Low
     } else {
@@ -1834,13 +1344,6 @@ fn draw_backdrop(
             alpha: 1.0,
         },
     );
-    // A backdrop with post-blur passes is clipped to its rounded box first
-    // and the passes run over the whole rectangle inside the clip, so they
-    // see an opaque backdrop at the box's anti-aliased rim. Run over the
-    // rim's partial alpha instead, a non-separable pass (`grayscale`,
-    // `saturate`: `Mix::Saturation`) unpremultiplies a white pixel to a
-    // colour an ulp above 1 with equal channels, and the blend shader's
-    // `clip_color` divides 0 by 0: a dark dot on the rim.
     if !backdrop.after.is_empty() {
         let bounds = backdrop.shape.bounding_box();
         with_shape!(&backdrop.shape, |s| scene.push_clip_layer(
@@ -1869,13 +1372,8 @@ fn draw_backdrop(
     crate::paint::filters::draw_passes_shape(scene, &backdrop.after, &backdrop.shape, transform);
 }
 
-/// Whether `affine` moves an image by a whole number of device pixels and
-/// nothing else — the condition under which nearest sampling is exact.
 fn is_integer_translation(affine: Affine) -> bool {
     let coefficients = affine.as_coeffs();
-    // Exact comparison on purpose: the question is whether nearest sampling
-    // reproduces the bake byte for byte, and anything but the identity linear
-    // part and a whole-pixel offset means it does not.
     coefficients[..4] == [1.0, 0.0, 0.0, 1.0]
         && coefficients[4].fract() == 0.0
         && coefficients[5].fract() == 0.0
@@ -1898,7 +1396,6 @@ mod tests {
         )
     }
 
-    /// A clip push in `space` — the cheapest op that carries one.
     fn push(space: Option<u32>) -> ComposeOp {
         ComposeOp::Push {
             clip_only: true,
@@ -1916,7 +1413,6 @@ mod tests {
         FilterGroup::new(2.0, Rect::new(0.0, 0.0, 8.0, 8.0), space)
     }
 
-    /// Two root spaces: scroll slot 0, and animation slot 0.
     const SPACES: [Space; 2] = [
         Space {
             parent: None,
@@ -1930,8 +1426,6 @@ mod tests {
     const SCROLLED: Option<u32> = Some(0);
     const ANIMATED: Option<u32> = Some(1);
 
-    /// The animation slot table [`SPACES`] indexes: slot 0 carries a
-    /// transform track when `moves`.
     fn slots(moves: bool) -> Vec<AnimationSlot> {
         use crate::visual::curves::{CompositeCurve, TransformTrack};
         use crate::visual::reach::Reach;
@@ -1942,8 +1436,6 @@ mod tests {
         }]
     }
 
-    /// Nested brackets pair up, and each group's range is exactly the ops
-    /// strictly between its own pair.
     #[test]
     fn nested_filter_brackets_pair_and_bound_their_own_ops() {
         let mut assembly = assembly();
@@ -1981,38 +1473,26 @@ mod tests {
         );
     }
 
-    /// Over plain ops, `inner_chains` is exactly "some op in the range and
-    /// the group's space differ in their innermost scroll or sticky node",
-    /// on either side — the one condition that makes a bake depend on a
-    /// scroll offset.
     #[test]
     fn inner_chains_reports_only_a_differing_scroll_chain() {
-        // Content on the group's own chain: the group and its content move
-        // together, so the bake is offset-independent.
         let mut same = assembly();
         same.push_filter(group(SCROLLED));
         same.push_op(push(SCROLLED));
         same.pop_filter(&SPACES, &slots(true), &[]);
         assert!(!same.finish().filter_groups[0].inner_chains);
 
-        // Content on a chain the group is not on: the content slides under
-        // the blur.
         let mut differing = assembly();
         differing.push_filter(group(None));
         differing.push_op(push(SCROLLED));
         differing.pop_filter(&SPACES, &slots(true), &[]);
         assert!(differing.finish().filter_groups[0].inner_chains);
 
-        // The group on a chain an op is not on: the shape a backdrop inside
-        // a scroller has, over the page painted outside it.
         let mut reverse = assembly();
         reverse.push_filter(group(SCROLLED));
         reverse.push_op(push(None));
         reverse.pop_filter(&SPACES, &slots(true), &[]);
         assert!(reverse.finish().filter_groups[0].inner_chains);
 
-        // An animation node is not a scroll node: it makes the bake depend
-        // on the instant, not on an offset.
         let mut animated = assembly();
         animated.push_filter(group(None));
         animated.push_op(push(ANIMATED));
@@ -2020,8 +1500,6 @@ mod tests {
         assert!(!animated.finish().filter_groups[0].inner_chains);
     }
 
-    /// A target no op misses: what replays that test what is drawn, not
-    /// what is culled, compose for.
     const EVERYWHERE: Rect = Rect::new(
         f64::NEG_INFINITY,
         f64::NEG_INFINITY,
@@ -2029,8 +1507,6 @@ mod tests {
         f64::INFINITY,
     );
 
-    /// One fragment drawing a teal square, so a replay has real content to
-    /// append.
     fn fragment() -> DisplayList {
         let mut scene = DisplayList::default();
         scene.fill(
@@ -2075,8 +1551,6 @@ mod tests {
         scene
     }
 
-    /// A 100×100 scrollport over 200 px of content, circular on `y`: max
-    /// 100, period 200. It is [`SPACES`]' scroll slot 0.
     fn circular_slot() -> crate::visual::ScrollSlot {
         use crate::scroll::{CaptureAxes, ScrollAxes};
         crate::visual::ScrollSlot {
@@ -2098,7 +1572,6 @@ mod tests {
         }
     }
 
-    /// Replays `program` over [`circular_slot`] standing at `offset`.
     fn replay_circular(program: &[ComposeOp], offset: Vector2D<f32>) -> DisplayList {
         let fragments = [fragment()];
         let slots = [circular_slot()];
@@ -2130,9 +1603,6 @@ mod tests {
         scene
     }
 
-    /// A circular container whose scrollport straddles the seam draws its
-    /// content twice, the second copy one period back, right after the
-    /// first and inside the same clip; one that does not draws it once.
     #[test]
     fn a_straddling_circular_slot_draws_its_content_again_one_period_back() {
         let program = [
@@ -2163,9 +1633,6 @@ mod tests {
         );
     }
 
-    /// The copy is drawn where the container's content sits in paint order:
-    /// what paints over the container later — a positioned sibling, say —
-    /// still paints over the copy.
     #[test]
     fn a_seam_copy_is_drawn_before_what_paints_over_the_container() {
         let program = [
@@ -2192,13 +1659,8 @@ mod tests {
         );
     }
 
-    /// A layer of the container's content — a card's own clip — is part of
-    /// the copy: pushed again, shifted with it, rather than inherited from
-    /// the original at the original's place. A layer that does not ride the
-    /// container (its scrollport clip) is inherited.
     #[test]
     fn a_seam_copy_pushes_its_own_riding_layers_again() {
-        // Clips the content reaches through, wherever the copies land.
         let area = Rect::new(0.0, -400.0, 100.0, 400.0);
         let push = |space| clip_in(space, area);
         let program = [
@@ -2230,13 +1692,6 @@ mod tests {
         );
     }
 
-    /// The bracket ops encode nothing at all when no texture was baked: the
-    /// raw fallback's encoding is byte-for-byte the encoding of the same
-    /// program without the bracket.
-    ///
-    /// This is the property the fallback rests on. A bracket that encoded
-    /// anything — even a redundant transform tag — would make "no GPU" and
-    /// "over budget" observable in the drawing rather than only in the blur.
     #[test]
     fn a_filter_bracket_encodes_nothing_without_a_baked_texture() {
         let bare = [
@@ -2268,8 +1723,6 @@ mod tests {
         }
     }
 
-    /// With a texture the bracket draws it once, at the group's own device
-    /// rect, and the group's ops are skipped rather than drawn underneath.
     #[test]
     fn a_baked_group_is_drawn_once_and_its_ops_skipped() {
         let program = [
@@ -2303,7 +1756,6 @@ mod tests {
         );
     }
 
-    /// A backdrop entry whose Backdrop Root is the document's.
     fn backdrop_entry(space: Option<u32>) -> FilterGroup {
         backdrop_entry_in(space, BackdropRoot::Document)
     }
@@ -2324,8 +1776,6 @@ mod tests {
         )
     }
 
-    /// A backdrop's range is everything already recorded from its Backdrop
-    /// Root's content start, and the flags are read off exactly that slice.
     #[test]
     fn a_backdrop_records_the_program_behind_it() {
         let mut assembly = assembly();
@@ -2375,11 +1825,6 @@ mod tests {
         );
     }
 
-    /// Over plain ops, a curve that moves or fades an op relative to the
-    /// entry is what makes a bake depend on the timeline reading, and the
-    /// only thing that does. A curve on the op's side does either; one on
-    /// the entry's side only if it moves the entry — a backdrop over the
-    /// prefix behind it — and its element's fade leaves the bake as it is.
     #[test]
     fn inner_animations_reports_only_a_curve_between_op_and_entry() {
         for moves in [true, false] {
@@ -2414,10 +1859,6 @@ mod tests {
         }
     }
 
-    /// Nothing painted behind the element inside a group is nothing to
-    /// filter: the entry is refused outright rather than recorded with an
-    /// empty range, so the frame's filter table stays empty and the bake
-    /// pre-step stays skipped.
     #[test]
     fn an_empty_range_in_a_group_records_no_backdrop_at_all() {
         let mut assembly = assembly();
@@ -2435,9 +1876,6 @@ mod tests {
         assert_eq!(finished.program.len(), 1, "the group's own push and no op");
     }
 
-    /// Nothing painted behind the element at the document's root still
-    /// leaves the canvas behind it, so the entry is recorded with its empty
-    /// range and bakes the canvas colour alone.
     #[test]
     fn an_empty_range_at_the_document_root_still_records_a_backdrop() {
         let mut assembly = assembly();
@@ -2455,8 +1893,6 @@ mod tests {
         ));
     }
 
-    /// Without a texture the op encodes nothing: the unfiltered backdrop the
-    /// element sits on is what shows, byte for byte.
     #[test]
     fn a_backdrop_op_encodes_nothing_without_a_baked_texture() {
         let bare = [ComposeOp::Fragment {
@@ -2481,8 +1917,6 @@ mod tests {
         }
     }
 
-    /// With a texture the op draws it once, through the element's own shape,
-    /// and each post-blur pass adds one blend layer over it.
     #[test]
     fn a_baked_backdrop_draws_one_fill_and_its_after_passes() {
         let program = [
@@ -2519,8 +1953,6 @@ mod tests {
             let entries = [entry];
             replay_program(&program, &entries, &[Some(baked)])
         };
-        // The texture and its passes are drawn inside a clip to the rounded
-        // box (`draw_backdrop`): a clip layer and its pop more.
         assert_eq!(
             with_passes.len(),
             plain.len() + 3 + 2,
@@ -2534,8 +1966,6 @@ mod tests {
         );
     }
 
-    /// A nested group's own chain counts as an op's chain, so an inner
-    /// scroller reaches the outer group through the bracket alone.
     #[test]
     fn a_nested_group_reports_its_own_chain_to_the_group_around_it() {
         let mut assembly = assembly();
@@ -2550,10 +1980,6 @@ mod tests {
         );
     }
 
-    /// An element with both properties: its backdrop's range is the prefix
-    /// before its blur group, and the backdrop op inside the group rides the
-    /// group's own space. The group still takes on what the backdrop reads,
-    /// since it draws that texture.
     #[test]
     fn a_blur_group_takes_on_what_the_backdrop_inside_it_reads() {
         for behind in [SCROLLED, ANIMATED] {
@@ -2582,9 +2008,6 @@ mod tests {
         }
     }
 
-    /// A child's backdrop range opens with its root's backdrop op: the child
-    /// takes on what the root's backdrop reads, though nothing it paints
-    /// itself moves.
     #[test]
     fn a_child_backdrop_takes_on_what_its_roots_backdrop_reads() {
         let mut assembly = assembly();
@@ -2619,8 +2042,6 @@ mod tests {
         assert!(!child.inner_chains);
     }
 
-    /// A vector draw of [`fragment`]'s picture — an 8×8 viewport — onto an
-    /// 8×8 box at the origin, under `transform`, filling `area`.
     fn vector_draw(transform: Affine, area: ImageArea) -> VectorDraw {
         VectorDraw {
             scene: Arc::new(fragment()),
@@ -2639,8 +2060,6 @@ mod tests {
         ImageArea::Fill(CapturedShape::Rect(Rect::new(0.0, 0.0, 8.0, 8.0)))
     }
 
-    /// A baked texture's handle, with an id of its own, as the raster
-    /// cache and the filter bakes mint one.
     fn texture(width: u32, height: u32) -> Texture {
         Texture::new(width, height, width, height)
     }
@@ -2677,9 +2096,6 @@ mod tests {
         scene
     }
 
-    /// Without a texture the op encodes nothing at all: the program with
-    /// the op is byte for byte the program without it. Nothing stands in
-    /// for the picture, and nothing stands in its place either.
     #[test]
     fn a_vector_op_encodes_nothing_without_a_texture() {
         let bare = [ComposeOp::Fragment {
@@ -2704,10 +2120,6 @@ mod tests {
         }
     }
 
-    /// With a texture the op is the one fill an [`ImageDraw`] makes over
-    /// the same area, painted with the texture by its id — through a clip
-    /// pair, closed inside the op, where a rounded clip is only partly
-    /// covered.
     #[test]
     fn a_vector_op_with_a_texture_draws_it_as_one_image_fill() {
         let program = [ComposeOp::Vector {
@@ -2752,9 +2164,6 @@ mod tests {
         assert_eq!(clipped.open_layers(), 0);
     }
 
-    /// A texture smaller than the draw — one the renderable bound clamped —
-    /// is stretched over the extent: the brush scale is the extent over the
-    /// texture's own size, never over the device size the draw asked for.
     #[test]
     #[allow(clippy::float_cmp, reason = "the expectations are exact")]
     fn a_vector_textures_brush_scale_is_the_extent_over_its_size() {
@@ -2777,9 +2186,6 @@ mod tests {
         assert_eq!(brush.as_coeffs(), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     }
 
-    /// `preserveAspectRatio`: `none` stretches per axis; `meet` fits the
-    /// viewport inside the box by the smaller ratio and aligns the slack;
-    /// `slice` covers the box by the larger ratio.
     #[test]
     #[allow(clippy::float_cmp, reason = "the expectations are exact")]
     fn the_aspect_map_stretches_meets_or_slices() {
@@ -2818,10 +2224,6 @@ mod tests {
         );
     }
 
-    /// A texture clamped on one axis holds the picture placed in the real
-    /// device extent, squeezed: a 200×1 viewport met into a 20000×100 px
-    /// draw fills the whole 8192×100 texture, so the stretch back over the
-    /// extent draws it 100 px tall, not letterboxed into 8192×100 first.
     #[test]
     fn a_clamped_texture_holds_the_picture_placed_in_the_real_extent() {
         let draw = VectorDraw {
@@ -2851,8 +2253,6 @@ mod tests {
         }
     }
 
-    /// The device size is the extent under the transform's per-axis scale,
-    /// rounded up, and no larger on either axis than the rasterizer can place.
     #[test]
     fn a_draws_device_size_is_its_scaled_extent_rounded_up_and_bounded() {
         let at = |transform| VectorDraw {
@@ -2867,9 +2267,6 @@ mod tests {
         assert_eq!(at(Affine::scale(0.0)).device_size(), (0, 0));
     }
 
-    /// The inline encoding — the monolithic walk's — places the scene with
-    /// the aspect map inside the layers the texture fill would open, and
-    /// closes them in the same call.
     #[test]
     fn the_inline_vector_encoding_places_the_scene_inside_its_own_layers() {
         let draw = VectorDraw {
@@ -2885,14 +2282,12 @@ mod tests {
             Affine::IDENTITY,
             &Rect::new(0.0, 0.0, 8.0, 8.0),
         );
-        // An 8×8 viewport met into 16×8 at (2, 2): scale 1, centred on x.
         expected.append(&fragment(), Some(Affine::translate((6.0, 2.0))));
         expected.pop_layer();
         crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
         assert_eq!(actual.open_layers(), 0);
     }
 
-    /// A sealed fragment drawing one 8 px square at `(x, y)`.
     fn square_at(x: f64, y: f64) -> DisplayList {
         let mut scene = DisplayList::default();
         scene.fill(
@@ -2906,12 +2301,10 @@ mod tests {
         scene
     }
 
-    /// A clip push of `rect` at the root.
     fn clip(rect: Rect) -> ComposeOp {
         clip_in(None, rect)
     }
 
-    /// A clip push of `rect` in `space`.
     fn clip_in(space: Option<u32>, rect: Rect) -> ComposeOp {
         ComposeOp::Push {
             clip_only: true,
@@ -2925,11 +2318,8 @@ mod tests {
         }
     }
 
-    /// The 100 px target the culling replays compose for.
     const TARGET: Rect = Rect::new(0.0, 0.0, 100.0, 100.0);
 
-    /// Replays `program` over `fragments` for [`TARGET`], with [`SPACES`]'
-    /// scroll slot (not circular) at `offset`.
     fn replay_culled(
         fragments: &[DisplayList],
         program: &[ComposeOp],
@@ -2970,8 +2360,6 @@ mod tests {
         scene
     }
 
-    /// A fragment whose ink lies off the target draws nothing; one partly
-    /// on it is drawn whole.
     #[test]
     fn a_fragment_off_the_target_draws_nothing_and_one_partly_on_it_draws() {
         let program = [ComposeOp::Fragment {
@@ -2998,9 +2386,6 @@ mod tests {
         assert_eq!(partly.compare(&expected), Ok(()));
     }
 
-    /// The test reads the fragment's bound under its compose transform at
-    /// this instant: content below the scrollport draws once the container
-    /// scrolls it into view, and not before.
     #[test]
     fn a_fragment_is_culled_where_the_scroll_offset_puts_it() {
         let program = [ComposeOp::Fragment {
@@ -3014,8 +2399,6 @@ mod tests {
         assert_eq!(scrolled.len(), 1);
     }
 
-    /// A fragment the clip around it excludes is skipped; the clip itself
-    /// is still pushed and popped.
     #[test]
     fn a_fragment_its_clip_excludes_is_skipped() {
         let program = [
@@ -3038,9 +2421,6 @@ mod tests {
         assert_eq!(scene.open_layers(), 0);
     }
 
-    /// A push whose own shape misses the target is skipped with everything
-    /// up to its matching pop, nested pushes included, and what follows the
-    /// pop draws.
     #[test]
     fn a_push_off_the_target_is_skipped_up_to_its_matching_pop() {
         let program = [
@@ -3063,8 +2443,6 @@ mod tests {
         assert_eq!(scene.layers(), 0);
     }
 
-    /// A fragment's chunk holding a layer is left out whole, so the layer
-    /// stack balances, and the fragment's other chunks still draw.
     #[test]
     fn a_skipped_chunk_holding_a_layer_keeps_the_stack_balanced() {
         let mut fragment = DisplayList::default();
@@ -3111,9 +2489,6 @@ mod tests {
         assert_eq!(scene.len(), 3, "push, the fill on the target, pop");
     }
 
-    /// A push whose matching pop lies past the replayed range is encoded
-    /// even off the target, so the range leaves open what a replay without
-    /// culling leaves open; what it holds is still culled.
     #[test]
     fn a_push_whose_pop_lies_past_the_range_is_encoded() {
         let program = [
@@ -3149,9 +2524,6 @@ mod tests {
         assert_eq!(scene.len(), 1, "the push alone");
     }
 
-    /// A baked group's texture covers the group's content grown by its blur
-    /// outset; it draws while that outset reaches the target, though the
-    /// content itself does not, and draws nothing once none of it does.
     #[test]
     fn a_baked_groups_outset_reaching_the_target_draws_it() {
         let program = [
@@ -3162,12 +2534,9 @@ mod tests {
             },
             ComposeOp::PopFilter,
         ];
-        // The content at 106, its 6 px outset from 100.
         let fragments = [square_at(106.0, 0.0)];
         let baked = |x: f64| {
             let mut group = FilterGroup::new(2.0, Rect::new(x, 0.0, x + 20.0, 20.0), None);
-            // The ops between the bracket's pair, as `push_filter` and
-            // `pop_filter` record them.
             group.ops = 1..2;
             replay_culled(
                 &fragments,

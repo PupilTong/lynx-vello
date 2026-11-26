@@ -12,11 +12,6 @@ use super::{XmlItem, XmlMarkup, XmlNamespace};
 use crate::tree::document::{Document, NodeId};
 
 impl<T> Document<T> {
-    /// Builds `markup` under `parent` and answers its root element.
-    /// `payload` is called once per node made, in document order. `built`
-    /// is called once per element, after its attributes are set and it is
-    /// appended, with its index in `markup`, its node and its depth (the
-    /// root is one deep).
     pub(crate) fn append_xml(
         &mut self,
         parent: NodeId,
@@ -24,7 +19,6 @@ impl<T> Document<T> {
         mut payload: impl FnMut() -> T,
         mut built: impl FnMut(usize, NodeId, u32),
     ) -> NodeId {
-        // The open elements: the index one past each one's subtree, and its node.
         let mut open: Vec<(usize, NodeId)> = Vec::new();
         let mut root = None;
         for index in 0..markup.len() {
@@ -69,8 +63,6 @@ mod tests {
     use crate::test_common::Doc;
     use crate::tree::xml::{XmlMarkup, XmlNamespace};
 
-    /// Elements, attributes and text are built in document order, each
-    /// element reported once with its depth, and nothing else is applied.
     #[test]
     fn builds_nodes_in_document_order() {
         let mut doc = Doc::new();

@@ -52,39 +52,22 @@ use terminus::link::NodeId;
 use super::parse::{Alignment, Block, HtmlElement, Inline, ListItem, TableRow};
 use crate::main::tree::LynxDocument;
 
-/// The engine's element for inline content that has no element of its own;
-/// see the module documentation.
 pub(super) const LINE_TAG: &str = "md-line";
-/// The engine's element for a list item's marker; see the module
-/// documentation.
 pub(super) const MARKER_TAG: &str = "md-marker";
-/// The engine's element for an image, where web-core's tree has an `<img>`.
 pub(super) const IMAGE_TAG: &str = "image";
-/// The class web-core gives the `<span>` an inline view's slot sits in
-/// (`#injectInlineViews`, `XMarkdownAttributes.ts:1284-1304`).
 pub(super) const INLINE_VIEW_CLASS: &str = "md-inline-view";
 
-/// Which of markdown-it's block line breaks are written around one element,
-/// as [`AFTER_CLOSE`], [`AFTER_OPEN`] and [`BEFORE_OPEN`] bits.
 pub(super) type Newlines = u8;
-/// A `"\n"` after the element's close tag, in its parent.
 pub(super) const AFTER_CLOSE: Newlines = 1;
-/// A `"\n"` right after the element's open tag, its own first text.
 pub(super) const AFTER_OPEN: Newlines = 1 << 1;
-/// A `"\n"` right before the element's open tag, in its parent.
 pub(super) const BEFORE_OPEN: Newlines = 1 << 2;
 
-/// Builds blocks into a shadow tree and records their line breaks.
 pub(super) struct Builder<'a> {
     pub(super) document: &'a mut LynxDocument,
     pub(super) newlines: &'a mut FxHashMap<NodeId, Newlines>,
 }
 
 impl Builder<'_> {
-    /// Builds `block` as the last child of `parent` and answers its element.
-    /// `lists` is how many lists enclose it, which picks an unordered list's
-    /// marker; `after_hidden` is whether the block before it in the same
-    /// list item was that item's hidden paragraph.
     pub(super) fn block(
         &mut self,
         parent: NodeId,
@@ -92,8 +75,6 @@ impl Builder<'_> {
         lists: usize,
         after_hidden: bool,
     ) -> NodeId {
-        // Every block markdown-it writes through `renderToken` takes the
-        // line break before it after a hidden paragraph.
         let before = if after_hidden { BEFORE_OPEN } else { 0 };
         match block {
             Block::Paragraph { children, .. } => {
@@ -171,10 +152,6 @@ impl Builder<'_> {
                 self.inlines(line, children);
                 line
             }
-            // A text node of the container, as in the browser's tree: white
-            // space only, so it generates no box among the container's
-            // items (css-flexbox-1 §4), and it is counted in the rendered
-            // text.
             Block::HtmlSpace { text, .. } => {
                 let node = self.document.create_text_node(text.as_str(), ());
                 self.document.append_child(parent, node);
@@ -191,8 +168,6 @@ impl Builder<'_> {
     }
 
     fn list_item(&mut self, list: NodeId, item: &ListItem, marker: &str, lists: usize) {
-        // A tight item's paragraph is hidden, and markdown-it then writes no
-        // line break after `<li>`; an empty item is `<li></li>`.
         let open = match item.children.first() {
             Some(Block::Inlines { .. }) | None => 0,
             Some(_) => AFTER_OPEN,
@@ -216,7 +191,6 @@ impl Builder<'_> {
         before: Newlines,
     ) -> NodeId {
         let table = self.element(parent, "table", AFTER_CLOSE | AFTER_OPEN | before);
-        // seldon has no `repeat()`: one `auto` track per column.
         let columns = head.cells.len().max(1);
         let tracks = vec!["auto"; columns].join(" ");
         self.document
@@ -236,8 +210,6 @@ impl Builder<'_> {
         let tr = self.element(parent, "tr", AFTER_CLOSE | AFTER_OPEN);
         for (index, cell) in row.cells.iter().enumerate() {
             let element = self.element(tr, cell_tag, AFTER_CLOSE);
-            // markdown-it's `style="text-align:<a>"` on every cell of an
-            // aligned column.
             let align = match alignments.get(index) {
                 Some(Alignment::Left) => Some("left"),
                 Some(Alignment::Center) => Some("center"),
@@ -299,7 +271,6 @@ impl Builder<'_> {
                 if let Some(title) = title {
                     self.document.set_attribute(element, "title", title);
                 }
-                // Last, so the image component binds the source once.
                 self.document.set_attribute(element, "src", src);
             }
             Inline::InlineView { id, .. } => {
@@ -351,8 +322,6 @@ impl Builder<'_> {
     }
 }
 
-/// Forgets the line breaks recorded for `element` and everything under it,
-/// before the subtree is freed.
 pub(super) fn forget(
     document: &LynxDocument,
     newlines: &mut FxHashMap<NodeId, Newlines>,
@@ -367,9 +336,6 @@ pub(super) fn forget(
     }
 }
 
-/// The tag `getParseResult` matches an element of our tree under: its HTML
-/// name, `img` for the engine's `image`, and none for the engine's own
-/// [`LINE_TAG`] and [`MARKER_TAG`].
 pub(super) fn html_name(tag: &str) -> Option<&str> {
     match tag {
         IMAGE_TAG => Some("img"),

@@ -28,18 +28,13 @@ pub use frame::BrowserFrame;
 pub use media::{BrowserMedia, BrowserPlayer, deliver_media_event, deliver_media_frame};
 use vant::{ArtifactStore, NoStore, Parts, Platform, Tier};
 
-/// Which cache of the origin's Cache API the code cache keeps its entries
-/// in, and how many bytes of entries it may keep there.
 #[derive(Clone, Debug)]
 pub struct CodeCacheConfig {
-    /// The name `caches.open` is called with.
     pub cache_name: String,
-    /// The code cache's budget, in stored entry bytes.
     pub budget_bytes: u64,
 }
 
 impl Default for CodeCacheConfig {
-    /// `bobcat-code-cache`, under 32 MiB.
     fn default() -> Self {
         Self {
             cache_name: "bobcat-code-cache".to_owned(),
@@ -48,10 +43,6 @@ impl Default for CodeCacheConfig {
     }
 }
 
-/// The browser's Render Worker: its own `fetch` ([`BrowserFetch`]), its own
-/// image decoders ([`BrowserDecoder`]), the facade's `<video>` elements
-/// ([`BrowserMedia`]), and, when the Cache API can be opened, the code
-/// cache's store ([`CacheStore`]).
 #[derive(Debug)]
 pub struct BrowserPlatform {
     fetch: BrowserFetch,
@@ -61,16 +52,6 @@ pub struct BrowserPlatform {
 }
 
 impl BrowserPlatform {
-    /// The browser platform, decoding images in this Worker, playing videos
-    /// through `media`, and keeping compiled scripts in `code_cache`'s cache
-    /// of the Cache API.
-    ///
-    /// The cache is opened once, here; a second view in this Worker shares it
-    /// through `Resources::new_scope`, and another tab's Worker opens the
-    /// same cache. Every failure is a note, never an error: without
-    /// `createImageBitmap` no image decodes, and without the Cache API (a
-    /// context that is not secure, a browser that refuses it in private
-    /// browsing) the code cache keeps its artifacts in memory only.
     pub async fn new(
         code_cache: Option<CodeCacheConfig>,
         media: BrowserMedia,
@@ -110,9 +91,6 @@ impl Platform for BrowserPlatform {
     type Decoder = BrowserDecoder;
     type Media = BrowserMedia;
 
-    /// No byte tier: the browser's HTTP cache plays that role
-    /// ([`BrowserFetch`] owns it). The code cache gets the Cache API store
-    /// when it opened.
     fn into_parts(self) -> Parts<BrowserFetch, NoStore, CacheStore, BrowserDecoder, BrowserMedia> {
         Parts {
             fetch: self.fetch,

@@ -12,14 +12,10 @@ use std::fmt;
 use bobcat_core::PageConfig;
 use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-/// The page flags in `text`, `Ok(None)` when it is JSON but no object, and a
-/// JSON error when it is no JSON at all. A key given twice counts as its last
-/// value, as in a decoded object.
 pub(crate) fn page_config(text: &str) -> Result<Option<PageConfig>, serde_json::Error> {
     serde_json::from_str::<ConfigObject>(text).map(|object| object.0)
 }
 
-/// Every flag off, which is what a page whose section omits them all has.
 pub(crate) const fn all_off() -> PageConfig {
     PageConfig {
         default_display_linear: false,
@@ -92,7 +88,6 @@ impl<'de> Visitor<'de> for ConfigVisitor {
     }
 }
 
-/// The flag field one key names, `None` for a key a page does not read.
 struct Key(Option<fn(&mut PageConfig) -> &mut bool>);
 
 impl<'de> Deserialize<'de> for Key {
@@ -122,8 +117,6 @@ impl Visitor<'_> for KeyVisitor {
     }
 }
 
-/// Whether one value is the string `"true"`; any other value, a `true`
-/// boolean included, is not.
 struct IsTrue(bool);
 
 impl<'de> Deserialize<'de> for IsTrue {
@@ -178,8 +171,6 @@ impl<'de> Visitor<'de> for IsTrueVisitor {
 mod tests {
     use super::*;
 
-    /// What the full decode reads for the same text: the decoded object's
-    /// `config_flag`s.
     fn decoded(text: &str) -> Option<PageConfig> {
         let serde_json::Value::Object(map) = serde_json::from_str(text).unwrap() else {
             return None;

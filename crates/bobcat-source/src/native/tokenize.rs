@@ -19,8 +19,6 @@ fn tokenize_parser(
     output: &mut Vec<ValueToken>,
     depth: usize,
 ) -> Result<(), ParseError<()>> {
-    // Each nested cssparser block adds Rust stack frames. Bound this before
-    // entering the block so source-controlled nesting cannot abort the process.
     if depth >= 64 {
         return Err(ParseError::custom(()));
     }

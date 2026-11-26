@@ -13,8 +13,6 @@ use bytes::Bytes;
 
 use crate::platform::{AsyncStore, Estimate, Meta, Store, StoreError, Volatility};
 
-/// Clones share their contents, so a test can reopen a tier over the same
-/// entries, or open two tiers over one Store as two processes would.
 #[derive(Clone, Default)]
 pub(crate) struct MemStore {
     pub(crate) entries: Arc<Mutex<HashMap<String, (Meta, Bytes)>>>,
@@ -29,8 +27,6 @@ impl MemStore {
         self.entries.lock().unwrap()
     }
 
-    /// Files `meta` and `body` under `slot`, whatever key `meta` names:
-    /// a corrupt record, a hash collision, a truncated body.
     pub(crate) fn forge(&self, slot: &str, meta: Meta, body: &[u8]) {
         self.entries()
             .insert(slot.to_owned(), (meta, Bytes::copy_from_slice(body)));
@@ -117,7 +113,6 @@ impl Store for MemStore {
     }
 }
 
-/// One kind of [`AsyncStore`] call, as [`AsyncMemStore::hold`] names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Op {
     Get,
@@ -126,12 +121,6 @@ pub(crate) enum Op {
     Touch,
 }
 
-/// A [`MemStore`] behind the [`AsyncStore`] interface, whose calls of a held
-/// kind stay pending until the test releases that kind. Nothing wakes a
-/// pending call: the tests poll by hand.
-///
-/// A `get` reads the entry when it is called and answers when it is
-/// released; a `put`, `delete` or `touch` takes effect when it is released.
 #[derive(Clone, Default)]
 pub(crate) struct AsyncMemStore {
     pub(crate) inner: MemStore,
@@ -148,7 +137,6 @@ impl AsyncMemStore {
         self.held.lock().unwrap().remove(&op);
     }
 
-    /// A future that is pending while `op` is held, then answers `run()`.
     fn gated<T>(&self, op: Op, run: impl FnOnce() -> T + Send) -> impl Future<Output = T> + Send {
         let held = Arc::clone(&self.held);
         let mut run = Some(run);
@@ -203,14 +191,10 @@ impl AsyncStore for AsyncMemStore {
     }
 }
 
-/// Polls `future` once, with a waker that does nothing.
 pub(crate) fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-/// Runs `future` to its answer. Every [`AsyncMemStore`] call answers on its
-/// first poll unless its kind is held, so a future that is still pending
-/// after a few polls is waiting on a held call, which is a test bug.
 pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     for _ in 0..64 {

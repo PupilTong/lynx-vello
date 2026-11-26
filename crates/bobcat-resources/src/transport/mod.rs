@@ -39,7 +39,6 @@ use crate::mime::MediaType;
 use crate::registry::Installs;
 use crate::{CachePolicy, Handle, Registered, Registry, data_url};
 
-/// What every request this system makes is sent with.
 #[derive(Clone, Debug)]
 pub(crate) struct HttpSettings {
     pub timeout: Duration,
@@ -48,53 +47,25 @@ pub(crate) struct HttpSettings {
     pub max_redirects: u32,
 }
 
-/// Bytes a transport produced, with what the pipeline behind it needs.
 #[derive(Clone, Debug)]
 pub(crate) struct Fetched {
     pub bytes: Bytes,
-    /// The type the transport could label the bytes with: a `Content-Type`,
-    /// a `data:` media type, a registration's type, or a file's extension.
     pub media_type: Option<MediaType>,
-    /// The URL the bytes finally came from, after redirects.
     pub url: Url,
-    /// Whether the transport can hand these bytes back again synchronously
-    /// and without the network — a file, or a response the byte tier holds.
-    /// The image pipeline keeps the bytes of anything that cannot, since a
-    /// read after eviction has to come from somewhere.
     pub restorable: bool,
 }
 
-/// Whether bytes a transport hands over can be asked for again inside a
-/// read. The browser's restore reads only what is in hand
-/// (`images::restore_bytes`), so nothing its transport fetched is.
 const RESTORES: bool = cfg!(not(target_arch = "wasm32"));
 
-/// `specifier` resolved by URL rules: joined to `base` when there is one,
-/// and parsed on its own when there is none.
-///
-/// With a base, the join is the whole algorithm, as it is where the engine
-/// resolves a script URL against the view's base. Parsing first and joining
-/// only on failure gives a different URL for one kind of input: a reference
-/// that repeats the base's own special scheme, such as `https:x` against an
-/// `https:` base, which a join reads as a relative path and a parse as the
-/// host `x`.
 pub(crate) fn join(specifier: &str, base: Option<&Url>) -> Result<Url, url::ParseError> {
     base.map_or_else(|| Url::parse(specifier), |base| base.join(specifier))
 }
 
-/// Every transport, behind one dispatch: the registry, `data:` URLs, the
-/// byte tier and the platform's [`Fetch`].
 pub(crate) struct Transports<P: Platform> {
-    /// Its own `Arc` so that
-    /// [`ResourceFetcher::style_sheet_probe`](bobcat_core::resource::ResourceFetcher::style_sheet_probe)
-    /// can hand a reader of it to `bobcat-main`, as the fetch index is.
     pub registry: std::sync::Arc<Registry>,
-    /// The containers still being registered into it in the background.
     pub installs: Installs,
     pub http: HttpSettings,
     pub fetch: Handle<P::Fetch>,
-    /// The HTTP byte tier: `None` when the platform has no store, or when
-    /// its transport applies HTTP cache semantics itself.
     pub bytes: Option<Handle<ByteCache<P::Store>>>,
 }
 
@@ -108,23 +79,16 @@ impl<P: Platform> std::fmt::Debug for Transports<P> {
     }
 }
 
-/// What the byte tier decided about an `http(s)` request.
 enum Planned {
-    /// Answered without a request: stored bytes, or `only-if-cached` with
-    /// nothing stored.
     Answered(Result<Fetched, Failure>),
-    /// A request to make, and what to do with its answer.
     Fetch {
         request: Request,
-        /// Whether a `304` refreshes the stored entry.
         revalidating: bool,
-        /// Whether the answer may be stored.
         store: bool,
     },
 }
 
 impl<P: Platform> Transports<P> {
-    /// The scope's transports over the platform's `fetch` and byte tier.
     pub(crate) fn new(
         http: HttpSettings,
         fetch: Handle<P::Fetch>,
@@ -139,7 +103,6 @@ impl<P: Platform> Transports<P> {
         }
     }
 
-    /// Transports for a new scope: a fresh registry, the same platform parts.
     pub(crate) fn for_new_scope(&self) -> Self {
         Self::new(
             self.http.clone(),
@@ -148,9 +111,6 @@ impl<P: Platform> Transports<P> {
         )
     }
 
-    /// Resolves `specifier` against `base`, refusing what nothing here could
-    /// serve — so the failure is at resolution, where the protocol reports
-    /// it, and never a request that was doomed from the start.
     pub(crate) fn resolve(&self, specifier: &str, base: Option<&Url>) -> Result<Url, Failure> {
         let url = join(specifier, base).map_err(|error| {
             Failure::new(
@@ -159,9 +119,6 @@ impl<P: Platform> Transports<P> {
                 format!("`{specifier}` is not a URL: {error}"),
             )
         })?;
-        // The hold before the registry: an install releases its hold only
-        // after everything is registered, so a URL it was going to register
-        // and no longer holds is registered by the time the registry is read.
         if self.installs.install_covering(&url).is_some()
             || self.registry.contains(&url)
             || Self::serves_scheme(url.scheme())
@@ -181,8 +138,6 @@ impl<P: Platform> Transports<P> {
             || (cfg!(not(target_arch = "wasm32")) && scheme == "file")
     }
 
-    /// Resources that are already in hand: registered contents and `data:`
-    /// URLs. `None` when the URL needs a transport.
     pub(crate) fn local(&self, url: &Url) -> Option<Result<Fetched, Failure>> {
         if let Some(registered) = self.registry.get(url) {
             return Some(match registered {
@@ -190,8 +145,6 @@ impl<P: Platform> Transports<P> {
                     bytes,
                     media_type,
                     url: url.clone(),
-                    // A registration may be cleared later, and its bytes are
-                    // shared rather than copied, so keeping them costs nothing.
                     restorable: false,
                 }),
                 Registered::StyleSheet(_) => Err(Failure::new(
@@ -222,12 +175,6 @@ impl<P: Platform> Transports<P> {
         None
     }
 
-    /// Moves the bytes for `url`, blocking the calling thread: always a
-    /// blocking-pool thread, running a background job's transport read.
-    ///
-    /// `body` is how bytes read from a file — the `file:` URL's, or the byte
-    /// tier's copy of a response — are handed over. Registered and `data:`
-    /// bytes are already in memory and come as they are.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fetch_blocking(
         &self,
@@ -278,9 +225,6 @@ impl<P: Platform> Transports<P> {
         }
     }
 
-    /// Moves the bytes for `url` in the browser: registered and `data:`
-    /// resources synchronously, everything else through the platform's
-    /// asynchronous [`Fetch::fetch`].
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn fetch(
         &self,
@@ -310,8 +254,6 @@ impl<P: Platform> Transports<P> {
         }
     }
 
-    /// The platform's blocking fetch, or the failure a transport that
-    /// cannot block answers with.
     #[cfg(not(target_arch = "wasm32"))]
     fn blocking(&self, request: &Request) -> Result<Response, Failure> {
         self.fetch.fetch_blocking(request).unwrap_or_else(|| {
@@ -323,8 +265,6 @@ impl<P: Platform> Transports<P> {
         })
     }
 
-    /// The request for `url`: the caller's headers plus any conditional
-    /// ones a revalidation adds.
     fn request(
         &self,
         url: &Url,
@@ -347,10 +287,6 @@ impl<P: Platform> Transports<P> {
         }
     }
 
-    /// The first half of an `http(s)` load: the byte tier decides whether a
-    /// request is needed. Without a byte tier in front of a transport that
-    /// keeps no cache either, nothing is ever stored, so `only-if-cached`
-    /// cannot be served.
     fn plan_http(
         &self,
         url: &Url,
@@ -360,7 +296,6 @@ impl<P: Platform> Transports<P> {
         now: SystemTime,
     ) -> Planned {
         let Some(bytes) = self.bytes.as_deref() else {
-            // With nothing stored the plan does not read the clock.
             if !self.fetch.owns_http_cache()
                 && matches!(plan(policy, None, UNIX_EPOCH), Plan::Unavailable)
             {
@@ -389,8 +324,6 @@ impl<P: Platform> Transports<P> {
         }
     }
 
-    /// The second half of an `http(s)` load: a `304` refreshes what is
-    /// stored, a storable answer is stored, and a failure status fails.
     fn finish_http(
         &self,
         url: &Url,
@@ -422,9 +355,6 @@ impl<P: Platform> Transports<P> {
         if let Some(failure) = status_failure(status_code(response.status)?) {
             return Err(failure);
         }
-        // Bytes to be retained are handed over as the stored copy's mapping
-        // once there is one, so the download's buffer is dropped here rather
-        // than held as long as the bytes are.
         let mapped = (stored && read == Read::Mapped)
             .then(|| self.bytes.as_deref()?.map_body(key))
             .flatten();
@@ -436,8 +366,6 @@ impl<P: Platform> Transports<P> {
         })
     }
 
-    /// A response that needs no byte tier — a file's — as the pipeline
-    /// takes it.
     #[cfg(not(target_arch = "wasm32"))]
     fn answered(url: &Url, response: Response, restorable: bool) -> Result<Fetched, Failure> {
         if let Some(failure) = status_failure(status_code(response.status)?) {
@@ -470,7 +398,6 @@ impl<P: Platform> Transports<P> {
     }
 }
 
-/// The type a response labels its body with, or else the URL's extension.
 fn media_type(headers: &HeaderMap, url: &Url) -> Option<MediaType> {
     headers
         .get(http::header::CONTENT_TYPE)
@@ -505,9 +432,6 @@ fn not_cached() -> Failure {
     )
 }
 
-/// The wall clock the byte tier's freshness and the code cache's last-use
-/// stamps are measured on. `std`'s has no source on
-/// `wasm32-unknown-unknown`, so the browser's `Date` stands in.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn now() -> SystemTime {
     SystemTime::now()
@@ -518,8 +442,6 @@ pub(crate) fn now() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs_f64(js_sys::Date::now().max(0.0) / 1000.0)
 }
 
-/// The failure an HTTP status is, if it is one: every non-success status
-/// after redirects were followed.
 pub(crate) fn status_failure(status: StatusCode) -> Option<Failure> {
     if status.is_success() {
         return None;
@@ -572,8 +494,6 @@ mod tests {
                 .as_str(),
             "https://cards.test/img/a.png"
         );
-        // With a base, the join is the whole algorithm, as the engine's is: a
-        // reference that repeats the base's own special scheme is relative.
         assert_eq!(
             transports
                 .resolve("https:img/a.png", Some(&base))
@@ -673,8 +593,6 @@ mod tests {
     }
 }
 
-/// The dispatch over a scripted [`Fetch`]: the byte tier in front of it, the
-/// `file:` path, and the answers a transport that cannot block gets.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod dispatch_tests {
     use std::sync::Mutex;
@@ -687,8 +605,6 @@ mod dispatch_tests {
     use crate::decode::NativeDecoder;
     use crate::store::FsStore;
 
-    /// Answers every request with the next scripted response, and counts
-    /// what it was asked.
     #[derive(Default)]
     struct Scripted {
         answers: Mutex<Vec<Response>>,

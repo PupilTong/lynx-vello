@@ -28,7 +28,6 @@ use http::StatusCode;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use libloading::Library;
 
-/// The platform's libcurl, loaded once per process and shared.
 #[derive(Clone)]
 pub struct Curl {
     inner: Arc<Inner>,
@@ -56,14 +55,11 @@ pub enum TransportError {
     Curl { code: i32, message: String },
 }
 
-/// One GET.
 #[derive(Clone, Debug)]
 pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
-    /// The whole transfer, connect included.
     pub timeout: Duration,
-    /// Past this many body bytes the transfer is aborted.
     pub max_body: usize,
     pub max_redirects: u32,
     pub user_agent: String,
@@ -83,15 +79,11 @@ impl HttpRequest {
     }
 }
 
-/// The final response of a transfer, after any redirects.
 #[derive(Clone, Debug)]
 pub struct HttpResponse {
     pub status: StatusCode,
-    /// The final response's headers only; a redirect's block is discarded
-    /// when the next status line arrives.
     pub headers: HeaderMap,
     pub body: Vec<u8>,
-    /// The URL the final response came from.
     pub effective_url: String,
 }
 
@@ -109,8 +101,6 @@ type SlistFreeAll = unsafe extern "C" fn(*mut c_void);
 type DataCallback = unsafe extern "C" fn(*mut c_char, usize, usize, *mut c_void) -> usize;
 
 struct Inner {
-    // Declared before the library so it drops first: the symbols are only
-    // valid while the library is mapped.
     symbols: Symbols,
     _library: Library,
 }
@@ -189,9 +179,6 @@ impl std::fmt::Debug for Curl {
 }
 
 impl Curl {
-    /// The platform libcurl, loaded and globally initialised on first use.
-    /// A host without one gets [`TransportError::Unavailable`] every time,
-    /// never a panic.
     pub fn load() -> Result<Self, TransportError> {
         LOADED
             .get_or_init(|| Self::load_uncached().map_err(|error| error.to_string()))
@@ -264,7 +251,6 @@ impl Curl {
         })
     }
 
-    /// `curl_version()`.
     #[must_use]
     pub fn version(&self) -> String {
         // SAFETY: `curl_version` returns a pointer to a static NUL-terminated
@@ -274,10 +260,6 @@ impl Curl {
             .into_owned()
     }
 
-    /// Performs one blocking GET, following redirects, returning whatever
-    /// final response the server gave — a `404` is a response here, not an
-    /// error. Protocols are restricted to HTTP and HTTPS, on the first hop
-    /// and on every redirect.
     pub fn get(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
         let symbols = &self.inner.symbols;
         // SAFETY: plain constructor call; a null return is checked below.
@@ -360,8 +342,6 @@ impl Curl {
         })
     }
 
-    /// Sets every option a transfer needs, returning the C strings the
-    /// handle now points at — they must outlive `easy_perform`.
     fn configure(
         guard: &mut HandleGuard<'_>,
         request: &HttpRequest,
@@ -406,9 +386,6 @@ impl Curl {
                 CURLOPT_CONNECTTIMEOUT_MS,
                 millis(request.timeout.min(Duration::from_secs(30))),
             );
-            // The string form is the current API; a libcurl older than 7.85
-            // answers it with an unknown-option code, and the numeric form
-            // it does know says the same thing.
             if setopt(handle, CURLOPT_PROTOCOLS_STR, protocols.as_ptr()) != CURLE_OK {
                 setopt(handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTP_HTTPS);
             }
@@ -451,8 +428,6 @@ impl Curl {
     }
 }
 
-/// A raw symbol type marker: `libloading` hands back `Symbol<T>` for the `T`
-/// requested, and this alias keeps the request site to one generic.
 pub(crate) type Raw<T> = T;
 
 fn c_string(value: &str) -> Result<CString, TransportError> {
@@ -464,7 +439,6 @@ fn millis(duration: Duration) -> c_long {
     c_long::try_from(duration.as_millis()).unwrap_or(c_long::MAX)
 }
 
-/// Frees the easy handle and its header list however `get` exits.
 struct HandleGuard<'a> {
     handle: Handle,
     symbols: &'a Symbols,
@@ -486,7 +460,6 @@ impl Drop for HandleGuard<'_> {
     }
 }
 
-/// The per-transfer state both callbacks write.
 struct Transfer {
     collector: HeaderCollector,
     body: Vec<u8>,
@@ -494,16 +467,12 @@ struct Transfer {
     overflowed: bool,
 }
 
-/// Accumulates header lines across a redirect chain, keeping only the last
-/// response's block.
 #[derive(Debug, Default)]
 pub(crate) struct HeaderCollector {
     current: HeaderMap,
 }
 
 impl HeaderCollector {
-    /// Feeds one header line as libcurl delivers it: a status line, a
-    /// `name: value` line, or the blank terminator.
     pub(crate) fn line(&mut self, line: &[u8]) {
         let trimmed = line.trim_ascii_end();
         if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case(b"HTTP/") {
@@ -525,7 +494,6 @@ impl HeaderCollector {
         self.current.append(name, value);
     }
 
-    /// The final response's headers.
     pub(crate) fn finish(self) -> HeaderMap {
         self.current
     }
@@ -578,7 +546,6 @@ unsafe extern "C" fn header_callback(
     .unwrap_or(0)
 }
 
-/// Maps a `CURLcode` to the transport's vocabulary.
 pub(crate) fn map_error(
     code: c_int,
     message: String,
@@ -676,7 +643,6 @@ mod tests {
         ));
     }
 
-    /// A tiny HTTP/1.1 server: one request per connection, routed by path.
     fn serve() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("address");
@@ -749,7 +715,6 @@ mod tests {
         };
         stream.write_all(&response).expect("write");
         stream.flush().expect("flush");
-        // Let the client read everything before the socket closes.
         let mut sink = Vec::new();
         let _ = reader.read_to_end(&mut sink);
     }

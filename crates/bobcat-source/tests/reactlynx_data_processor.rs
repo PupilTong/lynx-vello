@@ -12,8 +12,6 @@ use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::PageSource;
 use url::Url;
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(120.0, 120.0, 1.0);
 

@@ -32,8 +32,6 @@ const fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
 }
 
-/// An 8 × 8 APNG of one colour per frame, shown for its milliseconds,
-/// played `plays` times (zero: forever).
 fn apng(plays: u32, frames: &[([u8; 4], u16)]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -53,7 +51,6 @@ fn apng(plays: u32, frames: &[([u8; 4], u16)]) -> Vec<u8> {
     bytes
 }
 
-/// A still 8 × 8 PNG.
 fn still_png() -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -66,8 +63,6 @@ fn still_png() -> Vec<u8> {
     bytes
 }
 
-/// Every frame of an APNG whose frames cover the whole canvas, and what
-/// the file states of them.
 fn read_apng(bytes: &[u8]) -> Result<(Vec<Vec<u8>>, ImageFrames), DecodeError> {
     let malformed = |error: png::DecodingError| DecodeError::Malformed(error.to_string());
     let mut reader = png::Decoder::new(Cursor::new(bytes))
@@ -89,20 +84,15 @@ fn read_apng(bytes: &[u8]) -> Result<(Vec<Vec<u8>>, ImageFrames), DecodeError> {
     Ok((pixels, ImageFrames::new(delays, loops)))
 }
 
-/// The decoder of these tests: APNG through the `png` crate, every frame
-/// decoded by index logged, and a frame the test closes held at a gate.
 #[derive(Clone, Default)]
 struct PngFrames {
     decoded: Arc<Mutex<Vec<usize>>>,
     gate: Arc<(Mutex<Vec<usize>>, Condvar)>,
-    /// Frames whose decode fails.
     broken: Arc<Mutex<Vec<usize>>>,
-    /// How many times the store said it asks no more frames.
     forgotten: Arc<AtomicUsize>,
 }
 
 impl PngFrames {
-    /// Holds every decode of `frame` until [`Self::open`].
     fn close(&self, frame: usize) {
         self.gate.0.lock().expect("gate").push(frame);
     }
@@ -160,7 +150,6 @@ impl ImageDecoder for PngFrames {
 }
 
 impl PngFrames {
-    /// Frame `index`, held at the gate while it is closed for it.
     fn frame(&self, bytes: &[u8], index: usize) -> Result<Bitmap, DecodeError> {
         {
             let (closed, opened) = &*self.gate;
@@ -208,8 +197,6 @@ impl Platform for PngPlatform {
     }
 }
 
-/// A resource system over [`PngFrames`] whose playheads read the test's
-/// clock, counting the host's wakeups.
 struct Rig {
     resources: Resources<PngPlatform>,
     decoder: PngFrames,
@@ -252,7 +239,6 @@ impl Rig {
         }
     }
 
-    /// The test's clock reads `at` after the start.
     fn set(&self, at: Duration) {
         *self.clock.lock().expect("clock") = self.start + at;
     }
@@ -262,7 +248,6 @@ impl Rig {
         (self.resources.for_view(reports), inbox)
     }
 
-    /// Registers `bytes` as `source` and loads it through `view`.
     fn load(
         &self,
         view: &ViewResources<PngPlatform>,
@@ -277,7 +262,6 @@ impl Rig {
         self.settle("the load never reported", || !inbox.drain().is_empty());
     }
 
-    /// Services turns until `done` holds.
     fn settle(&self, what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -290,7 +274,6 @@ impl Rig {
         }
     }
 
-    /// Services turns until `source` holds `frames`.
     fn settle_held(&self, source: &str, frames: &[usize]) {
         self.settle(&format!("{source} never held {frames:?}"), || {
             self.resources.local.borrow().animations.held_frames(source) == frames
@@ -317,7 +300,6 @@ fn url(source: &str) -> PictureKey {
 
 const HINT: ImageSizeHint = ImageSizeHint::new(8, 8);
 
-/// The colour of the top-left pixel a describe answered with.
 fn colour(image: &FrameImage) -> [u8; 4] {
     let pixels = image
         .pixels
@@ -327,7 +309,6 @@ fn colour(image: &FrameImage) -> [u8; 4] {
     pixels.data.data()[..4].try_into().expect("four")
 }
 
-/// Six frames of 100 ms, forever.
 fn six() -> Vec<u8> {
     apng(
         0,
@@ -342,10 +323,6 @@ fn six() -> Vec<u8> {
     )
 }
 
-/// A load of an animated file answers its first frame with the next change
-/// at its delay, and from then on each describe at a frame's due instant
-/// answers the next frame, at a generation one higher; the frames ahead are
-/// decoded off the painter's thread.
 #[test]
 fn frames_advance_at_their_delays() {
     let rig = Rig::new();
@@ -382,8 +359,6 @@ fn frames_advance_at_their_delays() {
     assert_eq!(rig.position("app:///a.png"), (0, 1, true));
 }
 
-/// Two draws of one URL, in two views, are one playhead: a describe from
-/// either moves both, and both answer the same frame.
 #[test]
 fn two_draws_share_one_playhead() {
     let rig = Rig::new();
@@ -406,7 +381,6 @@ fn two_draws_share_one_playhead() {
     assert_eq!((moved.generation, seen.generation), (1, 1));
     assert_eq!(moved.descriptor, seen.descriptor, "one bitmap for both");
 
-    // One view stops drawing it: the other still does, so it runs on.
     first.retain(&[]);
     rig.settle_held("app:///a.png", &[1, 2, 3]);
     rig.set(ms(200));
@@ -414,9 +388,6 @@ fn two_draws_share_one_playhead() {
     assert_eq!(rig.position("app:///a.png"), (2, 0, true));
 }
 
-/// A picture no view draws stops: its frames are dropped, time does not
-/// pass for it, and drawn again it continues from the frame it stopped on
-/// for the time that frame had left.
 #[test]
 fn a_picture_not_drawn_stops_and_resumes_on_the_same_frame() {
     let rig = Rig::new();
@@ -452,8 +423,6 @@ fn a_picture_not_drawn_stops_and_resumes_on_the_same_frame() {
         Some(rig.start + ms(60_040)),
         "the 40 ms frame 1 had left"
     );
-    // Its pixels were dropped: the store answers the bitmap it was, for the
-    // painter to draw from its upload.
     assert!(resumed.pixels.is_none());
     assert_eq!(
         rig.decoder.forgotten.load(Ordering::SeqCst),
@@ -462,10 +431,6 @@ fn a_picture_not_drawn_stops_and_resumes_on_the_same_frame() {
     );
 }
 
-/// A frame that is due and not decoded is waited for: the playhead stays,
-/// the next change stays the past instant, no timer is armed for it, and the
-/// decode's completion wakes the host; the frame then shows for its whole
-/// delay.
 #[test]
 fn a_frame_not_decoded_when_due_is_waited_for() {
     let rig = Rig::new();
@@ -502,9 +467,6 @@ fn a_frame_not_decoded_when_due_is_waited_for() {
     );
 }
 
-/// The timer the store arms on its executor wakes the host once per change
-/// of frame: never while the playhead waits for nothing, and once for each
-/// frame that comes due.
 #[test]
 fn the_timer_wakes_the_host_once_per_change() {
     let rig = Rig::new();
@@ -517,15 +479,11 @@ fn the_timer_wakes_the_host_once_per_change() {
     );
     let source = url("app:///a.png");
     view.describe(&source, HINT).expect("drawn");
-    // Every frame of a three-frame file stays held: nothing more decodes.
     rig.settle_held("app:///a.png", &[1, 2]);
 
     let mut at = 0;
     for generation in 1..=4 {
         let before = rig.wakeups.load(Ordering::SeqCst);
-        // Real time passes on the executor's timer; the playheads' clock is
-        // the test's, moved to the instant the timer was armed for once it
-        // has woken the host.
         let deadline = Instant::now() + Duration::from_secs(30);
         while rig.wakeups.load(Ordering::SeqCst) == before {
             assert!(Instant::now() < deadline, "the timer never woke the host");
@@ -552,8 +510,6 @@ fn the_timer_wakes_the_host_once_per_change() {
     );
 }
 
-/// A file that states a count plays exactly that many loops; then the last
-/// frame stays, at the same generation, with no next change and no timer.
 #[test]
 fn after_the_stated_loops_the_last_frame_stays() {
     let rig = Rig::new();
@@ -574,15 +530,12 @@ fn after_the_stated_loops_the_last_frame_stays() {
         image = view.describe(&source, HINT).expect("drawn");
         changes.push((next.duration_since(rig.start).as_millis(), image.generation));
     }
-    // Red 5 ms plays as 100 ms; green 200 ms; blue 300 ms; twice.
     assert_eq!(
         changes,
         [(100, 1), (300, 2), (600, 3), (700, 4), (900, 5), (1200, 5)]
     );
     assert_eq!(colour(&image), BLUE, "the last frame stays shown");
     assert_eq!(rig.position("app:///rgb.png"), (2, 2, true));
-    // The timers armed on the way, each for at most 300 ms of real time,
-    // have fired by now; a finished playhead arms none.
     std::thread::sleep(ms(600));
     crate::images::service(&rig.resources);
     let before = rig.wakeups.load(Ordering::SeqCst);
@@ -597,9 +550,6 @@ fn after_the_stated_loops_the_last_frame_stays() {
     assert_eq!(rig.wakeups.load(Ordering::SeqCst), before, "no timer");
 }
 
-/// While drawn, a source holds the frame shown and the two after it, and
-/// the frame shown is let go once the rasterizer holds its upload; a frame
-/// shown again later is decoded again.
 #[test]
 fn a_drawn_source_holds_a_bounded_window_of_frames() {
     let rig = Rig::new();
@@ -636,7 +586,6 @@ fn a_drawn_source_holds_a_bounded_window_of_frames() {
         rig.resources.memory_used_bytes()
             <= 3 * 8 * 8 * 4 + rig.resources.local.borrow().residency.encoded_bytes() + 8 * 8 * 4
     );
-    // A frame wanted after its pixels went is decoded again.
     let decodes = rig.decoder.decoded().len();
     view.want(&source, HINT);
     rig.settle("frame 3 was never decoded again", || {
@@ -646,8 +595,6 @@ fn a_drawn_source_holds_a_bounded_window_of_frames() {
     assert_eq!(rig.decoder.decoded().last(), Some(&3));
 }
 
-/// A frame that fails to decode stops the playhead where it is: no next
-/// change, so the painter stops asking, and the failure is noted.
 #[test]
 fn a_frame_that_fails_to_decode_stops_the_playhead() {
     let rig = Rig::new();
@@ -669,8 +616,6 @@ fn a_frame_that_fails_to_decode_stops_the_playhead() {
     assert_eq!(colour(&image), RED);
 }
 
-/// A still image is not an animation: generation zero, no next change, and
-/// no frame decode beyond its load.
 #[test]
 fn a_still_image_is_untouched() {
     let rig = Rig::new();
@@ -691,9 +636,6 @@ fn a_still_image_is_untouched() {
     assert_eq!(rig.decoder.decoded(), [0]);
 }
 
-/// A presenting painter draws two frames of one file with no commit
-/// between them: the first with the commit, the second at the next
-/// adoption once the playheads' clock has reached its due instant.
 #[test]
 fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
     use terminus::link::painter::{DrawTarget, GesturePolicy, Painter};
@@ -768,7 +710,6 @@ fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
     let commit = painter.frame().map(|frame| frame.commit_id());
     rig.settle_held(SRC, &[1, 2]);
 
-    // Turns before the frame is due change nothing, and wait for nothing.
     let _ = painter.take_redraw();
     for _ in 0..3 {
         crate::images::service(&rig.resources);
@@ -782,7 +723,6 @@ fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
     }
     goldens.assert_matches(&["animated", "first-frame"], &capture(&mut painter));
 
-    // Red's 5 ms plays as 100 ms.
     rig.set(ms(100));
     crate::images::service(&rig.resources);
     let current = painter.frame().cloned();
@@ -797,14 +737,10 @@ fn a_painter_draws_two_frames_of_one_file_with_no_commit_between() {
     goldens.assert_matches(&["animated", "second-frame"], &capture(&mut painter));
 }
 
-// --- `Id` pictures: a playhead of the picture's own ------------------------
-
-/// Three frames of 100, 200 and 300 ms whose file says forever.
 fn rgb_forever() -> Vec<u8> {
     apng(0, &[(RED, 100), (GREEN, 200), (BLUE, 300)])
 }
 
-/// An element's policy: `plays` times (zero: forever), paused or not.
 fn policy(plays: u32, paused: bool) -> PlayPolicy {
     PlayPolicy {
         loops: Loops::from_plays(plays),
@@ -812,8 +748,6 @@ fn policy(plays: u32, paused: bool) -> PlayPolicy {
     }
 }
 
-/// Asks `view`'s store to play `source` into a new picture under `policy`,
-/// and answers the picture.
 fn play(view: &ViewResources<PngPlatform>, source: &str, policy: PlayPolicy) -> PictureId {
     let picture = PictureId::new();
     view.request_playback(PlaybackRequest::Play {
@@ -835,9 +769,6 @@ impl Rig {
     }
 }
 
-/// What the painter takes out of `picture`'s slot after describing it at
-/// the test's clock: the colour of the newest frame, if a new one was
-/// published, and the description.
 fn adopt(view: &ViewResources<PngPlatform>, picture: PictureId) -> (Option<[u8; 4]>, FrameImage) {
     let image = view
         .describe(&PictureKey::Id(picture), HINT)
@@ -850,7 +781,6 @@ fn adopt(view: &ViewResources<PngPlatform>, picture: PictureId) -> (Option<[u8; 
     (taken, image)
 }
 
-/// The playback reports `inbox` holds, in order.
 fn reports(inbox: &ImageInbox) -> Vec<(PictureId, PlaybackReport)> {
     inbox
         .drain()
@@ -862,10 +792,6 @@ fn reports(inbox: &ImageInbox) -> Vec<(PictureId, PlaybackReport)> {
         .collect()
 }
 
-/// An `Id` picture plays its own count, not the file's: each frame is
-/// published once at its due instant, each loop is reported, the final one
-/// after it, and the last frame stays with no next change. The URL's own
-/// playhead is untouched.
 #[test]
 fn an_id_picture_plays_its_own_count_and_reports_every_loop() {
     let rig = Rig::new();
@@ -922,9 +848,6 @@ fn an_id_picture_plays_its_own_count_and_reports_every_loop() {
     );
 }
 
-/// Two pictures of one URL each have a playhead of their own, while their
-/// frames are decoded once: one paused on the first frame, the other
-/// playing.
 #[test]
 fn two_pictures_of_one_url_play_apart_over_one_set_of_frames() {
     let rig = Rig::new();
@@ -959,10 +882,6 @@ fn two_pictures_of_one_url_play_apart_over_one_set_of_frames() {
     assert_eq!(reports(&inbox), []);
 }
 
-/// The four controls: a pause keeps the frame shown and a resume
-/// continues from it; a stop keeps the frame shown and a resume shows the
-/// first frame; a restart shows the first frame from any state; a resume
-/// after the final loop plays the count again. None reports a loop.
 #[test]
 fn controls_drive_the_pictures_playhead() {
     let rig = Rig::new();
@@ -1050,8 +969,6 @@ fn controls_drive_the_pictures_playhead() {
     assert!(reports(&inbox).is_empty(), "no control reports a loop");
 }
 
-/// A picture no view draws does not advance and reports nothing, however
-/// long it waits; and one that ends lets go of what it held.
 #[test]
 fn a_picture_not_drawn_waits_and_one_that_ends_lets_go() {
     let rig = Rig::new();
@@ -1094,12 +1011,10 @@ fn a_picture_not_drawn_waits_and_one_that_ends_lets_go() {
     );
     assert!(view.describe(&PictureKey::Id(picture), HINT).is_none());
     assert!(view.take_frame(picture).is_none());
-    // A drawn set still naming it changes nothing.
     view.retain(&[PictureKey::Id(picture)]);
     assert_eq!(rig.held("app:///a.png"), [] as [usize; 0]);
 }
 
-/// A view that goes ends the pictures it asked to play.
 #[test]
 fn a_view_that_goes_ends_its_pictures() {
     let rig = Rig::new();
@@ -1119,8 +1034,6 @@ fn a_view_that_goes_ends_its_pictures() {
     );
 }
 
-/// A source the store does not animate plays nothing: a still image's
-/// picture has no frame, and asks for no decode.
 #[test]
 fn a_still_source_plays_nothing() {
     let rig = Rig::new();

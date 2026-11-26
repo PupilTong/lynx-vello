@@ -99,36 +99,21 @@ use terminus::link::{CustomElement, NodeId, ShadowRootMode};
 
 use super::{ComponentEvents, LynxDocument, PAGE_TAG};
 
-/// Native's tag, and the JSX tag a compiled card writes.
 pub(super) const FRAME_TAG: &str = "frame";
 
-/// The part name web-core's nested page carries (`web-core/css/index.css`,
-/// `[part="page"]`).
 const PAGE_PART: &str = "page";
 
-/// How many frames deep a nested page may be read, counting the frame
-/// itself: what lets a card that embeds itself stop instead of recursing
-/// without bound.
 pub(crate) const MAX_FRAME_DEPTH: usize = 8;
 
-/// The frame's own rules; see the module documentation. The `auto-width`
-/// rule comes last at the same specificity, so a frame with both attributes
-/// takes its `contain: layout paint style`.
 pub(super) const UA_RULES: &str = r#"frame { display: flex; contain: strict; }
 frame[auto-height]:not([auto-height="false"]) { contain: inline-size layout paint style; }
 frame[auto-width]:not([auto-width="false"]) { contain: layout paint style; }
 "#;
 
-/// Installs the component, over the queue its connections go on. Must run
-/// before any element could carry the tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(FRAME_TAG, Box::new(Frame { events }));
 }
 
-/// The frame component: an open shadow root with the nested page in it,
-/// built when the element is constructed, so the element is new and
-/// detached when it gains them; and its connections, queued.
 struct Frame {
     events: ComponentEvents,
 }
@@ -148,9 +133,6 @@ impl CustomElement<()> for Frame {
     }
 }
 
-/// Appends a fresh nested page to the frame's shadow root `shadow` and
-/// answers it: the one the first card renders under, built with the element,
-/// and the one each later card does, built by [`reset_frame`].
 fn append_nested_page(document: &mut LynxDocument, shadow: NodeId) -> NodeId {
     let page = document.create_element(PAGE_TAG, ());
     document.set_attribute(page, "part", PAGE_PART);
@@ -158,14 +140,6 @@ fn append_nested_page(document: &mut LynxDocument, shadow: NodeId) -> NodeId {
     page
 }
 
-/// Lets go of the card the frame `frame` shows: frees its nested page with
-/// everything under it — the page is inside a shadow tree, so
-/// [`terminus::link::Document::drop_element`] frees the whole subtree outright, and
-/// each freed node takes its listener rows and its intersection
-/// registrations with it through the document's free path — and every sheet
-/// mounted on the frame's shadow root, so the next card is styled by its
-/// own alone; then builds a fresh nested page for that card. Answers the new
-/// page, or `None`, changing nothing, for a node that is not a live frame.
 pub(crate) fn reset_frame(document: &mut LynxDocument, frame: NodeId) -> Option<NodeId> {
     let page = nested_page(document, frame)?;
     let shadow = document
@@ -176,7 +150,6 @@ pub(crate) fn reset_frame(document: &mut LynxDocument, frame: NodeId) -> Option<
     Some(append_nested_page(document, shadow))
 }
 
-/// Whether `node` is a live `frame` element.
 pub(crate) fn is_frame(document: &LynxDocument, node: NodeId) -> bool {
     document
         .get(node)
@@ -184,8 +157,6 @@ pub(crate) fn is_frame(document: &LynxDocument, node: NodeId) -> bool {
         .is_some_and(|tag| tag == FRAME_TAG)
 }
 
-/// The nested page of the frame `frame`: the first element child of its
-/// shadow root. `None` for a node that is not a live frame.
 pub(crate) fn nested_page(document: &LynxDocument, frame: NodeId) -> Option<NodeId> {
     if !is_frame(document, frame) {
         return None;
@@ -198,9 +169,6 @@ pub(crate) fn nested_page(document: &LynxDocument, frame: NodeId) -> Option<Node
         .map(terminus::link::Node::id)
 }
 
-/// How many frames `node` sits in, itself included: every frame among its
-/// shadow-including inclusive ancestors. A shadow root's parent is its host
-/// here, so the parent chain crosses every shadow boundary.
 pub(crate) fn frame_depth(document: &LynxDocument, node: NodeId) -> usize {
     let mut depth = 0;
     let mut current = Some(node);
@@ -215,7 +183,7 @@ pub(crate) fn frame_depth(document: &LynxDocument, node: NodeId) -> usize {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::stylo::values::computed::Display;
     use terminus::link::{NodeId, ShadowRootMode};
@@ -248,8 +216,6 @@ mod tests {
         }
     }
 
-    /// The nested page is built with the element, detached or not, and is
-    /// the shadow root's one child: a `page` with web-core's `part`.
     #[test]
     fn a_frame_is_constructed_with_its_nested_page() {
         let mut document = document();
@@ -264,10 +230,6 @@ mod tests {
         assert_eq!(nested_page(&document, view), None, "a view is no frame");
     }
 
-    /// A reset frees the nested page with everything under it, empties the
-    /// shadow root's sheets, and builds the next card a page of its own: a
-    /// different node, the shadow root's one child again, with the same tag
-    /// and `part`. A node that is no frame is left alone.
     #[test]
     fn a_reset_frees_the_nested_page_and_builds_the_next() {
         let mut document = document();
@@ -302,8 +264,6 @@ mod tests {
         assert!(document.get(view).is_some());
     }
 
-    /// Strict containment: what renders inside sizes nothing. The page's
-    /// column still stretches the frame across it.
     #[test]
     fn a_frames_content_does_not_size_it() {
         let mut document = document();
@@ -315,8 +275,6 @@ mod tests {
         assert_eq!((size.width, size.height), (393.0, 0.0));
     }
 
-    /// The shadow root has no slot, so a light child is assigned nowhere and
-    /// generates no box.
     #[test]
     fn a_frames_light_children_do_not_render() {
         let mut document = document();
@@ -329,8 +287,6 @@ mod tests {
         );
     }
 
-    /// The nested page fills the frame: the UA sheet's `page` rule is
-    /// web-core's `[part="page"]`.
     #[test]
     fn the_nested_page_fills_the_frame() {
         let mut document = document();
@@ -341,8 +297,6 @@ mod tests {
         assert_eq!((size.width, size.height), (100.0, 50.0));
     }
 
-    /// Both values of `defaultDisplayLinear`, which decides the nested page's
-    /// own display and so how its content measures.
     fn under_either_switch() -> impl Iterator<Item = (bool, LynxDocument)> {
         [true, false].into_iter().map(|linear| {
             (
@@ -355,8 +309,6 @@ mod tests {
         })
     }
 
-    /// A frame under `parent` with `style` and `attributes`, and one view of
-    /// `content` in its nested page; the frame and its nested page.
     fn frame_holding(
         document: &mut LynxDocument,
         parent: NodeId,
@@ -373,17 +325,10 @@ mod tests {
         (frame, page)
     }
 
-    /// A flex container under the page with `style`. The page's own display
-    /// follows `defaultDisplayLinear` (a vertical linear box, or a row flex
-    /// container that stretches a child's height), so the tests that run
-    /// under either switch place the frame in a container of their own and
-    /// let the switch decide only the nested page's display.
     fn container(document: &mut LynxDocument, style: &str) -> NodeId {
         child(document, "view", &format!("display: flex; {style}"))
     }
 
-    /// A row that does not stretch: a frame in it is sized by its own
-    /// contribution on both axes.
     fn row(document: &mut LynxDocument) -> NodeId {
         container(document, "flex-direction: row; align-items: flex-start")
     }
@@ -393,8 +338,6 @@ mod tests {
         (size.width, size.height)
     }
 
-    /// `auto-height`: the nested card's content sizes the frame's height,
-    /// and the page, `height: 100%` of an indefinite height, takes it too.
     #[test]
     fn an_auto_height_frame_takes_its_contents_height() {
         for (linear, mut document) in under_either_switch() {
@@ -412,7 +355,6 @@ mod tests {
         }
     }
 
-    /// `__SetAttribute` writes `false` as the string `"false"`, which is off.
     #[test]
     fn auto_height_false_is_off() {
         let mut document = document();
@@ -428,7 +370,6 @@ mod tests {
         assert_eq!(size_of(&document, frame), (300.0, 0.0));
     }
 
-    /// An author height is a definite height, which content does not move.
     #[test]
     fn an_author_height_wins_over_auto_height() {
         let mut document = document();
@@ -445,8 +386,6 @@ mod tests {
         assert_eq!(size_of(&document, nested), (300.0, 50.0));
     }
 
-    /// `auto-width`: where nothing stretches it, the nested card's content
-    /// width is the frame's, and the page's `width: 100%` follows it.
     #[test]
     fn an_auto_width_frame_takes_its_contents_width() {
         for (linear, mut document) in under_either_switch() {
@@ -464,7 +403,6 @@ mod tests {
         }
     }
 
-    /// Both attributes: the content's size on both axes.
     #[test]
     fn a_frame_with_both_attributes_takes_its_contents_size() {
         for (linear, mut document) in under_either_switch() {
@@ -482,10 +420,6 @@ mod tests {
         }
     }
 
-    /// A stretched width is a definite one, which wins over `auto-width` as
-    /// native's `EXACTLY` measure mode does. With no author height, the
-    /// frame also takes its content's height: CSS has no containment of the
-    /// height alone, where native would leave the frame 0 tall.
     #[test]
     fn a_stretched_auto_width_frame_keeps_the_stretched_width() {
         for (linear, mut document) in under_either_switch() {
@@ -503,8 +437,6 @@ mod tests {
         }
     }
 
-    /// The same on the other axis: a row stretches an `auto-height` frame's
-    /// height to its own, and the content does not move it.
     #[test]
     fn a_stretched_auto_height_frame_keeps_the_stretched_height() {
         for (linear, mut document) in under_either_switch() {
@@ -526,8 +458,6 @@ mod tests {
         }
     }
 
-    /// `preset-height` is native's nested viewport before the first content
-    /// rect, a window this engine does not have: it sizes nothing.
     #[test]
     fn preset_height_has_no_effect() {
         let mut document = document();
@@ -543,8 +473,6 @@ mod tests {
         assert_eq!(size_of(&document, frame), (393.0, 0.0));
     }
 
-    /// The attribute rules restyle: adding `auto-height` sizes the frame by
-    /// its content and removing it again puts it back at 0.
     #[test]
     fn toggling_auto_height_relayouts_the_frame() {
         let mut document = document();
@@ -569,8 +497,6 @@ mod tests {
         assert_eq!(size_of(&document, frame), (300.0, 0.0), "\"false\"");
     }
 
-    /// What the component queued since the last call, as `(node,
-    /// connected)`.
     fn queued(events: &ComponentEvents) -> Vec<(terminus::link::NodeId, bool)> {
         events
             .take()
@@ -582,9 +508,6 @@ mod tests {
             .collect()
     }
 
-    /// Each connection and each disconnection is one queued event, a frame
-    /// inside another frame's nested page included; a detached frame queues
-    /// nothing.
     #[test]
     fn connecting_and_disconnecting_a_frame_queues_one_event_each() {
         let (mut document, events) = with_component_events(PageConfig::default());

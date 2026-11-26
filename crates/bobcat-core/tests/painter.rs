@@ -15,16 +15,12 @@ use std::time::{Duration, Instant};
 use bobcat_core::{DrawTarget, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources};
 use support::{FetcherDouble, tick, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 const SCRIPT_URL: &str = "app:///main.js";
 const IMAGE_URL: &str = "https://example.test/pixel.png";
 
-/// A page filling the 32x24 viewport with one flat colour, so which document
-/// a painter is showing is one pixel away.
 fn page(color: &str) -> Vec<u8> {
     format!(
         r"
@@ -39,9 +35,6 @@ globalThis.renderPage = function renderPage() {{
     .into_bytes()
 }
 
-/// The same page, filled by a 1x1 image the host serves rather than by a
-/// colour: the top-left pixel then answers what the painter read out of that
-/// view's store, not what the frame encoded by itself.
 fn image_page() -> Vec<u8> {
     format!(
         r#"
@@ -76,9 +69,6 @@ async fn group() -> LynxGroup {
         .expect("the group starts")
 }
 
-/// A view has at most one interactive painter. The second is refused rather
-/// than silently taking the first's place, because two painters drawing one
-/// document would each be routing input against a frame the other consumed.
 #[tokio::test]
 async fn a_second_painter_on_one_view_is_refused() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -110,9 +100,6 @@ async fn a_second_painter_on_one_view_is_refused() {
     assert!(first.is_attached(), "while the first still observes it");
 }
 
-/// Detaching releases the view, and a fresh painter then shows the same
-/// committed frame: the document is the view's, and a painter is only ever
-/// looking at it.
 #[tokio::test]
 async fn a_detached_view_can_be_painted_by_another_painter() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -154,10 +141,6 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
     );
 }
 
-/// A view dropped under an attached painter is not an error anywhere. The
-/// painter notices on its next turn, keeps what it drew, and goes on being
-/// capturable — which is what lets a host tear a page down while its pixels
-/// stay on screen.
 #[tokio::test]
 async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -198,10 +181,6 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
     );
 }
 
-/// The same law at the one place it costs something: a frame's pixels are the
-/// view's, read out of its store, and the store goes when the view does. What
-/// the painter adopted it adopted whole — frame and bitmaps together — so the
-/// image is still there to draw once nothing can be read any more.
 #[tokio::test]
 async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
     let images = Rc::new(prime_radiant::TestImages::new());
@@ -228,9 +207,6 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
     painter.attach(&view).expect("a fresh view takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
 
-    // The store's retain log is written by the painter's own resolve pass, so
-    // a non-empty working set is a committed frame that draws the image and a
-    // painter that has read its pixels.
     let deadline = Instant::now() + Duration::from_secs(30);
     while !images.retained().iter().any(|set| !set.is_empty()) {
         let _ = view.pump();
@@ -261,8 +237,6 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
     );
 }
 
-/// The image page with a hook: `updatePage({ style })` restyles the box and
-/// flushes, which commits a frame that still draws the image.
 fn restyled_image_page() -> Vec<u8> {
     format!(
         r#"
@@ -282,8 +256,6 @@ globalThis.updatePage = function updatePage(data) {{
     .into_bytes()
 }
 
-/// A view of `page` serving `images`, with an offscreen painter attached and
-/// its entry module booted.
 async fn image_view(
     group: &LynxGroup,
     page: Vec<u8>,
@@ -312,7 +284,6 @@ async fn image_view(
     (view, painter)
 }
 
-/// Takes turns of both until `done` answers true.
 fn turn_until(
     view: &mut bobcat_core::LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -327,7 +298,6 @@ fn turn_until(
     }
 }
 
-/// How many reads the store has answered for the image.
 fn image_reads(images: &prime_radiant::TestImages) -> usize {
     images
         .reads()
@@ -336,8 +306,6 @@ fn image_reads(images: &prime_radiant::TestImages) -> usize {
         .count()
 }
 
-/// Restyles the page's box and turns until a frame of the new style is
-/// adopted: the store's working set is told once per adopted commit.
 fn restyle(
     view: &mut bobcat_core::LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -352,10 +320,6 @@ fn restyle(
     });
 }
 
-/// One copy of a bitmap: once the rasterizer holds the image's upload, the
-/// store is told it may drop its pixels, the painter keeps no reference of
-/// its own, and later commits that still draw the image describe it and draw
-/// it from the upload without reading it.
 #[tokio::test]
 async fn a_bitmap_the_rasterizer_holds_is_released_and_drawn_from_its_upload() {
     let images = Rc::new(prime_radiant::TestImages::releasing());
@@ -404,9 +368,6 @@ async fn a_bitmap_the_rasterizer_holds_is_released_and_drawn_from_its_upload() {
     assert!(!images.holds_pixels(IMAGE_URL));
 }
 
-/// A commit that draws the released image with another sampler —
-/// `image-rendering: pixelated` — draws it from the one upload the
-/// rasterizer holds and reads nothing back.
 #[tokio::test]
 async fn a_draw_with_another_sampler_draws_the_released_image_from_its_upload() {
     let images = Rc::new(prime_radiant::TestImages::releasing());
@@ -435,10 +396,6 @@ async fn a_draw_with_another_sampler_draws_the_released_image_from_its_upload() 
     assert_eq!(images.released().len(), 1, "released once");
 }
 
-/// A scroller over two rows drawing one image, the second row with
-/// `image-rendering: pixelated`, so the image is drawn with two samplers. The
-/// second row is below the scrollport: committed, since the encode window
-/// reaches it, but not drawn. `updatePage({ rows })` resizes both rows.
 fn two_sampler_page() -> Vec<u8> {
     format!(
         r#"
@@ -470,10 +427,6 @@ globalThis.updatePage = function updatePage(data) {{
     .into_bytes()
 }
 
-/// A source drawn with two samplers is one upload: its pixels are released
-/// once that upload exists, while one of its draws is committed but never
-/// rendered, and that draw, once rendered, draws from the same upload with
-/// no read.
 #[tokio::test]
 async fn an_image_drawn_with_two_samplers_is_one_upload_released_once_it_exists() {
     let images = Rc::new(prime_radiant::TestImages::releasing());
@@ -516,12 +469,6 @@ async fn an_image_drawn_with_two_samplers_is_one_upload_released_once_it_exists(
     assert_eq!(images.released().len(), 1, "released once");
 }
 
-/// The browser's shape: one painter over one canvas, pointed at a second view
-/// when the page changes.
-///
-/// The reset is what this pins. Commit ids restart at one per document, so a
-/// painter that kept the previous page's retained key would answer the new
-/// page's first frame with the old page's pixels.
 #[tokio::test]
 async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
     let mut painter = offscreen_painter().await;
@@ -544,9 +491,6 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
     tick(&mut painter, true).expect("the first page's frame");
     assert_eq!(top_left(&mut painter), RED);
 
-    // A page is a group of its own, exactly as the browser embedder builds
-    // one: the entry module is registered on the group's script runtime, so a
-    // second page cannot reuse the first's.
     painter.detach();
     drop(first);
     drop(first_group);
@@ -581,12 +525,6 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
     );
 }
 
-/// The same change of page without the `detach()` in the middle: a host that
-/// drops a view and attaches the next one straight away.
-///
-/// A link whose view has gone is not an attachment, so this is accepted — and
-/// what the painter kept of the old page is dropped by the attach itself,
-/// which is the only thing on this path that clears it.
 #[tokio::test]
 async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
     let mut painter = offscreen_painter().await;
@@ -607,8 +545,6 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
     tick(&mut painter, true).expect("the first page's frame");
     assert_eq!(top_left(&mut painter), RED);
 
-    // No `detach`, and no turn in between either: the painter has not yet
-    // taken one on which it could have noticed.
     drop(first);
     drop(first_group);
 
@@ -626,10 +562,6 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
     painter
         .attach(&second)
         .expect("a painter whose view has gone is not an attached one");
-    // The first page's frame went with its view: a capture now either finds
-    // nothing to draw, or — when the second page's boot on its own thread has
-    // already committed, which attaching's metrics release — the second
-    // page. Never the first: that is what `attach`'s reset is for.
     match painter.capture() {
         Err(_) => {}
         Ok(shot) => assert_eq!(
@@ -647,12 +579,6 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
     );
 }
 
-/// The same again with one turn in between, which is the path where the
-/// auto-detach has already run.
-///
-/// That one releases the link and keeps everything composed from it, so
-/// `attach`'s own reset is the only thing that drops the old page's compose
-/// key — and without it the new page's first frame would look already drawn.
 #[tokio::test]
 async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
     let mut painter = offscreen_painter().await;
@@ -709,11 +635,6 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
     );
 }
 
-/// A 64x64 page holding one 24x24 blurred black box.
-///
-/// Sigma 4 against a 24 px box leaves the centre saturated (the box is six
-/// sigma across), so the fall-off across a border is the clean one-dimensional
-/// profile the assertions below read.
 fn blurred_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -731,13 +652,6 @@ globalThis.renderPage = function renderPage() {
     .to_vec()
 }
 
-/// `filter: blur()` reaches the embedder's own painter: a blurred box's ink
-/// leaves its border box, and the fall-off is symmetric about the border.
-///
-/// The bake is a pre-step of `compose_and_render`, so this is the one test
-/// that proves an embedder gets it — `terminus`'s own pixel tests drive the
-/// headless renderer directly and would pass with the painter never calling
-/// `prepare_filters` at all.
 #[tokio::test]
 async fn a_blurred_box_reaches_the_embedder_painter() {
     let group = group().await;
@@ -761,8 +675,6 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);
 
-    // The box is (20, 20)-(44, 44); its centre is (32, 32) and its right
-    // border is x = 44.
     assert!(luma(32, 32) < 8, "the box keeps its ink ({})", luma(32, 32));
     assert!(
         luma(50, 32) < 250,
@@ -774,7 +686,6 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
         "but effectively none past 4 sigma ({})",
         luma(61, 32),
     );
-    // The border is at x = 44.0, so pixels 43 and 44 are the symmetric pair.
     for distance in 0..=9_usize {
         let inside = luma(43 - distance, 32);
         let outside = luma(44 + distance, 32);
@@ -786,11 +697,6 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
     }
 }
 
-/// A 64x64 page: an opaque white ground, a black left half, and one 32x32
-/// box over the seam carrying `backdrop-filter: blur(5px)`.
-///
-/// The page paints its ground itself; [`blur_view_page`] leaves it to the
-/// painter's canvas.
 fn backdrop_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -814,13 +720,6 @@ globalThis.renderPage = function renderPage() {
     .to_vec()
 }
 
-/// `backdrop-filter` reaches the embedder's own painter: the black/white seam
-/// is a gradient inside the element's border box and a step beside it.
-///
-/// Same argument as the blur test above — the bake is a pre-step of
-/// `compose_and_render`, and `terminus`'s own pixel tests drive the headless
-/// renderer directly, so this is the one test that proves an embedder gets a
-/// backdrop at all.
 #[tokio::test]
 async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
     let group = group().await;
@@ -844,8 +743,6 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);
 
-    // The box is (16, 16)-(48, 48) and the seam is x = 32. Inside the box the
-    // seam rises monotonically; above the box it is one step.
     let profile: Vec<i32> = (18..=46).map(|x| luma(x, 32)).collect();
     for pair in profile.windows(2) {
         assert!(
@@ -867,10 +764,6 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
     );
 }
 
-/// A 128x240 page that paints no ground: a black left half over the
-/// painter's bare canvas, and three 80x56 `<blur-view blur-radius="5">`s
-/// centred on the seam — one plain, one rotated by its own `transform`, one
-/// inside a wrapper that carries the rotation.
 fn blur_view_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -902,16 +795,6 @@ globalThis.renderPage = function renderPage() {
     .to_vec()
 }
 
-/// A `<blur-view>` over a coloured box's edge on the painter's bare canvas
-/// blurs that edge on both sides, with or without a transform on the view or
-/// on an ancestor of it.
-///
-/// The canvas is the colour the painter clears its target to, which no page
-/// content draws; filter-effects-2 puts it in the document root's Backdrop
-/// Root Image, so the view's bake has to render over it. Without it the
-/// blurred copy of the black half fades to transparency toward the canvas
-/// and the half's own sharp edge shows through, which reads here as a profile
-/// that stays black up to the seam.
 #[tokio::test]
 async fn a_blur_view_over_the_bare_canvas_blurs_an_edge_on_both_sides() {
     let group = group().await;
@@ -935,8 +818,6 @@ async fn a_blur_view_over_the_bare_canvas_blurs_an_edge_on_both_sides() {
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 128 + x) * 4]);
 
-    // The seam is x = 64.0, so 63 and 64 are the symmetric pair, and each
-    // view's centre row crosses it well inside the view.
     for (label, row) in [
         ("plain", 40),
         ("rotated", 120),
@@ -965,8 +846,6 @@ async fn a_blur_view_over_the_bare_canvas_blurs_an_edge_on_both_sides() {
     );
 }
 
-/// A page that flushes and says so whenever the host updates its data, which
-/// is how a test watches a flush return.
 fn flushing_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -984,13 +863,6 @@ globalThis.updatePage = function updatePage(data) {
     .to_vec()
 }
 
-/// Only the *first* binding is waited for: once a painter has named this
-/// view's metrics, detaching it does not make a later `__FlushElementTree`
-/// park again.
-///
-/// Without that rule a view moved to the background would stop on its next
-/// flush and, because a parked job holds the whole engine thread's queue,
-/// take every other view in its group with it.
 #[tokio::test]
 async fn a_flush_after_the_painter_detached_does_not_park() {
     let group = group().await;
@@ -1039,12 +911,6 @@ async fn a_flush_after_the_painter_detached_does_not_park() {
 
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 
-/// A red box that a timer armed from a timer the page armed logs `after
-/// boot` for and turns green.
-///
-/// Nested because a realm runs the timers that are due before it reports the
-/// boot it finished, so the outer one may run ahead of `ScriptFinished`; the
-/// one it arms comes due in a later turn of the view's, after boot's end.
 fn after_boot_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -1064,15 +930,6 @@ globalThis.renderPage = function renderPage() {
     .to_vec()
 }
 
-/// A host that took no turn while boot finished and the page went on gets
-/// both in its next turn, and `wait_for_script` answers with what that turn
-/// reported after boot's end rather than dropping it.
-///
-/// A test thread the OS leaves unscheduled under parallel load takes that
-/// turn. Here the painter's turns stand in for the time it spent: they take
-/// none of the view's, so the view's reports wait in its channel until the
-/// green box says the inner timer has run, and only then does the wait take
-/// the view's first turn.
 #[tokio::test]
 async fn wait_for_script_answers_with_what_the_turn_that_ended_boot_reported_after_it() {
     let group = group().await;

@@ -80,7 +80,6 @@ const PAGE_CSS: &str = "page { display: linear; }
 
 const TAG: &str = "x-row";
 
-/// Minimal lifecycle handler used to isolate framework overhead.
 struct Inert;
 
 impl CustomElement<()> for Inert {

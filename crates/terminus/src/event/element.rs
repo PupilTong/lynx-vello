@@ -112,41 +112,20 @@
 use super::{EventDetail, EventSteps};
 use crate::tree::document::{Document, NodeId};
 
-/// Which pass of the walk a delivery belongs to — DOM's `Event.eventPhase`,
-/// minus the `NONE` an event that is not being dispatched reports.
-///
-/// There is no `NONE` here because an [`ElementEvent`] exists only for the
-/// length of one dispatch: it is created by the walk and borrowed out to each
-/// handler, and nothing can hold one past the end.
-///
-/// <https://dom.spec.whatwg.org/#dom-event-eventphase>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventPhase {
-    /// Root inward, above the target.
     Capturing = 1,
-    /// The target itself, or a host standing in for a node inside its shadow
-    /// tree. Delivered once, whatever `bubbles` says.
     AtTarget = 2,
-    /// Target outward, above the target. Absent when the event does not
-    /// bubble.
     Bubbling = 3,
 }
 
 impl EventPhase {
-    /// The DOM constant, for a consumer that reports the number.
     #[must_use]
     pub fn value(self) -> u16 {
         self as u16
     }
 }
 
-/// One in-flight dispatch, as the handler on each step sees it.
-///
-/// The read half is the DOM event interface this crate can answer — `type`,
-/// `target`, `currentTarget`, `eventPhase` — and the write half is the two
-/// stop methods. There is no `preventDefault`: nothing on this path is
-/// cancelable, because the engine decides the event *after* the fact it
-/// reports has already happened.
 #[derive(Debug)]
 pub struct ElementEvent<'a> {
     type_name: &'static str,
@@ -155,48 +134,31 @@ pub struct ElementEvent<'a> {
     target: NodeId,
     current_target: NodeId,
     phase: EventPhase,
-    /// Copied into the walk's one stop flag when the handler returns: an
-    /// event object lives for one handler call, the flag for the dispatch.
     stopped: bool,
-    /// Set by [`Self::stop_immediate_propagation`] alone.
     immediate: bool,
 }
 
 impl ElementEvent<'_> {
-    /// The event's type, as the web platform spells it: `slotchange`,
-    /// `pointerdown`, `contentvisibilityautostatechange`. The identity a
-    /// handler matches on.
     #[must_use]
     pub fn type_name(&self) -> &'static str {
         self.type_name
     }
 
-    /// What the event carries; see [`EventDetail`].
     #[must_use]
     pub fn detail(&self) -> &EventDetail {
         self.detail
     }
 
-    /// When the event happened, in milliseconds on the host's timeline: the
-    /// value the host's script dispatch of the same event reports as its
-    /// `timestamp`. This crate owns no clock, so it is whatever the caller of
-    /// the dispatch named. An engine-only event the document fires from
-    /// inside a mutation, such as `slotchange`, reports `0`.
     #[must_use]
     pub fn timestamp(&self) -> f64 {
         self.timestamp
     }
 
-    /// The node the event was dispatched at, as this step may see it: the
-    /// dispatch target, or the shadow host standing in for it above a
-    /// boundary the event crossed.
     #[must_use]
     pub fn target(&self) -> NodeId {
         self.target
     }
 
-    /// The node whose handler is running — always the `element` argument of
-    /// the call it is running in.
     #[must_use]
     pub fn current_target(&self) -> NodeId {
         self.current_target
@@ -207,52 +169,25 @@ impl ElementEvent<'_> {
         self.phase
     }
 
-    /// Ends the walk after this handler returns: no node further along the
-    /// path hears the event. The node whose handler stopped it still runs
-    /// the rest of its listeners — a host's, at that step.
     pub fn stop_propagation(&mut self) {
         self.stopped = true;
     }
 
-    /// The same, plus the rest of this node's listeners: the walk does not
-    /// report the step this handler ran at, so a host runs nothing of its
-    /// own there.
-    ///
-    /// A node's local name resolves to at most one definition, so the other
-    /// listeners on the node are never another component's; they are the
-    /// host's, which [`Document::advance`] reports a step for after the
-    /// component handler has run.
     pub fn stop_immediate_propagation(&mut self) {
         self.stopped = true;
         self.immediate = true;
     }
 
-    /// Whether a handler has ended the walk.
     #[must_use]
     pub fn propagation_stopped(&self) -> bool {
         self.stopped
     }
 }
 
-/// One dispatch in progress over a path the caller computed, advanced one
-/// step at a time by [`Document::advance`].
-///
-/// Built by [`Document::event_walk`]. It borrows the steps and the detail but
-/// not the document, so a host releases the document between two steps and
-/// calls into script with nothing borrowed — the reason the walk is driven
-/// from outside rather than run to the end in one call.
-///
-/// It holds the dispatch's one stop flag. A component's
-/// [`ElementEvent::stop_propagation`] sets it, and from then on
-/// [`Document::advance`] reports no further step, so nothing the host runs
-/// per step runs for a node further along the path either.
 #[derive(Debug)]
 pub struct EventWalk<'a> {
     steps: &'a EventSteps,
-    /// The next step to visit.
     at: usize,
-    /// The observed-event set's `'static` spelling of the type, or `None`
-    /// when no definition observes it: then no step looks a component up.
     type_name: Option<&'static str>,
     detail: &'a EventDetail,
     timestamp: f64,
@@ -260,16 +195,12 @@ pub struct EventWalk<'a> {
 }
 
 impl EventWalk<'_> {
-    /// Whether a component has stopped the dispatch.
     #[must_use]
     pub fn propagation_stopped(&self) -> bool {
         self.stopped
     }
 }
 
-/// The identity of one step [`Document::advance`] visited: which node's
-/// listeners run, the target that node may see, and which pass this is —
-/// the fields of the [`EventStep`](super::EventStep) it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StepOutcome {
     pub node: NodeId,
@@ -278,21 +209,6 @@ pub struct StepOutcome {
 }
 
 impl<T> Document<T> {
-    /// Fires one engine event at `target` and runs the standard's two passes
-    /// over the path, calling
-    /// [`CustomElement::handle_event`](crate::tree::custom::CustomElement::handle_event)
-    /// on every step whose node is a defined custom element — and, for a
-    /// non-composed event, on the host of the shadow root its path ends at.
-    ///
-    /// The entry point of an event fired to the engine's components alone
-    /// (`slotchange`, and `contentvisibilityautostatechange` for a host that
-    /// does not take it to script): nothing about this walk reaches script.
-    /// `timestamp` is [`ElementEvent::timestamp`].
-    ///
-    /// A name no definition observes
-    /// ([`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events))
-    /// returns before anything else, and so does a target that is no longer
-    /// live, the rule a stale path already follows.
     pub fn dispatch_element_event(
         &mut self,
         target: NodeId,
@@ -305,25 +221,10 @@ impl<T> Document<T> {
         if !self.observes_event(type_name) || self.get(target).is_none() {
             return;
         }
-        // Computed once, owning no borrow: every handler below takes the
-        // document mutably, and one of them may free a node this list names.
         let steps = self.event_steps(target, bubbles, composed);
         self.dispatch_element_event_over(&steps, type_name, detail, timestamp);
     }
 
-    /// The component walk over a path the caller already computed with
-    /// [`Self::event_steps`], for the event `type_name` carrying `detail`,
-    /// run to its end: [`Self::event_walk`] advanced until it reports no
-    /// step.
-    ///
-    /// For a caller with nothing of its own to run per step. One that does —
-    /// a host calling a realm at a step — drives the walk itself with
-    /// [`Self::advance`].
-    ///
-    /// Gated on the definitions: when no
-    /// [`CustomElement::observed_events`](crate::tree::custom::CustomElement::observed_events)
-    /// names `type_name`, this is one set lookup and returns. Otherwise each
-    /// step costs one definition lookup and, on a defined element, one call.
     pub fn dispatch_element_event_over(
         &mut self,
         steps: &EventSteps,
@@ -338,15 +239,6 @@ impl<T> Document<T> {
         while self.advance(&mut walk).is_some() {}
     }
 
-    /// Starts a dispatch of `type_name` carrying `detail` over `steps`,
-    /// which the caller computed with [`Self::event_steps`] and owns.
-    ///
-    /// The type's observed-event spelling is looked up here, once, so a walk
-    /// of a type no definition observes visits its steps without a
-    /// definition lookup per step. Whether to build a walk at all is the
-    /// caller's question: a type nothing hears ([`Self::hears`] is `false` —
-    /// no registration and no observing definition) costs that one check and
-    /// no path.
     #[must_use]
     pub fn event_walk<'a>(
         &self,
@@ -365,24 +257,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Visits the next step of `walk`: runs that step's component handler,
-    /// if any, and reports the step, or answers `None` once the walk has
-    /// ended — at the last step, or for good once a component stopped it.
-    ///
-    /// The component rules are the walk's of the module doc: the at-target
-    /// capture step delivers to no component (the target hears it once, on
-    /// its bubble step) but is still reported, because a host's own
-    /// listeners there are a different set; the shadow root a non-composed
-    /// path ends at delivers to its host's handler; each handler call is its
-    /// own `[CEReactions]` scope. A step whose node is no longer live is
-    /// skipped without being reported.
-    ///
-    /// A handler's [`ElementEvent::stop_propagation`] still reports the step
-    /// it stopped at — the standard runs the rest of the current node's
-    /// listeners — and ends the walk after it.
-    /// [`ElementEvent::stop_immediate_propagation`] reports nothing for that
-    /// step, since what the host would run there are the rest of the node's
-    /// listeners.
     pub fn advance(&mut self, walk: &mut EventWalk<'_>) -> Option<StepOutcome> {
         while !walk.stopped {
             let step = *walk.steps.steps().get(walk.at)?;
@@ -404,8 +278,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// Runs one step's component handler, if the step has one, recording a
-    /// stop in `walk`. Answers whether the stop was immediate.
     fn deliver_to_component(
         &mut self,
         walk: &mut EventWalk<'_>,
@@ -416,16 +288,10 @@ impl<T> Document<T> {
     ) -> bool {
         let at_target = node == target;
         if at_target && capture {
-            // One delivery per node per dispatch: the standard visits the
-            // target in both passes only because each pass runs a different
-            // registration set, and a component has one handler rather than a
-            // set per phase.
             return false;
         }
         let (element, handler) = match self.custom_element_hearing(node, type_name) {
             Some(handler) => (node, handler),
-            // The shadow root a non-composed path ends at, whose host hears
-            // the event in its place; see the module doc.
             None if walk.steps.boundary == Some(node) => {
                 let Some((host, handler)) = self.shadow_host(node).and_then(|host| {
                     self.custom_element_hearing(host, type_name)
@@ -453,9 +319,6 @@ impl<T> Document<T> {
             stopped: false,
             immediate: false,
         };
-        // One `[CEReactions]` scope per handler, as a browser wraps one
-        // listener invocation: what this handler's mutations raised runs
-        // before the next step, not after the walk.
         let base = self.begin_reactions();
         handler.handle_event(self, element, &mut event);
         self.drain_reactions(base);

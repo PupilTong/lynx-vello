@@ -21,33 +21,18 @@ use std::sync::Arc;
 use crate::main::quickjs::ScriptRuntime;
 use crate::script::ScriptError;
 
-/// The `packages/bobcat-element/src` module `$name` as the `QuickJS` bytecode
-/// a realm reads it from, which `build.rs` compiled into this Cargo build's
-/// `OUT_DIR`: the TypeScript to JavaScript, and that, under the module's
-/// specifier, to bytecode.
 macro_rules! runtime_bytecode {
     ($name:literal) => {
         include_bytes!(concat!(env!("OUT_DIR"), "/runtime/", $name, ".qbc"))
     };
 }
 
-/// One built-in module, as a runtime registers it.
 pub(crate) struct BuiltinModule {
-    /// What a realm imports it by.
     pub(crate) specifier: &'static str,
-    /// The `packages/bobcat-element/src` file it is compiled from.
     pub(crate) file: &'static str,
-    /// The bytecode `build.rs` compiled that file to, under
-    /// [`Self::specifier`]: what every realm that imports the specifier
-    /// reads its own instance of the module from.
     pub(crate) bytecode: &'static [u8],
 }
 
-/// The [`BuiltinModule`] compiled from `packages/bobcat-element/src/$name.ts`,
-/// imported as `$specifier`. The file name and the bytecode are both written
-/// from `$name`, so the two cannot name different files; `build.rs` compiles
-/// the bytecode under the specifier `tsconfig.json` maps to that file, and
-/// the test below holds this table to that same mapping.
 macro_rules! builtin_module {
     ($specifier:expr, $name:literal) => {
         BuiltinModule {
@@ -58,158 +43,67 @@ macro_rules! builtin_module {
     };
 }
 
-/// The native module every realm's Rust-backed members are exported from.
 pub(crate) const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 
-/// The native module a realm reaches the embedder's native modules through,
-/// which every realm kind declares: `invokeNativeModule`, and nothing else.
-/// The view's module table is not here: it is the MTS realm's startup member
-/// `nativeModuleTable`, which the MTS realm posts to its BTS in `initialize`.
-/// [`crate::native_module::install`] is what installs it.
 pub(crate) const NATIVE_MODULES_HOST_SPECIFIER: &str = "bobcat-internal:native-modules";
 
-/// The timer runtime: the realm's half of `setTimeout` and its three
-/// companions, imported for its effect.
 pub(crate) const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
 
-/// The `Future` class: one host-backed operation, usable synchronously
-/// through `wait` and as a `PromiseLike` through `then`. The class is
-/// JavaScript like every other built-in; the table behind it and the three
-/// members it speaks to are [`crate::future`].
 pub(crate) const FUTURE_MODULE_SPECIFIER: &str = "bobcat:future";
 
-/// Node's `createRequire`, the one synchronous way into a source a realm has
-/// not imported. The algorithm is JavaScript like every other built-in; what
-/// it is written over is the two host members [`crate::require`] installs.
 pub(crate) const REQUIRE_MODULE_SPECIFIER: &str = "bobcat:module";
 
-/// A realm's `console` and `reportError`: the one value formatting and the one
-/// `lynx.reportError` level rule every realm kind reports with, over the two
-/// members [`crate::realm`] installs in every realm's core.
 pub(crate) const DIAGNOSTICS_MODULE_SPECIFIER: &str = "bobcat:diagnostics";
 
-/// The `EventTarget` a view's `lynx.getEngine()` and a worker's global scope
-/// are both built on.
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 
-/// A realm's animation-frame callbacks and its one frame demand, for every
-/// realm kind: the module both [`RUNTIME_MODULE_SPECIFIER`] and
-/// [`BTS_RUNTIME_MODULE_SPECIFIER`] take `lynx.requestAnimationFrame` from,
-/// and the one whose `__BobcatBeginFrame` both engine threads call to deliver
-/// a vsync to a realm that asked for one.
 pub(crate) const ANIMATION_FRAME_MODULE_SPECIFIER: &str = "bobcat:animation-frame";
 
-/// The one builder of a realm's `SystemInfo`, where its runtime constants are
-/// written.
 pub(crate) const SYSTEM_INFO_MODULE_SPECIFIER: &str = "bobcat:system-info";
 
-/// The one reader of the `<utf16Length>:<text>` records the host writes: the
-/// Element PAPI's attribute and style answers, and the native module table
-/// the BTS is posted in `initialize`.
 pub(crate) const RECORD_MODULE_SPECIFIER: &str = "bobcat:record";
 
-/// The native module transport, for every realm kind: `callNativeModule`,
-/// which hands one call to [`NATIVE_MODULES_HOST_SPECIFIER`]'s
-/// `invokeNativeModule`, and [`Export::NativeModuleCallback`], which both
-/// engine threads call with a module's answer. `bobcat:bts-runtime` builds
-/// the BTS's `NativeModules` over it.
 pub(crate) const NATIVE_MODULES_MODULE_SPECIFIER: &str = "bobcat:native-modules";
 
 pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
 
-/// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 
-/// The URL of a view's background thread, and the BTS bootstrap: the BTS is
-/// the worker at this URL, and this module is its realm's root module, as
-/// every worker's root module is the module at its URL. A registered module,
-/// which imports the worker global scope and the timer globals itself and
-/// hands `bobcat:bts-runtime` the loader of the view's BTS entry.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
 
-/// The Element PAPI: the named exports an MTS entry builds and edits its
-/// view's document through.
 pub(crate) const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 
-/// The MTS compatibility module: the bindings an MTS entry is given, and the
-/// exports the view calls into its realm through.
 pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 
-/// What a `frame` element's `src`, connection and disconnection do in the
-/// realm that holds its handle: the fetch, the `ShadowRealm` child, the
-/// calls into [`FRAME_BOOT_MODULE_SPECIFIER`] there, and the disposal.
-/// [`ELEMENT_MODULE_SPECIFIER`] imports it and hands it a frame's
-/// connections, which it hears as the internal events the runtime dispatches
-/// at the frame, and the page's disposal lets go of every frame's card first
-/// through its `__BobcatCloseFrames`.
 pub(crate) const FRAME_MODULE_SPECIFIER: &str = "bobcat:frame";
 
-/// A nested card's main-thread boot, which a frame's `ShadowRealm` child
-/// imports: the page boot's steps under the frame's nested page, without a
-/// document of its own — the card's BTS included, a `Worker` the child
-/// creates — and the `dispose` that sends the card's last `disexposure` list,
-/// disposes of that BTS and then closes the child.
 pub(crate) const FRAME_BOOT_MODULE_SPECIFIER: &str = "bobcat:frame-boot";
 
-/// The MTS realm's `Worker` class. The one built-in name without a colon,
-/// which the module normalizer passes through by name.
 pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
 
-/// The worker realm's global-scope module: `self`, `postMessage`,
-/// `onmessage` and the rest, and the export a posted message is delivered
-/// through. The engine installs it nowhere: a worker's script imports it, as
-/// `bobcat:bts` does, and a realm in which it never ran has nothing that
-/// receives a message.
 pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 
-/// A function a built-in module exports for the host to call: every way the
-/// host calls into a realm, each named once with the module it lives on.
-///
-/// A realm resolves each one the first time the host calls it and keeps the
-/// namespace object and the interned name for every later call, in a table
-/// indexed by this enum (see `ScriptEngine::call_module_export`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Export {
-    /// `bobcat:timers`, when a timer the realm armed comes due.
     RunTimer,
-    /// `bobcat:future`, when a future the realm asked to settle
-    /// asynchronously has settled.
     SettleFuture,
-    /// [`NATIVE_MODULES_MODULE_SPECIFIER`], with one native module callback's
-    /// answer.
     NativeModuleCallback,
-    /// [`ANIMATION_FRAME_MODULE_SPECIFIER`], at a vsync the realm asked for.
     BeginFrame,
-    /// [`WORKER_MODULE_SPECIFIER`], in a worker realm, with one message
-    /// value.
     DeliverWorkerMessage,
-    /// [`WORKER_CLASS_MODULE_SPECIFIER`], with one event of a worker the
-    /// realm created.
     DispatchWorkerEvent,
-    /// [`BTS_RUNTIME_MODULE_SPECIFIER`], in a worker realm with a
-    /// `lynx.performance` observer, when entries it observes are ready.
     PerformanceReady,
-    /// [`RUNTIME_MODULE_SPECIFIER`], naming the MTS entry before it is
-    /// completed.
     InitEntry,
-    /// [`RUNTIME_MODULE_SPECIFIER`]'s four page updates.
     Reload,
     UpdateData,
     UpdateGlobalProps,
     SendGlobalEvent,
-    /// [`ELEMENT_MODULE_SPECIFIER`], with one event and its whole path.
     DispatchEvent,
-    /// [`FRAME_BOOT_MODULE_SPECIFIER`], in a `<frame>` card's realm, with
-    /// the card's load entry as Lynx's JSON, which it dispatches at its page
-    /// as the frame's `loadmetrics`.
     LoadMetrics,
 }
 
 impl Export {
-    /// How many exports there are: the length of a realm's table.
     pub(crate) const COUNT: usize = Self::LoadMetrics as usize + 1;
 
-    /// The module the export is looked up on.
     pub(crate) const fn specifier(self) -> &'static str {
         match self {
             Self::RunTimer => TIMER_MODULE_SPECIFIER,
@@ -229,7 +123,6 @@ impl Export {
         }
     }
 
-    /// The name the module exports it under.
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::RunTimer => "__BobcatRunTimer",
@@ -250,31 +143,8 @@ impl Export {
     }
 }
 
-/// The compiler factory ABI: what the BTS runtime's `lynx.requireModule` and
-/// its companions load a bundle body through.
 pub(crate) const LYNX_MODULES_SPECIFIER: &str = "bobcat:lynx-modules";
 
-/// Named imports prepended to one card's *MTS body* before it is registered
-/// as a module: every binding a card's main-thread script expects to find in
-/// scope, as imports of [`RUNTIME_MODULE_SPECIFIER`] and
-/// [`ELEMENT_MODULE_SPECIFIER`]. web-core's main-thread wrapper also carries a
-/// `//# allFunctionsCalledOnLoad` line, a V8 eager-compilation hint that
-/// `QuickJS`'s parser ignores, so it is not reproduced here.
-///
-/// One physical line, deliberately: the body follows it on the same line, so
-/// every line of the body keeps the number it had in the container.
-///
-/// The names are this realm's, so the list is defined here.
-/// `bobcat-source` is what prepends it, to every card body it registers for
-/// this realm: a page's root Lepus script, an XML page's main-thread script
-/// and a container's `main-thread`/`*__main-thread` section. The engine adds nothing to
-/// an entry: it loads every entry as the fetcher answered it, so a
-/// main-thread script that is not a card's body imports what it uses itself.
-///
-/// The list does not name the card: `MainThreadRuntime::complete_entry`
-/// hands the card URL — the view's `ViewSources::card_url`, or else the
-/// entry's response URL — to `__BobcatInitEntry` before the body runs, so no
-/// such statement is compiled into every body this is prepended to.
 pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "import { __Card__, lynx, console, SystemInfo, __globalProps, NativeModules, ",
     "_AddEventListener, _ReportError, _SetSourceMapRelease, __OnLifecycleEvent, ",
@@ -294,27 +164,8 @@ pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "} from \"bobcat:element\"; ",
 );
 
-/// BTS bindings live separately from the bootstrap that awaits the app entry.
 pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
 
-/// Named imports prepended to one *bundle body* before it is registered as a
-/// module: every name web-core's `createBundleInitReturnObj` puts in a chunk
-/// wrapper's parameter list (`createChunkLoading.ts`), the ones this realm has
-/// a value for as imports of [`BTS_RUNTIME_MODULE_SPECIFIER`] and the rest as
-/// `undefined`, exactly as web-core supplies them. `module` and `exports` are
-/// not here: a `CommonJS` body needs its own pair, and the adapter that writes
-/// one declares them beside this.
-///
-/// One physical line, deliberately: the body follows it on the same line, so
-/// every line of the body keeps the number it had in the container.
-///
-/// The names are this realm's, so the list is defined here.
-/// `bobcat-source` is what prepends it, to every card body it registers for
-/// this realm: a container's manifest paths and string custom sections, and
-/// an XML page's background-thread script. The engine adds nothing to a
-/// worker's script or to the BTS entry: it loads each as the fetcher answered
-/// it, so a background script that is not a card's body imports what it uses
-/// itself.
 pub const BTS_CHUNK_PREAMBLE: &str = concat!(
     "import { lynx, lynxCoreInject, NativeModules, console, SystemInfo, Card, Component, ",
     "nativeAppId, Behavior, LynxJSBI, setTimeout, setInterval, clearTimeout, clearInterval, ",
@@ -326,55 +177,18 @@ pub const BTS_CHUNK_PREAMBLE: &str = concat!(
     "Reporter = undefined, print = undefined, global = undefined; ",
 );
 
-/// The URL rule both realms write a container's section and stylesheet URLs
-/// with — one module so the two cannot drift, and so `bobcat-source` has one
-/// rule to register under.
 pub(crate) const SECTION_URL_MODULE_SPECIFIER: &str = "bobcat:section-url";
 
-/// `lynx.fetchBundle`'s handle: the `{wait, then}` object and the callback
-/// list, over the [`Future`] a `fetchResource` ([`crate::fetch`]) answers
-/// with. Both realm kinds import it, because either thread's card may ask
-/// for a lazy container.
-///
-/// [`Future`]: crate::future
 pub(crate) const BUNDLE_FETCH_MODULE_SPECIFIER: &str = "bobcat:bundle-fetch";
 
-/// `lynx.performance`'s JavaScript half, for both realm kinds: the pipeline
-/// hooks over the four host members [`crate::performance`] installs, and the
-/// BTS's `PerformanceObserver` over the entries its worker takes.
 pub(crate) const PERFORMANCE_MODULE_SPECIFIER: &str = "bobcat:performance";
 
-/// BTS query builders carry selection tokens across Worker messages.
 pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
 
-/// The name prefixes of the engine's own modules. A runtime reserves both: a
-/// name under one is answered from the runtime's registered sources and the
-/// importing realm's host modules, and from nothing else.
-///
-/// [`WORKER_CLASS_MODULE_SPECIFIER`] has no colon, so neither covers it; both
-/// runtimes register it, so an import of it never reaches a fetcher either.
 pub(crate) const ENGINE_MODULE_PREFIXES: [&str; 2] = ["bobcat:", "bobcat-internal:"];
 
-/// The prefix of an embedder's native module ES modules: `lynx:<name>` is the
-/// module the view's native module `<name>` supplied
-/// ([`NativeModule::esm`](crate::NativeModule::esm)), kept as written by the
-/// normalizer and never fetched.
-///
-/// Only a worker realm of the view loads one: the worker driver completes an
-/// import of a name the view has from its bytecode, on the worker thread,
-/// and fails one it does not have with an error naming it
-/// ([`crate::realm::owner`]); a synchronous load of one that no `import`
-/// has loaded throws ([`crate::require`]). The main runtime reserves the
-/// prefix ([`build_main_runtime`]), so an MTS realm, and every
-/// `ShadowRealm` on that runtime, fails an import or a `require` of one with
-/// a `ReferenceError` naming it.
 pub(crate) const NATIVE_MODULE_ESM_PREFIX: &str = "lynx:";
 
-/// Every built-in module. Both runtimes register all of them, and a realm's
-/// host modules decide which of them it can link.
-///
-/// In the order of the `paths` of `packages/bobcat-element/src/tsconfig.json`,
-/// which maps each specifier to the same file; a test holds the two equal.
 pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(LYNX_MODULES_SPECIFIER, "lynx-modules"),
     builtin_module!(GLOBAL_EVENT_MODULE_SPECIFIER, "global-event-emitter"),
@@ -402,20 +216,6 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(BTS_MODULE_SPECIFIER, "bts"),
 ];
 
-/// Builds one of a group's two `QuickJS` runtimes: every built-in module
-/// registered on it for every realm that will be opened there, and the
-/// [`ENGINE_MODULE_PREFIXES`] reserved to those and to each realm's host
-/// modules.
-///
-/// Both engine threads build theirs with this, and both keep an `Err` rather
-/// than failing the group: it is the failure of every view or worker that
-/// asks that runtime for a realm, each of which reports it as its own.
-///
-/// Modules are registered once per runtime rather than once per realm: a
-/// runtime holds one bytecode per name and reads it into a module per realm,
-/// so a second registration of a name would refuse the second realm. The
-/// bytecode is the binary's own ([`BuiltinModule::bytecode`]), so
-/// registering it copies nothing.
 pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
     let mut runtime = ScriptRuntime::new()?;
     for module in BUILTIN_MODULES {
@@ -438,10 +238,6 @@ pub(crate) fn build_runtime() -> Result<ScriptRuntime, ScriptError> {
     Ok(runtime)
 }
 
-/// [`build_runtime`] for `bobcat-main`, which also reserves
-/// [`NATIVE_MODULE_ESM_PREFIX`]: a native module's ES module is a worker
-/// realm's, so on this runtime a `lynx:` name fails in the realm that asked,
-/// with a `ReferenceError` naming it, and is never fetched.
 pub(crate) fn build_main_runtime() -> Result<ScriptRuntime, ScriptError> {
     let mut runtime = build_runtime()?;
     runtime
@@ -460,13 +256,8 @@ pub(crate) fn build_main_runtime() -> Result<ScriptRuntime, ScriptError> {
 mod tests {
     use super::BUILTIN_MODULES;
 
-    /// What type-checks the built-ins: its `paths` resolve each specifier to
-    /// the file the realm registers under it, one entry per line.
     const TSCONFIG: &str = include_str!("../../../packages/bobcat-element/src/tsconfig.json");
 
-    /// The table a runtime registers and the `paths` the TypeScript is
-    /// checked against name the same files under the same specifiers, in the
-    /// same order, so neither can gain or rename a module alone.
     #[test]
     fn the_built_in_table_is_the_tsconfig_paths() {
         let paths: Vec<(&str, &str)> = TSCONFIG

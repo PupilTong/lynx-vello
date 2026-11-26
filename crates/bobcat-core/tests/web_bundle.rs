@@ -8,8 +8,6 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, solo_view};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -81,9 +79,6 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
         assert!(config.default_display_linear, "{name}");
         assert!(config.default_overflow_visible, "{name}");
         assert!(config.enable_css_selector, "{name}");
-        // The key and the value type a real rspeedy build writes for this
-        // switch: these fixtures are built without it, which the web encoder
-        // spells as the string `"false"`.
         assert_eq!(
             template.config_str("enableCSSInheritance"),
             Some("false"),

@@ -89,35 +89,25 @@ use super::{
 use crate::background::WorkerKey;
 use crate::clock::{ClockInstant, SystemTime};
 
-/// Names one realm over a view's document — the page realm, or a `<frame>`
-/// card's `ShadowRealm` child — for the records it opens and the BTS it
-/// connects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OpenerId(u64);
 
 impl OpenerId {
-    /// The page realm's: the one realm every view has.
     pub(crate) const PAGE: Self = Self(0);
 }
 
-/// Which realm ran the script that opened a record: a fact about provenance,
-/// which decides which BTS hears about it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Opener {
     Realm(OpenerId),
     Worker(WorkerKey),
 }
 
-/// A realm's load milestone after its start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoadMark {
-    /// The entry's evaluation settled.
     VmExecuteEnd,
-    /// The first render began.
     MtsRenderStart,
 }
 
-/// A BTS worker's load milestone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerLoadMark {
     CoreStart,
@@ -127,8 +117,6 @@ pub(crate) enum WorkerLoadMark {
 }
 
 impl WorkerLoadMark {
-    /// The mark a worker realm names `key`; `loadCoreStart` is the host's,
-    /// taken before the realm exists, so a realm cannot name it.
     pub(crate) fn from_realm_key(key: &str) -> Option<Self> {
         match key {
             "loadCoreEnd" => Some(Self::CoreEnd),
@@ -139,46 +127,27 @@ impl WorkerLoadMark {
     }
 }
 
-/// What one timed flush hands the registry.
 pub(crate) struct FlushBinding {
-    /// The realm whose `__FlushElementTree` this was.
     pub(crate) opener: OpenerId,
-    /// The `pipelineOptions.pipelineID` it was called with; 0 for none.
     pub(crate) pipeline: u64,
-    /// Its `__lynx_timing_flag` option and the flag attributes set since
-    /// the last flush, in that order.
     pub(crate) flags: Vec<Arc<str>>,
-    /// The native-triggered pipelines opened since the last flush.
     pub(crate) native: Vec<u64>,
-    /// Whether this is the realm's load's first flush after its render.
     pub(crate) load: bool,
-    /// The frame the flush committed or bound to.
     pub(crate) commit_id: u64,
-    /// That frame's commit timing, when this flush built it.
     pub(crate) timing: Option<CommitTiming>,
-    /// When `__FlushElementTree` was called.
     pub(crate) started: ClockInstant,
 }
 
-/// What a worker's mark completed.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Completion {
-    /// Whether a record completed, which the embedder's next `pump` reports.
     pub(crate) completed: bool,
-    /// Whether the worker that made the mark is owed entries now.
     pub(crate) owed_to_caller: bool,
 }
 
-/// Which workers an entry handed to [`PipelineRegistry::deliver`] may
-/// reach besides the Rust embedder, each only when its observers asked for
-/// the entry's type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerAudience {
-    /// The Rust embedder alone.
     None,
-    /// The BTS of the realm that produced the entry.
     One(WorkerKey),
-    /// Every worker of the view: an entry about the view as a whole.
     #[cfg_attr(
         not(test),
         allow(
@@ -190,62 +159,27 @@ pub(crate) enum WorkerAudience {
     Every,
 }
 
-/// Lynx's bound on its timing map (`timing_map_exceeded_size`), and on
-/// each queue of [`PipelineRegistry::deliver`].
 const MAX_RECORDS: usize = 1000;
-/// `oldest_waiting_commit` when no record waits for a present.
 const NO_COMMIT: u64 = u64::MAX;
-/// Audience bits.
 const RUST: u8 = 1;
 const WORKER: u8 = 1 << 1;
 
 pub(crate) struct PipelineRegistry {
     origin: TimeOrigin,
-    /// The next pipeline id; ids start at 1, and 0 means "none" in every
-    /// host call.
     next_id: AtomicU64,
-    /// The next `<frame>` realm's [`OpenerId`]; the page's is 0.
     next_opener: AtomicU64,
-    /// The smallest commit id a bound record waits to see presented, or
-    /// [`NO_COMMIT`]: the painter's one read per present.
     oldest_waiting_commit: AtomicU64,
-    /// The newest commit id the painter presented, 0 for none: what a flush
-    /// that bound to an already presented frame reads.
     last_presented_commit: AtomicU64,
-    /// Bumped at each completion: `pump`'s one read per turn.
     generation: AtomicU64,
-    /// Whether anything observes — the embedder subscribed to a type, or a
-    /// BTS observer exists. Without it, a pipeline that does not carry
-    /// timestamps when it opens is not recorded at all.
     observed: AtomicBool,
-    /// How many records exist: a flush or a mark with none takes no lock.
     live_records: AtomicUsize,
-    /// [`Self::wants_content_detection`]: someone observes `paint` and
-    /// `first-contentful-paint` has not been recorded.
     content_detection: AtomicBool,
-    /// Whether a paint mark still needs the painter's presentation records:
-    /// [`Self::content_detection`], or the view's first paint not recorded
-    /// yet. Half of [`Self::wants_presentation_timing`].
     marks_wanted: AtomicBool,
-    /// The long task monitor's threshold (`monitors::encode_threshold`),
-    /// 0 while it is off: every job reads it once.
     long_task_threshold: AtomicU64,
-    /// The JS blocking monitor's, likewise: every message to a worker
-    /// reads it once.
     js_blocking_threshold: AtomicU64,
-    /// Bumped by every monitor setter, the new value being the new
-    /// configuration's epoch, and notified without a bump when a monitor's
-    /// state changes in a way its task waits for.
     monitor_epochs: watch::Sender<u64>,
-    /// [`Self::times_resources`]: the Rust embedder observes
-    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`.
     resource_observed: AtomicBool,
-    /// Whether the Rust embedder observes [`EntryTypes::CONTAINER`]: what
-    /// [`Self::note_container_paints`] reads before it locks.
     container_observed: AtomicBool,
-    /// Set once by the painter facade at the view's first pointer down,
-    /// wheel or key down; taken by the main thread's next commit, which
-    /// ends Container Timing ([`Self::take_container_stop`]).
     container_stop: AtomicBool,
     inner: Mutex<Inner>,
 }
@@ -253,83 +187,41 @@ pub(crate) struct PipelineRegistry {
 #[derive(Default)]
 struct Inner {
     records: FxHashMap<u64, Record>,
-    /// Each realm's load, by the realm that loads.
     loads: FxHashMap<OpenerId, LoadRecord>,
-    /// Each BTS worker's own load marks.
     worker_loads: FxHashMap<WorkerKey, WorkerLoadMarks>,
-    /// Which realm each BTS worker belongs to (`connectBackground`).
     bindings: FxHashMap<WorkerKey, OpenerId>,
-    /// The workers with a `lynx.performance` observer, each with the types
-    /// its observers opt into beyond its realm's pipeline entries, which
-    /// every observing worker receives.
     worker_types: FxHashMap<WorkerKey, EntryTypes>,
-    /// Completed records some audience has not taken yet, in completion
-    /// order.
     completed: Vec<u64>,
-    /// Workers owed a `PerformanceReady` for a completion no painter
-    /// present made, handed to whichever embedder-thread call comes next.
     wakes: Vec<WorkerKey>,
     extra: ExtraTiming,
     rust_types: EntryTypes,
-    /// Every flag bound so far: Lynx reports a timing flag once.
     dispatched_flags: FxHashSet<Arc<str>>,
-    /// The view's Paint Timing marks, as the painter reported them.
     first_paint: Option<ClockInstant>,
     first_contentful_paint: Option<ClockInstant>,
-    /// `create_lynx_view`'s span, which the page realm's load reports.
     root_create_lynx: Option<(ClockInstant, ClockInstant)>,
-    /// The present the page realm's load waited for, which a JS blocking
-    /// monitor turned on after it counts `time_after_load_bundle` from.
     page_loaded: Option<ClockInstant>,
-    /// The JS blocking monitor's running state; `None` while it is off.
     js_blocking: Option<JsBlockingState>,
-    /// The memory monitor's readings; `None` while it is off.
     memory: Option<MemoryState>,
-    /// The delivered entries the Rust embedder has not taken, oldest first,
-    /// at most [`MAX_RECORDS`].
     owed_rust: VecDeque<PerformanceEntry>,
-    /// The delivered entries each worker has not taken, likewise.
     owed_workers: FxHashMap<WorkerKey, VecDeque<PerformanceEntry>>,
-    /// The `<frame>` card realms whose load completed and whose `loadmetrics`
-    /// the embedder's next `pump` has not sent yet, in completion order.
     frame_loads_owed: Vec<OpenerId>,
-    /// Each Container Timing root's `containertiming` value, by the root.
     container_identifiers: FxHashMap<NodeId, Arc<str>>,
 }
 
-/// The memory monitor's state: Lynx's `MemoryMonitor` members.
 struct MemoryState {
-    /// The configuration this state belongs to: its monitor epoch.
     epoch: u64,
-    /// `memory_records_`: each category's latest reading, by
-    /// [`MemoryCategory::index`].
     records: [Option<MemoryItem>; MemoryCategory::ALL.len()],
-    /// `last_reported_size_bytes_`: the total the last report carried.
     last_reported_total: u64,
-    /// The smallest change of the total that is reported, in bytes.
     threshold: u64,
-    /// Whether the next reading is reported whatever it changed: the first
-    /// one after the monitor was turned on.
     force_next: bool,
 }
 
-/// The JS blocking monitor's state between two reports: Lynx's
-/// `JSBlockingMonitor` members.
 struct JsBlockingState {
-    /// The configuration this state belongs to: its monitor epoch.
     epoch: u64,
-    /// `total_blocking_time_`: the waits counted since the last report.
     total_time: Duration,
-    /// `total_blocking_count_`.
     total_count: u32,
-    /// `last_report_time_`: the last report made, or the monitor's start.
     last_report: ClockInstant,
-    /// `load_bundle_time_`: the `loadBundle` report's instant, or the
-    /// page's load for a monitor turned on after it.
     load_bundle: Option<ClockInstant>,
-    /// What the `timer` reports are scheduled from: the `loadBundle`
-    /// report's instant, or the configuration's for a monitor turned on or
-    /// changed after the page's load; `None` while neither has happened.
     timer_anchor: Option<ClockInstant>,
 }
 
@@ -338,8 +230,6 @@ enum Kind {
     Update,
     Load,
     Reload,
-    /// A Paint Timing mark, completed when it is made; its instant is the
-    /// record's `start`.
     Paint(PaintName),
 }
 
@@ -347,7 +237,6 @@ enum Kind {
 struct Commit {
     id: u64,
     timing: Option<CommitTiming>,
-    /// When the flush returned: the stages of a flush that built no frame.
     at: ClockInstant,
 }
 
@@ -357,7 +246,6 @@ struct Record {
     origin: PipelineOrigin,
     dsl: Option<Arc<str>>,
     stage: Option<Arc<str>>,
-    /// The flags bound to it, one `Pipeline` entry each.
     flags: SmallVec<[Arc<str>; 1]>,
     need_timestamps: bool,
     start: ClockInstant,
@@ -366,11 +254,8 @@ struct Record {
     opener: Opener,
     commit: Option<Commit>,
     presented: Option<PresentedFrame>,
-    /// A load's or reload's end: when its flush returned.
     end: Option<ClockInstant>,
-    /// The BTS's load marks, copied at completion.
     background: Option<WorkerLoadMarks>,
-    /// A load entry sent again after `set_extra_timing`: only that entry.
     load_only: bool,
     done: bool,
     audience: u8,
@@ -401,7 +286,6 @@ impl Record {
         }
     }
 
-    /// The entry types the record yields.
     fn types(&self) -> EntryTypes {
         if matches!(self.kind, Kind::Paint(_)) {
             return EntryTypes::PAINT;
@@ -426,8 +310,6 @@ struct LoadRecord {
     pipeline: u64,
     create_lynx: Option<(ClockInstant, ClockInstant)>,
     vm_execute: (ClockInstant, Option<ClockInstant>),
-    /// The completed load pipeline, kept so `set_extra_timing` can send its
-    /// entry again.
     completed: Option<Record>,
 }
 
@@ -460,7 +342,6 @@ impl PipelineRegistry {
             observed: AtomicBool::new(false),
             live_records: AtomicUsize::new(0),
             content_detection: AtomicBool::new(false),
-            // The view's first paint is not recorded yet.
             marks_wanted: AtomicBool::new(true),
             long_task_threshold: AtomicU64::new(0),
             js_blocking_threshold: AtomicU64::new(0),
@@ -472,8 +353,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// A registry with an origin of its own, for a view nobody builds
-    /// through `create_lynx_view`: the crate's tests and benchmarks.
     pub(crate) fn detached() -> Arc<Self> {
         Arc::new(Self::new(TimeOrigin::now()))
     }
@@ -509,8 +388,6 @@ impl PipelineRegistry {
             .store(detect || inner.first_paint.is_none(), Ordering::Relaxed);
     }
 
-    /// Whether anyone asked for `kind`'s entries: the Rust embedder, or a
-    /// worker's observers.
     fn wanted(inner: &Inner, kind: EntryTypes) -> bool {
         inner.rust_types.contains(kind)
             || inner
@@ -519,47 +396,27 @@ impl PipelineRegistry {
                 .any(|types| types.contains(kind))
     }
 
-    /// Whether the view's document should decide Paint Timing's contentful
-    /// test as it builds frames (`terminus`'s
-    /// `Document::set_content_detection`): someone observes `paint` — the
-    /// Rust embedder through [`EntryTypes::PAINT`], or a BTS observer of
-    /// `paint` — and `first-contentful-paint` has not been recorded. One
-    /// relaxed load, which every commit reads.
     pub(crate) fn wants_content_detection(&self) -> bool {
         self.content_detection.load(Ordering::Relaxed)
     }
 
-    /// Whether the view's painter should record its presentations
-    /// (`terminus`'s `Painter::set_presentation_timing`): a bound record
-    /// waits for a present, the document detects content, or the view's
-    /// first paint — which every load entry's `lynxFcp` ends at, and the
-    /// `first-paint` entry reports — has not been recorded yet. Two relaxed
-    /// loads and no lock, which every draw reads; a view nobody observes
-    /// answers `false` from its first recorded present on, except while a
-    /// record waits.
     pub(crate) fn wants_presentation_timing(&self) -> bool {
         self.oldest_waiting_commit.load(Ordering::Relaxed) != NO_COMMIT
             || self.marks_wanted.load(Ordering::Relaxed)
     }
 
-    /// A fresh pipeline id: one atomic increment and nothing else.
     pub(crate) fn generate_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// A fresh id for a `<frame>` card's realm.
     pub(crate) fn allocate_opener(&self) -> OpenerId {
         OpenerId(self.next_opener.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// How many completions there have been.
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// `_onPipelineStart`. A pipeline that carries no timestamps is
-    /// recorded only while something observes: it may still be bound to a
-    /// flag later, and then its start and its marks are wanted.
     pub(crate) fn open(
         &self,
         id: u64,
@@ -591,9 +448,6 @@ impl PipelineRegistry {
         self.insert(&mut inner, id, record);
     }
 
-    /// `_markTiming`: `mtsRenderStart`/`mtsRenderEnd` are the record's own
-    /// render; every other key is a framework mark, the last one per key
-    /// kept.
     pub(crate) fn mark(&self, id: u64, key: &str) {
         if id == 0 || self.live_records.load(Ordering::Relaxed) == 0 {
             return;
@@ -616,8 +470,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// `_bindPipelineIdWithTimingFlag`: the pipeline carries timestamps, and
-    /// reports `flag`.
     pub(crate) fn bind_flag(&self, id: u64, flag: &str, opener: Opener) {
         if id == 0 || flag.is_empty() {
             return;
@@ -642,8 +494,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// A native update or reload arriving with a flag, or any reload: opened
-    /// now, bound by the realm's next flush. Answers its id.
     pub(crate) fn open_native(&self, origin: PipelineOrigin, flag: &str, opener: OpenerId) -> u64 {
         let now = ClockInstant::now();
         let id = self.generate_id();
@@ -662,9 +512,6 @@ impl PipelineRegistry {
         id
     }
 
-    /// Whether the pipeline a flush names carries timestamps. One whose
-    /// record carries none, in a flush nothing else times, is dropped here:
-    /// it will never be bound.
     pub(crate) fn claim_for_flush(&self, id: u64, others: bool) -> bool {
         if id == 0 || self.live_records.load(Ordering::Relaxed) == 0 {
             return false;
@@ -686,14 +533,10 @@ impl PipelineRegistry {
         false
     }
 
-    /// `create_lynx_view`'s span, for the page realm's load.
     pub(crate) fn set_root_create_lynx(&self, start: ClockInstant, end: ClockInstant) {
         self.lock().root_create_lynx = Some((start, end));
     }
 
-    /// A realm's load begins: its `loadBundleStart` and `vmExecuteStart`.
-    /// `created` is a `<frame>` card's realm construction; the page's is
-    /// `create_lynx_view`'s. A realm loads once.
     pub(crate) fn open_load(
         &self,
         opener: OpenerId,
@@ -730,9 +573,6 @@ impl PipelineRegistry {
         self.insert(&mut inner, id, record);
     }
 
-    /// One of a realm's load milestones. Answers, for
-    /// [`LoadMark::MtsRenderStart`], whether the load's render began now —
-    /// the realm's next flush then ends the load.
     pub(crate) fn mark_load(&self, opener: OpenerId, mark: LoadMark) -> bool {
         let now = ClockInstant::now();
         let mut inner = self.lock();
@@ -755,13 +595,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// Binds a timed flush: the pipeline it names, the native pipelines
-    /// and the load it closes, and its flags — each flag to the record a
-    /// `_bindPipelineIdWithTimingFlag` gave it, or else to the flush's own
-    /// pipeline, or else to a new record of its own. A record that reports
-    /// nothing is dropped. When the flush bound to a frame already
-    /// presented, the records complete here. Answers whether anything
-    /// completed.
     pub(crate) fn bind_commit(&self, binding: FlushBinding) -> bool {
         let ended = ClockInstant::now();
         let FlushBinding {
@@ -789,8 +622,6 @@ impl PipelineRegistry {
                     targets.push(pipeline);
                     primary = Some(pipeline);
                 }
-                // Not recorded when it opened, because nothing observed and
-                // it carried no timestamps: its flags still report.
                 None if !flags.is_empty() => {
                     let record = Record::new(
                         Kind::Update,
@@ -838,15 +669,9 @@ impl PipelineRegistry {
         if !bound {
             return false;
         }
-        // Sequentially consistent with the painter's two accesses in
-        // `note_presented`, so of a present and this binding racing, at
-        // least one sees the other: this one completes the records itself,
-        // or the painter finds them waiting.
         self.oldest_waiting_commit
             .fetch_min(commit_id, Ordering::SeqCst);
         if self.last_presented_commit.load(Ordering::SeqCst) >= commit_id {
-            // The frame was already presented; the binding is the closest
-            // reading this side has of that present.
             self.present_through(
                 inner,
                 PresentedFrame {
@@ -860,11 +685,6 @@ impl PipelineRegistry {
         self.generation.load(Ordering::Relaxed) != generation
     }
 
-    /// Gives each flag of a flush its record: the one a
-    /// `_bindPipelineIdWithTimingFlag` bound it to, or else `primary`, the
-    /// flush's own pipeline, or else a new record of its own, which then
-    /// takes the flags after it too. Each record a flag lands on is added to
-    /// `targets`.
     fn attach_flags(
         &self,
         inner: &mut Inner,
@@ -907,8 +727,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// Binds each target to `commit`, dropping an update that reports no
-    /// flag. Answers whether any was bound.
     fn bind_targets(inner: &mut Inner, targets: &[u64], commit: Commit) -> bool {
         let mut bound = false;
         for id in targets {
@@ -928,9 +746,6 @@ impl PipelineRegistry {
         bound
     }
 
-    /// The painter presented `frame`: completes every record waiting for a
-    /// commit it covers, and answers the workers owed a `PerformanceReady`.
-    /// Without a waiting record it is two atomic accesses and no lock.
     pub(crate) fn note_presented(&self, frame: PresentedFrame) -> Vec<WorkerKey> {
         self.last_presented_commit
             .fetch_max(frame.commit_id, Ordering::SeqCst);
@@ -942,13 +757,6 @@ impl PipelineRegistry {
         std::mem::take(&mut inner.wakes)
     }
 
-    /// The painter drew the frame of `commit_id` while its presentation
-    /// timing was off ([`Self::wants_presentation_timing`] said no record
-    /// waited). A flush may have bound a record to that commit since the
-    /// painter asked: then the record completes here, presented now, as a
-    /// binding to an already presented frame does. Without a waiting record
-    /// it is two atomic accesses and no lock, as [`Self::note_presented`]
-    /// is.
     pub(crate) fn note_untimed_present(&self, commit_id: u64) -> Vec<WorkerKey> {
         self.last_presented_commit
             .fetch_max(commit_id, Ordering::SeqCst);
@@ -969,10 +777,6 @@ impl PipelineRegistry {
         std::mem::take(&mut inner.wakes)
     }
 
-    /// The view's Paint Timing marks, as the painter first saw them. Each
-    /// is kept once, and the first time each is seen it completes one
-    /// `paint` record for every audience that asks for `paint` then.
-    /// Answers the workers owed a `PerformanceReady` for them.
     pub(crate) fn note_paint(
         &self,
         first_paint: Option<PresentedFrame>,
@@ -996,10 +800,6 @@ impl PipelineRegistry {
         std::mem::take(&mut inner.wakes)
     }
 
-    /// One completed `paint` record per audience: the Rust embedder's, when
-    /// it subscribed to [`EntryTypes::PAINT`], and one per worker observing
-    /// `paint` — the mark is the view's, so every such worker hears it. No
-    /// record at all when nobody asks.
     fn complete_paint(&self, inner: &mut Inner, name: PaintName, at: ClockInstant) {
         let mut audiences: SmallVec<[(u8, Option<WorkerKey>); 2]> = SmallVec::new();
         if inner.rust_types.contains(EntryTypes::PAINT) {
@@ -1029,8 +829,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// The workers owed a `PerformanceReady` for completions no present
-    /// made: a binding to a frame already presented, `set_extra_timing`.
     pub(crate) fn take_wakes(&self) -> Vec<WorkerKey> {
         std::mem::take(&mut self.lock().wakes)
     }
@@ -1047,8 +845,6 @@ impl PipelineRegistry {
                 presented.push(*id);
             }
         }
-        // In opening order, so the entries of one present are reported in
-        // the order their pipelines began.
         presented.sort_unstable();
         for id in presented {
             self.try_complete(inner, id);
@@ -1063,7 +859,6 @@ impl PipelineRegistry {
         self.oldest_waiting_commit.store(oldest, Ordering::SeqCst);
     }
 
-    /// The BTS worker connected to `opener`'s realm.
     fn background_of(inner: &Inner, opener: OpenerId) -> Option<WorkerKey> {
         inner
             .bindings
@@ -1072,7 +867,6 @@ impl PipelineRegistry {
             .map(|(key, _)| *key)
     }
 
-    /// The realm whose load a record's entries measure against.
     fn realm_of(inner: &Inner, opener: Opener) -> Option<OpenerId> {
         match opener {
             Opener::Realm(realm) => Some(realm),
@@ -1080,8 +874,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// Completes a presented record, unless it is a load whose BTS has not
-    /// loaded its entry yet.
     fn try_complete(&self, inner: &mut Inner, id: u64) {
         let Some(record) = inner.records.get(&id) else {
             return;
@@ -1103,7 +895,6 @@ impl PipelineRegistry {
         self.complete(inner, id, background);
     }
 
-    /// Fixes a record's audiences, and frees it when it has none.
     fn complete(&self, inner: &mut Inner, id: u64, background: Option<WorkerLoadMarks>) {
         let Some(record) = inner.records.get(&id) else {
             return;
@@ -1140,10 +931,6 @@ impl PipelineRegistry {
                 Some(OpenerId::PAGE) => {
                     page_loaded = record.presented.map(|frame| frame.presented);
                 }
-                // A `<frame>` card's own load: Lynx's `FramePerformanceClient`
-                // forwards exactly this entry to the frame as `loadmetrics`
-                // (`LynxFrameView.java:456-477`), whatever the host observes,
-                // so it is owed whoever observes — one per card load.
                 Some(card) => frame_load = Some(card),
                 None => {}
             }
@@ -1154,7 +941,6 @@ impl PipelineRegistry {
         if let Some(card) = frame_load {
             inner.frame_loads_owed.push(card);
             if audience == 0 {
-                // What the embedder's next `pump` reads to look at all.
                 self.generation.fetch_add(1, Ordering::Release);
             }
         }
@@ -1176,10 +962,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// The page realm's load completed, presented at `presented`: Lynx's
-    /// `JSBlockingMonitor::OnPerformanceEvent`, which makes the `loadBundle`
-    /// report and starts the timer from now. Once: a load entry sent again
-    /// by `set_extra_timing` starts no second timer, as Lynx's would.
     fn page_loaded(&self, inner: &mut Inner, presented: ClockInstant) {
         if inner.page_loaded.is_some() {
             return;
@@ -1191,11 +973,9 @@ impl PipelineRegistry {
         };
         state.timer_anchor = Some(now);
         self.report_blocking(inner, JsBlockingStage::LoadBundle, now);
-        // Wakes the report task, which waits for the anchor.
         self.monitor_epochs.send_modify(|_| {});
     }
 
-    /// The workers whose observers asked for `kind`, in key order.
     fn workers_asking(inner: &Inner, kind: EntryTypes) -> SmallVec<[WorkerKey; 2]> {
         let mut workers: SmallVec<[WorkerKey; 2]> = inner
             .worker_types
@@ -1207,11 +987,6 @@ impl PipelineRegistry {
         workers
     }
 
-    /// The one delivery path for an entry made whole where it was produced:
-    /// queued for the Rust embedder when it observes `kind`, and for each
-    /// worker of `workers` that asked for `kind`, which is then owed a
-    /// `PerformanceReady` ([`Self::take_wakes`]). Answers whether it was
-    /// queued anywhere, which is when the caller wakes the embedder.
     fn deliver(
         &self,
         inner: &mut Inner,
@@ -1244,7 +1019,6 @@ impl PipelineRegistry {
         true
     }
 
-    /// [`Self::deliver`] under a lock of its own.
     pub(crate) fn deliver_entry(
         &self,
         entry: PerformanceEntry,
@@ -1254,7 +1028,6 @@ impl PipelineRegistry {
         self.deliver(&mut self.lock(), entry, kind, workers)
     }
 
-    /// A new monitor configuration's epoch; every monitor task wakes.
     fn next_monitor_epoch(&self) -> u64 {
         let mut epoch = 0;
         self.monitor_epochs.send_modify(|current| {
@@ -1264,33 +1037,24 @@ impl PipelineRegistry {
         epoch
     }
 
-    /// A reader of the monitor epochs, which a monitor task waits on.
     pub(crate) fn monitor_epochs(&self) -> watch::Receiver<u64> {
         self.monitor_epochs.subscribe()
     }
 
-    /// The long task monitor's threshold, `None` while it is off: one
-    /// relaxed load, which every job of the view's realms reads.
     pub(crate) fn long_task_threshold(&self) -> Option<Duration> {
         decode_threshold(self.long_task_threshold.load(Ordering::Relaxed))
     }
 
-    /// Turns the long task monitor on with `threshold`, or off.
     pub(crate) fn set_long_task_threshold(&self, threshold: Option<Duration>) {
         self.long_task_threshold
             .store(encode_threshold(threshold), Ordering::Relaxed);
         self.next_monitor_epoch();
     }
 
-    /// The instant a message sent to a worker now carries for the JS
-    /// blocking monitor, `None` while it is off: one relaxed load, and a
-    /// clock reading only while it is on.
     pub(crate) fn js_blocking_stamp(&self) -> Option<ClockInstant> {
         (self.js_blocking_threshold.load(Ordering::Relaxed) != 0).then(ClockInstant::now)
     }
 
-    /// A message's job waited `wait` for its worker's thread: Lynx's
-    /// `AddJSBlockingTime`, which counts a wait of at least the threshold.
     pub(crate) fn note_js_blocking(&self, wait: Duration) {
         let Some(threshold) = decode_threshold(self.js_blocking_threshold.load(Ordering::Relaxed))
         else {
@@ -1305,10 +1069,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// Turns the JS blocking monitor on with `config` at `now`, or off, and
-    /// answers the epoch a report task for the new configuration serves —
-    /// `None` when it is off. Turning it on starts its totals and its first
-    /// report's span; changing a monitor that is on keeps them.
     pub(crate) fn set_js_blocking_monitor(
         &self,
         config: Option<JsBlockingConfig>,
@@ -1319,8 +1079,6 @@ impl PipelineRegistry {
             encode_threshold(config.map(|config| config.threshold)),
             Ordering::Relaxed,
         );
-        // Under the lock, so a task that wakes for the bump reads the new
-        // state.
         let epoch = self.next_monitor_epoch();
         if config.is_none() {
             inner.js_blocking = None;
@@ -1336,15 +1094,10 @@ impl PipelineRegistry {
             timer_anchor: None,
         });
         state.epoch = epoch;
-        // The timer reports start at the `loadBundle` report, which is still
-        // to come while the page has not loaded. A monitor turned on, or
-        // changed, after it — which Lynx, whose monitor exists from the
-        // start, never has — starts them from now.
         state.timer_anchor = state.load_bundle.map(|_| now);
         Some(epoch)
     }
 
-    /// Whether `epoch` is the JS blocking monitor's current configuration.
     pub(crate) fn js_blocking_is_current(&self, epoch: u64) -> bool {
         self.lock()
             .js_blocking
@@ -1352,9 +1105,6 @@ impl PipelineRegistry {
             .is_some_and(|state| state.epoch == epoch)
     }
 
-    /// The instant the `timer` reports of the configuration of `epoch` are
-    /// scheduled from, once there is one; `None` too when that
-    /// configuration is not the current one.
     pub(crate) fn js_blocking_anchor(&self, epoch: u64) -> Option<ClockInstant> {
         self.lock()
             .js_blocking
@@ -1363,27 +1113,18 @@ impl PipelineRegistry {
             .and_then(|state| state.timer_anchor)
     }
 
-    /// The JS blocking monitor's report task, for the configuration of
-    /// `epoch`, owes a `timer` report now. Answers whether one was kept
-    /// for the Rust embedder, which is when it is owed a wake.
     pub(crate) fn report_js_blocking(&self, epoch: u64) -> bool {
         let mut inner = self.lock();
         let current = inner.js_blocking.as_ref().map(|state| state.epoch) == Some(epoch);
         current && self.report_blocking(&mut inner, JsBlockingStage::Timer, ClockInstant::now())
     }
 
-    /// A report of `stage` at `now`, for a test that drives the monitor
-    /// with instants of its own.
     #[cfg(test)]
     pub(crate) fn report_js_blocking_at(&self, stage: JsBlockingStage, now: ClockInstant) -> bool {
         let mut inner = self.lock();
         self.report_blocking(&mut inner, stage, now)
     }
 
-    /// Lynx's `ReportBlockingInfo`: nothing, and the span not restarted,
-    /// when nothing was counted; otherwise one report, for the Rust embedder
-    /// alone, after which the totals and the span start again at `now`, as
-    /// Lynx resets them. Answers [`Self::deliver`]'s answer.
     fn report_blocking(
         &self,
         inner: &mut Inner,
@@ -1422,15 +1163,8 @@ impl PipelineRegistry {
         )
     }
 
-    /// Turns the memory monitor on with `config`, or off, and answers the
-    /// epoch a sampling task for the new configuration serves — `None` when
-    /// it is off. Each call starts the readings afresh: the categories read
-    /// so far are dropped and the next reading is reported whatever it
-    /// changed.
     pub(crate) fn set_memory_monitor(&self, config: Option<MemoryConfig>) -> Option<u64> {
         let mut inner = self.lock();
-        // Under the lock, so a task that wakes for the bump reads the new
-        // state.
         let epoch = self.next_monitor_epoch();
         inner.memory = config.map(|config| MemoryState {
             epoch,
@@ -1442,8 +1176,6 @@ impl PipelineRegistry {
         config.map(|_| epoch)
     }
 
-    /// Whether `epoch` is the memory monitor's current configuration: what
-    /// its task and each sample check before they read anything.
     pub(crate) fn memory_is_current(&self, epoch: u64) -> bool {
         self.lock()
             .memory
@@ -1451,21 +1183,10 @@ impl PipelineRegistry {
             .is_some_and(|state| state.epoch == epoch)
     }
 
-    /// The BTS worker of the view's page realm, which a memory sample asks
-    /// for the background thread's reading.
     pub(crate) fn page_background(&self) -> Option<WorkerKey> {
         Self::background_of(&self.lock(), OpenerId::PAGE)
     }
 
-    /// One category's reading: Lynx's `UpdateMemoryUsage` and then
-    /// `ReportMemory`. A reading whose size is the one its category last
-    /// had is dropped, as Lynx drops it, unless it is the first since the
-    /// monitor was turned on; any other replaces the category's reading,
-    /// and a report of every category's latest one is delivered, to the
-    /// Rust embedder alone, when the total moved by at least the threshold
-    /// since the last report (0 reports every change), or the total is 0,
-    /// or the reading is the first. Answers [`Self::deliver`]'s answer;
-    /// nothing at all while the monitor is off.
     pub(crate) fn note_memory(&self, item: MemoryItem) -> bool {
         let mut guard = self.lock();
         let inner = &mut *guard;
@@ -1506,9 +1227,6 @@ impl PipelineRegistry {
         )
     }
 
-    /// One of a BTS worker's load marks. `loadBackgroundEnd` is the load's
-    /// last readiness condition, so it may complete the load of the realm
-    /// the worker belongs to.
     pub(crate) fn mark_worker_load(&self, key: WorkerKey, mark: WorkerLoadMark) -> Completion {
         let now = ClockInstant::now();
         let generation = self.generation.load(Ordering::Relaxed);
@@ -1538,13 +1256,10 @@ impl PipelineRegistry {
         }
     }
 
-    /// `connectBackground`: `key` is the BTS of `opener`'s realm.
     pub(crate) fn bind_worker(&self, key: WorkerKey, opener: OpenerId) {
         self.lock().bindings.insert(key, opener);
     }
 
-    /// A worker ended. A load waiting for it waits no more, and reports
-    /// without the BTS's marks.
     pub(crate) fn forget_worker(&self, key: WorkerKey) {
         let mut guard = self.lock();
         let inner = &mut *guard;
@@ -1560,11 +1275,6 @@ impl PipelineRegistry {
         self.update_observed(inner);
     }
 
-    /// Whether the worker `key` has a `lynx.performance` observer — `None`
-    /// for none — and, when it has, the types its observers opt into
-    /// beyond its realm's pipeline entries ([`EntryTypes::PAINT`] and
-    /// [`EntryTypes::RESOURCE`]). A worker that stops observing drops the delivered
-    /// entries it had not taken.
     pub(crate) fn observe_worker(&self, key: WorkerKey, asked: Option<EntryTypes>) {
         let mut inner = self.lock();
         if let Some(types) = asked {
@@ -1576,20 +1286,10 @@ impl PipelineRegistry {
         self.update_observed(&inner);
     }
 
-    /// Whether a `fetchResource` is timed: the Rust embedder observes
-    /// [`EntryTypes::RESOURCE`] or a BTS observer asked for `resource`. One
-    /// relaxed load, which is all a fetch reads while nobody does.
     pub(crate) fn times_resources(&self) -> bool {
         self.resource_observed.load(Ordering::Relaxed)
     }
 
-    /// One timed fetch completed, made by `opener`'s realm: its
-    /// `resource.lazyBundle` entry, delivered to the Rust embedder and to
-    /// the BTS of the realm that fetched — the worker itself, or the BTS
-    /// its main-thread realm connected ([`Self::background_of`]) — as
-    /// native sends it to every audience (`kEventTypeAll`,
-    /// `lynx/core/resource/lazy_bundle/lazy_bundle_loader.cc:169`).
-    /// Answers [`Self::deliver`]'s answer.
     pub(crate) fn note_lazy_bundle(&self, opener: Opener, entry: LazyBundleEntry) -> bool {
         let mut guard = self.lock();
         let inner = &mut *guard;
@@ -1605,8 +1305,6 @@ impl PipelineRegistry {
         )
     }
 
-    /// `node`'s `containertiming` attribute was set to `identifier`, or
-    /// removed (`None`): what its `container` entries name it by.
     pub(crate) fn set_container_identifier(&self, node: NodeId, identifier: Option<&str>) {
         let mut inner = self.lock();
         match identifier {
@@ -1621,12 +1319,6 @@ impl PipelineRegistry {
         }
     }
 
-    /// The painter's Container Timing reports since the last call: one
-    /// `container` entry each, delivered to the Rust embedder alone, which a
-    /// background thread does not receive (it holds no element to name).
-    /// One relaxed load and no lock while the embedder does not observe
-    /// [`EntryTypes::CONTAINER`]; the reports are then dropped. Answers
-    /// whether any was delivered.
     pub(crate) fn note_container_paints(&self, paints: &[ContainerPaint]) -> bool {
         if paints.is_empty() || !self.container_observed.load(Ordering::Relaxed) {
             return false;
@@ -1650,24 +1342,15 @@ impl PipelineRegistry {
         delivered
     }
 
-    /// Asks the main thread to end Container Timing at its next commit: the
-    /// painter facade's call at the view's first pointer down, wheel or key
-    /// down.
     pub(crate) fn request_container_stop(&self) {
         self.container_stop.store(true, Ordering::Release);
     }
 
-    /// Whether Container Timing is to end now, once: the main thread's one
-    /// relaxed load per commit.
     pub(crate) fn take_container_stop(&self) -> bool {
         self.container_stop.load(Ordering::Relaxed)
             && self.container_stop.swap(false, Ordering::Acquire)
     }
 
-    /// Every `<frame>` card's load entry owed to its realm as `loadmetrics`
-    /// since the last call, in completion order, assembled on the caller's
-    /// thread — the embedder's, in `pump` — from the record its completion
-    /// kept.
     pub(crate) fn take_frame_loads(&self) -> Vec<(OpenerId, LoadBundleTiming)> {
         let taken: Vec<(OpenerId, Taken)> = {
             let mut guard = self.lock();
@@ -1712,16 +1395,12 @@ impl PipelineRegistry {
             .collect()
     }
 
-    /// What the Rust embedder subscribes to.
     pub(crate) fn observe_rust(&self, types: EntryTypes) {
         let mut inner = self.lock();
         inner.rust_types = types;
         self.update_observed(&inner);
     }
 
-    /// The host's container marks, each kept once. A load already reported
-    /// is reported again, to every audience it has now, with the metrics
-    /// the new marks fill. Answers whether anything was reported.
     pub(crate) fn set_extra_timing(&self, extra: &ExtraTiming) -> bool {
         let generation = self.generation.load(Ordering::Relaxed);
         let mut guard = self.lock();
@@ -1745,10 +1424,6 @@ impl PipelineRegistry {
         self.generation.load(Ordering::Relaxed) != generation
     }
 
-    /// Every completed entry the Rust embedder has not taken, of the types
-    /// it subscribes to: the pipeline and paint records in completion
-    /// order, assembled on the caller's thread, then the delivered entries
-    /// in the order they were made.
     pub(crate) fn take_completed_for_rust(&self) -> Vec<PerformanceEntry> {
         let (taken, owed, types) = {
             let mut inner = self.lock();
@@ -1763,8 +1438,6 @@ impl PipelineRegistry {
             .collect()
     }
 
-    /// Every completed entry the worker `key` is owed, assembled on its
-    /// own thread, then the entries delivered to it.
     pub(crate) fn take_completed_for_worker(&self, key: WorkerKey) -> Vec<PerformanceEntry> {
         let (taken, owed) = {
             let mut inner = self.lock();
@@ -1822,8 +1495,6 @@ impl PipelineRegistry {
 
     fn insert(&self, inner: &mut Inner, id: u64, record: Record) {
         if inner.records.len() >= MAX_RECORDS && !inner.records.contains_key(&id) {
-            // Lynx's `timing_map_exceeded_size`: the oldest pipeline that
-            // never reached a flush goes first, and a load last of all.
             let victim = inner
                 .records
                 .iter()
@@ -1840,7 +1511,6 @@ impl PipelineRegistry {
         self.count(inner);
     }
 
-    /// The records as they stand, for the crate's tests.
     #[cfg(test)]
     pub(crate) fn records_for_test(&self) -> Vec<RecordProbe> {
         let inner = self.lock();
@@ -1861,7 +1531,6 @@ impl PipelineRegistry {
     }
 }
 
-/// One record as [`PipelineRegistry::records_for_test`] reports it.
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct RecordProbe {
@@ -1873,18 +1542,13 @@ pub(crate) struct RecordProbe {
     pub(crate) timing: Option<CommitTiming>,
 }
 
-/// What a realm's load contributes to an entry.
 struct LoadSnapshot {
     url: Arc<str>,
     create_lynx: Option<(ClockInstant, ClockInstant)>,
     vm_execute: (ClockInstant, Option<ClockInstant>),
-    /// The page realm's load, which the view's Paint Timing marks are
-    /// about.
     page: bool,
 }
 
-/// One completed record and what its entries are assembled from, copied out
-/// under the lock so the assembly runs outside it.
 struct Taken {
     record: Record,
     load: Option<LoadSnapshot>,
@@ -1892,7 +1556,6 @@ struct Taken {
     first_paint: Option<ClockInstant>,
 }
 
-/// Queues `entry`, dropping the oldest beyond [`MAX_RECORDS`].
 fn push_bounded(queue: &mut VecDeque<PerformanceEntry>, entry: PerformanceEntry) {
     if queue.len() >= MAX_RECORDS {
         queue.pop_front();
@@ -1907,7 +1570,6 @@ fn range(span: (Option<ClockInstant>, Option<ClockInstant>)) -> Option<std::ops:
     }
 }
 
-/// A metric ending at a present, from a mark that may not have been set.
 fn paint_metric(
     name: &'static str,
     start_name: &'static str,
@@ -1924,8 +1586,6 @@ fn paint_metric(
 }
 
 impl Taken {
-    /// The entries of the record that `types` asks for: the load's or the
-    /// reload's own, then one `Pipeline` entry per flag.
     fn assemble(&self, types: EntryTypes, origin: &TimeOrigin) -> SmallVec<[PerformanceEntry; 2]> {
         let mut entries = SmallVec::new();
         let record = &self.record;
@@ -2022,9 +1682,6 @@ impl Taken {
         entries
     }
 
-    /// The pipeline every entry of the record carries, with no identifier:
-    /// the commit's stages, or empty stages at the flush's end for a flush
-    /// that built no frame, and the present's.
     fn pipeline(record: &Record, commit: Commit, presented: PresentedFrame) -> PipelineTiming {
         let at = Timestamp(commit.at);
         let (resolve, layout, build) = commit.timing.map_or((at..at, at..at, at..at), |timing| {
@@ -2061,7 +1718,6 @@ impl Taken {
         }
     }
 
-    /// A realm's load entry over its pipeline.
     fn load_entry(
         &self,
         load: &LoadSnapshot,
@@ -2072,9 +1728,6 @@ impl Taken {
     ) -> LoadBundleTiming {
         let record = &self.record;
         let start = Timestamp(load.vm_execute.0);
-        // Lynx's `fcp` is the view's first paint (Paint Timing's
-        // `first-paint`); a `<frame>` card's load, whose first paint the
-        // view's is not, reports its own pipeline's present.
         let first_paint = load
             .page
             .then_some(self.first_paint)

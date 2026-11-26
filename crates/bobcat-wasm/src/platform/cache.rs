@@ -38,8 +38,6 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Cache, CacheStorage, Headers, Response, ResponseInit};
 
-/// The origin every request URL is under: never fetched from, since the
-/// `.invalid` top-level domain resolves nowhere.
 const ORIGIN: &str = "https://bobcat.invalid/";
 
 const KEY_HEADER: &str = "x-bobcat-key";
@@ -47,21 +45,12 @@ const LENGTH_HEADER: &str = "x-bobcat-length";
 const LAST_USED_HEADER: &str = "x-bobcat-last-used";
 const RECORD_HEADER: &str = "x-bobcat-record";
 
-/// One cache of the origin's `CacheStorage`, opened once.
 #[derive(Debug)]
 pub struct CacheStore {
     cache: Cache,
 }
 
 impl CacheStore {
-    /// Opens (creating if absent) the cache `name` of this scope's
-    /// `caches`. Works in a Window and in a Worker: `caches` is read from
-    /// the global scope.
-    ///
-    /// # Errors
-    ///
-    /// When the scope has no `caches` (a context that is not secure) or
-    /// `caches.open` rejects (some browsers' private browsing).
     pub async fn open(name: &str) -> Result<Self, String> {
         let caches =
             Reflect::get(&js_sys::global(), &"caches".into()).map_err(|error| describe(&error))?;
@@ -79,11 +68,6 @@ impl CacheStore {
 }
 
 impl AsyncStore for CacheStore {
-    /// Every entry's [`Meta`], read from its headers by `matchAll()`; no body
-    /// is read. A response from `matchAll()` does not say which request it
-    /// is filed under, so when one's headers do not parse, the entries are
-    /// listed again by `keys()` and every entry whose headers do not parse is
-    /// deleted by its request URL.
     async fn scan(&self) -> Result<Vec<Meta>, StoreError> {
         let responses = list(self.cache.match_all()).await?;
         let mut metas = Vec::with_capacity(responses.length() as usize);
@@ -140,9 +124,6 @@ impl AsyncStore for CacheStore {
         Ok(())
     }
 
-    /// Puts the entry again with a new `last_used` header. The stored body
-    /// is handed to the new response as its stream, so it is never copied
-    /// into Wasm memory. A key with no entry is left absent.
     async fn touch(&self, key: &str, now: SystemTime) -> Result<(), StoreError> {
         let Some(response) = self.matched(key).await? else {
             return Ok(());
@@ -164,8 +145,6 @@ impl AsyncStore for CacheStore {
         Ok(())
     }
 
-    /// `navigator.storage.estimate()` for the whole origin, when the scope
-    /// has it; otherwise nothing is known.
     async fn estimate(&self) -> Estimate {
         let Some(estimate) = storage_estimate().await else {
             return Estimate::default();
@@ -191,15 +170,12 @@ impl AsyncStore for CacheStore {
         }
     }
 
-    /// The browser may clear the origin's storage at any time.
     fn volatility(&self) -> Volatility {
         Volatility::EvictableAnytime
     }
 }
 
 impl CacheStore {
-    /// Deletes every entry whose headers do not parse, found through
-    /// `keys()`, which names each entry's request.
     async fn delete_broken(&self) -> Result<(), StoreError> {
         for request in list(self.cache.keys()).await?.iter() {
             let Ok(request) = request.dyn_into::<web_sys::Request>() else {
@@ -221,7 +197,6 @@ impl CacheStore {
         Ok(())
     }
 
-    /// The response stored under `key`, if there is one.
     async fn matched(&self, key: &str) -> Result<Option<Response>, StoreError> {
         let answer = JsFuture::from(self.cache.match_with_str(&request_url(key)))
             .await
@@ -230,7 +205,6 @@ impl CacheStore {
     }
 }
 
-/// The list a `matchAll()` or `keys()` Promise answers.
 async fn list(promise: js_sys::Promise) -> Result<Array, StoreError> {
     JsFuture::from(promise)
         .await
@@ -239,8 +213,6 @@ async fn list(promise: js_sys::Promise) -> Result<Array, StoreError> {
         .map_err(|_| StoreError::Other("the cache answered something other than a list".to_owned()))
 }
 
-/// `navigator.storage.estimate()`'s answer, or `None` when the scope has no
-/// `navigator.storage` or the call fails.
 async fn storage_estimate() -> Option<JsValue> {
     let navigator = Reflect::get(&js_sys::global(), &"navigator".into()).ok()?;
     if navigator.is_undefined() || navigator.is_null() {
@@ -257,13 +229,11 @@ async fn storage_estimate() -> Option<JsValue> {
     JsFuture::from(storage.estimate().ok()?).await.ok()
 }
 
-/// The request URL a store key is filed under.
 fn request_url(key: &str) -> String {
     let path: Vec<String> = key.split('/').map(percent_encode).collect();
     format!("{ORIGIN}{}", path.join("/"))
 }
 
-/// The response options carrying `meta` as headers.
 fn init(meta: &Meta) -> Result<ResponseInit, StoreError> {
     let headers = Headers::new().map_err(store_error)?;
     let last_used = meta
@@ -284,8 +254,6 @@ fn init(meta: &Meta) -> Result<ResponseInit, StoreError> {
     Ok(init)
 }
 
-/// The [`Meta`] an entry's headers carry, or `None` when one is missing or
-/// does not parse.
 fn meta_of(headers: &Headers) -> Option<Meta> {
     let header = |name: &str| headers.get(name).ok().flatten();
     let key = percent_decode(&header(KEY_HEADER)?)?;
@@ -300,8 +268,6 @@ fn meta_of(headers: &Headers) -> Option<Meta> {
     })
 }
 
-/// `text` with every byte other than an ASCII letter, digit, `-`, `.`, `_`
-/// or `~` written as `%XX`.
 fn percent_encode(text: &str) -> String {
     let mut encoded = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -317,8 +283,6 @@ fn percent_encode(text: &str) -> String {
     encoded
 }
 
-/// The text [`percent_encode`] wrote, or `None` for a malformed escape or a
-/// result that is not UTF-8.
 fn percent_decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());

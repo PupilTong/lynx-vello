@@ -45,37 +45,22 @@ use euclid::default::{Size2D, Vector2D};
 
 use crate::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
 
-/// The rubber band's `c`: the slope a stretch starts at. `UIKit`'s
-/// coefficient.
 pub(super) const RUBBER_BAND_COEFFICIENT: f32 = 0.55;
 
-/// A fling's in-range decay per millisecond: `UIKit`'s normal deceleration
-/// rate.
 pub(super) const FLING_DECAY_PER_MS: f32 = 0.998;
 
-/// A fling's decay per millisecond once it has stretched past a boundary:
-/// `UIKit`'s fast deceleration rate, so an overshoot is short.
 pub(super) const OVERSHOOT_DECAY_PER_MS: f32 = 0.99;
 
-/// The bounce back's `β`, per second: the critically damped spring's
-/// stiffness.
 pub(super) const BOUNCE_BACK_STIFFNESS: f32 = 15.0;
 
-/// What is moving a scroll container through one chain step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Motion {
-    /// One step of a finger's drag: raw in range, rubber-banded past a
-    /// `contain-bounce` edge.
     Drag,
-    /// One step of a fling: raw in range, and past a `contain-bounce` edge
-    /// raw too, capped at one scrollport.
     Fling,
-    /// A wheel tick: snaps as it lands, and never stretches.
     Wheel,
 }
 
 impl Motion {
-    /// The css-scroll-snap-1 kind the step is for the snap rules.
     pub(super) fn kind(self) -> ScrollKind {
         match self {
             Self::Drag | Self::Fling => ScrollKind::Gesture,
@@ -84,9 +69,6 @@ impl Motion {
     }
 }
 
-/// One physical pixel in CSS px: the distance under which a curve is over
-/// and a stretch is none, and — read as CSS px per millisecond — the
-/// velocity under which an overshoot starts its bounce back.
 pub(super) fn rest_threshold(device_pixel_ratio: f32) -> f32 {
     if device_pixel_ratio.is_finite() && device_pixel_ratio > 0.0 {
         1.0 / device_pixel_ratio
@@ -95,20 +77,13 @@ pub(super) fn rest_threshold(device_pixel_ratio: f32) -> f32 {
     }
 }
 
-/// How far a boundary stretches when the finger has travelled `travel` CSS
-/// px past it, for a scrollport of `extent` on that axis. Non-negative in,
-/// non-negative out; a non-positive extent stretches nothing.
 pub(super) fn rubber_band(travel: f32, extent: f32) -> f32 {
-    // NaN in, nothing out: neither comparison holds.
     if travel <= 0.0 || extent <= 0.0 || travel.is_nan() || extent.is_nan() {
         return 0.0;
     }
     (1.0 - 1.0 / (travel * RUBBER_BAND_COEFFICIENT / extent + 1.0)) * extent
 }
 
-/// How fast the stretch grows per px of finger travel at `travel` past the
-/// edge: the rubber band's derivative, `c / (x·c/L + 1)²`. What a finger's
-/// release velocity is damped by when it lets go mid-stretch.
 pub(super) fn rubber_band_slope(travel: f32, extent: f32) -> f32 {
     if extent <= 0.0 || extent.is_nan() {
         return 0.0;
@@ -117,9 +92,6 @@ pub(super) fn rubber_band_slope(travel: f32, extent: f32) -> f32 {
     RUBBER_BAND_COEFFICIENT / (inner * inner)
 }
 
-/// The finger travel that stretches a boundary by `displacement`: the
-/// inverse of [`rubber_band`]. A displacement at or past the extent is
-/// unreachable and answers the travel for a hair short of it.
 pub(super) fn rubber_band_travel(displacement: f32, extent: f32) -> f32 {
     if displacement <= 0.0 || extent <= 0.0 || displacement.is_nan() || extent.is_nan() {
         return 0.0;
@@ -128,51 +100,32 @@ pub(super) fn rubber_band_travel(displacement: f32, extent: f32) -> f32 {
     (extent * displacement) / ((extent - displacement) * RUBBER_BAND_COEFFICIENT)
 }
 
-/// A fling's velocity `elapsed_ms` after it started at `velocity`, decaying
-/// at `rate` per millisecond.
 pub(super) fn fling_velocity(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
     velocity * rate.powf(elapsed_ms)
 }
 
-/// The distance a fling that started at `velocity` has covered
-/// `elapsed_ms` later, decaying at `rate` per millisecond.
 pub(super) fn fling_distance(velocity: f32, rate: f32, elapsed_ms: f32) -> f32 {
     velocity * (rate.powf(elapsed_ms) - 1.0) / rate.ln()
 }
 
-/// The whole distance a fling from `velocity` covers before it is spent.
 pub(super) fn fling_travel(velocity: f32, rate: f32) -> f32 {
     -velocity / rate.ln()
 }
 
-/// The velocity whose whole fling covers exactly `travel`: how a fling is
-/// aimed at a snap position.
 pub(super) fn fling_velocity_for_travel(travel: f32, rate: f32) -> f32 {
     -travel * rate.ln()
 }
 
-/// Where a bounce back from `displacement` stands `elapsed_s` seconds in.
-/// Critically damped with no initial velocity, so it never crosses the
-/// boundary it returns to.
 pub(super) fn bounce_back(displacement: f32, elapsed_s: f32) -> f32 {
     glide(displacement, 0.0, elapsed_s)
 }
 
-/// Where a glide from `displacement`, whose displacement was changing at
-/// `velocity` CSS px per second, stands `elapsed_s` seconds in: the
-/// critically damped spring `(C + (v + β·C)·t)·e^(−β·t)`. It never crosses
-/// zero when `velocity` is what [`glide_velocity`] admits.
 pub(super) fn glide(displacement: f32, velocity: f32, elapsed_s: f32) -> f32 {
     let t = elapsed_s.max(0.0);
     let beta_t = BOUNCE_BACK_STIFFNESS * t;
     (displacement + (velocity + BOUNCE_BACK_STIFFNESS * displacement) * t) * (-beta_t).exp()
 }
 
-/// The initial velocity, in CSS px per second of displacement, a glide from
-/// `displacement` may start with when the container is moving at
-/// `velocity`: toward the target it keeps up to `β·|C|`, the speed of a pure
-/// exponential approach, past which the spring would cross the target; a
-/// velocity pointing away from the target starts the glide from rest.
 pub(super) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
     if !velocity.is_finite() || velocity * displacement >= 0.0 {
         return 0.0;
@@ -181,8 +134,6 @@ pub(super) fn glide_velocity(displacement: f32, velocity: f32) -> f32 {
     velocity.clamp(-limit, limit)
 }
 
-/// The signed stretch of `offset` past `0..=max`: negative past the start
-/// edge, positive past the end edge, zero in range.
 pub(super) fn stretch_of(offset: f32, max: f32) -> f32 {
     if offset < 0.0 {
         offset
@@ -193,39 +144,13 @@ pub(super) fn stretch_of(offset: f32, max: f32) -> f32 {
     }
 }
 
-/// One resolved chain step on a container that may stretch; see
-/// [`resolve_elastic_step`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ElasticStep {
-    /// Where the container stands after the step. Outside `0..=max` on an
-    /// axis it stretched on.
     pub(super) applied: Vector2D<f32>,
-    /// What the container absorbed of the admitted delta — everything, on
-    /// an axis it stretched on.
     pub(super) absorbed: Vector2D<f32>,
-    /// The axes on which the container is now past a boundary.
     pub(super) stretched: ScrollAxes,
 }
 
-/// Resolves one container's chain step where an axis in `bounce` may
-/// stretch past its boundary, and answers like [`resolve_step`] where none
-/// does.
-///
-/// A drag step past the boundary is rubber-banded: the finger's travel
-/// past the edge — recovered from the current stretch through
-/// [`rubber_band_travel`] when the container was already stretched — maps
-/// through [`rubber_band`], and a drag that pulls back through the edge
-/// spends the rest of its delta scrolling. A fling step stretches raw,
-/// capped at one scrollport. A wheel tick
-/// never stretches: it first brings a stretched container back to its
-/// edge, then lands as any wheel tick does.
-///
-/// An axis in `wrap` is circular with a period: it has no edge, so a drag
-/// or fling step moves it by the whole delta and absorbs all of it, and a
-/// wheel tick lands through [`resolve_step`] with the same axis unclamped,
-/// where a snapping axis's positions repeat every period. Nothing here
-/// normalizes the result: the offset may stand outside `0..=max` on that
-/// axis, and is never reported as stretched.
 #[allow(
     clippy::too_many_arguments,
     reason = "one chain step's whole context: the motion, the geometry, the policy and the snap data"
@@ -242,7 +167,6 @@ pub(super) fn resolve_elastic_step(
     snap_y: Option<SnapAxis<'_>>,
 ) -> ElasticStep {
     if motion == Motion::Wheel || bounce == ScrollAxes::NONE {
-        // A wrapped axis has no range to bring the offset back into.
         let settled = Vector2D::new(
             settle_axis(offset.x, max.x, wrap.x),
             settle_axis(offset.y, max.y, wrap.y),
@@ -305,12 +229,6 @@ pub(super) fn resolve_elastic_step(
     }
 }
 
-/// Unwinds one stretched axis toward its edge by `delta`, absorbing no
-/// more than what brings it home: `(applied, absorbed)`. A delta pushing
-/// further out, or an axis in range, is left to the chain walk.
-///
-/// The restore-first rule: a container already stretched on the chain
-/// unwinds before any delta chains inward, whatever the walk's order.
 pub(super) fn unwind_stretch(
     motion: Motion,
     current: f32,
@@ -347,16 +265,12 @@ pub(super) fn unwind_stretch(
     }
 }
 
-/// One drag step on a stretching axis: `(applied, absorbed, stretched)`.
 fn drag_axis(current: f32, delta: f32, max: f32, extent: f32) -> (f32, f32, bool) {
     let stretch = stretch_of(current, max);
     let mut current = current;
     let mut remaining = delta;
     if stretch != 0.0 {
         let edge = if stretch < 0.0 { 0.0 } else { max };
-        // The finger travel that produced the stretch, then this step's on
-        // top: still past the edge, or back through it with the rest to
-        // spend on scrolling.
         let travel = stretch.signum() * rubber_band_travel(stretch.abs(), extent) + delta;
         if travel != 0.0 && travel.signum() == stretch.signum() {
             let stretched = stretch.signum() * rubber_band(travel.abs(), extent);
@@ -378,8 +292,6 @@ fn drag_axis(current: f32, delta: f32, max: f32, extent: f32) -> (f32, f32, bool
     (edge + stretched, delta, true)
 }
 
-/// One fling step on a stretching axis: raw, and capped one scrollport
-/// past either edge.
 fn fling_axis(current: f32, delta: f32, max: f32, extent: f32) -> (f32, f32, bool) {
     let natural = (current + delta).clamp(-extent, max + extent);
     (natural, delta, natural < 0.0 || natural > max)
@@ -393,8 +305,6 @@ fn clamp_axis(value: f32, max: f32) -> f32 {
     }
 }
 
-/// Where a step finds the container on one axis: clamped into range, or —
-/// on a wrapped axis, which has no range — where it stands.
 fn settle_axis(value: f32, max: f32, wraps: bool) -> f32 {
     match (wraps, value.is_finite()) {
         (true, true) => value,
@@ -423,7 +333,6 @@ mod tests {
         assert_eq!(rubber_band(0.0, extent), 0.0);
         assert_eq!(rubber_band(-10.0, extent), 0.0);
         assert_eq!(rubber_band(10.0, 0.0), 0.0);
-        // One px of travel: (1 − 1/1.001375)·400, a hair under the slope.
         let first = rubber_band(1.0, extent);
         assert!(close(first, 0.5492), "got {first}");
         assert!(first < RUBBER_BAND_COEFFICIENT);
@@ -441,7 +350,6 @@ mod tests {
         }
         assert_eq!(rubber_band_travel(0.0, extent), 0.0);
         assert!(rubber_band_travel(extent, extent).is_finite());
-        // The slope is the coefficient at the edge and falls off past it.
         assert_eq!(rubber_band_slope(0.0, extent), RUBBER_BAND_COEFFICIENT);
         let numeric = rubber_band(100.5, extent) - rubber_band(99.5, extent);
         assert!(close(rubber_band_slope(100.0, extent), numeric));
@@ -453,7 +361,6 @@ mod tests {
         let (v0, rate) = (2.0, FLING_DECAY_PER_MS);
         assert_eq!(fling_distance(v0, rate, 0.0), 0.0);
         assert!(close(fling_velocity(v0, rate, 100.0), v0 * rate.powi(100)));
-        // Riemann sum against the closed form.
         let mut sum = 0.0;
         for step in 0..1000 {
             sum += fling_velocity(v0, rate, step as f32 + 0.5);
@@ -465,7 +372,6 @@ mod tests {
             fling_travel(fling_velocity_for_travel(250.0, rate), rate),
             250.0
         ));
-        // The overshoot rate spends a fling about five times sooner.
         assert!(fling_travel(v0, OVERSHOOT_DECAY_PER_MS) * 4.0 < fling_travel(v0, rate));
     }
 
@@ -473,8 +379,6 @@ mod tests {
     fn the_bounce_back_starts_where_it_was_left_with_no_velocity_and_settles() {
         let c1 = 120.0;
         assert_eq!(bounce_back(c1, 0.0), c1);
-        // Zero initial velocity: the first millisecond moves it by the
-        // second-order term alone, (β·t)²/2 of the way.
         assert!(bounce_back(c1, 0.001) > c1 * 0.9998);
         assert!(bounce_back(c1, 0.001) < c1);
         let mut previous = c1;
@@ -497,18 +401,15 @@ mod tests {
     #[test]
     fn a_glide_keeps_its_velocity_toward_the_target_and_never_crosses_it() {
         let c = 120.0;
-        // Toward the target (displacement falling): kept up to β·|C|.
         assert_eq!(glide_velocity(c, -500.0), -500.0);
         assert_eq!(glide_velocity(c, -1e6), -BOUNCE_BACK_STIFFNESS * c);
         assert_eq!(glide_velocity(-c, 1e6), BOUNCE_BACK_STIFFNESS * c);
-        // Away from it, or nowhere to go: from rest.
         assert_eq!(glide_velocity(c, 500.0), 0.0);
         assert_eq!(glide_velocity(0.0, -500.0), 0.0);
         assert_eq!(glide_velocity(c, f32::NAN), 0.0);
         for v in [0.0, -500.0, -BOUNCE_BACK_STIFFNESS * c] {
             let v = glide_velocity(c, v);
             assert_eq!(glide(c, v, 0.0), c);
-            // The curve's slope at the start is the velocity it was given.
             let slope = (glide(c, v, 1e-4) - c) / 1e-4;
             assert!((slope - v).abs() < 5.0, "slope {slope} for {v}");
             let mut previous = c;
@@ -519,7 +420,6 @@ mod tests {
             }
             assert!(glide(c, v, 1.0) < rest_threshold(3.0));
         }
-        // The full velocity is the pure exponential approach.
         let v = -BOUNCE_BACK_STIFFNESS * c;
         assert!(close(
             glide(c, v, 0.2),
@@ -562,7 +462,6 @@ mod tests {
         assert_eq!(applied, -rubber_band(100.0, 200.0));
         assert_eq!(absorbed, -100.0, "a stretching axis absorbs everything");
         assert!(stretched);
-        // The same finger travel in two steps lands on the same stretch.
         let (half, ..) = step(Motion::Drag, 0.0, -40.0, true);
         let (whole, ..) = step(Motion::Drag, half, -60.0, true);
         assert!(close(whole, applied), "{whole} vs {applied}");
@@ -570,12 +469,10 @@ mod tests {
 
     #[test]
     fn a_drag_that_crosses_the_edge_spends_the_rest_scrolling() {
-        // 30px in range, then 20px past the end edge.
         let (applied, absorbed, stretched) = step(Motion::Drag, 470.0, 50.0, true);
         assert_eq!(applied, 500.0 + rubber_band(20.0, 200.0));
         assert_eq!(absorbed, 50.0);
         assert!(stretched);
-        // Pulled back: the stretch unwinds first, then the container scrolls.
         let (back, absorbed, stretched) = step(Motion::Drag, applied, -50.0, true);
         assert!(close(back, 470.0), "got {back}");
         assert_eq!(absorbed, -50.0);
@@ -612,9 +509,6 @@ mod tests {
         assert_eq!((applied, absorbed), (480.0, 0.0));
     }
 
-    /// One step on a circular y axis: `max` 500 over a 200px scrollport,
-    /// so a period of 700, with `bounce` on the x axis so a drag or fling
-    /// takes the elastic path too.
     fn wrapped_step(
         motion: Motion,
         offset: f32,
@@ -637,19 +531,15 @@ mod tests {
     #[test]
     fn a_drag_or_fling_on_a_wrapped_axis_runs_past_either_end_and_absorbs_everything() {
         for motion in [Motion::Drag, Motion::Fling] {
-            // 480 + 50 runs 30px past the end: no clamp, no stretch.
             let step = wrapped_step(motion, 480.0, 50.0, None);
             assert_eq!(step.applied.y, 530.0, "{motion:?}");
             assert_eq!(step.absorbed.y, 50.0, "{motion:?}");
             assert_eq!(step.stretched, ScrollAxes::NONE, "{motion:?}");
-            // And back below the start from an offset already outside the
-            // range, which is where the previous step may have left it.
             let step = wrapped_step(motion, 20.0, -260.0, None);
             assert_eq!(step.applied.y, -240.0, "{motion:?}");
             assert_eq!(step.absorbed.y, -260.0, "{motion:?}");
             assert!(!step.stretched.y, "{motion:?}");
         }
-        // The same without any bouncing axis, through `resolve_step`.
         let plain = resolve_elastic_step(
             Motion::Drag,
             Vector2D::new(0.0, 900.0),
@@ -679,16 +569,11 @@ mod tests {
             points: &points,
             period: Some(700.0),
         };
-        // From the last position a forward tick reaches the first one's
-        // next copy, 700, rather than being refused at the end.
         let step = wrapped_step(Motion::Wheel, 400.0, 30.0, Some(snap));
         assert_eq!(step.applied.y, 700.0);
         assert_eq!(step.absorbed.y, 30.0);
-        // Backward from the start it reaches the last position's previous
-        // copy, 400 − 700.
         let step = wrapped_step(Motion::Wheel, 0.0, -30.0, Some(snap));
         assert_eq!(step.applied.y, -300.0);
-        // Unsnapped it lands raw past the end.
         let step = wrapped_step(Motion::Wheel, 490.0, 30.0, None);
         assert_eq!(step.applied.y, 520.0);
         assert_eq!(step.absorbed.y, 30.0);
@@ -697,7 +582,6 @@ mod tests {
 
     #[test]
     fn unwinding_absorbs_only_what_brings_the_stretch_home() {
-        // Stretched 40px past the start edge by ~92px of finger travel.
         let stretched = -rubber_band(92.0, 200.0);
         assert_eq!(
             unwind_stretch(Motion::Drag, stretched, -10.0, 500.0, 200.0),

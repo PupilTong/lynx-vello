@@ -144,23 +144,12 @@ use crate::tree::node::Node;
 use crate::tree::xml::MAX_NESTING;
 use crate::visual::transform::{ContextMatrix, planar};
 
-/// Where the root `svg` element's own group effects (`opacity`,
-/// `clip-path`, `mask`, `transform`) are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RootGroup {
-    /// In the item list: an SVG document used as an image has no box to
-    /// carry them.
     Recorded,
-    /// By the root's own CSS box, which the paint walk composites like any
-    /// box's: an `svg` element in a document. The list holds its content
-    /// only.
     Box,
 }
 
-/// Records the subtree of the SVG `svg` element `root`, whose styles are
-/// flushed. The natural size, viewport and `preserveAspectRatio` come from
-/// the root's attributes, by CSS Images 3 default sizing
-/// ([`vector_sizes`]).
 pub(crate) fn record<T>(document: &Document<T>, root: NodeId, group: RootGroup) -> Recording {
     let node = document.get(root).expect("the root is live");
     let width = plain(node, "width").and_then(absolute_length);
@@ -196,9 +185,6 @@ pub(crate) fn record<T>(document: &Document<T>, root: NodeId, group: RootGroup) 
     }
 }
 
-/// Every element of `root`'s light subtree that has an `id`, by id; the
-/// first in tree order wins, as `getElementById` says. A `use` instance is
-/// in a shadow tree and is not in it.
 fn ids<T>(document: &Document<T>, root: NodeId) -> FxHashMap<&str, NodeId> {
     let mut ids = FxHashMap::default();
     let mut stack = vec![root];
@@ -214,8 +200,6 @@ fn ids<T>(document: &Document<T>, root: NodeId) -> FxHashMap<&str, NodeId> {
     ids
 }
 
-/// Where an element is recorded: its absolute transform, the viewport
-/// percentages resolve against, and how many levels of the walk enclose it.
 #[derive(Clone, Copy)]
 struct Context {
     transform: Affine,
@@ -223,42 +207,29 @@ struct Context {
     depth: u32,
 }
 
-/// What a `url()` paint names.
 enum Server {
     Gradient(GradientSpec),
     Pattern,
     Missing,
 }
 
-/// An element's own transform, or what is needed to know it.
 enum OwnTransform {
     Known(Affine),
-    /// The reference box is the element's bounding box, which only its
-    /// content decides.
     AfterContent,
 }
 
 struct Recorder<'d, T> {
     document: &'d Document<T>,
     ids: FxHashMap<&'d str, NodeId>,
-    /// The document's URL, which a `url()` naming an element of the subtree
-    /// is a fragment of.
     base: &'d url::Url,
     items: Vec<Item>,
     has_text: bool,
     animated: Vec<Animated>,
-    /// Whether elements whose `transform` or `opacity` animates are marked
-    /// in [`Recording::animated`]: for an `svg` element in a document, whose
-    /// plan can hand them to the painter, and not for an SVG image.
     marks: bool,
-    /// How many elements enclosing the one being recorded drew something
-    /// from the extent of their content: a bounds layer, a bounding-box
-    /// clip, a transform against their bounding box.
     content_bound: u32,
 }
 
 impl<'d, T> Recorder<'d, T> {
-    /// `id` as an SVG element, with its local name.
     fn element(&self, id: NodeId) -> Option<(&'d Node<T>, &'d str)> {
         let node = self.document.get(id)?;
         if !node.is_element() || !node.in_svg_namespace() {
@@ -271,8 +242,6 @@ impl<'d, T> Recorder<'d, T> {
         self.document.get(id)?.layout_computed_style()
     }
 
-    /// The root: its content, under its own group effects when they are
-    /// the list's to draw.
     fn record_root(&mut self, root: NodeId, context: Context, group: RootGroup) {
         let Some(style) = self.style(root) else {
             return;
@@ -305,7 +274,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// One element and everything it draws; nothing past [`MAX_NESTING`].
     fn record_element(&mut self, id: NodeId, context: Context) {
         let Some((node, name)) = self.element(id) else {
             return;
@@ -340,8 +308,6 @@ impl<'d, T> Recorder<'d, T> {
         });
     }
 
-    /// Records `draw` under the own transform of element `id`, of `style`,
-    /// and inside the layers its `opacity` and `clip-path` open.
     fn with_effects(
         &mut self,
         id: NodeId,
@@ -351,7 +317,6 @@ impl<'d, T> Recorder<'d, T> {
     ) {
         let first = self.items.len();
         let (fades, moves) = self.animates(id);
-        // Marked before its content, so the list is in document order.
         let entry = (fades || moves).then(|| {
             self.animated.push(Animated {
                 node: id,
@@ -361,8 +326,6 @@ impl<'d, T> Recorder<'d, T> {
             });
             self.animated.len() - 1
         });
-        // A curve moving the element would leave what an enclosing element
-        // drew from the extent of its content stale.
         let moves = moves && self.content_bound == 0;
         let reference = (moves || has_transform(style)).then(|| reference(style, context.viewport));
         let reference = match reference {
@@ -388,8 +351,6 @@ impl<'d, T> Recorder<'d, T> {
                 rect.filter(|_| moves)
             }
             Some(Reference::After { include_stroke }) => {
-                // Recorded as if the element had no transform of its own,
-                // then mapped by it once the content gives the box.
                 let provisional = Context {
                     transform: context.transform,
                     viewport: context.viewport,
@@ -439,9 +400,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// Whether element `id`'s `opacity` and its `transform` animate, as
-    /// the stacking contexts of the CSS boxes read it
-    /// (`visual::stacking`), when this recording marks such elements.
     fn animates(&self, id: NodeId) -> (bool, bool) {
         if !self.marks {
             return (false, false);
@@ -451,8 +409,6 @@ impl<'d, T> Recorder<'d, T> {
         })
     }
 
-    /// [`open_layers`] for element `id` of `style`, its clip path resolved
-    /// first; `fades` opens its compositing layer whatever its opacity.
     fn open_layers(
         &mut self,
         id: NodeId,
@@ -472,7 +428,6 @@ impl<'d, T> Recorder<'d, T> {
         )
     }
 
-    /// The id `style`'s `clip-path: url()` names in this subtree.
     fn clip_url(&self, style: &'d ComputedValues) -> Option<&'d str> {
         match &style.get_svg().clip_path {
             ClipPath::Url(url) => self.fragment(url),
@@ -480,7 +435,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// The fragment `url` names when it is one of the document's own URL.
     fn fragment<'u>(&self, url: &'u ComputedUrl) -> Option<&'u str> {
         match url {
             ComputedUrl::Valid(url) => {
@@ -493,10 +447,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// A nested `svg`, or a `symbol` or `svg` a `use` instantiates: its
-    /// viewport is clipped and its `viewBox` mapped by its
-    /// `preserveAspectRatio`. `size` is the `use`'s `width` and `height`,
-    /// which override the element's own.
     fn nested_viewport(
         &mut self,
         id: NodeId,
@@ -564,8 +514,6 @@ impl<'d, T> Recorder<'d, T> {
         self.items.push(Item::Pop);
     }
 
-    /// A `use`: its instance drawn at its computed `x`/`y`. The expansion
-    /// is a level of its own.
     fn record_use(&mut self, id: NodeId, context: Context) {
         if context.depth >= MAX_NESTING {
             return;
@@ -614,8 +562,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// The element a `use` instantiates: the first element of its shadow
-    /// root.
     fn instance(&self, node: &Node<T>) -> Option<NodeId> {
         let shadow = self.document.get(node.shadow_root_id()?)?;
         shadow
@@ -625,7 +571,6 @@ impl<'d, T> Recorder<'d, T> {
             .find(|&child| self.element(child).is_some())
     }
 
-    /// A basic shape or `path` as one [`Item::Path`].
     fn record_shape(
         &mut self,
         id: NodeId,
@@ -687,7 +632,6 @@ impl<'d, T> Recorder<'d, T> {
         });
     }
 
-    /// The geometry of a shape element in its own user space.
     fn geometry(
         &self,
         id: NodeId,
@@ -751,8 +695,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// The brush for `paint` at `opacity` on an element of `style` whose
-    /// bounding box is `bbox`. `None` paints nothing.
     fn resolve_paint(
         &self,
         paint: &SVGPaint,
@@ -781,8 +723,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// The text paint for `paint`, resolved as far as recording can: a
-    /// gradient waits for the shaped chunk's box.
     fn resolve_text_paint(
         &self,
         paint: &SVGPaint,
@@ -810,7 +750,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// What `url` names.
     fn paint_server(&self, url: &ComputedUrl, viewport: Viewport) -> Server {
         let Some(&target) = self.fragment(url).and_then(|id| self.ids.get(id)) else {
             return Server::Missing;
@@ -825,9 +764,6 @@ impl<'d, T> Recorder<'d, T> {
         }
     }
 
-    /// The `clipPath` with `id` resolved to one shape, with its own clip
-    /// chain. `depth` cuts a `clip-path` chain past eight references, a
-    /// cycle included.
     fn clip_path(&self, id: &str, viewport: Viewport, depth: usize) -> Option<ClipDef> {
         if depth > 8 {
             return None;
@@ -843,7 +779,6 @@ impl<'d, T> Recorder<'d, T> {
             .clip_url(style)
             .and_then(|outer| self.clip_path(outer, viewport, depth + 1))
             .map(Box::new);
-        // Children, each under its own transform; `use` one level deep.
         let mut parts: SmallVec<[(BezPath, Fill); 2]> = SmallVec::new();
         for &child in node.child_ids() {
             let Some((child_node, child_name)) = self.element(child) else {
@@ -895,7 +830,6 @@ impl<'d, T> Recorder<'d, T> {
         ))
     }
 
-    /// A `text` element as one [`Item::Text`].
     fn record_text(&mut self, id: NodeId, style: &'d ComputedValues, context: Context) {
         let Some((node, _)) = self.element(id) else {
             return;
@@ -929,8 +863,6 @@ impl<'d, T> Recorder<'d, T> {
         }));
     }
 
-    /// The `xml:space` of the nearest of `id` and its ancestors that has
-    /// one, along the flat tree.
     fn space(&self, id: NodeId) -> Space {
         let mut current = self.document.get(id);
         while let Some(node) = current {
@@ -949,8 +881,6 @@ impl<'d, T> Recorder<'d, T> {
         Space::Default
     }
 
-    /// Appends the text and `tspan`s under `id` to `chunks`, in order.
-    /// `pending` is the `dx`/`dy` the next span takes.
     fn collect_spans(
         &self,
         id: NodeId,
@@ -1053,8 +983,6 @@ impl<'d, T> Recorder<'d, T> {
     }
 }
 
-/// Whether an element and its subtree draw nothing: `display: none`, or a
-/// mask, which drawing unmasked would show what the author hid.
 fn hidden(style: &ComputedValues) -> bool {
     style.get_box().display.is_none() || crate::paint::mask::has_mask(style)
 }
@@ -1064,14 +992,10 @@ fn visible(style: &ComputedValues) -> bool {
     style.get_inherited_box().visibility == Visibility::Visible
 }
 
-/// The viewport as a `view-box` reference box: its size at the user space
-/// origin (css-transforms-1 §6.1).
 fn view_rect(viewport: Viewport) -> Rect {
     Rect::new(0.0, 0.0, viewport.width, viewport.height)
 }
 
-/// Whether `style` gives the element a transform of its own: a transform
-/// list or an individual `rotate`, `scale` or `translate`.
 fn has_transform(style: &ComputedValues) -> bool {
     use stylo::values::computed::transform::{Rotate, Scale, Translate};
 
@@ -1082,9 +1006,6 @@ fn has_transform(style: &ComputedValues) -> bool {
         && matches!(box_style.translate, Translate::None))
 }
 
-/// The reference box `transform-box` names (css-transforms-1 §6.1): known
-/// before the content (`view-box`), or the element's bounding box, strokes
-/// included or not, known after it.
 enum Reference {
     Before(Rect),
     After { include_stroke: bool },
@@ -1104,8 +1025,6 @@ fn reference(style: &ComputedValues, viewport: Viewport) -> Reference {
     }
 }
 
-/// What an element's own transform needs: none when it has no transform at
-/// all, its reference box otherwise.
 fn own_transform(style: &ComputedValues, viewport: Viewport) -> OwnTransform {
     if !has_transform(style) {
         return OwnTransform::Known(Affine::IDENTITY);
@@ -1116,8 +1035,6 @@ fn own_transform(style: &ComputedValues, viewport: Viewport) -> OwnTransform {
     }
 }
 
-/// The own transform an element of `style` records against the reference
-/// box `reference`: the identity when it has no transform.
 fn transform_against(style: &ComputedValues, reference: Rect) -> Affine {
     if has_transform(style) {
         box_transform(style, reference)
@@ -1126,9 +1043,6 @@ fn transform_against(style: &ComputedValues, reference: Rect) -> Affine {
     }
 }
 
-/// An element's own transform when its bounding box, if it needs one, is
-/// `bounds` (a shape's geometry) or unknown (the `view-box` reference
-/// stands in).
 fn known_transform(style: &ComputedValues, viewport: Viewport, bounds: Option<Rect>) -> Affine {
     match own_transform(style, viewport) {
         OwnTransform::Known(own) => own,
@@ -1138,19 +1052,11 @@ fn known_transform(style: &ComputedValues, viewport: Viewport, bounds: Option<Re
     }
 }
 
-/// `style`'s transform with its origin resolved against `reference`, through
-/// the matrix builder of the CSS boxes: the origin and a percentage in the
-/// list resolve against the box's size, and the box's origin moves both.
 fn box_transform(style: &ComputedValues, reference: Rect) -> Affine {
     let matrix = context_matrix(style, reference).with_list(&style.get_box().transform);
     planar(&matrix) * Affine::translate((-reference.x0, -reference.y0))
 }
 
-/// The matrix builder of the CSS boxes around an SVG element's transform
-/// list, its reference box `reference` in the element's user space standing
-/// for the border box at its offset: the factors [`box_transform`] folds a
-/// list with, and an animation slot's track folds a sampled list with
-/// (`visual::svg`).
 pub(crate) fn context_matrix(style: &ComputedValues, reference: Rect) -> ContextMatrix {
     #[expect(clippy::cast_possible_truncation, reason = "CSS geometry is f32")]
     let (x, y, width, height) = (
@@ -1162,7 +1068,6 @@ pub(crate) fn context_matrix(style: &ComputedValues, reference: Rect) -> Context
     ContextMatrix::of(style, Size2D::new(width, height), Point2D::new(x, y), None)
 }
 
-/// Maps an already recorded item's transform by `map`, applied after it.
 fn map_item(item: &mut Item, map: Affine) {
     match item {
         Item::Path { transform, .. }
@@ -1173,7 +1078,6 @@ fn map_item(item: &mut Item, map: Affine) {
     }
 }
 
-/// The length a percentage of `axis` resolves against in `viewport`.
 fn basis(viewport: Viewport, axis: Axis) -> f64 {
     match axis {
         Axis::Horizontal => viewport.width,
@@ -1182,7 +1086,6 @@ fn basis(viewport: Viewport, axis: Axis) -> f64 {
     }
 }
 
-/// A computed length or percentage in user units.
 fn resolve(length: &LengthPercentage, viewport: Viewport, axis: Axis) -> f64 {
     f64::from(
         length
@@ -1191,8 +1094,6 @@ fn resolve(length: &LengthPercentage, viewport: Viewport, axis: Axis) -> f64 {
     )
 }
 
-/// A computed `width` or `height`: a length or percentage, or `None` for
-/// `auto` and the intrinsic keywords.
 fn size_of(size: &Size, viewport: Viewport, axis: Axis) -> Option<f64> {
     match size {
         Size::LengthPercentage(length) => Some(resolve(&length.0, viewport, axis)),
@@ -1235,7 +1136,6 @@ fn text_anchor(style: &ComputedValues) -> TextAnchor {
     }
 }
 
-/// `paint-order` names the stroke before the fill.
 fn stroke_first(style: &ComputedValues) -> bool {
     let order = &style.get_inherited_svg().paint_order;
     order.order_at(0) == PaintOrder::Stroke
@@ -1249,8 +1149,6 @@ fn stroke_width(style: &ComputedValues, viewport: Viewport) -> f64 {
     }
 }
 
-/// The kurbo stroke of `style`: an odd dash list repeated to an even one,
-/// a list of zeros no dashes.
 fn stroke_style(style: &ComputedValues, viewport: Viewport) -> Stroke {
     use stylo::values::computed::svg::{StrokeLinecap, StrokeLinejoin};
 
@@ -1284,7 +1182,6 @@ fn stroke_style(style: &ComputedValues, viewport: Viewport) -> Stroke {
             StrokeLinejoin::Round => Join::Round,
             StrokeLinejoin::Bevel => Join::Bevel,
         },
-        // SVG 2 makes a limit below one an error; the cascade keeps it.
         f64::from(svg.stroke_miterlimit.0).max(1.0),
         (!dashes.is_empty()).then_some(dashes.as_slice()),
         offset,

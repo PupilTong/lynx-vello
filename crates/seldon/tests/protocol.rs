@@ -203,7 +203,6 @@ impl GridStyle for MockStyle {
     }
 }
 
-/// Immutable per-node data: style and topology, fixed for the layout epoch.
 #[derive(Debug, Default)]
 struct MockSourceNode {
     style: MockStyle,
@@ -216,8 +215,6 @@ struct MockState {
     invalidated: Vec<usize>,
 }
 
-/// Immutable source tree. A separate [`MockState`] owns all mutable layout
-/// slots for an epoch.
 #[derive(Debug, Default)]
 struct MockTree {
     nodes: Vec<MockSourceNode>,
@@ -259,7 +256,6 @@ impl MockTree {
     }
 }
 
-/// The `Copy` node id.
 #[derive(Clone, Copy)]
 struct MockRef {
     index: usize,
@@ -283,8 +279,6 @@ impl Iterator for MockChildren<'_> {
         Some(MockRef { index })
     }
 
-    /// Exact, like the slice iterator a real host returns: item collection
-    /// sizes its buffers from this.
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.ids.size_hint()
     }
@@ -331,9 +325,6 @@ impl LayoutTree for MockTree {
         }
 
         if style.skips_contents() {
-            // The two halves of a skipped box, composed the way every host
-            // must: the hide sweep answers to the box tree and runs on every
-            // committing call, the size is an ordinary cacheable answer.
             hide_skipped_contents(self, state, node, input);
             return compute_cached_layout(self, state, node, input, |tree, _state, node, input| {
                 compute_skipped_contents_size(&tree.style(node), input)
@@ -725,9 +716,7 @@ fn a_box_that_reads_no_percentage_basis_is_cached_against_none() {
         seen.into_inner()
     };
 
-    // Lengths only: one computation, against no basis, answers all three.
     assert_eq!(run(npx(5.0)), vec![Size::NONE]);
-    // A percentage padding reads the basis: each one is its own entry.
     assert_eq!(
         run(calc_lp(0.0, 0.1)),
         vec![
@@ -830,7 +819,6 @@ fn hidden_style() -> MockStyle {
 
 #[test]
 fn flattened_children_splices_display_contents_subtrees_in_source_order() {
-    // root: [ first, wrapper[ nested[ inner ], hidden ], last ]
     let mut tree = MockTree::default();
     let first = tree.push(MockStyle::default(), vec![]);
     let inner = tree.push(MockStyle::default(), vec![]);
@@ -846,7 +834,6 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
             .collect()
     };
 
-    // Each yielded child carries the style and display already read.
     let (yielded, style, display) = tree
         .flattened_children(tree.node(root))
         .next()
@@ -855,12 +842,10 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
     assert!(std::ptr::eq(style, tree.style(tree.node(first))));
     assert_eq!(display, tree.style(tree.node(first)).display());
 
-    // Box-less wrappers flatten in place while `display: none` remains visible to cleanup.
     assert_eq!(ids(root), vec![first, inner, hidden, last]);
     assert_eq!(ids(wrapper), vec![inner, hidden]);
     assert_eq!(ids(first), Vec::<usize>::new());
 
-    // Source children retain every descendant for cleanup and rounding.
     let source: Vec<usize> = tree
         .children(tree.node(root))
         .map(|child| child.index)
@@ -877,10 +862,8 @@ fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
     let empty = tree.push(contents_style(), vec![]);
     let direct = tree.push(MockStyle::default(), vec![plain, plain]);
     let grows = tree.push(MockStyle::default(), vec![expanding, plain]);
-    // A childless box-less child makes a source-derived lower bound invalid.
     let shrinks = tree.push(MockStyle::default(), vec![empty]);
 
-    // `display: contents` can add or remove yielded items.
     for node in [direct, grows, shrinks] {
         assert_eq!(
             tree.flattened_children(tree.node(node)).size_hint(),
@@ -891,7 +874,6 @@ fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
     assert_eq!(tree.flattened_children(tree.node(grows)).count(), 3);
     assert_eq!(tree.flattened_children(tree.node(shrinks)).count(), 0);
 
-    // The separate preallocation estimate tolerates box-less children.
     assert_eq!(
         tree.flattened_children(tree.node(direct)).capacity_hint(),
         2
@@ -936,10 +918,6 @@ fn relayout_boundary_requires_both_layout_and_size() {
         Contain::INLINE_SIZE | Contain::LAYOUT
     )));
 
-    // Reached through css-contain-3 instead: a `container-type: inline-size`
-    // query container is layout- and inline-size-contained, and single-axis
-    // containment is still not a boundary — its block size answers to its
-    // contents. `size` is.
     let query_container = |container_type| {
         effective_containment(
             Contain::empty(),

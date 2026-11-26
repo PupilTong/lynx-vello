@@ -15,8 +15,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, RequestCache, RequestInit, WorkerGlobalScope};
 
-/// The browser transport. It cannot block, so it answers no synchronous
-/// request: every fetch goes through [`Fetch::fetch`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BrowserFetch;
 
@@ -34,8 +32,6 @@ impl Fetch for BrowserFetch {
     }
 }
 
-/// One request through `fetch`. A response whose status is not a success
-/// is answered without its body, which nothing reads.
 async fn fetch(request: &Request) -> Result<Response, Failure> {
     let scope = js_sys::global()
         .dyn_into::<WorkerGlobalScope>()

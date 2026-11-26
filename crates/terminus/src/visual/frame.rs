@@ -30,84 +30,25 @@ use crate::scroll::{
 };
 use crate::tree::document::NodeId;
 
-/// One scroll container in the committed frame, linked to the nearest scroll
-/// container on its containing-block chain.
-///
-/// The chain is containing-block-based, not DOM-based, because that is what
-/// scrolling follows: a box is only carried by, and only chains into,
-/// scroll containers it is laid out inside of (CSS2 §11.1.1). The builder
-/// assigns entries with the same escape rules the paint order itself uses,
-/// so an absolutely-positioned box whose containing block is outside its
-/// DOM-side scroller correctly links past it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollSlot {
-    /// The scroll container element.
     pub node: NodeId,
-    /// The nearest enclosing scroll container on the containing-block chain.
     pub parent: Option<u32>,
-    /// The axes the user may scroll directly (`overflow: scroll`); a
-    /// `hidden` container is in the table — it scrolls programmatically and
-    /// carries chain structure — with both flags off.
     pub user_scrollable: ScrollAxes,
-    /// The axes a boundary chains past: `overscroll-behavior: auto`.
     pub chains: ScrollAxes,
-    /// The axes whose boundary stretches and springs back:
-    /// `overscroll-behavior: contain-bounce`. Policy only: the painter's
-    /// intents may stand outside `0..=max_offset` on such an axis, while the
-    /// committed `offset` never does.
     pub bounce: ScrollAxes,
-    /// The axes with no boundary: `overscroll-behavior: circular`. The
-    /// painter's intents may stand anywhere on such an axis and compose
-    /// modulo [`Self::wrap_period`]; the committed `offset` and a request's
-    /// target stand in `[0, period)`, above `max_offset` while the
-    /// scrollport straddles the seam.
     pub circular: ScrollAxes,
-    /// Whether the container above goes first, per axis:
-    /// `scroll-capture-x` / `scroll-capture-y`.
     pub(crate) capture: CaptureAxes,
-    /// The axes this container snaps on, each naming its points in the
-    /// frame's [`snap_points`](CommittedFrame::snap_points).
     pub snap: SnapSlot,
-    /// The committed offset, as the document admitted it
-    /// ([`ScrollBox::admit`](crate::scroll::ScrollBox::admit)): in
-    /// `0..=max_offset`, or on an axis with a [`Self::wrap_period`] in
-    /// `[0, period)`.
     pub offset: Vector2D<f32>,
-    /// The largest offset the committed geometry admits, per axis.
     pub max_offset: Vector2D<f32>,
-    /// The scrollport (padding box) size, which is also what the encode
-    /// window is sized from.
     pub scrollport: Size2D<f32>,
-    /// Local horizontal and vertical unit vectors in viewport CSS pixels.
-    /// Scroll offsets stay local; composition maps their translations through
-    /// these axes so transformed scroll containers move their content correctly.
     pub viewport_axes: [Vector2D<f32>; 2],
-    /// The container's pending programmatic scroll, its target admitted
-    /// against this frame's geometry as [`Self::offset`] is (clamped to
-    /// `max_offset`, or in `[0, period)` on an axis with a
-    /// [`Self::wrap_period`]): carried by every frame until the painter
-    /// acknowledges it, and handled by the painter once per serial
-    /// ([`Document::scroll_to_with`](crate::tree::document::Document::scroll_to_with)).
     pub request: Option<ScrollRequest>,
-    /// The sum of every adjustment css-scroll-anchoring-1 has made to the
-    /// container's offset ([`Document::scroll_anchor_shift`]). The painter
-    /// moves its own offset by the part of it it has not applied yet.
-    ///
-    /// [`Document::scroll_anchor_shift`]: crate::tree::document::Document::scroll_anchor_shift
     pub anchor_shift: Vector2D<f32>,
-    /// How much farther the painter's own motion — a fling, a glide — was
-    /// carrying the container past its offset when the painter last posted
-    /// it ([`ScrollEntry::reach`](crate::painter::ScrollEntry::reach)), as the
-    /// document kept it ([`Document::scroll_reach`]). Zero for a container at
-    /// rest. It stretches [`Self::relevance_window`] and nothing else: the
-    /// encode window, and so the compose headroom, is the offset's alone.
-    ///
-    /// [`Document::scroll_reach`]: crate::tree::document::Document::scroll_reach
     pub reach: Vector2D<f32>,
 }
 
-/// Where compose puts a frame's scroll slots at one instant: `offset_of`'s
-/// override for a slot, else its committed offset.
 #[derive(Clone, Copy)]
 pub(crate) struct ScrollOffsets<'a> {
     pub(crate) slots: &'a [ScrollSlot],
@@ -115,25 +56,18 @@ pub(crate) struct ScrollOffsets<'a> {
 }
 
 impl ScrollOffsets<'_> {
-    /// Slot `slot`'s offset.
     pub(crate) fn of(&self, slot: u32) -> Vector2D<f32> {
         let slot = &self.slots[slot as usize];
         (self.offset_of)(slot).unwrap_or(slot.offset)
     }
 }
 
-/// `offset_of` with every offset normalized into its slot's period
-/// ([`ScrollSlot::wrap`]): what the frame's entry points hand everything
-/// they sample, so scroll timelines, stickies, anchored boxes and the space
-/// maps all read an offset inside the scrolling area's one period.
 fn wrapped_offsets(
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) -> impl Fn(&ScrollSlot) -> Option<Vector2D<f32>> + '_ {
     move |slot: &ScrollSlot| offset_of(slot).map(|offset| slot.wrap(offset))
 }
 
-/// One axis of a slot's snapping: its strictness and the `start..end`
-/// range of its points in the frame's snap-point table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapSlotAxis {
     pub strictness: SnapStrictness,
@@ -141,7 +75,6 @@ pub struct SnapSlotAxis {
     pub end: u32,
 }
 
-/// A slot's snapping, per axis; `None` on an axis it does not snap on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SnapSlot {
     pub x: Option<SnapSlotAxis>,
@@ -149,8 +82,6 @@ pub struct SnapSlot {
 }
 
 impl SnapSlotAxis {
-    /// This axis over the frame's points, repeating every `period` on a
-    /// circular axis.
     pub(super) fn axis<'frame>(
         &self,
         points: &'frame [SnapPoint],
@@ -165,8 +96,6 @@ impl SnapSlotAxis {
 }
 
 impl ScrollSlot {
-    /// This container's part in a chain walk, for
-    /// `drive_chain`.
     #[must_use]
     pub(crate) fn link(&self) -> ChainLink {
         ChainLink {
@@ -180,10 +109,6 @@ impl ScrollSlot {
         self.viewport_axes[0] * offset.x + self.viewport_axes[1] * offset.y
     }
 
-    /// The period each axis wraps with: the extent of the whole scrolling
-    /// area (`max_offset` plus the scrollport) on a [`Self::circular`] axis
-    /// whose content overflows, `None` otherwise. An axis with nothing to
-    /// scroll has nothing to wrap either, so it keeps the ordinary clamp.
     #[must_use]
     pub fn wrap_period(&self) -> (Option<f32>, Option<f32>) {
         (
@@ -192,14 +117,6 @@ impl ScrollSlot {
         )
     }
 
-    /// `offset` normalized into `[0, period)` on each axis that has a
-    /// [`Self::wrap_period`], and unchanged on the others — this clamps
-    /// nothing. A non-finite offset on a wrapped axis normalizes to `0`.
-    ///
-    /// The painter's offset on a circular axis stands anywhere on an
-    /// unbounded line; this is where it is consumed. A normalized offset
-    /// above `max_offset` is one whose scrollport straddles the seam: it
-    /// shows the end of the scrolling area followed by its start.
     #[must_use]
     pub fn wrap(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
         let axis = |value: f32, period: Option<f32>| match period {
@@ -210,15 +127,6 @@ impl ScrollSlot {
         Vector2D::new(axis(offset.x, x), axis(offset.y, y))
     }
 
-    /// `offset` as a scroll progress timeline samples it: [`Self::wrap`]
-    /// first, then, on an axis with a [`Self::wrap_period`], an offset past
-    /// `max_offset` — a scrollport straddling the seam — stands at its
-    /// representative nearer the range `0..=max_offset`: `offset - period`
-    /// when the period's end is nearer than `max_offset`, otherwise the
-    /// offset itself (a tie keeps it). A scrollport just before the start
-    /// therefore reads the start rather than the end. Unchanged on every
-    /// other axis. The same rule as the document's
-    /// [`ScrollBox::unwrapped_offset`](crate::scroll::ScrollBox::unwrapped_offset).
     #[must_use]
     pub fn unwrap(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
         let (x, y) = self.wrap_period();
@@ -228,19 +136,6 @@ impl ScrollSlot {
         )
     }
 
-    /// The offset range the committed encode covers on each axis — the
-    /// window compose may move through without a recommit. Sized in
-    /// scrollports around the committed offset, clamped to what the geometry
-    /// admits. A scroll outside it recommits at once (`Document::scroll_to`);
-    /// one that has used half the headroom toward an edge recommits early
-    /// ([`Self::recenter_due`]), so the painter is never left at the edge.
-    ///
-    /// On an axis with a [`Self::wrap_period`] the window is the whole
-    /// scrolling area, `0..=max_offset`, whatever the committed offset: the
-    /// painter's offset moves around the circle without telling the document
-    /// until it settles, and across the seam it composes both ends at once,
-    /// so no window narrower than the whole area stays valid. That also
-    /// makes every `content-visibility: auto` box on that axis relevant.
     #[must_use]
     pub fn encode_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
         let (wrap_x, wrap_y) = self.wrap_period();
@@ -259,18 +154,6 @@ impl ScrollSlot {
         (Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y))
     }
 
-    /// The offset range whose content the commit treats as relevant to the
-    /// user (css-contain-2 §4.1): [`Self::encode_window`], stretched on each
-    /// axis toward where the container is going — a pending
-    /// [`Self::request`]'s target, else the painter's [`Self::reach`] — by at
-    /// most [`RELEVANCE_REACH_SCROLLPORTS`], and never past the range. Only
-    /// ever wider than the encode window, never narrower; an axis with a
-    /// [`Self::wrap_period`], or with nothing to scroll, is the encode
-    /// window's.
-    ///
-    /// `content-visibility: auto` is decided against this, so the boxes a
-    /// fling or a jump is about to show stop skipping in the commit before
-    /// the container gets there; compose and culling keep the encode window.
     #[must_use]
     pub fn relevance_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
         let (low, high) = self.encode_window();
@@ -295,13 +178,6 @@ impl ScrollSlot {
         (Vector2D::new(low_x, low_y), Vector2D::new(high_x, high_y))
     }
 
-    /// Whether a scroll to `offset` has used more than half the headroom
-    /// [`Self::encode_window`] leaves toward the edge it moves to, on either
-    /// axis, so the commit should re-center the window on it. `offset` is
-    /// clamped to the committed range first: a `contain-bounce` stretch is
-    /// composed from the edge's own content and asks for nothing. An axis
-    /// with a [`Self::wrap_period`] never asks: its window is already the
-    /// whole scrolling area.
     #[must_use]
     pub fn recenter_due(&self, offset: Vector2D<f32>) -> bool {
         let clamp = |value: f32, max: f32| {
@@ -337,29 +213,10 @@ impl ScrollSlot {
     }
 }
 
-/// How far past the committed offset, in scrollports per scrollable axis,
-/// the encode covers — the compose headroom before a recentering commit is
-/// due.
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 
-/// How far past the committed offset, in scrollports per axis, the relevance
-/// region may stretch toward where the painter's own motion — a fling, a
-/// glide, a pending request — will carry the container
-/// ([`ScrollSlot::relevance_window`]). A fling's remaining travel at the
-/// painter's decay rate is its velocity times about half a second, so three
-/// scrollports admit the whole landing of a fling slower than about six
-/// scrollports per second, and of a faster one (or of a jump) the next three
-/// scrollports of its way: the recentering commits that motion asks for
-/// every half scrollport each stretch again from where the container then
-/// stands, so the region stays that far ahead of it. Bounded, because what it
-/// reveals is laid out: an unbounded stretch would let one jump across a
-/// long list lay out everything between.
 pub const RELEVANCE_REACH_SCROLLPORTS: f32 = 3.0;
 
-/// One axis of [`ScrollSlot::encode_window`]: `offset` plus and minus
-/// [`ENCODE_WINDOW_SCROLLPORTS`] scrollports of `extent`, clamped to
-/// `0..=max`; the whole range `0..=max` when the axis `wraps`. An axis with
-/// nothing to scroll is the one offset.
 pub(crate) fn encode_window_axis(offset: f32, max: f32, extent: f32, wraps: bool) -> (f32, f32) {
     if wraps {
         return (0.0, max);
@@ -372,16 +229,6 @@ pub(crate) fn encode_window_axis(offset: f32, max: f32, extent: f32, wraps: bool
     ((offset - slack).max(0.0), (offset + slack).min(max))
 }
 
-/// One axis of [`ScrollSlot::relevance_window`], shared with the document's
-/// own [`Document::scroll_relevance_window`]: `window` (the encode window's
-/// `(low, high)` on the axis) stretched by `toward` — where the container is
-/// going, less where it is — on the side it points to, `toward` capped at
-/// [`RELEVANCE_REACH_SCROLLPORTS`] scrollports of `extent`, the stretched
-/// edge kept inside `0..=max`. Unchanged when the axis `wraps` (its window is
-/// already the whole area), has nothing to scroll, or `toward` is zero or not
-/// finite.
-///
-/// [`Document::scroll_relevance_window`]: crate::tree::document::Document::scroll_relevance_window
 pub(crate) fn relevance_window_axis(
     window: (f32, f32),
     toward: f32,
@@ -404,34 +251,15 @@ pub(crate) fn relevance_window_axis(
     }
 }
 
-/// The largest area, in viewports, of an element's `max(size, content_size)`
-/// that still exports a transform curve. Culling bounds a moving subtree by
-/// the viewport pulled back through its curve's reach, so this cap is what
-/// bounds the encode only where no reach does — a scale range reaching 0, or
-/// a list holding an op the reach does not model (matrix, skew, 3D rotation)
-/// or a mismatched remainder stylo decomposes, either of which admits the
-/// whole subtree. Firefox caps composited transform animations the same way
-/// (`nsDisplayList.cpp`: 1.125 viewports, 4096² px).
 pub(crate) const MAX_MOVING_EXTENT_VIEWPORTS: f32 = 3.0;
 
-/// One composite-animated element in the committed frame: the target of the
-/// compose-time retargeting that lets its animation play without commits.
-///
-/// A slot exists only where a curve was exported — every structural and
-/// value-level refusal happens before it is allocated — so sampling one is
-/// always sampling a live curve. The curve is a clone of the element's stylo
-/// animation state, `Send + Sync` by construction.
 #[derive(Debug)]
 pub struct AnimationSlot {
-    /// The animated element.
     pub node: NodeId,
-    /// The exported curve.
     pub(crate) curve: crate::visual::curves::CompositeCurve,
 }
 
 impl AnimationSlot {
-    /// This slot's compose values at `now` — the committed instant when
-    /// `None` — with each scroll slot at `offsets`, and `values` as scratch.
     pub(crate) fn sample(
         &self,
         now: Option<f64>,
@@ -446,57 +274,30 @@ impl AnimationSlot {
     }
 }
 
-/// What a frame hit test reports: the element to act on, plus the scroll
-/// slot recognition starts its chain walk from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitTarget {
-    /// The topmost hit-testable element at the point. May be freed by the
-    /// time a consumer acts on it; the id then resolves to nothing.
     pub node: NodeId,
-    /// The nearest ancestor-or-self scroll container of the hit item, as an
-    /// index into [`CommittedFrame::scroll_slots`].
     pub scroll: Option<u32>,
 }
 
-/// One commit's published output. Immutable, self-contained, and shared by
-/// `Arc`: the committer retains one for its own queries, the compositor holds
-/// one to draw and route input from.
-///
-/// The scene is carried *split*: per-space fragments plus the compose
-/// program over them, so scroll offsets apply at composition.
 pub struct CommittedFrame {
     pub(crate) order: PaintOrder,
     pub(crate) presentation: Presentation,
     pub(crate) animations_active: bool,
     pub(crate) needs_main_ticks: bool,
-    /// The earliest instant an exported curve leaves its domain at, over
-    /// every slot; `None` when nothing exported ever ends.
     pub(crate) earliest_expiry: Option<f64>,
     pub(crate) viewport: Size2D<f32>,
     pub(crate) device_pixel_ratio: f32,
-    /// Paint Timing's contentful test over what the walk encoded
-    /// ([`Self::paints_content`]); `false` when the walk did not test.
     pub(crate) paints_content: bool,
-    /// What the walk painted under Container Timing roots
-    /// ([`crate::visual::container_timing`]); empty, and unallocated, on a
-    /// document with no root.
     pub(crate) container_rects: Vec<crate::visual::container_timing::ContainerRect>,
 }
 
-/// The split scene: fragments plus the program that assembles them.
 pub(crate) struct Presentation {
     pub(crate) fragments: Vec<DisplayList>,
     pub(crate) program: Vec<ComposeOp>,
-    /// One entry per [`ComposeOp::Image`], in program order. Carries names
-    /// and geometry; never pixels.
     pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
-    /// One entry per [`ComposeOp::Vector`], in program order. Carries the
-    /// image's scene and geometry; never a texture.
     pub(crate) vector_draws: Vec<crate::paint::compose::VectorDraw>,
-    /// One entry per [`ComposeOp::PushFilter`] and [`ComposeOp::PushBackdrop`],
-    /// in program order. Carries device geometry and σ; never a GPU resource.
     pub(crate) filter_groups: Vec<FilterGroup>,
-    /// The slots `program` reads, derived from it at commit.
     pub(crate) composed: crate::visual::ComposedSlots,
 }
 
@@ -511,12 +312,6 @@ impl std::fmt::Debug for CommittedFrame {
 }
 
 impl CommittedFrame {
-    /// The frame's one fragment when that is the whole program — the common
-    /// shape with no scroll containers or group effects, borrowable at no
-    /// cost. `None` otherwise: no whole-frame composition is materialized
-    /// beside the fragments (it would double the content-proportional
-    /// memory); compose one with [`Self::compose_into`] where a flat scene
-    /// is genuinely needed.
     #[must_use]
     pub fn scene(&self) -> Option<&DisplayList> {
         matches!(
@@ -529,29 +324,6 @@ impl CommittedFrame {
         .then(|| &self.presentation.fragments[0])
     }
 
-    /// Composes the frame into `scene` with each scroll slot at the offset
-    /// `offset_of` reports for it, falling back to the committed one.
-    ///
-    /// This is the compositor's per-frame path: scrolling recomposes instead
-    /// of recommitting, for as long as every overridden offset stays inside
-    /// its slot's [`ScrollSlot::encode_window`].
-    ///
-    /// An offset on a circular axis may stand anywhere: it is normalized into
-    /// the slot's period ([`ScrollSlot::wrap`]) before anything reads it, and
-    /// a slot whose scrollport straddles the seam draws its content a second
-    /// time, one period back.
-    ///
-    /// `images` is the table [`Self::resolve_images`] fills, `filtered` the
-    /// one the filter bakes produce, and `vectors` the one the vector raster
-    /// cache produces (`VectorTextures::prepare`), each index-parallel with
-    /// its side table; an absent entry draws nothing.
-    ///
-    /// The scene holds what can reach the frame's own viewport in device
-    /// px, [`Self::device_viewport`]: content composed off it — the encode
-    /// window's headroom past the scrollport, a box a sticky shift or an
-    /// animation moved away — is left out, since the rasterizer would turn
-    /// it into strips only to drop them. [`Self::compose_target_into`]
-    /// composes for a target of another size.
     pub fn compose_into(
         &self,
         scene: &mut DisplayList,
@@ -572,8 +344,6 @@ impl CommittedFrame {
         );
     }
 
-    /// The frame's viewport in device px, from the origin: the target a
-    /// frame is composed for when no other is named.
     #[must_use]
     pub fn device_viewport(&self) -> (u32, u32) {
         let length = |css: f32| {
@@ -592,8 +362,6 @@ impl CommittedFrame {
         (length(self.viewport.width), length(self.viewport.height))
     }
 
-    /// [`Self::compose_into`] for a target of `target` device px: what can
-    /// reach no pixel of it is left out of `scene`.
     #[expect(
         clippy::too_many_arguments,
         reason = "one composition's full inputs: the target, its size, the three pixel tables, \
@@ -646,62 +414,20 @@ impl CommittedFrame {
         );
     }
 
-    /// The frame's offscreen-baked entries — `filter: blur()` groups and
-    /// `backdrop-filter` elements — in program order. Empty for the
-    /// overwhelmingly common frame, which is why the whole bake pre-step is
-    /// skipped on one test of this slice.
     #[must_use]
     pub fn filter_groups(&self) -> &[FilterGroup] {
         &self.presentation.filter_groups
     }
 
-    /// The frame's vector image draws, in program order — what the
-    /// painter's raster cache bakes textures for. Empty on a frame drawing
-    /// no SVG document, which skips that pre-step on one test of this slice.
     pub(crate) fn vector_draws(&self) -> &[compose::VectorDraw] {
         &self.presentation.vector_draws
     }
 
-    /// Whether the frame draws any vector image, and so owes the vector
-    /// raster cache a prepare before it composes.
     #[must_use]
     pub fn draws_vectors(&self) -> bool {
         !self.presentation.vector_draws.is_empty()
     }
 
-    /// Replays filter entry `index`'s own ops into `scene`, in the bake
-    /// target's coordinates: device px with the entry's `rect` origin at
-    /// `(0, 0)` and the entry's own space divided out, because that space is
-    /// applied when the baked texture is drawn rather than baked into it.
-    /// `SpaceSamples::bake_map` fixes that division's side — left, the only
-    /// side that survives a rotating or scaling node between the entry's
-    /// space and an op's.
-    ///
-    /// The replay samples the curves at `animation_now` and the live offsets
-    /// exactly when the entry [`FilterGroup::samples_animations`], and takes
-    /// their committed values otherwise, where no relative map in its range
-    /// depends on them.
-    /// A `backdrop-filter` entry's range is a prefix of the frame, so it can
-    /// hold other elements' exported curves; a `filter: blur()` group's holds
-    /// the curves of its own content, and no clip of its ancestors', which
-    /// the walker pushes outside the group. After the replay a
-    /// backdrop pops the layers the range left open and draws its pre-blur
-    /// passes over the whole bake rect, so neither lands inside a clip.
-    ///
-    /// `scene` holds the range's ops and nothing under them. What they
-    /// compose over is the base colour `scene` is rendered with, which is
-    /// the caller's: the canvas colour for an entry that
-    /// [reads the canvas](FilterGroup::reads_canvas), transparent black for
-    /// every other.
-    ///
-    /// Offsets on a circular axis are normalized as [`Self::compose_into`]
-    /// normalizes them, and the seam copy of a straddling container the
-    /// entry does not ride is baked into the texture with the rest.
-    ///
-    /// `filtered` must already hold the textures of every entry this one's
-    /// range draws — bake in order of increasing `ops.end` — and `vectors`
-    /// the textures of the vector draws in it, which the vector raster cache
-    /// prepares before any filter bakes.
     #[expect(
         clippy::too_many_arguments,
         reason = "one bake's full inputs: the entry, its scene, the three pixel tables, and the \
@@ -745,9 +471,6 @@ impl CommittedFrame {
             self.device_pixel_ratio,
             offset_of,
         );
-        // An entry inside a box `position-visibility` hides composes through
-        // the zero map: it draws nothing, so it bakes nothing either — its
-        // own map has no inverse to bake through.
         if samples.device(group.space).determinant().abs() < f64::EPSILON {
             return;
         }
@@ -789,34 +512,6 @@ impl CommittedFrame {
         );
     }
 
-    /// Asks for this frame's pixels once, into a table the compose path
-    /// indexes by draw rather than by name.
-    ///
-    /// Composition replays the program on every frame that scrolls or
-    /// animates, so resolving by source string there would hash a URL and
-    /// clone an `ImageData` per draw per frame to re-learn an answer that
-    /// only changes when the commit does. This runs once per commit instead,
-    /// and encoding a draw becomes a slice index.
-    ///
-    /// `images` ends up with one entry per image draw, in draw order, each
-    /// holding its pixels ([`ImageRef::held`]): the table of a caller with
-    /// no rasterizer to lease uploads from, whose composed scene may outlive
-    /// the store's answer. The painter lends them instead
-    /// (`painter::images`). `sources` receives each distinct image once, in
-    /// first-draw order — the frame's working set, and the residency hint a
-    /// host is given.
-    ///
-    /// Each source is described once, with the size hint covering every
-    /// draw of it in this frame — which is why the draws are walked before
-    /// the first describe: a source drawn small first and large later must
-    /// be decoded for the large draw. This caller has no rasterizer, so a
-    /// source the store answers without pixels draws nothing here, and the
-    /// store is told it is wanted ([`FrameImages::want`]), as the painter
-    /// tells it. Answers how many sources were wanted: a caller that captures
-    /// the table must not take one with any, since those pictures are on
-    /// their way.
-    ///
-    /// [`FrameImages::want`]: crate::render::image::FrameImages::want
     pub fn resolve_images<P>(
         &self,
         pixels: &P,
@@ -836,8 +531,6 @@ impl CommittedFrame {
             .zip(&hints)
             .map(|(source, hint)| {
                 let described = pixels.describe(source, *hint)?;
-                // An `Id` picture's newest frame is taken; this caller keeps
-                // no upload, so it is held by the table it resolves into.
                 let image = match source {
                     PictureKey::Url(_) => described.pixels,
                     PictureKey::Id(id) => pixels.take_frame(*id).map(|taken| taken.frame),
@@ -855,10 +548,6 @@ impl CommittedFrame {
         wanted
     }
 
-    /// The distinct pictures this frame's image draws name, in first-draw
-    /// order, into `sources`; the size hint covering every draw of each,
-    /// parallel to it, into `hints`; and per draw, in draw order, the index
-    /// of its picture into `indices`. Each is cleared first.
     pub(crate) fn image_sources(
         &self,
         sources: &mut Vec<PictureKey>,
@@ -869,12 +558,7 @@ impl CommittedFrame {
         hints.clear();
         indices.clear();
         indices.reserve(self.presentation.image_draws.len());
-        // One entry per distinct picture. A frame draws few distinct images
-        // however many draws it has, so this scan is over a handful of keys.
         for draw in &self.presentation.image_draws {
-            // Every draw of one URL shares one allocation — the registry
-            // hands back its own key — so pointer identity is the whole
-            // dedup, and no URL is ever compared.
             let seen = sources.iter().position(|source| source.same(&draw.image));
             let hint = draw.size_hint();
             let index = seen.unwrap_or_else(|| {
@@ -887,111 +571,53 @@ impl CommittedFrame {
         }
     }
 
-    /// This frame's commit id. Monotonic across a document's life, so it
-    /// orders commits; it says nothing about what changed between two of
-    /// them.
     #[must_use]
     pub fn commit_id(&self) -> u64 {
         self.order.commit_id()
     }
 
-    /// Whether this frame puts contentful ink on the viewport, as Paint
-    /// Timing defines it for `first-contentful-paint`: text with a glyph that
-    /// is not white space, or an image whose pixels the document holds — an
-    /// image element's, a background image's, a vector (SVG) image's with
-    /// something to draw. A background colour, a gradient, a border, an
-    /// outline, a shadow, a `mask-image`, a `::backdrop` and white-space-only
-    /// text do not count, nor does anything inside an `opacity: 0` group
-    /// that no animation fades, nor anything the walk culled — an item whose
-    /// box cannot reach the viewport, or a text run whose clip chain admits
-    /// nothing.
-    ///
-    /// Decided by the walk that encodes the frame, as it encodes each item,
-    /// and only while the document's content detection is on
-    /// ([`Document::set_content_detection`](crate::link::Document::set_content_detection)):
-    /// a frame built while it was off answers `false` whatever it draws, and
-    /// its walk tested nothing. Reading the answer costs nothing either way.
     #[must_use]
     pub const fn paints_content(&self) -> bool {
         self.paints_content
     }
 
-    /// What this frame painted under Container Timing roots, one rect per
-    /// contentful paint and root, in CSS px of the viewport.
     pub(crate) fn container_rects(&self) -> &[crate::visual::container_timing::ContainerRect] {
         &self.container_rects
     }
 
-    /// Whether this frame painted anything under a Container Timing root:
-    /// whether presenting it can grow a root's painted region
-    /// ([`crate::visual::container_timing`]). Answers `false` for every
-    /// frame of a document with no root.
     pub(crate) fn paints_under_containers(&self) -> bool {
         !self.container_rects.is_empty()
     }
 
-    /// Whether the document had a running animation at commit time — the
-    /// compositor's cue to keep producing frames.
     #[must_use]
     pub const fn animations_active(&self) -> bool {
         self.animations_active
     }
 
-    /// Whether something animating still needs per-frame main-thread ticks:
-    /// an animation or transition this frame could not export as a curve.
-    /// The painter posts one frame request per frame while this holds.
     #[must_use]
     pub const fn needs_main_ticks(&self) -> bool {
         self.needs_main_ticks
     }
 
-    /// Whether the compose program references an exported curve that reads
-    /// the document timeline — the compositor then recomposes each frame at
-    /// its clock reading instead of reusing the drawn frame.
-    ///
-    /// A curve the program leaves out — culled, or on content that draws
-    /// nothing — changes no pixel at any instant of its domain, so a frame
-    /// whose curves are all left out composes once. A curve on a scroll
-    /// timeline alone moves only when a scroll offset does, and a scroll
-    /// recomposes by itself. Hit tests read [`Self::has_exported_curves`]
-    /// instead, and [`Self::animation_boundary_passed`] counts every curve.
     #[must_use]
     pub fn has_live_curves(&self) -> bool {
         self.presentation.composed.clock
     }
 
-    /// Whether the compose program references a curve that reads a scroll
-    /// slot's offset: a filter entry sampling animations then re-bakes on a
-    /// scroll, whatever the paths its range rides.
     pub(crate) fn composes_scroll_curves(&self) -> bool {
         self.presentation.composed.scroll
     }
 
-    /// Whether the frame exports any curve — hit tests then sample at the
-    /// input's clock reading: a curve moves its element's hit area even where
-    /// the program draws nothing of it. A scroll timeline's curve samples its
-    /// offsets whatever the reading.
     #[must_use]
     pub fn has_exported_curves(&self) -> bool {
         !self.order.animations().is_empty()
     }
 
-    /// Whether any exported curve has run past its domain at `now`: the cue
-    /// to post a frame request — each frame, until a commit without the passed
-    /// curve is adopted — so the main thread runs the finish restyle and
-    /// commits the animation's end state. Until then the compositor draws
-    /// the curve's last instant inside its domain: past it an animation's
-    /// contribution can be replaced by the base value, which only that
-    /// commit knows.
-    ///
-    /// Read off the commit's own minimum expiry, because the compositor asks
-    /// this on every input, draw, capture and tick.
     #[must_use]
     pub fn animation_boundary_passed(&self, now: f64) -> bool {
         self.earliest_expiry.is_some_and(|expiry| now >= expiry)
     }
 
-    /// The CSS-px viewport this frame was committed for.
     #[must_use]
     pub const fn viewport(&self) -> Size2D<f32> {
         self.viewport
@@ -1002,54 +628,31 @@ impl CommittedFrame {
         self.device_pixel_ratio
     }
 
-    /// Every snap position in the frame, sliced per slot and axis by
-    /// [`ScrollSlot::snap`].
     #[must_use]
     pub fn snap_points(&self) -> &[SnapPoint] {
         self.order.snap_points()
     }
 
-    /// A slot's snapping on each axis, over the frame's points. On a
-    /// circular axis the positions repeat every [`ScrollSlot::wrap_period`],
-    /// so the painter snaps across the seam.
     #[must_use]
     pub fn snap_axes(&self, slot: &ScrollSlot) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
         self.order.snap_axes(slot)
     }
 
-    /// The frame's scroll containers, chain-linked; see [`ScrollSlot`].
     #[must_use]
     pub fn scroll_slots(&self) -> &[ScrollSlot] {
         self.order.slots()
     }
 
-    /// The pending auto-scroll change of each container that has one, with
-    /// the container: carried by every frame until the painter acknowledges
-    /// it, and handled by the painter once per serial
-    /// ([`Document::auto_scroll`](crate::tree::document::Document::auto_scroll)). Every
-    /// container named has a slot in this frame. Empty for a document no
-    /// script has called `autoScroll` on.
     #[must_use]
     pub fn auto_scroll_requests(&self) -> &[(NodeId, AutoScrollRequest)] {
         self.order.auto_scroll_requests()
     }
 
-    /// The slot a scroll container node has in this frame, if it is one:
-    /// one lookup in the index the commit built.
     #[must_use]
     pub fn slot_of(&self, node: NodeId) -> Option<u32> {
         self.order.slot_of(node)
     }
 
-    /// Whether this frame can still be composed at `offset` for the scroll
-    /// container `node`: it carries the container as a slot, and `offset` is
-    /// inside that slot's [`ScrollSlot::encode_window`] on each axis. On an
-    /// axis with a [`ScrollSlot::wrap_period`] every finite offset is
-    /// covered: the window there is the whole scrolling area and compose
-    /// normalizes the offset into the period, the seam included.
-    ///
-    /// `false` for a container this frame does not know, which is the case
-    /// the caller has to rebuild for anyway.
     #[must_use]
     pub fn covers_scroll_offset(&self, node: NodeId, offset: Vector2D<f32>) -> bool {
         self.slot_of(node).is_some_and(|index| {
@@ -1064,18 +667,6 @@ impl CommittedFrame {
         })
     }
 
-    /// The topmost hit-testable element at `point`, with its scroll slot.
-    ///
-    /// The frame is baked unscrolled; `offset_of` supplies each slot's
-    /// current offset (the compositor's between-commit values), falling back
-    /// to the committed ones. No liveness filter — see the module doc.
-    ///
-    /// An offset on a circular axis is normalized into its period first, as
-    /// composition does. Where a slot's scrollport straddles the seam, an
-    /// item that rides the slot is tested at its original place and then at
-    /// its copy one period back, in its own place in the front-to-back
-    /// order: the two copies tile the scrollport and both are cut by its
-    /// clip, so at most one of them is under the point.
     #[must_use]
     pub fn hit(
         &self,
@@ -1136,15 +727,11 @@ impl CommittedFrame {
         })
     }
 
-    /// The frame's composite-animated elements; see [`AnimationSlot`].
     #[must_use]
     pub fn animation_slots(&self) -> &[AnimationSlot] {
         self.order.animations()
     }
 
-    /// The first slot on the chain from `from` (inclusive) the user may
-    /// scroll on any of `axes` — the published-data equivalent of the
-    /// document's `nearest_user_scrollable`.
     #[must_use]
     pub fn nearest_user_scrollable(&self, from: Option<u32>, axes: ScrollAxes) -> Option<u32> {
         let slots = self.order.slots();
@@ -1162,7 +749,6 @@ impl CommittedFrame {
 
 #[cfg(test)]
 impl CommittedFrame {
-    /// The frame's scroll slots at their committed offsets.
     pub(crate) fn committed_offsets(&self) -> ScrollOffsets<'_> {
         fn committed(_: &ScrollSlot) -> Option<Vector2D<f32>> {
             None
@@ -1175,7 +761,6 @@ impl CommittedFrame {
 }
 
 impl PaintOrder {
-    /// Front-to-back hits with their scroll slots, no liveness filter.
     pub(crate) fn raw_hits_at<'frame>(
         &'frame self,
         point: Point2D<f32>,
@@ -1194,7 +779,6 @@ impl PaintOrder {
     }
 }
 
-/// The whole point of the type: it crosses threads.
 #[allow(dead_code, reason = "compile-time thread-safety assertion")]
 const fn assert_frame_is_shareable()
 where
@@ -1235,8 +819,6 @@ mod tests {
         (document, root, scroller)
     }
 
-    /// A 100×100 scrollport over 500 px of content on both axes (max 400,
-    /// period 500), circular on `y` alone, standing at `(200, 200)`.
     fn circular_y_slot() -> ScrollSlot {
         ScrollSlot {
             node: crate::tree::document::DOCUMENT_ELEMENT_NODE_ID,
@@ -1295,11 +877,6 @@ mod tests {
         );
     }
 
-    /// A scroll timeline reads an offset past `max_offset` at its
-    /// representative nearer the range: with `max` 400 and period 500, the
-    /// seam's midpoint is 450. Below it the offset reads as itself, above it
-    /// as the start's copy one period back, a tie keeps the offset, and an
-    /// offset off the circle is wrapped first. A bounded axis is unchanged.
     #[test]
     fn unwrap_reads_past_the_seams_midpoint_as_the_start() {
         let slot = circular_y_slot();
@@ -1334,9 +911,6 @@ mod tests {
         );
     }
 
-    /// A 100×100 scrollport over 2100 px of content on y (max 2000),
-    /// nothing to scroll on x, standing at `offset_y` with `reach_y` posted:
-    /// at 500 its encode window on y is `400..=600`.
     fn tall_slot(offset_y: f32, reach_y: f32) -> ScrollSlot {
         ScrollSlot {
             circular: ScrollAxes::NONE,
@@ -1441,10 +1015,6 @@ mod tests {
         );
     }
 
-    /// A circular axis covers every finite offset — the seam included, past
-    /// `max_offset` — so adopting an offset across the seam rebuilds
-    /// nothing; a bounded axis keeps its window. The scroller (max 800,
-    /// period 1000) circular on y, its x bounded, inside a page.
     #[test]
     fn a_circular_axis_covers_every_offset_and_a_bounded_one_keeps_its_window() {
         let (mut document, root, scroller) = scrolling_page();
@@ -1519,7 +1089,6 @@ mod tests {
             "no new frame is built for it"
         );
 
-        // Any real commit picks the live offset up into the slot table.
         document.set_inline_style(root, "background-color: teal");
         let frame = document.commit();
         assert!((frame.scroll_slots()[0].offset.y - 120.0).abs() < f32::EPSILON);
@@ -1560,9 +1129,6 @@ mod tests {
             "nested scrollers chain outward"
         );
 
-        // The escapee's containing block is the viewport (no positioned
-        // ancestor), so its item must carry no slot at all — it neither
-        // scrolls with the inner scroller nor chains into it.
         let hit = frame
             .hit(Point2D::new(15.0, 15.0), &|_| None, None)
             .expect("escapee hit");

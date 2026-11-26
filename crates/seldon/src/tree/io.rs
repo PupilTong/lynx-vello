@@ -21,19 +21,7 @@ pub enum RequestedAxis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutGoal {
     Measure(RequestedAxis),
-    /// Durable child geometry. `content_independent`, per axis: the committing
-    /// parent proved this input's `known_dimensions`, `parent_size` and
-    /// `available_space` cannot change when only the node's own subtree
-    /// content changes. Distinct from [`LayoutInput::definite_dimensions`]
-    /// (CSS definiteness): a post-flexing size is definite even when it was
-    /// measured from the very content whose change is in question. It never
-    /// affects computed geometry and is outside the cache key; it is what
-    /// licenses a host to relayout the node in place under its committed
-    /// input. A measurement carries no such license, so only a commit has the
-    /// field.
-    Commit {
-        content_independent: Size<bool>,
-    },
+    Commit { content_independent: Size<bool> },
 }
 
 impl Default for LayoutGoal {
@@ -45,13 +33,11 @@ impl Default for LayoutGoal {
 }
 
 impl LayoutGoal {
-    /// Whether this goal asks for durable child geometry.
     #[must_use]
     pub const fn commits(self) -> bool {
         matches!(self, Self::Commit { .. })
     }
 
-    /// The independence a commit carries; a measurement carries none.
     #[must_use]
     pub const fn independence(self) -> Option<Size<bool>> {
         match self {
@@ -118,7 +104,6 @@ impl Size<AvailableSpace> {
     }
 }
 
-/// Everything an algorithm may know about a node before laying it out.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutInput {
@@ -128,38 +113,7 @@ pub struct LayoutInput {
     pub definite_dimensions: Size<bool>,
     pub parent_size: Size<Option<f32>>,
     pub available_space: Size<AvailableSpace>,
-    /// The caller reads this box's last baseline from the output, so a
-    /// measurement must report it exactly. Without the request a flex
-    /// container's measurement may give the item its last baseline comes
-    /// from one synthesized from that item's border box, when its cross-size
-    /// pass did not otherwise measure the item; without this request and
-    /// [`Self::reads_first_baseline`] it reports no baseline at all, and
-    /// returns as soon as its own size is decided. A commit always reports
-    /// the last baseline exactly, from the committed children, and needs no
-    /// request.
-    ///
-    /// Set only by a caller that reads the value: a flex line's
-    /// last-baseline-sharing group, a grid row's (its shims included), and a
-    /// container measuring the child its own requested last baseline comes
-    /// from. Never part of the computed geometry; the cache answers a request
-    /// that carries it only from an entry computed with it, or from a
-    /// commit.
     pub reads_last_baseline: bool,
-    /// The caller reads this box's first baseline from the output, so a
-    /// measurement must report it exactly. Without the request a linear
-    /// container's measurement skips the probes of its fixed-size items that
-    /// only its own first baseline would read, and reports one synthesized
-    /// from their border boxes instead. A commit always reports the first
-    /// baseline exactly, from the committed children, and needs no request.
-    ///
-    /// Set by every caller that reads the value from a measurement: a flex
-    /// or grid container measuring a first-baseline group member, a grid
-    /// row's baseline contributions, a flex, grid, grid-lanes or linear
-    /// container measuring the items its own requested first baseline comes
-    /// from, and a host's inline-level atoms. Never part of the computed
-    /// geometry; the cache
-    /// answers a request that carries it only from an entry computed with it,
-    /// or from a commit.
     pub reads_first_baseline: bool,
 }
 
@@ -184,7 +138,6 @@ impl LayoutInput {
         }
     }
 
-    /// The same input, with [`Self::reads_last_baseline`] set as given.
     #[inline]
     #[must_use]
     pub const fn reading_last_baseline(mut self, reads: bool) -> Self {
@@ -192,7 +145,6 @@ impl LayoutInput {
         self
     }
 
-    /// The same input, with [`Self::reads_first_baseline`] set as given.
     #[inline]
     #[must_use]
     pub const fn reading_first_baseline(mut self, reads: bool) -> Self {
@@ -235,26 +187,12 @@ impl LayoutInput {
     }
 }
 
-/// What one layout pass reports back to its caller.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutOutput {
     pub size: Size<f32>,
-    /// The box's scrollable overflow rectangle, in border-box coordinates:
-    /// the union of its padding box and the reach of its contents, so it
-    /// ends at the padding box's far edge at the least and never takes in
-    /// the far border. See [`Layout::content_size`].
     pub content_size: Size<f32>,
-    /// The box's first baseline, measured from its border-box origin: the
-    /// alphabetic baseline of its horizontal first line, a distance down from
-    /// the top edge. Only horizontal writing modes are laid out, so no box
-    /// has a vertical baseline to report. `None` is a box with no first
-    /// baseline set (css-align-3 §9.1); whoever aligns it synthesizes one.
     pub first_baseline: Option<f32>,
-    /// The box's last baseline, in the same coordinates as
-    /// [`Self::first_baseline`]: the baseline of its last line, which
-    /// `last baseline` self-alignment and the containers' own last baselines
-    /// read.
     pub last_baseline: Option<f32>,
 }
 
@@ -289,21 +227,12 @@ impl LayoutOutput {
     }
 }
 
-/// The durable, host-stored layout of one node.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {
     pub order: u32,
     pub location: Point<f32>,
     pub size: Size<f32>,
-    /// The box's scrollable overflow rectangle measured from its border-box
-    /// origin ([css-overflow-3 §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)):
-    /// the union of its own padding box and its contents' reach — each
-    /// child's border box, its margin area in a scroll container, and its
-    /// own `content_size` where its overflow is `visible`. An empty box's
-    /// ends at its padding box's far edge, inside the far border, so a scroll
-    /// container's scrolling area is `content_size` less the start border,
-    /// never smaller than its padding box.
     pub content_size: Size<f32>,
     pub border: Edges<f32>,
     pub padding: Edges<f32>,

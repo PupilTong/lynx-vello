@@ -12,7 +12,6 @@ use terminus::link::{NodeId, Point2D, PopoverError, StylesheetOrigin};
 use super::test_support::{child, display, document, element_under, style_of, with_config};
 use super::{LynxDocument, PageConfig};
 
-/// One computed longhand, as CSSOM serializes it.
 fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
     let id = PropertyId::parse_enabled_for_all_content(property)
         .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -35,14 +34,12 @@ fn rect(document: &LynxDocument, element: NodeId) -> (f32, f32, f32, f32) {
     )
 }
 
-/// The elements at `point` in the committed frame, front to back.
 fn hits(document: &mut LynxDocument, x: f32, y: f32) -> Vec<NodeId> {
     document.layout();
     document.commit();
     document.elements_from_point(Point2D::new(x, y))
 }
 
-/// A manual popover `dialog` under the page, holding a 100 by 50 box.
 fn popover_dialog(document: &mut LynxDocument) -> NodeId {
     let dialog = child(document, DIALOG_TAG, "font-size: 10px");
     document.set_attribute(dialog, "popover", "manual");
@@ -55,14 +52,6 @@ fn popover_dialog(document: &mut LynxDocument) -> NodeId {
     dialog
 }
 
-// --- HTML's rules ---------------------------------------------------------
-
-/// A hidden popover generates no box; a showing one gets HTML's
-/// `[popover]` box — fixed, centred at its fit-content size, a solid
-/// medium border, `0.25em` of padding, `Canvas`/`CanvasText` — on the
-/// top layer, with the display `defaultDisplayLinear` picks for
-/// `dialog`. Its 100 by 50 content, 2.5px of padding and 3px of border
-/// make 111 by 61, centred in the 393 by 727 viewport.
 #[test]
 fn a_showing_popover_dialog_gets_html_s_popover_box_on_the_top_layer() {
     for (linear, expected) in [(true, Display::Linear), (false, Display::Flex)] {
@@ -112,10 +101,6 @@ fn a_showing_popover_dialog_gets_html_s_popover_box_on_the_top_layer() {
     }
 }
 
-/// A showing popover paints above a `z-index: 100` sibling whatever its
-/// ancestors, and makes nothing inert: its `::backdrop` covers the
-/// viewport and takes no touch, so a point outside the popover hits what
-/// is below.
 #[test]
 fn a_popover_s_backdrop_takes_no_touch_and_nothing_below_is_inert() {
     let mut document = document();
@@ -149,11 +134,6 @@ fn a_popover_s_backdrop_takes_no_touch_and_nothing_below_is_inert() {
     assert_eq!(hits(&mut document, 1.0, 1.0), vec![cover, page]);
 }
 
-/// A Lynx tag keeps what web-elements' author rules give it — here
-/// `display`, `position: relative`, no border and the overflow
-/// `defaultOverflowVisible` releases — as it does under web-core,
-/// where those rules outrank the browser's: a `<view popover>` is not
-/// hidden. What web-elements leaves alone is the popover's.
 #[test]
 fn a_lynx_tag_keeps_its_own_rules_over_html_s_popover_rules() {
     let mut document = document();
@@ -174,8 +154,6 @@ fn a_lynx_tag_keeps_its_own_rules_over_html_s_popover_rules() {
     }
 }
 
-/// An author rule wins over every one of them, as over a browser's UA
-/// sheet, except the backdrop's `!important`.
 #[test]
 fn author_rules_win_but_the_backdrop_stays_untouchable() {
     let mut document = document();
@@ -195,10 +173,6 @@ fn author_rules_win_but_the_backdrop_stays_untouchable() {
     assert_eq!(hits(&mut document, 1.0, 1.0), vec![page]);
 }
 
-// --- with `dialog` ---------------------------------------------------------
-
-/// HTML's `showModal()` throws `InvalidStateError` on a dialog that is
-/// showing as a popover, and *show popover* on a modal one.
 #[test]
 fn a_dialog_is_modal_or_a_popover_never_both() {
     let mut document = document();
@@ -218,11 +192,6 @@ fn a_dialog_is_modal_or_a_popover_never_both() {
     assert!(!document.popover_showing(dialog));
 }
 
-/// A popover `dialog` shown modally is a modal dialog with `[popover]`'s
-/// box, as in HTML: `dialog:modal`'s values (the one rule ordered before
-/// `[popover]` here, which writes the same values) and `[popover]`'s
-/// padding over `dialog`'s. Its 100 by 50 content, 2.5px of padding and
-/// 3px of border make 111 by 61, centred, and the page below is inert.
 #[test]
 fn a_popover_dialog_shown_modally_is_a_modal_dialog_with_the_popover_box() {
     let mut document = document();
@@ -255,10 +224,6 @@ fn a_popover_dialog_shown_modally_is_a_modal_dialog_with_the_popover_box() {
     );
 }
 
-/// A popover `dialog` can also be opened with `show()`, which HTML does
-/// not refuse; closing it then leaves the popover showing and in the top
-/// layer, because `close()` takes a dialog out of the layer only when it
-/// is modal.
 #[test]
 fn closing_a_dialog_shown_as_a_popover_leaves_the_popover_showing() {
     let mut document = document();

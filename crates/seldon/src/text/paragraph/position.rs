@@ -16,8 +16,6 @@ use super::style::{BreakStyle, LineHeight, RunStyle, VerticalAlign};
 use crate::style::TextBrush;
 use crate::text::TextContext;
 
-/// The value parley aligns a box with. A percentage raises the box by that
-/// fraction of `percent_basis` (`percent_basis`).
 pub(in crate::text) fn parley_vertical_align(
     value: VerticalAlign,
     percent_basis: f32,
@@ -36,15 +34,6 @@ pub(in crate::text) fn parley_vertical_align(
     }
 }
 
-/// What a `vertical-align` percentage is a fraction of: the root inline
-/// box's `line-height`.
-///
-/// CSS takes the percentage of the aligned element's own `line-height`; an
-/// atomic box here carries no `line-height` of its own, so the root's — the
-/// value its content inherits — stands in. `normal` is read as the root's
-/// first available font's ascent plus descent, without its line gap, which
-/// parley keeps to itself. `root` is the strut's style, or the run that
-/// stands in for it; with neither the basis is zero.
 pub(in crate::text) fn percent_basis(layout: &Layout<TextBrush>, root: Option<&RunStyle>) -> f32 {
     match root.map(|style| (style.line_height, style.font_size)) {
         Some((LineHeight::Px(px), _)) => px,
@@ -56,16 +45,6 @@ pub(in crate::text) fn percent_basis(layout: &Layout<TextBrush>, root: Option<&R
     }
 }
 
-/// The used value of `style`'s `line-height` (CSS 2.2 §10.8.1): a length as
-/// given, a number times the font size, and `normal` the height parley gives
-/// a line box of the style's first available font alone — its ascent,
-/// descent and line gap, as Chrome takes it.
-///
-/// What a `vertical-align` percentage on an element is a fraction of, the
-/// element's own `line-height` (§10.8.1). [`VerticalAlign::Percent`] on an
-/// atom is taken of the root inline box's instead (`percent_basis`), so a
-/// host that knows the atom's style resolves the percentage into a
-/// [`VerticalAlign::Length`] with this first.
 pub fn used_line_height(context: &mut TextContext, style: &RunStyle) -> f32 {
     match style.line_height {
         LineHeight::Px(px) => px,

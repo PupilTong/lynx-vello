@@ -24,31 +24,22 @@ use super::{Videos, apply_reports};
 
 const SRC: &str = "app:///clip.mp4";
 const OTHER_SRC: &str = "app:///other.mp4";
-/// The test clip: 2.5 seconds of 64 by 48 pixels.
 const LENGTH: Duration = Duration::from_millis(2500);
 const NATURAL: (u32, u32) = (64, 48);
 
-/// One opened picture as the test host plays it.
 #[derive(Debug)]
 struct Player {
     settings: MediaSettings,
     playing: bool,
-    /// Where in the clip it is.
     at: Duration,
     ended: bool,
 }
 
-/// A host that serves the requests as a platform player would: an open
-/// reports its first frame at once, paused; `Play` plays from where it is,
-/// from the start after the end; time passes only when the test says; the
-/// end is reported unless the player loops, when it starts over.
 #[derive(Default)]
 struct Host {
     players: FxHashMap<PictureId, Player>,
     requests: Vec<PlaybackRequest>,
-    /// What the open of each source answers: a failure when named here.
     failing: FxHashMap<&'static str, MediaError>,
-    /// Reports not delivered yet.
     reports: Vec<ImageEvent>,
 }
 
@@ -60,7 +51,6 @@ impl Host {
         });
     }
 
-    /// Serves what the entry's epilogue hands over.
     fn serve(&mut self, document: &LynxDocument, videos: &Videos) {
         for request in videos.take_requests(document) {
             match &request {
@@ -118,7 +108,6 @@ impl Host {
         }
     }
 
-    /// Lets `elapsed` pass for every playing player.
     fn run(&mut self, elapsed: Duration) {
         let mut ended = Vec::new();
         for (picture, player) in &mut self.players {
@@ -148,7 +137,6 @@ impl Host {
     }
 }
 
-/// A document with its component events and videos, and a host.
 struct Page {
     document: LynxDocument,
     events: ComponentEvents,
@@ -167,14 +155,10 @@ impl Page {
         }
     }
 
-    /// An unsized, absolutely positioned video: its box is its natural size
-    /// once it has one.
     fn video(&mut self) -> NodeId {
         child(&mut self.document, "video", "position: absolute")
     }
 
-    /// The end of an entry: the requests handed to the host, and what it
-    /// reported back applied, as a turn does.
     fn settle(&mut self) {
         self.host.serve(&self.document, &self.videos);
         let reports = std::mem::take(&mut self.host.reports);
@@ -187,7 +171,6 @@ impl Page {
             .invoke_element_method(element, MethodCall { name, params: "{}" })
     }
 
-    /// The events queued since the last call, as `name detail`.
     fn events(&self) -> Vec<String> {
         self.events
             .take()
@@ -225,10 +208,6 @@ impl Page {
     }
 }
 
-/// `src` presents a picture of the element's own from the write, with no
-/// natural size, and opens it under the `loop` and `muted` the element has
-/// when the entry ends, written before or after `src`. The first frame
-/// sizes the box and fires `firstframe` with the duration in seconds.
 #[test]
 fn src_opens_a_picture_under_the_attributes_the_entry_leaves() {
     let mut page = Page::new();
@@ -258,7 +237,6 @@ fn src_opens_a_picture_under_the_attributes_the_entry_leaves() {
     assert_eq!(page.events(), ["firstframe duration=2.5"]);
     assert_eq!(page.size(video), (64.0, 48.0), "the video's natural size");
 
-    // A change after the open is a command to the player.
     page.document.set_attribute(video, "muted", "true");
     page.document.set_attribute(video, "loop", "false");
     page.settle();
@@ -278,8 +256,6 @@ fn src_opens_a_picture_under_the_attributes_the_entry_leaves() {
     assert!(page.host.players[&picture].settings.muted);
 }
 
-/// `loop` and `muted` are booleans as `__SetAttribute` writes one: on when
-/// present, off when absent or the `"false"` a JavaScript `false` becomes.
 #[test]
 fn loop_and_muted_read_as_booleans() {
     for (value, on) in [
@@ -303,9 +279,6 @@ fn loop_and_muted_read_as_booleans() {
     }
 }
 
-/// Nothing plays until `play`: an open is paused on its first frame, as on
-/// both platforms. `play` and `pause` each send their command and answer
-/// code 0 with `{success: true}` (the record's one field), playing or not.
 #[test]
 fn play_and_pause_send_their_commands_and_answer_success() {
     let mut page = Page::new();
@@ -338,8 +311,6 @@ fn play_and_pause_send_their_commands_and_answer_success() {
     assert!(page.events().is_empty(), "no event is fired for either");
 }
 
-/// `play` with no `src` answers 8 and fires `error` with iOS's `-1` and
-/// both platforms' message; `pause` with none answers success.
 #[test]
 fn play_with_no_source_fails_and_fires_an_error() {
     let mut page = Page::new();
@@ -357,9 +328,6 @@ fn play_with_no_source_fails_and_fires_an_error() {
     assert_eq!(page.host.take_requests(), []);
 }
 
-/// `ended` fires once when playback reaches the end of a video that does not
-/// loop, and never for one that does; a `play` after the end plays again
-/// from the start.
 #[test]
 fn ended_fires_at_the_end_unless_the_video_loops() {
     let mut page = Page::new();
@@ -392,9 +360,6 @@ fn ended_fires_at_the_end_unless_the_video_loops() {
     );
 }
 
-/// A player's failure is the element's `error`, with iOS's codes: `-1` for a
-/// source that could not be opened, `-2` for anything else, a platform with
-/// no player included. Nothing else is fired for it.
 #[test]
 fn a_failure_fires_error_with_its_code_and_message() {
     let mut page = Page::new();
@@ -421,9 +386,6 @@ fn a_failure_fires_error_with_its_code_and_message() {
     assert_eq!(page.size(missing), (0.0, 0.0), "nothing sized it");
 }
 
-/// A new `src` ends the picture before and opens a new one, whose first
-/// frame sizes the box again; what the old one reports afterwards is
-/// dropped. Removing `src` ends the picture and presents nothing.
 #[test]
 fn a_src_change_ends_the_picture_and_opens_another() {
     let mut page = Page::new();
@@ -472,8 +434,6 @@ fn a_src_change_ends_the_picture_and_opens_another() {
     );
 }
 
-/// An element freed while it plays ends its picture, and what its player
-/// reports afterwards owes nothing.
 #[test]
 fn a_freed_video_ends_its_picture() {
     let mut page = Page::new();
@@ -496,9 +456,6 @@ fn a_freed_video_ends_its_picture() {
     assert!(page.host.players.is_empty());
 }
 
-/// What is not built: `stop` and `seek` answer as methods the element does
-/// not have, and `volume`, `speed`, `mode` and `timeupdate-interval` reach
-/// nothing.
 #[test]
 fn the_reduced_surface_answers_nothing_else() {
     let mut page = Page::new();
@@ -521,9 +478,6 @@ fn the_reduced_surface_answers_nothing_else() {
     assert_eq!(page.host.take_requests(), []);
 }
 
-/// `object-fit` reaches the engine as a UA attribute rule: `contain`,
-/// native's default, for the bare tag and anything unrecognised; `cover`
-/// and `fill` as written.
 #[test]
 fn object_fit_selects_the_css_property() {
     let mut page = Page::new();
@@ -549,9 +503,6 @@ fn object_fit_selects_the_css_property() {
     }
 }
 
-/// A `video` is sized like any replaced element: a CSS size wins, and one
-/// axis derives the other through the video's ratio. Its children make no
-/// box.
 #[test]
 fn a_video_is_sized_like_a_replaced_element() {
     let mut page = Page::new();

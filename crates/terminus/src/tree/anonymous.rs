@@ -133,51 +133,26 @@ use crate::style::damage::StyleDamage;
 use crate::tree::document::{Document, NodeId, TreeArenas};
 use crate::tree::node::{Node, NodeFlags, StyleRefresh};
 
-/// The local name an anonymous box's node carries. No selector can name it:
-/// a type selector cannot start with `::`.
 static ANONYMOUS_BOX: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("::anonymous-box"));
 
-/// The anonymous boxes, keyed three ways for their three readers.
-///
-/// An overridden node and a source each record the container that owns the
-/// entry: a node moved from one container to another is claimed by the one
-/// derived second, and the other must not take the entry back when it is
-/// derived after it.
 #[derive(Debug, Default)]
 pub(crate) struct AnonymousBoxes {
-    /// What each item container with sources generated.
     containers: FxHashMap<NodeId, Generated>,
-    /// The children `LayoutTree::children` answers in place of a node's flat
-    /// children.
     layout_children: FxHashMap<NodeId, Override>,
-    /// Each source, and the box its sequence is in — `None` for a sequence
-    /// that renders nothing.
     sources: FxHashMap<NodeId, Source>,
-    /// Records not yet resolved: a node, and whether what moved can change
-    /// the size of a box in its container.
     pending: Vec<(NodeId, bool)>,
 }
 
-/// One container's derivation.
 #[derive(Debug, Default)]
 struct Generated {
-    /// The container's style the boxes' style was built from, and that box
-    /// style: a derivation whose container still has that style `Arc` reuses
-    /// it rather than building and comparing another.
     style: Option<(Arc<ComputedValues>, Arc<ComputedValues>)>,
-    /// Its boxes, in tree order.
     boxes: Vec<NodeId>,
-    /// The nodes whose layout children it overrides.
     overridden: Vec<NodeId>,
-    /// Its sources, rendering or not.
     sources: Vec<NodeId>,
 }
 
-/// Overrides as a list: each overridden node and the children layout reads
-/// for it.
 type Overrides = Vec<(NodeId, Box<[NodeId]>)>;
 
-/// A derivation taken out of the tables, with the overrides it still owned.
 #[derive(Debug, Default)]
 struct Taken {
     generated: Generated,
@@ -197,8 +172,6 @@ struct Source {
 }
 
 impl AnonymousBoxes {
-    /// The children layout reads for `node` in place of its flat children:
-    /// `Some` exactly when its flat children hold a source.
     #[inline]
     pub(crate) fn layout_children(&self, node: NodeId) -> Option<&[NodeId]> {
         if self.layout_children.is_empty() {
@@ -209,7 +182,6 @@ impl AnonymousBoxes {
             .map(|entry| &*entry.children)
     }
 
-    /// The anonymous box whose paragraph holds `source`'s text.
     #[inline]
     pub(crate) fn box_of(&self, source: NodeId) -> Option<NodeId> {
         if self.sources.is_empty() {
@@ -218,8 +190,6 @@ impl AnonymousBoxes {
         self.sources.get(&source)?.anonymous
     }
 
-    /// Whether no container has sources. The other two tables are only ever
-    /// filled by a container's derivation, so this answers for all three.
     #[inline]
     fn is_empty(&self) -> bool {
         self.containers.is_empty()
@@ -231,8 +201,6 @@ impl AnonymousBoxes {
             || self.sources.contains_key(&node)
     }
 
-    /// Takes `container`'s derivation out, along with the overrides and
-    /// sources it still owns.
     fn take(&mut self, container: NodeId) -> Option<Taken> {
         let generated = self.containers.remove(&container)?;
         let mut overrides = Vec::with_capacity(generated.overridden.len());
@@ -262,17 +230,11 @@ impl AnonymousBoxes {
     }
 }
 
-/// One sequence of a container's sources.
 struct Sequence {
     sources: Vec<NodeId>,
     renders: bool,
 }
 
-/// The item container whose loose text `node`'s children are: `node` itself
-/// when it lays its children out as items, else the one its box-less
-/// ancestors lead to. `None` where that text renders as something else or
-/// not at all — a paragraph's content, a replaced element's ignored
-/// children, a subtree with no style.
 fn item_container<T>(tree: &TreeArenas<T>, node: NodeId) -> Option<NodeId> {
     let mut current = tree.get(node)?;
     loop {
@@ -299,11 +261,6 @@ fn item_container<T>(tree: &TreeArenas<T>, node: NodeId) -> Option<NodeId> {
     }
 }
 
-/// Whether text whose parent is `node` can be loose text: `node` is not a
-/// styled element — its display is unknown yet, or it is a shadow root whose
-/// host decides — or it is an item container or `display: contents`. Text in
-/// a paragraph, in a replaced element or under a box that renders nothing
-/// never is.
 fn may_hold_loose_text<T>(node: &Node<T>) -> bool {
     if !node.is_element() {
         return true;
@@ -323,13 +280,6 @@ fn may_hold_loose_text<T>(node: &Node<T>) -> bool {
         )
 }
 
-/// Whether `element`, just styled for the first time or with a new
-/// `display` or `content`, can have given an item container its first
-/// source while no container had any: it holds loose text itself — a text
-/// child, or a `display: contents` child that may hold some — or it is a
-/// `display: contents` element with such children or generated content,
-/// under a node that may hold loose text. Its record resolves to the
-/// container either way.
 fn brings_loose_text<T>(tree: &TreeArenas<T>, element: NodeId) -> bool {
     let Some(node) = tree.get(element) else {
         return false;
@@ -337,8 +287,6 @@ fn brings_loose_text<T>(tree: &TreeArenas<T>, element: NodeId) -> bool {
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
-    // The children's styles are read live: the harvest that calls this
-    // refreshes an element's layout snapshot before its children's.
     let holds_text = || {
         node.flat_children().iter().any(|&child| {
             let child = tree.at(child);
@@ -360,18 +308,12 @@ fn brings_loose_text<T>(tree: &TreeArenas<T>, element: NodeId) -> bool {
     }
 }
 
-/// Whether `text` holds a character css-flexbox-1 §4 does not count as white
-/// space.
 fn has_rendered_character(text: &str) -> bool {
     text.chars()
         .any(|character| !matches!(character, ' ' | '\t' | '\n' | '\r'))
 }
 
-/// `container`'s sources, split into sequences, in tree order.
 fn sequences<T>(tree: &TreeArenas<T>, container: NodeId) -> Vec<Sequence> {
-    // Text reaches the container only as a text node or through a
-    // `display: contents` child, so a container with neither — every
-    // container a page of plain element boxes has — answers here.
     let may_hold_text = tree.live(container).flat_children().iter().any(|&child| {
         let child = tree.at(child);
         child.is_text_node()
@@ -430,15 +372,10 @@ fn sequences<T>(tree: &TreeArenas<T>, container: NodeId) -> Vec<Sequence> {
 }
 
 impl<T> Document<T> {
-    /// Records that the loose text of the item container `node` is in —
-    /// `node` itself when it is one — may group differently: `node`'s child
-    /// list or slot assignment changed, or, for a text node, its data.
     pub(crate) fn note_loose_text_change(&mut self, node: NodeId) {
         self.arenas_mut().anonymous_mut().pending.push((node, true));
     }
 
-    /// The record for `child` inserted under `parent` (module doc, "When the
-    /// boxes are re-derived").
     pub(crate) fn note_child_inserted(&mut self, parent: NodeId, child: NodeId) {
         let tree = self.arenas();
         let records = !tree.anonymous().is_empty() || {
@@ -454,26 +391,18 @@ impl<T> Document<T> {
         }
     }
 
-    /// The record for a child removed from `parent`: none while no container
-    /// has sources, since a removal can then neither split nor end one.
     pub(crate) fn note_child_removed(&mut self, parent: NodeId) {
         if !self.arenas().anonymous().is_empty() {
             self.note_loose_text_change(parent);
         }
     }
 
-    /// The record for a text node whose data changed: only a source's edit
-    /// can make its sequence start or stop rendering.
     pub(crate) fn note_text_data_change(&mut self, text: NodeId) {
         if self.arenas().anonymous().sources.contains_key(&text) {
             self.note_loose_text_change(text);
         }
     }
 
-    /// The harvest's record for an element it visited (module doc, "When the
-    /// boxes are re-derived"). `relayout` is whether its damage reaches
-    /// layout. Called whatever the damage: a first or a last style carries
-    /// none.
     pub(crate) fn note_box_restyle(
         &mut self,
         element: NodeId,
@@ -505,11 +434,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Drops what `id` was to the anonymous boxes — called by `free_node` for
-    /// every node it frees. A container's boxes are freed with it; an
-    /// overridden node's or a source's entry goes, and its container, which
-    /// the unlink before the free recorded, drops it from its derivation the
-    /// next time it is derived.
     pub(crate) fn forget_anonymous_boxes(&mut self, id: NodeId) {
         if self.arenas().anonymous().is_empty() {
             return;
@@ -529,8 +453,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Takes `container`'s derivation away, freeing its boxes, and answers
-    /// whether it had generated anything layout read.
     fn release_container(&mut self, container: NodeId) -> bool {
         let Some(Taken {
             generated,
@@ -551,8 +473,6 @@ impl<T> Document<T> {
         generated_any
     }
 
-    /// Clears the override flag of every node `taken` overrode that `kept`
-    /// does not list. A node whose free is in progress is skipped.
     fn clear_override_flags(&mut self, taken: &Overrides, kept: &[NodeId]) {
         for (holder, _) in taken {
             if !kept.contains(holder)
@@ -569,9 +489,6 @@ impl<T> Document<T> {
         })
     }
 
-    /// CSS 2.2 §9.2.1.1's style for an anonymous block box whose parent box
-    /// has style `parent`: its inherited properties, every other property's
-    /// initial value, and the block container display.
     pub(crate) fn anonymous_block_style(&self, parent: &ComputedValues) -> Arc<ComputedValues> {
         let stylist = self.style_engine().stylist();
         let mut builder =
@@ -582,8 +499,6 @@ impl<T> Document<T> {
         builder.build()
     }
 
-    /// Test/benchmark-only: how many anonymous boxes `container`'s last
-    /// derivation gave its loose text.
     #[cfg(feature = "layout-test-utils")]
     #[doc(hidden)]
     pub fn anonymous_box_count_for_testing(&self, container: NodeId) -> usize {
@@ -594,17 +509,12 @@ impl<T> Document<T> {
             .map_or(0, |generated| generated.boxes.len())
     }
 
-    /// The element a hit on `node` targets: an anonymous box's container,
-    /// `node` itself otherwise.
     pub(crate) fn hit_target(&self, node: NodeId) -> NodeId {
         self.arenas().anonymous_container(node).unwrap_or(node)
     }
 }
 
 impl<T: Sync> Document<T> {
-    /// Re-derives the anonymous boxes of every item container a record since
-    /// the last call resolves to, and answers whether a box's size may have
-    /// moved. One test when nothing was recorded.
     pub(crate) fn rebuild_anonymous_boxes(&mut self) -> bool {
         if self.arenas().anonymous().pending.is_empty() {
             return false;
@@ -619,15 +529,11 @@ impl<T: Sync> Document<T> {
                 if let Some(container) = container {
                     containers.push((container, relayout));
                 }
-                // A container that stopped being one: its text belongs to
-                // another container now, or renders as something else.
                 if container != Some(node) && tree.anonymous().containers.contains_key(&node) {
                     released.push(node);
                 }
             }
         }
-        // Sorted by handle so the boxes a pass allocates — and so their
-        // handles — do not depend on the order the records came in.
         containers.sort_unstable_by_key(|&(container, _)| container.to_bits());
         containers.dedup_by(|later, kept| {
             let same = later.0 == kept.0;
@@ -648,10 +554,6 @@ impl<T: Sync> Document<T> {
         relayout
     }
 
-    /// Re-derives one container's boxes and overrides, and answers whether
-    /// its layout was invalidated. `moved` is whether a record that resolved
-    /// to it can have changed a box's size, which re-derivation alone cannot
-    /// see: a run's style is its element's, not the box's.
     fn derive_anonymous_boxes(&mut self, container: NodeId, moved: bool) -> bool {
         let sequences = sequences(self.arenas(), container);
         if sequences.is_empty() {
@@ -674,9 +576,6 @@ impl<T: Sync> Document<T> {
         );
         let (sources, overrides) = overrides(self.arenas(), &sequences, &placed.owners);
 
-        // Any override that appeared, went or changed moves what layout
-        // reads; the ones the previous derivation owned were taken out with
-        // it above.
         let relayout = placed.relayout
             || previous_overrides.len() != overrides.len()
             || overrides.iter().any(|(holder, children)| {
@@ -729,10 +628,6 @@ impl<T: Sync> Document<T> {
         relayout
     }
 
-    /// Gives each rendering sequence a box — reusing `previous` in order,
-    /// allocating past its end, freeing what is left of it — with its links
-    /// and style set, and clears the cached layout of every box whose
-    /// content or style can have moved its size.
     fn place_anonymous_boxes(
         &mut self,
         container: NodeId,
@@ -750,7 +645,6 @@ impl<T: Sync> Document<T> {
             Some((parent, style)) if Arc::ptr_eq(parent, &container_style) => Arc::clone(style),
             _ => self.anonymous_block_style(&container_style),
         };
-        // The parent whose flat-tree parent is the container (module doc).
         let parent = {
             let node = self.live(container);
             node.shadow_root_slot()
@@ -780,7 +674,6 @@ impl<T: Sync> Document<T> {
             if regrouped {
                 node.children.clone_from(&sequence.sources);
             }
-            // `Some(relayout)` when the style moved, `None` when it did not.
             let damage = match node.layout_computed_style_arc() {
                 None => Some(true),
                 Some(old) if Arc::ptr_eq(old, &style) => None,
@@ -811,31 +704,20 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// What [`Document::place_anonymous_boxes`] did.
 struct Placed {
-    /// The container's style and the box style built from it.
     style: (Arc<ComputedValues>, Arc<ComputedValues>),
-    /// The boxes, in tree order.
     boxes: Vec<NodeId>,
-    /// Each sequence's box, `None` for one that renders nothing; indexed like
-    /// the sequences.
     owners: Vec<Option<NodeId>>,
-    /// Whether a box appeared, went, or may have changed size.
     relayout: bool,
-    /// Whether a box took a new style.
     restyled: bool,
 }
 
-/// Every source, in tree order, and the override of each node whose flat
-/// children hold one: those children with every source removed and each box
-/// where its first source was.
 fn overrides<T>(
     tree: &TreeArenas<T>,
     sequences: &[Sequence],
     owners: &[Option<NodeId>],
 ) -> (Vec<NodeId>, Overrides) {
     let mut sources = Vec::new();
-    // Each source, and the box it opens: `Some` only for a sequence's first.
     let mut opens: FxHashMap<NodeId, Option<NodeId>> = FxHashMap::default();
     let mut holders: Vec<NodeId> = Vec::new();
     for (sequence, owner) in sequences.iter().zip(owners) {
@@ -885,7 +767,6 @@ mod tests {
 
     const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
-    /// A 400×300 flex row page, 10px Ahem, and 20px square `view`s.
     fn doc(css: &str) -> Doc {
         let mut doc = Doc::with_css(&format!(
             "page {{ display: flex; width: 400px; height: 300px; align-items: flex-start;
@@ -913,7 +794,6 @@ mod tests {
         )
     }
 
-    /// The anonymous boxes `container` generates, in tree order.
     fn boxes(doc: &Doc, container: NodeId) -> Vec<NodeId> {
         doc.dom
             .arenas()
@@ -924,7 +804,6 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// The sources one box lays out.
     fn sources(doc: &Doc, anonymous: NodeId) -> Vec<NodeId> {
         doc.dom
             .get(anonymous)
@@ -1128,12 +1007,6 @@ mod tests {
         assert_eq!(rect(&doc, span).0, 20.0);
     }
 
-    /// A flex container that becomes a block container lays its text out in
-    /// its own inline formatting context, so the box around the text goes.
-    /// The block container stands for every paragraph mode here: a Lynx text
-    /// element is one by its kind, which never changes, and `display: block`
-    /// is the one paragraph a restyle can switch to. It is engine-only, so a
-    /// UA sheet writes it.
     #[test]
     fn a_container_that_becomes_a_paragraph_releases_its_boxes() {
         let mut doc = doc("");
@@ -1156,7 +1029,6 @@ mod tests {
         );
     }
 
-    /// The output the node's last committing run reported.
     fn committed_output(doc: &Doc, id: NodeId) -> seldon::tree::LayoutOutput {
         let slot = &doc
             .dom
@@ -1169,10 +1041,6 @@ mod tests {
             .expect("the committed entry answers its own input")
     }
 
-    /// The box's inline formatting context reports both its first and its
-    /// last line box's baseline, and its flex container hands both on as its
-    /// own (css-flexbox-1 §8.5): `aa bb cc` in 20px wraps to three 10px
-    /// lines, first baseline 8, last 28.
     #[test]
     fn a_wrapped_box_hands_its_last_line_baseline_to_its_container() {
         let mut doc = doc(".row { display: flex; width: 20px; }");
@@ -1192,18 +1060,10 @@ mod tests {
         }
     }
 
-    /// `align-items: last baseline` lines anonymous text items up by their
-    /// last lines (css-align-3 §9.3). The 20px-wide item wraps `aa bb cc`
-    /// to three 10px lines, last baseline 28; `dd` keeps one, baseline 8, so
-    /// it sits 20 lower than the wrapped one. A 0×0 box splits the text into
-    /// two items.
     #[test]
     fn last_baseline_lines_anonymous_text_up_on_its_last_line() {
         let cases = [
-            // Flex: the wrapped item shrinks to its 20px min-content width.
             ".row { display: flex; width: 40px; align-items: last baseline; }",
-            // Grid: one row, the wrapped item in a 20px column; the row's
-            // height comes from the shimmed contributions.
             ".row { display: grid; grid-template-columns: 20px 0 20px;
                     align-items: last baseline; }",
         ];
@@ -1243,11 +1103,6 @@ mod tests {
         assert_eq!(rect(&doc, anonymous), (0.0, 0.0, 60.0, 20.0));
     }
 
-    /// The container's `direction` reaches its box, where it is the inline
-    /// formatting context's bidi paragraph level: parley reads it when it
-    /// shapes, so the change needs a new flow (`InlineFlow::set_style`
-    /// asserts as much in debug builds, which this runs in), and `start`
-    /// moves to the right edge.
     #[test]
     fn a_container_direction_change_re_shapes_the_box_at_the_new_level() {
         let mut doc = doc("div { display: flex; flex-direction: column; width: 60px; }");
@@ -1304,8 +1159,6 @@ mod tests {
         let div = doc.dom.create_element("div", ());
         let data = doc.dom.create_text_node("abc", ());
         doc.dom.append_child(div, data);
-        // A flush while `div` is detached: its record finds no style and is
-        // dropped.
         doc.flush();
         assert_eq!(boxes(&doc, div), []);
 
@@ -1405,8 +1258,6 @@ mod tests {
         doc.flush();
         doc.dom.render();
 
-        // No flush between the attach and the hit: the box still parents to
-        // the host itself, whose flat children are the shadow root's now.
         doc.dom.attach_shadow(div, ShadowRootMode::Open);
         assert_eq!(
             doc.dom.elements_from_point(Point2D::new(5.0, 5.0)).first(),
@@ -1478,7 +1329,6 @@ mod tests {
         assert_eq!(rect(&doc, anonymous).2, 20.0);
     }
 
-    /// The records waiting for the next derivation.
     fn pending(doc: &Doc) -> usize {
         doc.dom.arenas().anonymous().pending.len()
     }
@@ -1494,8 +1344,6 @@ mod tests {
         doc.flush();
         assert_eq!(boxes(&doc, root), []);
 
-        // An element inserted, text inserted into a paragraph and edited
-        // there, and a removal: none can give a container a source.
         let more = text(&mut doc, paragraph, "def");
         doc.el(root, "view");
         doc.dom.set_text_node_data(more, "ghi");
@@ -1505,8 +1353,6 @@ mod tests {
         assert_eq!(boxes(&doc, root), []);
     }
 
-    /// A block container stands for every paragraph mode a restyle can
-    /// leave: a Lynx text element is one by its kind, which never changes.
     #[test]
     fn a_paragraph_restyled_to_a_container_boxes_its_text() {
         let mut doc = doc("");

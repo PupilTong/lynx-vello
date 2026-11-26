@@ -149,60 +149,29 @@ use crate::scroll::initial_target::InitialTarget;
 use crate::scroll::{AutoScrollRequest, SnapAxis, SnapPoint};
 use crate::tree::document::{Document, NodeId};
 
-/// A frame's back-to-front paint order.
 #[derive(Debug)]
 pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
-    /// Each slot's index by its container, built once per commit.
     slot_index: FxHashMap<NodeId, u32>,
     animations: Vec<AnimationSlot>,
     stickies: Vec<StickySlot>,
-    /// The scroll, sticky, anchored and animation nodes, in allocation
-    /// order; see [`space`].
     spaces: Vec<Space>,
-    /// Every anchor-positioned box with a space node; see [`anchored`].
     anchored: Vec<anchored::AnchoredSlot>,
-    /// The scroll and sticky inputs of the anchored slots' shifts, sliced
-    /// per slot.
     anchor_links: Vec<anchored::AnchorLink>,
-    /// The clips between each anchored slot's default anchor and its
-    /// containing block, sliced per slot.
     anchor_clips: Vec<u32>,
-    /// The order the anchored slots are sampled in.
     anchored_order: Vec<u32>,
-    /// Every `content-visibility: auto` box this build reached, in build
-    /// order. See [`AutoBox`].
     auto_boxes: Vec<AutoBox>,
-    /// Every scroll slot's snap positions, in slot order; see
-    /// [`ScrollSlot::snap`].
     snap_points: Vec<SnapPoint>,
-    /// The world matrices of the items, clips, layers and `auto` boxes that
-    /// are not a pure translation, which on most pages is none of them; see
-    /// [`ItemTransform`].
     matrices: Vec<Transform3D<f32>>,
-    /// Every `scroll-initial-target: nearest` element the build reached,
-    /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
-    /// not a recycled buffer.
     initial_targets: Vec<InitialTarget>,
-    /// The pending auto-scroll change of each container that has one and a
-    /// slot here; see `scroll::request`. Rarely non-empty, so not a
-    /// recycled buffer and not a field of every [`ScrollSlot`].
     auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
-    /// The index of the first item of the topmost top-layer entry that
-    /// blocks the document (HTML's modal dialog), its `::backdrop`'s when it
-    /// has one: every item before it is inert to hit testing. `None` while
-    /// nothing blocks the document. See `tree::top_layer`.
     inert_floor: Option<usize>,
     commit_id: u64,
 }
 
-/// One instant's samples of a frame's slots, ascending by slot: every slot
-/// for a hit test, which answers over items no program encoded, and only the
-/// program's own for a compose, so a composed frame costs what it encoded
-/// rather than what the page animates. Inline for the few a frame composes.
 #[derive(Debug, Clone)]
 pub(crate) struct SlotSamples<S>(smallvec::SmallVec<[(u32, S); 4]>);
 
@@ -213,11 +182,8 @@ impl<S> Default for SlotSamples<S> {
 }
 
 impl<S> SlotSamples<S> {
-    /// Slot `slot`'s sample. A compose reads only the slots its program
-    /// names, which are exactly the ones it sampled.
     pub(crate) fn get(&self, slot: u32) -> &S {
         let entries = &self.0;
-        // A whole-frame table holds slot `i` at `i`.
         let index = match entries.get(slot as usize) {
             Some((at, _)) if *at == slot => slot as usize,
             _ => entries
@@ -235,8 +201,6 @@ impl<S> SlotSamples<S> {
         self.0.push((slot, sample));
     }
 
-    /// Every sampled slot with its sample, to write over: how a seam pass
-    /// resamples the few slots its copy reads differently.
     pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = (u32, &mut S)> {
         self.0.iter_mut().map(|(slot, sample)| (*slot, sample))
     }
@@ -252,35 +216,23 @@ impl<S> FromIterator<(u32, S)> for SlotSamples<S> {
     }
 }
 
-/// The sampled values of a frame's animation slots.
 pub(crate) type AnimationSamples = SlotSamples<AnimationSample>;
 
-/// The painter's scratch for [`PaintOrder::mark_composed_spaces`]: one flag
-/// per space node and one per sticky slot, reused across commits.
 #[derive(Debug, Default)]
 pub(crate) struct ComposedMarks {
     spaces: Vec<bool>,
     stickies: Vec<bool>,
 }
 
-/// The slots one compose program reads, derived from the program by
-/// [`PaintOrder::mark_composed_spaces`] and carried beside it, so a
-/// composition samples only what it draws.
 #[derive(Debug, Default)]
 pub(crate) struct ComposedSlots {
-    /// The animation slots on the path of a space some op names, ascending.
     pub(crate) animations: Vec<u32>,
-    /// The sticky slots on those paths plus the boxes they solve against,
-    /// ascending.
     pub(crate) stickies: Vec<u32>,
-    /// Whether one of `animations` reads the document timeline.
     pub(crate) clock: bool,
-    /// Whether one of `animations` reads a scroll slot's offset.
     pub(crate) scroll: bool,
 }
 
 impl ComposedSlots {
-    /// Empties both lists, keeping their capacity.
     pub(crate) fn clear(&mut self) {
         self.animations.clear();
         self.stickies.clear();
@@ -289,23 +241,12 @@ impl ComposedSlots {
     }
 }
 
-/// One animation slot's compose-time values, sampled at one instant: the
-/// CSS-px delta from the committed geometry, and the opacity replacing the
-/// committed one on the element's effect layer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnimationSample {
     pub(crate) delta: crate::kurbo::Affine,
     pub(crate) alpha: Option<f32>,
 }
 
-/// The four growable tables a [`PaintOrder`] is made of, emptied of one
-/// frame's contents but not of their capacity.
-///
-/// The builder fills a set and the painter reclaims the set from the frame it
-/// retires, so a document whose page shape has stopped growing allocates
-/// paint-order storage zero times per frame. The set the painter reclaims is
-/// never the frame it retains: hit testing reads that one between renders, so
-/// it must never be the object being emptied.
 #[derive(Debug, Default)]
 pub(crate) struct FrameBuffers {
     items: Vec<PaintItem>,
@@ -342,11 +283,6 @@ impl FrameBuffers {
 }
 
 impl PaintOrder {
-    /// Empties this frame and hands back its storage with capacity intact.
-    ///
-    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`], [`ScrollSlot`],
-    /// [`Space`] and [`AutoBox`] own no heap data, so each clear is a length
-    /// write.
     pub(crate) fn into_buffers(mut self) -> FrameBuffers {
         self.items.clear();
         self.clips.clear();
@@ -382,9 +318,6 @@ impl PaintOrder {
         }
     }
 
-    /// A frame with no storage at all — the placeholder a discarded pass
-    /// leaves behind while its buffers go back to the painter. It allocates
-    /// nothing and is never built, walked or published.
     pub(crate) const fn empty() -> Self {
         Self {
             items: Vec::new(),
@@ -423,7 +356,6 @@ impl PaintOrder {
         ]
     }
 
-    /// The world matrix `transform` names in this frame.
     #[must_use]
     pub(crate) fn matrix(&self, transform: ItemTransform) -> Transform3D<f32> {
         transform.resolve(&self.matrices)
@@ -434,15 +366,11 @@ impl PaintOrder {
         &self.items
     }
 
-    /// The items hit testing considers, back to front: every item above the
-    /// inert floor (see [`Self::inert_floor`]).
     #[must_use]
     pub(crate) fn hit_testable_items(&self) -> &[PaintItem] {
         &self.items[self.inert_floor.unwrap_or(0)..]
     }
 
-    /// The index of the first item a modal top-layer entry leaves
-    /// hit-testable, or `None` when nothing blocks the document.
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn inert_floor(&self) -> Option<usize> {
@@ -464,20 +392,16 @@ impl PaintOrder {
         &self.slots
     }
 
-    /// The slot `node` has in this frame, if it is a scroll container here.
     #[must_use]
     pub(crate) fn slot_of(&self, node: NodeId) -> Option<u32> {
         self.slot_index.get(&node).copied()
     }
 
-    /// Every slot's snap positions, sliced by [`ScrollSlot::snap`].
     #[must_use]
     pub(crate) fn snap_points(&self) -> &[SnapPoint] {
         &self.snap_points
     }
 
-    /// A slot's snapping on each axis, over this frame's points; see
-    /// [`CommittedFrame::snap_axes`].
     #[must_use]
     pub(crate) fn snap_axes(
         &self,
@@ -496,13 +420,11 @@ impl PaintOrder {
         )
     }
 
-    /// Every `scroll-initial-target: nearest` element this build reached.
     #[must_use]
     pub(crate) fn initial_targets(&self) -> &[InitialTarget] {
         &self.initial_targets
     }
 
-    /// The pending auto-scroll changes this frame carries.
     #[must_use]
     pub(crate) fn auto_scroll_requests(&self) -> &[(NodeId, AutoScrollRequest)] {
         &self.auto_scroll_requests
@@ -513,24 +435,16 @@ impl PaintOrder {
         &self.animations
     }
 
-    /// The frame's space tree; see [`space`].
     #[must_use]
     pub(crate) fn spaces(&self) -> &[Space] {
         &self.spaces
     }
 
-    /// Every `content-visibility: auto` box this frame's build reached.
     #[must_use]
     pub(crate) fn auto_boxes(&self) -> &[AutoBox] {
         &self.auto_boxes
     }
 
-    /// Every animation slot's compose values sampled at `now` — the
-    /// committed instant when `None` — with each scroll slot at the offset
-    /// `offset_of` reports, falling back to the committed one.
-    ///
-    /// Every slot, because hit testing answers over every item the frame
-    /// carries, including the ones culling left unencoded.
     pub(crate) fn sample_animations(
         &self,
         now: Option<f64>,
@@ -544,8 +458,6 @@ impl PaintOrder {
             .collect()
     }
 
-    /// [`Self::sample_animations`] over only `composed`, the slots a
-    /// program composes; see [`Self::mark_composed_spaces`].
     pub(crate) fn sample_composed_animations(
         &self,
         composed: &[u32],
@@ -565,8 +477,6 @@ impl PaintOrder {
             .collect()
     }
 
-    /// The committed values of `composed`: identity deltas, committed
-    /// opacities.
     pub(crate) fn committed_animations(composed: &[u32]) -> AnimationSamples {
         composed
             .iter()
@@ -592,10 +502,6 @@ impl PaintOrder {
         }
     }
 
-    /// Binds every exported scroll timeline to its source's slot, now the
-    /// walk has allocated every slot: an element's own slot comes after its
-    /// animation slot, and a later-painted source's after its dependent's.
-    /// Writes into `painted` the elements whose curve reads a slot.
     fn bind_scroll_timelines(&mut self, painted: &mut FxHashSet<NodeId>) {
         painted.clear();
         for slot in &mut self.animations {
@@ -610,8 +516,6 @@ impl PaintOrder {
         }
     }
 
-    /// The earliest instant an exported curve leaves its domain at, over
-    /// every slot; `None` when nothing exported ever ends.
     pub(crate) fn earliest_expiry(&self) -> Option<f64> {
         self.animations
             .iter()
@@ -619,14 +523,6 @@ impl PaintOrder {
             .reduce(f64::min)
     }
 
-    /// Writes into `composed` the animation and sticky slots `program`
-    /// composes: those on the path of a space some op names, plus the sticky
-    /// boxes their constraints solve against. Composition samples only these,
-    /// which keeps a composed frame screen-bounded however much of the page
-    /// animates.
-    ///
-    /// Hit testing reads every slot instead: it answers over items this
-    /// commit may never have encoded.
     pub(crate) fn mark_composed_spaces(
         &self,
         program: &[crate::paint::compose::ComposeOp],
@@ -645,13 +541,8 @@ impl PaintOrder {
         let stickies = &mut marks.stickies;
         stickies.clear();
         stickies.resize(self.stickies.len(), false);
-        // Every anchored slot is sampled whatever the program draws, since
-        // one hides another through its anchor; what they read is marked
-        // with the program's spaces.
         self.mark_anchored_inputs(spaces, stickies);
         composed.clear();
-        // A node is pushed after its parent, so one reverse pass closes the
-        // set under `Space::parent`.
         for index in (0..spaces.len()).rev() {
             if !spaces[index] {
                 continue;
@@ -668,15 +559,12 @@ impl PaintOrder {
                 SpaceKind::Animation(slot) => composed.animations.push(slot),
             }
         }
-        // Space order is slot order within each kind.
         composed.animations.reverse();
         for &slot in &composed.animations {
             let curve = &self.animations[slot as usize].curve;
             composed.clock |= curve.reads_clock();
             composed.scroll |= curve.reads_scroll();
         }
-        // A sticky box solves against its parent box's cumulative shift and
-        // the one its scrollport shares, both allocated before it.
         for index in (0..stickies.len()).rev() {
             if !stickies[index] {
                 continue;
@@ -706,7 +594,6 @@ impl PaintOrder {
         self.commit_id
     }
 
-    /// This frame's space inputs at one instant, over the tables they index.
     pub(crate) fn space_samples<'a>(
         &'a self,
         animations: &'a AnimationSamples,
@@ -730,47 +617,12 @@ impl PaintOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaintItemKind {
     ElementBox,
-    TextRun {
-        element: NodeId,
-    },
-    /// A top-layer element's `::backdrop` box: painted as an element box of
-    /// the item's own node — the detached backdrop node, whose style and
-    /// layout the walk reads — and hit-tested as `element`, the originating
-    /// element, as a browser targets a pointer on the backdrop
-    /// (`tree::top_layer`).
-    Backdrop {
-        element: NodeId,
-    },
-    /// One fragment of a non-atomic inline box — the item's node — in the
-    /// inline formatting context `paragraph` establishes: its border box on
-    /// one line, in paragraph order after the paragraph's own record. The
-    /// paragraph's record draws it; this one only answers hits, so a point
-    /// in a fragment, its padding included, targets the inline box, and the
-    /// boxes it is nested in after it.
-    InlineFragment {
-        paragraph: NodeId,
-    },
-    /// One path or text item of an outermost `svg` element's recording
-    /// (`crate::svg::present`): `root` is that element, `index` the item's
-    /// place in its recording. The item's node is the SVG element the item
-    /// was recorded from; its transform maps the item's ink rectangle
-    /// (`crate::svg::ink_extent`), placed at its origin, onto the page, and
-    /// its size is that rectangle's. Never hit-testable: a point over it
-    /// hits the root's own box.
-    Svg {
-        root: NodeId,
-        index: u32,
-    },
+    TextRun { element: NodeId },
+    Backdrop { element: NodeId },
+    InlineFragment { paragraph: NodeId },
+    Svg { root: NodeId, index: u32 },
 }
 
-/// The world matrix of a paint item, clip, layer or `auto` box: its stacking
-/// context's flattened world pre-multiplied by its offset.
-///
-/// Inline when the matrix is exactly a translation — every entry the
-/// identity's, bit for bit, but `m41`/`m42` — which is every record outside a
-/// transformed context; otherwise an index into the frame's matrix table.
-/// [`PaintOrder::matrix`] gives back the very matrix the build computed
-/// either way, so every reader folds the same bits it always did.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ItemTransform {
     Translate(Vector2D<f32>),
@@ -778,7 +630,6 @@ pub(crate) enum ItemTransform {
 }
 
 impl ItemTransform {
-    /// The world matrix this names among `matrices`, the frame's table.
     pub(crate) fn resolve(self, matrices: &[Transform3D<f32>]) -> Transform3D<f32> {
         match self {
             Self::Translate(offset) => Transform3D::translation(offset.x, offset.y, 0.0),
@@ -787,7 +638,6 @@ impl ItemTransform {
     }
 }
 
-/// One node's entry in the paint order.
 #[derive(Debug, Clone)]
 pub(crate) struct PaintItem {
     pub(crate) node: NodeId,
@@ -797,24 +647,10 @@ pub(crate) struct PaintItem {
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
     pub(crate) hit_testable: bool,
-    /// The nearest ancestor-or-self scroll container on this item's
-    /// containing-block chain, as an index into [`PaintOrder::slots`]. This is
-    /// the *recognition* chain: a scroll container's own item names its own
-    /// slot (the box is a scroll target), while what moves the item is
-    /// [`Self::space`], which for a container's own box stops outside its own
-    /// scroll node.
     pub(crate) slot: Option<u32>,
-    /// The space this item composes in: the element's box space for its own
-    /// box, its content space for a text run. See [`space`].
     pub(crate) space: Option<u32>,
 }
 
-/// A stacking context rendered as a composited group.
-///
-/// Only contexts with group effects (`opacity`, `filter`, `backdrop-filter`,
-/// `mix-blend-mode`, `clip-path`, `mask-image`, `isolation`) get one. A plain transform or
-/// `z-index` context has no [`RenderLayer`] at all, so this table is not an
-/// index of stacking contexts and cannot be used as one.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderLayer {
     pub(crate) parent: Option<usize>,
@@ -822,39 +658,18 @@ pub(crate) struct RenderLayer {
     pub(crate) transform: ItemTransform,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
-    /// The root element's box space: the group moves with the root's own
-    /// sticky and animation nodes and the scrollers *around* it, never with
-    /// the root's own content.
     pub(crate) space: Option<u32>,
-    /// The clip enclosing the root element, which its own box item carries.
     pub(crate) clip: Option<usize>,
-    /// The contiguous run of [`PaintOrder::items`] this group encloses. A
-    /// stacking context paints atomically, so its members are always
-    /// contiguous; an empty run is not recorded at all (the layer is popped).
     pub(crate) items: std::ops::Range<usize>,
-    /// What the group's effects are read from.
     pub(crate) kind: LayerKind,
 }
 
-/// What a [`RenderLayer`]'s effects are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayerKind {
-    /// The group effects of a stacking context: its element's computed
-    /// `opacity`, `mix-blend-mode`, `filter`, `backdrop-filter`,
-    /// `clip-path` and mask.
     Element,
-    /// One layer push of an outermost `svg` element's recording
-    /// (`crate::paint::svg::layer`): a compositing layer at its alpha or a
-    /// clip, shaped by a rectangle or a path. `root` is the `svg` element,
-    /// `index` the push's place in its recording; the layer's node is the
-    /// element whose group effects the push records, its transform maps the
-    /// shape's bounding box, placed at its origin, onto the page, and its
-    /// size is that box's. Never floored, filtered or a Backdrop Root.
     Svg { root: NodeId, index: u32 },
 }
 
-/// One overflow/`contain: paint` clip: a rounded padding-box rect in the
-/// establishing element's local space.
 #[derive(Debug, Clone)]
 pub(crate) struct ClipNode {
     pub(crate) parent: Option<usize>,
@@ -863,27 +678,9 @@ pub(crate) struct ClipNode {
     pub(crate) transform: ItemTransform,
     pub(crate) rect: Rect<f32>,
     pub(crate) radii: CornerRadii,
-    /// The establishing element's box space: the clip moves with the
-    /// element's own sticky and animation nodes, never with its own scroll
-    /// node — a scroller's clip does not move with its own content.
     pub(crate) space: Option<u32>,
 }
 
-/// One `content-visibility: auto` box the build reached, with exactly the
-/// geometry the relevance test asks about.
-///
-/// **Not an item.** A `visibility: hidden` element paints nothing and so has
-/// no [`PaintItem`], but relevance is a geometric fact about its border box:
-/// it decides whether the element's *contents* — which may be
-/// `visibility: visible` and must then lay out and paint — are skipped. Tying
-/// the record to the item list would leave such an element undetermined and
-/// skipping forever. So the builder records this the moment it reaches the
-/// element, before it decides whether to emit an item at all, and the
-/// relevance pass reads the frame through it: one pass over the `auto` boxes
-/// rather than one over every item, and a page with none pays one `is_empty`
-/// test per render.
-///
-/// `space` is the element's box space, the one its own box item composes in.
 #[derive(Debug, Clone)]
 pub(crate) struct AutoBox {
     pub(crate) node: NodeId,
@@ -891,14 +688,9 @@ pub(crate) struct AutoBox {
     pub(crate) size: Size2D<f32>,
     pub(crate) clip: Option<usize>,
     pub(crate) space: Option<u32>,
-    /// The innermost enclosing group layer, including one this element opened
-    /// for itself: its blur carries the element's contents' ink outward, so
-    /// the region admitted for them grows with it.
     pub(crate) layer: Option<usize>,
 }
 
-/// Per-corner elliptical radii, in CSS px: `width` is the horizontal radius,
-/// `height` the vertical.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct CornerRadii {
     pub(crate) top_left: Size2D<f32>,
@@ -922,37 +714,16 @@ impl CornerRadii {
 }
 
 impl<T: Sync> Document<T> {
-    /// One frame built out of band, claiming a commit id of its own — the
-    /// shape the tests that inspect or deliberately strand a paint order
-    /// need. The production path is [`Self::render`], which claims the id
-    /// once and may build more than one frame under it.
     #[cfg(test)]
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
-        // Claimed after the layout and before the build, so the built frame
-        // carries it; a panicking build or walk leaves the previous frame
-        // retained with its older id, so `needs_render` still reports stale.
         let _ = self.next_commit_id();
         self.finish_layout();
         self.build_frame()
     }
 
-    /// One paint-order build under the commit id already claimed; the caller
-    /// has laid out.
-    ///
-    /// Split out of [`Self::build_paint_order`] because a render may take
-    /// more than one — a `content-visibility: auto` relevance flip voids the
-    /// frame it was decided on — while the commit id is claimed once per
-    /// render, so every pass builds the *same* commit.
     fn build_frame(&mut self) -> PaintOrder {
-        // Every `svg` root whose subtree changed records it now, after the
-        // layout the caller ran and before the walk draws it
-        // (`svg::present`). One `bool` test without one.
         self.record_svg_roots();
-        // Both takes finish before `build` reborrows the document shared. The
-        // retained frame is not among them: it stays where hit testing can
-        // read it for the whole build, and a build that panics loses only one
-        // frame's worth of capacity.
         let (scratch, buffers) = {
             let painter = self.painter.get_mut();
             (painter.take_build_scratch(), painter.take_spare_buffers())
@@ -963,40 +734,18 @@ impl<T: Sync> Document<T> {
         frame
     }
 
-    /// Lays out again only when the caller's own `layout()` left work owed —
-    /// a style flush, or a pass a capped settle loop did not reach. A settled
-    /// document's second `layout()` would re-test clean state and reach the
-    /// same frame, so the common case skips it.
     fn finish_layout(&mut self) {
         if self.layout_owed() {
             self.layout();
         }
     }
 
-    /// Builds the frame this render publishes, with
-    /// `content-visibility: auto` relevance determined inside it.
-    ///
-    /// See [`relevance`] for what the determination is and why the reveal
-    /// happens in this same commit: a frame is never published with a
-    /// relevance flip pending.
     fn build_frame_with_relevance(&mut self) -> PaintOrder {
         let mut scratch = self.painter.get_mut().take_relevance_scratch();
         self.finish_layout();
         let mut frame = self.build_frame();
-        // css-scroll-snap-1 §4.1.3 before the initial targets: it reads each
-        // offset against the positions the last commit published, and a
-        // target scrolled to below is placed in this layout — on its
-        // `nearest` axis from the offset the container holds by then.
         let resnapped = self.resnap(&frame);
         if self.scroll_to_initial_targets(&frame) || resnapped {
-            // css-scroll-snap-2's initial scroll position is set from the
-            // built frame and must be in the frame this commit publishes,
-            // with the scroll request that carries it to the painter, so the
-            // frame it was decided on is void — same commit, as below. The
-            // request dirtied the document; the rebuild is the answer to
-            // that too. A re-snapped offset voids the frame the same way,
-            // and the rebuild's layout re-samples the scroll timelines that
-            // read it.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
             self.layout();
@@ -1006,17 +755,10 @@ impl<T: Sync> Document<T> {
         let mut builds = 1;
         let mut owed = false;
         while self.determine_relevance(&mut scratch, &frame) {
-            // The frame the flips were decided on is void; its storage is
-            // not, so it goes back to the painter for the pass that replaces
-            // it.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
             self.layout();
             frame = self.build_frame();
-            // The flips invalidated layout, which dirtied the frame they
-            // were decided on. This render owns that dirt and the rebuild
-            // just above is its answer, so it is spent — no second commit id
-            // is claimed, because this is still the same commit.
             self.clear_visual_dirty();
             builds += 1;
             if builds == relevance::RELEVANCE_PASSES {
@@ -1030,60 +772,26 @@ impl<T: Sync> Document<T> {
         frame
     }
 
-    /// Renders only when the retained frame no longer represents the current
-    /// document state. Returns whether a new frame was built.
     pub fn render(&mut self) -> bool {
-        // css-anchor-position-1 §6.5 after a scroll. The embedder path
-        // already asked when it adopted the painter's offsets
-        // (`adopt_scroll_offsets`); this serves a document driven without
-        // that marker, and repeats at most one cheap walk per candidate
-        // otherwise — one `is_empty` test on a page without
-        // anchor-positioned boxes.
         self.redetermine_scrolled_fallbacks();
         if !self.needs_render() {
             return false;
         }
-        // A caller may render without ever laying out; the paint walk still
-        // reads layout slots wholesale, so size them first.
         let (bound, elements) = (self.arenas().slot_bound(), self.arenas().live_elements());
         self.layout_state_mut().ensure_covers(bound, elements);
-        // A timed render's layout passes mark their phases from here to the
-        // frame build (`timing`); untimed, this is one `bool` test.
         self.commit_timer.open();
-        // Style and layout run before the claim: the flush's damage harvest
-        // invalidates layout, which notes a visual mutation, so an id
-        // claimed ahead of it would be stale the instant it was claimed.
         self.layout();
-        // css-anchor-position-1 §6.5.1.1 records the last successful position
-        // option "at the time that ResizeObserver events are determined and
-        // delivered" — here, once per rendering update, after layout and
-        // before paint. A box that made a fallback-sensitive change forgets
-        // its option first and determines again from its base style.
         if self.forget_fallback_sensitive_options() {
             self.layout();
         }
         self.record_last_successful_options();
         let commit_id = self.next_commit_id();
-        // The build's own layouts (relevance, an initial scroll target)
-        // belong to the frame build, so the style and layout marks close
-        // here.
         let frame_build_start = self.commit_timer.close();
         let frame = self.build_frame_with_relevance();
-        // A request is carried by the container's scroll slot, and an
-        // auto-scroll change beside the slots, so one whose container this
-        // frame has no slot for has nowhere to go.
         self.retain_scroll_requests(|node| frame.slot_of(node).is_some());
-        // Asked again now the frame is final: the relevance pass inside the
-        // build reveals and skips subtrees with no style change to notice it,
-        // and css-contain-2 §4 freezes the animations inside a skipped one.
-        // So the flag this frame carries is decided after the last pass, and
-        // a reveal starts its animations in the very commit that revealed
-        // them.
         let (animations_active, needs_main_ticks) = self.refresh_animation_activity(Some(&frame));
         let viewport = self.viewport_size();
         let device_pixel_ratio = self.device_pixel_ratio();
-        // A reveal left owed rides the same request as a main-thread
-        // animation: one frame tick, then `resume_relevance`.
         let needs_main_ticks = needs_main_ticks || self.arenas().relevance_owed();
         self.painter.borrow_mut().paint(
             self,
@@ -1096,18 +804,10 @@ impl<T: Sync> Document<T> {
         if let Some(start) = frame_build_start {
             self.commit_timer.finish(commit_id, start);
         }
-        // A new frame is new geometry for every intersection observer:
-        // layout moved, or the viewport did, or an animation ticked.
         self.note_intersections_stale();
         true
     }
 
-    /// Runs the whole pipeline — style, layout, paint-order build, scene
-    /// encode — if anything is stale, and returns the committed frame.
-    ///
-    /// The returned `Arc` is the same object the document retains for its own
-    /// hit queries: publishing it to another thread costs one reference-count
-    /// increment, and the frame stays valid however stale it later gets.
     pub fn commit(&mut self) -> Arc<CommittedFrame> {
         self.render();
         self.committed_frame()
@@ -1115,10 +815,6 @@ impl<T: Sync> Document<T> {
     }
 }
 
-/// A borrow-shaped handle on the committed frame's scene: it keeps the frame
-/// alive and dereferences to the [`DisplayList`] inside it. A
-/// layered frame retains no whole-frame composition, so the handle carries
-/// one composed for it on demand.
 pub struct SceneRef {
     frame: Arc<CommittedFrame>,
     composed: Option<Box<DisplayList>>,
@@ -1149,29 +845,12 @@ impl std::ops::Deref for SceneRef {
 }
 
 impl<T> Document<T> {
-    /// The frame the last [`Self::render`] committed, if any.
     #[must_use]
     pub fn committed_frame(&self) -> Option<Arc<CommittedFrame>> {
         self.painter.borrow().frame().cloned()
     }
 
-    /// The display list committed by the last successful [`Self::render`].
-    ///
-    /// Valid only within this document's own viewport — [`Self::viewport_size`]
-    /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
-    /// sizes its target from. The painter discards content that can put no ink
-    /// there, so rendering this scene into a target covering more CSS pixels
-    /// than the document's viewport leaves the excess blank rather than
-    /// showing what happens to be laid out beyond it.
-    ///
-    /// # Panics
-    ///
-    /// If nothing has been rendered yet: there is no committed frame to read.
     #[must_use]
-    /// A scene cannot be composed without a pixel source: after the image
-    /// system moved to the painter, the frame names images rather than
-    /// carrying them, so the caller supplies whatever resolves those names.
-    /// Pass [`NoImages`](crate::render::image::NoImages) for a page with no images.
     pub fn scene<P: FrameImages<PlatformFrame = std::convert::Infallible> + ?Sized>(
         &self,
         pixels: &P,
@@ -1181,25 +860,14 @@ impl<T> Document<T> {
             .expect("Document::scene reads the committed frame: render first");
         let composed = frame.scene().is_none().then(|| {
             let (mut images, mut sources) = (Vec::new(), Vec::new());
-            // A picture wanted here draws nothing in this scene; the store
-            // has been told, and a later scene draws it.
             let _wanted = frame.resolve_images(pixels, &mut images, &mut sources);
             let mut scene = DisplayList::new();
-            // No GPU here, so no bake: a `filter: blur()` group replays raw
-            // and this scene is the unblurred one, and a vector image, whose
-            // texture only a renderer can bake, draws nothing (both
-            // documented fallbacks).
             frame.compose_into(&mut scene, &images, &[], &[], &|_| None, None);
             Box::new(scene)
         });
         SceneRef { frame, composed }
     }
 
-    /// Returns rendered elements under a point from front to back.
-    ///
-    /// The frame is baked unscrolled; document-side queries apply the
-    /// document's *live* scroll offsets, so a scroll is observable here the
-    /// moment it lands, without a rebuild.
     #[must_use]
     pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
         let offsets = |slot: &ScrollSlot| Some(self.scroll_offset(slot.node));
@@ -1208,9 +876,6 @@ impl<T> Document<T> {
             .unwrap_or_default()
     }
 
-    /// [`Self::elements_from_point`] for a batch of points answered from one
-    /// frame read; results are index-parallel with `points`. Same pure-read
-    /// contract: before the first render every answer is empty.
     #[must_use]
     pub fn elements_from_points(&self, points: &[Point2D<f32>]) -> Vec<Vec<NodeId>> {
         let offsets = |slot: &ScrollSlot| Some(self.scroll_offset(slot.node));
@@ -1239,8 +904,6 @@ impl<T> Document<T> {
 }
 
 impl<T> Document<T> {
-    /// Whether a visual mutation has made the retained frame stale, or no
-    /// frame has been built yet.
     #[must_use]
     pub fn needs_render(&self) -> bool {
         self.visual_dirty()
@@ -1248,16 +911,6 @@ impl<T> Document<T> {
                 != Some(self.commit_id())
     }
 
-    /// The capacity of every buffer the paint pipeline retains between
-    /// frames: the retained frame's four tables, the spare frame's four,
-    /// then the working scratch, ending with one entry per pooled
-    /// pseudo-context buffer.
-    ///
-    /// Exists for the reuse tests: a settled page must reproduce this exactly
-    /// from one frame to the next, because an entry that grew is a buffer that
-    /// reallocated. The pool is reported per entry rather than as a total, so
-    /// that a reallocation moving capacity from one pooled buffer to another
-    /// is visible instead of cancelling out.
     #[cfg(test)]
     pub(crate) fn paint_storage_capacities(&self) -> Vec<usize> {
         let painter = self.painter.borrow();
@@ -1271,58 +924,21 @@ impl<T> Document<T> {
         out
     }
 
-    /// The document's image name table.
     pub(crate) fn images(&self) -> &crate::render::image::ImageRegistry {
         &self.images
     }
 
-    /// The sources the last paint walk met and has not yet asked for, drained
-    /// for the painter to request from its store.
-    ///
-    /// This is how a `url()` in a stylesheet and an element's own source both
-    /// become load requests: the walk is the one place that knows which
-    /// sources a frame actually needs.
     pub fn take_wanted_images(&mut self) -> Vec<Arc<str>> {
         self.images.take_wanted()
     }
 
-    /// The documents [`Document::insert_image_document`] filed since the last
-    /// drain, as requests for the host to parse: each one's synthetic
-    /// source, its bytes, and what to parse them as. Drained once; every one
-    /// names a source that is pending and not forgotten.
-    ///
-    /// The embedder hands each to its host beside the image sources
-    /// [`Self::take_wanted_images`] names. The host parses the bytes with
-    /// [`ImageEvent::parse_document`] where it decodes bitmaps, as it parses
-    /// a fetched document, and reports the outcome for that source, which
-    /// comes back through [`Self::apply_image_events`] like every other
-    /// report. Nothing on this thread parses.
     pub fn take_document_requests(&mut self) -> Vec<DocumentRequest> {
         self.images.take_document_requests()
     }
 
-    /// Applies the host's image reports: records completed loads with their
-    /// intrinsic dimensions, and marks failures.
-    ///
-    /// A [`ImageEvent::ParsedDocument`], a document the host parsed, is
-    /// encoded here, on this thread, when its source is still pending: its
-    /// text is shaped through this document's own text context (created on
-    /// the first document with text) and its scene built once, so it
-    /// settles as a loaded vector image. A document that did not parse
-    /// arrives as a failure.
-    ///
-    /// Answers each source a report settled, with the status it settled at,
-    /// in report order: what an embedder presenting a source on a replaced
-    /// box ([`Document::set_picture`]) learns its outcome and natural size
-    /// from, in the same call, so an element resizes in the commit that
-    /// first draws what it reports on. A source reported twice is not
-    /// answered again: one URL has one content, so only the report that moves
-    /// it is carried.
     pub fn apply_image_events(&mut self, events: &[ImageEvent]) -> Vec<(Arc<str>, ImageStatus)> {
         let mut settled = Vec::new();
         for event in events {
-            // `None` is a source reported twice, which one URL with one
-            // content makes a no-op: nothing moved, so nothing is dirtied.
             let applied = self.apply_image_event(event);
             let (Some(status), Some(source)) = (applied, event.source()) else {
                 continue;
@@ -1333,28 +949,12 @@ impl<T> Document<T> {
         settled
     }
 
-    /// Continues a `content-visibility: auto` determination the last render
-    /// stopped at its pass cap: the retained frame goes stale, so the next
-    /// render reveals what that one could not. Called at a frame tick — the
-    /// frame asked for one through [`CommittedFrame::needs_main_ticks`] — and
-    /// a no-op otherwise.
-    ///
-    /// The frame is not marked stale at the end of the render itself: a
-    /// document the host sees dirty right after a commit holds back work that
-    /// waits for a settled frame, and HTML lets a later determination wait
-    /// for the next rendering opportunity.
     pub fn resume_relevance(&mut self) {
         if self.arenas_mut().take_relevance_owed() {
             self.note_visual_mutation();
         }
     }
 
-    /// Invalidates the retained frame because composition has moved a scroll
-    /// slot far through its committed encode window: the next commit must
-    /// repaint so the windows re-center on the current offsets.
-    ///
-    /// The offsets themselves are already this document's — scroll writes
-    /// land here first — so only the paint is stale, never the geometry.
     pub fn note_scroll_windows_stale(&mut self) {
         self.note_visual_mutation();
     }

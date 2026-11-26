@@ -33,9 +33,6 @@ async fn text(response: CachedStyle) -> String {
     }
 }
 
-/// One load of any kind, over the same watch channel the style cache uses —
-/// `SourceCompletion`'s two ends are minted inside `bobcat-core`, and a
-/// destination is all this needs.
 fn load(resources: &Resources, url: &str, kind: SourceKind) -> CachedStyle {
     let (sender, response) = watch::channel(None);
     start(
@@ -57,7 +54,6 @@ async fn font(resources: &Resources, url: &str) -> Vec<u8> {
     }
 }
 
-/// The vendored Ahem face, the one font fixture this workspace ships.
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
 #[tokio::test]
@@ -71,8 +67,6 @@ async fn a_font_source_is_served_from_disk_without_utf8_validation() {
     let bytes = font(&resources, &format!("file://{path}")).await;
 
     assert_eq!(bytes, AHEM, "the face arrives byte for byte");
-    // The point of the assertion: a `.ttf` is not UTF-8, so a stylesheet or a
-    // script load of the same URL would have been refused for its encoding.
     assert!(std::str::from_utf8(&bytes).is_err());
 }
 
@@ -94,13 +88,10 @@ async fn every_view_loading_one_font_file_is_handed_the_same_mapping() {
         source => panic!("expected font bytes, got {source:?}"),
     };
 
-    // Two views' scopes, as two `LynxView`s on one system hold.
     let first = blob(&resources).await;
     let second = blob(&resources.new_scope()).await;
 
     assert_eq!(first.as_ref(), AHEM);
-    // Not a heap copy each: the file's one mapping, which `FontBlob::new`
-    // answers with one blob.
     assert_eq!(first.as_ref().as_ptr(), second.as_ref().as_ptr());
 }
 
@@ -216,7 +207,6 @@ async fn replacement_scope_and_registration_ignore_retired_load_results() {
         .register(url.as_str(), ".new {}", Some("text/css"))
         .unwrap();
     assert_eq!(text(cached_style(&resources, url.clone())).await, ".new {}");
-    // A consumer can still own the old result; it cannot replace the new cache entry.
     assert_eq!(text(retired).await, ".old {}");
     assert_eq!(text(cached_style(&resources, url.clone())).await, ".new {}");
     let replacement = resources.new_scope();
@@ -235,12 +225,6 @@ async fn replacement_scope_and_registration_ignore_retired_load_results() {
     assert_eq!(text(cached_style(&resources, url)).await, ".new {}");
 }
 
-/// A container installer that writes one script beside the URL it was given,
-/// out of the bytes it was handed, and records the URL it was based on.
-///
-/// It stands in for the three answers the hook has: bytes it does not
-/// recognize are `Ok(false)` and change nothing, bytes it cannot decode are
-/// an error that fails the fetch, and anything else is installed.
 #[derive(Debug)]
 struct ScriptInstaller {
     installed: Mutex<Vec<Url>>,
@@ -286,9 +270,6 @@ fn installing(installer: Arc<ScriptInstaller>) -> Resources {
     )
 }
 
-/// A host that installs nothing still *fetches*: the request is a plain
-/// fetch, as an image's is, and having nothing to make of the bytes is not a
-/// failure.
 #[tokio::test]
 async fn a_fetch_completes_where_the_host_installs_no_containers() {
     let resources = resources();
@@ -307,8 +288,6 @@ async fn a_fetch_completes_where_the_host_installs_no_containers() {
     ));
 }
 
-/// An installer that does not recognize the bytes leaves the fetch alone:
-/// completed, with nothing registered.
 #[tokio::test]
 async fn an_unrecognized_body_completes_the_fetch_and_registers_nothing() {
     let installer = Arc::new(ScriptInstaller {
@@ -328,8 +307,6 @@ async fn an_unrecognized_body_completes_the_fetch_and_registers_nothing() {
         .await,
         Ok(LoadedSource::Fetched(_))
     ));
-    // Offered the bytes, and wrote nothing: the section URL a container would
-    // have answered at is still nothing.
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
     assert!(
         result(load(
@@ -342,8 +319,6 @@ async fn an_unrecognized_body_completes_the_fetch_and_registers_nothing() {
     );
 }
 
-/// The whole point of installing: the URLs the container's sections answer at
-/// become ordinary source requests afterwards.
 #[tokio::test]
 async fn an_installed_container_answers_the_module_requests_it_registered() {
     let installer = Arc::new(ScriptInstaller {
@@ -379,8 +354,6 @@ async fn an_installed_container_answers_the_module_requests_it_registered() {
     };
     assert_eq!(source, "export default 1;");
     assert_eq!(url, "app:///lazy-bundle/child.bundle/x.js");
-    // The resolved *request* URL, which is what the realm derives its section
-    // URLs from — a rooted specifier resolving at the page's origin root.
     assert_eq!(
         installer
             .installed
@@ -393,18 +366,9 @@ async fn an_installed_container_answers_the_module_requests_it_registered() {
     );
 }
 
-/// A rooted specifier is what a compiled card writes (webpack's `publicPath`
-/// is `/`), and what the installer is based on is where that resolved to —
-/// the page's origin root, not the directory the page sits in.
-///
-/// `request` maps a `Fetch` through the scope's own base URL, exactly as it
-/// maps an entry or a font, so what that mapping produces is this
-/// resolution.
 #[test]
 fn a_rooted_container_specifier_resolves_at_the_pages_origin_root() {
     let resources = resources();
-    // Registered so a scheme no transport serves still resolves, which is
-    // how a container reaches a test at all.
     resources
         .register("app:///lazy-bundle/child.bundle", b"body".to_vec(), None)
         .unwrap();
@@ -418,8 +382,6 @@ fn a_rooted_container_specifier_resolves_at_the_pages_origin_root() {
     assert_eq!(resolved.as_str(), "app:///lazy-bundle/child.bundle");
 }
 
-/// An installer that cannot decode what it recognized fails the fetch, and
-/// its message is what the realm reports.
 #[tokio::test]
 async fn an_installer_that_refuses_the_bytes_reports_its_own_message() {
     let installer = Arc::new(ScriptInstaller {
@@ -444,9 +406,6 @@ async fn an_installer_that_refuses_the_bytes_reports_its_own_message() {
     assert!(error.message.contains("not a container"));
 }
 
-/// The probe's whole contract: a plain fetch that **completed** is `true`
-/// afterwards, by the specifier the realm holds as well as by its resolved
-/// form, and nothing else is.
 #[tokio::test]
 async fn a_completed_fetch_is_what_the_probe_answers_true_for() {
     let installer = Arc::new(ScriptInstaller {
@@ -464,7 +423,6 @@ async fn a_completed_fetch_is_what_the_probe_answers_true_for() {
     let probe = bobcat_core::resource::ResourceFetcher::fetch_probe(&resources.for_view(reports))
         .expect("the reference fetcher always offers a probe");
 
-    // Nothing has been fetched yet, whatever else is registered.
     assert!(!probe("app:///lazy-bundle/child.bundle"));
 
     assert!(matches!(
@@ -477,17 +435,12 @@ async fn a_completed_fetch_is_what_the_probe_answers_true_for() {
         Ok(LoadedSource::Fetched(_))
     ));
 
-    // The URL the realm passed, and the rooted spelling of it a compiled card
-    // writes: both resolve to the one URL the fetch completed for.
     assert!(probe("app:///lazy-bundle/child.bundle"));
     assert!(probe("/lazy-bundle/child.bundle"));
-    // A URL nothing fetched, and one that resolves to nothing at all.
     assert!(!probe("app:///lazy-bundle/other.bundle"));
     assert!(!probe("::not a url::"));
 }
 
-/// A fetch that failed is not remembered, as native remembers no failure, and
-/// a load of another kind never populates the set at all.
 #[tokio::test]
 async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     let resources = resources();
@@ -505,7 +458,6 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     let probe = bobcat_core::resource::ResourceFetcher::fetch_probe(&resources.for_view(reports))
         .expect("the reference fetcher always offers a probe");
 
-    // Nothing is registered under this URL, so the fetch fails.
     assert!(
         result(load(
             &resources,
@@ -517,7 +469,6 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     );
     assert!(!probe("app:///page/gone.bundle"));
 
-    // A stylesheet and a module complete, and neither is a fetch.
     assert!(
         result(load(
             &resources,
@@ -540,10 +491,6 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     assert!(!probe("app:///page/module.js"));
 }
 
-/// The stylesheet probe reads the registry and nothing else: a registered
-/// sheet — pre-parsed or CSS bytes — is `true` by any specifier that resolves
-/// to it, its removal makes it `false` again, and a URL nothing registered is
-/// `false` without any load being started for it.
 #[test]
 fn the_style_sheet_probe_answers_from_the_registry_alone() {
     let resources = resources();
@@ -562,11 +509,8 @@ fn the_style_sheet_probe_answers_from_the_registry_alone() {
             .expect("the reference fetcher always offers a probe");
 
     assert!(probe("app:///page/child.bundle/custom_section/CSS.css"));
-    // Resolved against the base the way a request is.
     assert!(probe("child.bundle/custom_section/CSS.css"));
     assert!(probe("/page/text.css"));
-    // Nothing registered here: `false`, and over HTTP too, where a request
-    // would have gone to the network.
     assert!(!probe("app:///page/other.bundle/custom_section/CSS.css"));
     assert!(!probe(
         "https://cdn.test/child.bundle/custom_section/CSS.css"
@@ -576,8 +520,6 @@ fn the_style_sheet_probe_answers_from_the_registry_alone() {
     assert!(!probe("app:///page/text.css"));
 }
 
-/// A background install whose body waits for the test to let it go, so a
-/// request can be shown waiting on it.
 fn install_held(
     resources: &Resources,
     container: &str,
@@ -607,9 +549,6 @@ fn install_held(
     release
 }
 
-/// A view boots while its container is still being registered: a load of a
-/// URL under the container waits for the install, then finds what it
-/// registered — a module as bytes, a stylesheet pre-parsed.
 #[tokio::test]
 async fn a_load_under_a_container_being_registered_waits_for_it() {
     let resources = resources();
@@ -625,7 +564,6 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         "app:///page/card.web.bundle/style-info.css",
         SourceKind::StyleSheet,
     );
-    // A custom scheme no transport serves resolves while it is held.
     resources
         .shared
         .transports
@@ -650,7 +588,6 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
         result(sheet).await,
         Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(_)))
     ));
-    // Released: what the install registered is an ordinary registration now.
     assert!(
         resources
             .shared
@@ -661,11 +598,6 @@ async fn a_load_under_a_container_being_registered_waits_for_it() {
     );
 }
 
-/// A load that missed the registry while an install was registering its
-/// container, and looks for the install after it ended: no hold covers the
-/// URL, and a stylesheet the install registered pre-parsed is still this
-/// load's answer, never a fetch of bytes it does not have. A script with no
-/// hold goes on to its fetch.
 #[tokio::test]
 async fn a_load_past_an_ended_install_answers_its_pre_parsed_stylesheet() {
     let resources = resources();
@@ -697,8 +629,6 @@ async fn a_load_past_an_ended_install_answers_its_pre_parsed_stylesheet() {
     );
 }
 
-/// An install that fails fails every load it held, with its own message,
-/// and leaves a note.
 #[tokio::test]
 async fn a_failed_install_fails_the_loads_it_held() {
     let resources = resources();
@@ -731,9 +661,6 @@ async fn a_failed_install_fails_the_loads_it_held() {
     );
 }
 
-/// What an install covers is its container's path and what is under it,
-/// whatever the query and fragment: the BTS boot at `U#background-thread`
-/// is held, a sibling path that merely starts with the same text is not.
 #[test]
 fn an_install_holds_its_container_path_and_nothing_beside_it() {
     let resources = resources();
@@ -758,10 +685,6 @@ fn an_install_holds_its_container_path_and_nothing_beside_it() {
     drop(release);
 }
 
-/// The code cache's Store side. The memory tier is the process's own
-/// (`Artifacts::global`), which every test in this binary shares, so every
-/// test here uses script text no other test delivers and asserts only about
-/// its own keys.
 mod code_cache {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicU64;
@@ -774,10 +697,6 @@ mod code_cache {
     use super::*;
     use crate::{DiskCacheConfig, NativePlatform, flush_code_cache};
 
-    /// Serializes the tests whose system has a code store, each of which
-    /// flushes at least when it drops: a flush takes the whole process's
-    /// queue, so one test's flush could write another's artifact to its own
-    /// directory.
     static FLUSHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct TempDir(PathBuf);
@@ -824,7 +743,6 @@ mod code_cache {
         (resources, notes)
     }
 
-    /// Script text over the cache's threshold that only `test` delivers.
     fn script_text(test: &str) -> String {
         format!(
             "globalThis.{} = true;\n{}",
@@ -853,8 +771,6 @@ mod code_cache {
         }
     }
 
-    /// Writes `key`'s artifact into the code cache under `dir` the way a
-    /// flush would, without the process's tier.
     fn plant(dir: &Path, key: ArtifactKey, artifact: &'static [u8]) {
         let memory = Arc::new(Artifacts::new(1 << 20));
         memory.insert(
@@ -872,8 +788,6 @@ mod code_cache {
         assert_eq!(cache.flush(std::time::SystemTime::now()), 1);
     }
 
-    /// Whether the code cache under `dir` holds `key`, read through a tier
-    /// of its own.
     fn stored(dir: &Path, key: ArtifactKey) -> bool {
         let memory = Arc::new(Artifacts::new(1 << 20));
         let cache = ArtifactCache::open(
@@ -899,7 +813,6 @@ mod code_cache {
         {
             let (resources, _) = disk_resources(&dir.0);
             deliver(&resources, "app:///page/big.js", &text).await;
-            // What the engine does after compiling the delivered text.
             global.insert(engine, key, Bytes::from_static(b"compiled"));
             flush_code_cache(&resources);
             let code = resources.shared.code.as_ref().expect("a code cache");
@@ -970,7 +883,6 @@ mod code_cache {
     async fn a_code_directory_that_cannot_be_opened_is_a_note_and_the_system_runs() {
         let dir = TempDir::new();
         std::fs::create_dir_all(&dir.0).unwrap();
-        // A file where the directory would be.
         std::fs::write(dir.0.join("code"), b"not a directory").unwrap();
 
         let (resources, notes) = disk_resources(&dir.0);
@@ -987,8 +899,6 @@ mod code_cache {
         deliver(&resources, "app:///page/runs.js", &text).await;
     }
 
-    /// A platform whose code cache is an in-memory [`vant::AsyncStore`]:
-    /// what the browser's Cache API store is to the resource system.
     mod async_store {
         use std::collections::HashMap;
         use std::time::SystemTime;
@@ -1001,8 +911,6 @@ mod code_cache {
         use super::*;
         use crate::{NativeDecoder, NativeFetch};
 
-        /// Clones share their entries. A put waits until `puts_open` is
-        /// `true`, so a test can keep a flush in flight.
         #[derive(Clone)]
         struct MemAsyncStore {
             entries: Arc<Mutex<HashMap<String, (Meta, Bytes)>>>,
@@ -1124,8 +1032,6 @@ mod code_cache {
             )
         }
 
-        /// Delivers `text` as the script at `url`, and answers once its
-        /// completion has arrived.
         async fn deliver(resources: &Resources<AsyncPlatform>, url: &str, text: &str) {
             resources
                 .register(url, text.to_owned(), Some("text/javascript"))
@@ -1208,8 +1114,6 @@ mod code_cache {
             flush_code_cache(&resources);
             let code = resources.shared.code.as_ref().unwrap();
             assert!(code.flushing.load(Ordering::Acquire));
-            // The flush task has taken the queue once nothing is pending; its
-            // put then waits.
             tokio::time::timeout(Duration::from_secs(10), async {
                 while global.has_pending() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1218,7 +1122,6 @@ mod code_cache {
             .await
             .expect("the flush takes the queue");
             global.insert(engine, second, Bytes::from_static(b"second"));
-            // The next turns, while the first flush waits on its put.
             for _ in 0..3 {
                 flush_code_cache(&resources);
             }
@@ -1228,7 +1131,6 @@ mod code_cache {
             assert_eq!(store.puts.load(Ordering::Relaxed), 1);
             assert!(store.holds(&name(first)) && !store.holds(&name(second)));
 
-            // The turn after it ends starts the next flush.
             flush_code_cache(&resources);
             flush_ended(&resources).await;
             assert_eq!(store.puts.load(Ordering::Relaxed), 2);

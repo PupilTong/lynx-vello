@@ -26,23 +26,10 @@ use crate::main::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup}
 use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
 
-/// A booted Element PAPI realm over a private Lynx document.
-///
-/// The same pair the engine's main thread owns: one realm and the document
-/// it holds outright.
 pub struct ScriptHarness {
-    /// The runtime the realm lives on, as a group owns one.
     js_runtime: ScriptRuntime,
     runtime: MainThreadRuntime,
-    /// The engine thread the realm's synchronous host members would park on.
-    /// Nothing here is a job — a benchmark calls the runtime directly — but a
-    /// realm is opened with a live thread, so this harness owns one.
     _thread: Rc<JsThread>,
-    /// The far end of the same link the engine builds, so a benchmark can ask
-    /// the question the router asks — and pay what it pays. Retaining it is
-    /// also what keeps the realm's sends succeeding: these benchmarks measure
-    /// MTS operations, and neither a host nor a worker thread is inside the
-    /// harness.
     view: DetachedView,
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
@@ -59,14 +46,6 @@ impl std::fmt::Debug for ScriptHarness {
 }
 
 impl ScriptHarness {
-    /// Opens a realm over the ingredients of a document at a phone-shaped
-    /// viewport. The document itself arrives with [`Self::boot`], which is
-    /// what runs the boot module that creates it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the realm cannot be created, which for a benchmark is the
-    /// only useful response.
     #[must_use]
     pub fn new() -> Self {
         let viewport = Viewport::new(393.0, 727.0);
@@ -84,14 +63,10 @@ impl ScriptHarness {
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
             ingredients,
-            // Bound from the start: a benchmark plays the painter as well as
-            // the view, and an unbound flush would park.
             watch::channel(Some(viewport)).1,
             outbox,
             &WorkerFactory::new(workers, Arc::default()),
             thread.handle(),
-            // Nothing is outstanding: `boot` answers this realm's entry
-            // request in place, with the source the benchmark named.
             RealmStartup::default(),
         )
         .expect("the benchmark realm boots");
@@ -105,35 +80,12 @@ impl ScriptHarness {
         }
     }
 
-    /// Runs a card's MTS body and its global-function or engine-event boot,
-    /// as the engine does for a card's entry script: the entry is the body
-    /// with [`MTS_CHUNK_PREAMBLE`] in front, as `bobcat-source` registers a
-    /// card's root. The boot module creates the realm's document on the way
-    /// through, so this is also what makes every document-reading member
-    /// below answerable — once per harness, because a realm gets one
-    /// document.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the script fails.
     pub fn boot(&mut self, source: &str) {
         self.runtime
             .run_main_thread_script(&mut self.js_runtime, source, "bench:///main.js")
             .expect("the benchmark script boots");
     }
 
-    /// Evaluates a snippet in the booted realm, as one more module in the
-    /// graph the entry booted through.
-    ///
-    /// [`MTS_CHUNK_PREAMBLE`] is prepended, as `bobcat-source` prepends it to
-    /// a card's MTS body, so a step sees exactly the PAPI surface a card's
-    /// entry module sees. The import is a registry lookup after the first
-    /// step — `bobcat:element` is already instantiated — so what a step
-    /// measures is still the work in its body.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the snippet throws.
     pub fn evaluate(&mut self, source: &str) {
         let source = format!("{MTS_CHUNK_PREAMBLE}{source}");
         self.runtime
@@ -146,12 +98,6 @@ impl ScriptHarness {
             .expect("the benchmark step runs");
     }
 
-    /// Computes the path an event on `target` would take, as delivery does
-    /// on the document's owner thread.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the id is malformed.
     #[must_use]
     pub fn event_path(&mut self, target: u64) -> EventSteps {
         let target =
@@ -159,17 +105,6 @@ impl ScriptHarness {
         self.with_document(|document| document.event_steps(target, true, true))
     }
 
-    /// Delivers one routed event to `target`, with the payload a pointer
-    /// event carries: a position, no wheel delta and no touch points.
-    ///
-    /// The answer is whether a realm was called and published its dispatch
-    /// export: the host calls a realm only when the document's listener
-    /// table holds a registration of it that the path reaches, so an event
-    /// nothing on its path listens for answers `false` without crossing.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a listener throws or the id is malformed.
     pub fn dispatch(&mut self, target: u64, name: &Arc<str>) -> bool {
         let target =
             terminus::link::NodeId::from_bits(target).expect("a well-formed packed handle");
@@ -199,27 +134,6 @@ impl ScriptHarness {
         called
     }
 
-    /// One frame of the painter's scroll posts, taken and delivered as the
-    /// page takes and delivers them.
-    ///
-    /// The posts go into the document as `Page::adopt_posted` hands them
-    /// over ([`MainThreadRuntime::adopt_scroll_offsets`]), which queues the
-    /// `scroll`s and `scrollend`s they owe. Then the steps of the entry's
-    /// epilogue that bear on those events run in its order: the commit if
-    /// one is due, the instant scrolls' own `scroll`s, and — when the
-    /// queue holds anything and nothing is left uncommitted — the delivery
-    /// the epilogue posts as an entry of its own
-    /// ([`MainThreadRuntime::dispatch_component_events`]), run here in place.
-    /// The epilogue's other steps (intersection and content-visibility
-    /// updates, document requests) do not read the component-event queue
-    /// and are left out. The cost of posting and entering the delivery entry
-    /// itself is not part of what this measures.
-    ///
-    /// The answer is whether a delivery ran.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an id is malformed or a listener throws.
     pub fn scroll_frame(&mut self, posts: &[ScrollPost]) -> bool {
         self.runtime.adopt_scroll_offsets(posts.iter().map(|post| {
             let node =
@@ -245,23 +159,11 @@ impl ScriptHarness {
         true
     }
 
-    /// Whether the realm has published a listener for this event name — the
-    /// question the painting side asks before it builds anything.
-    ///
-    /// Resyncs first, as the start of a routing pass does, so the answer
-    /// accounts for every registration the realm has made so far rather than
-    /// only those a previous call happened to drain.
     pub fn has_listeners(&mut self, name: &str) -> bool {
         self.view.published.sync();
         self.view.published.has_listener(name)
     }
 
-    /// The serialized inline style of an element, so a benchmark can assert
-    /// it actually did the work it timed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the id is malformed.
     #[must_use]
     pub fn inline_style(&mut self, node: u64) -> Option<String> {
         let node = terminus::link::NodeId::from_bits(node).expect("a well-formed packed handle");
@@ -273,18 +175,11 @@ impl ScriptHarness {
         })
     }
 
-    /// The page root's handle, as `__CreatePage` returns it.
     #[must_use]
     pub fn page(&mut self) -> u64 {
         self.with_document(|document| document.document_element().id().to_bits())
     }
 
-    /// The handle of a child by position, so a benchmark can name a node by
-    /// where it is rather than by guessing at the order ids were issued in.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the id is malformed.
     #[must_use]
     pub fn child(&mut self, parent: u64, index: usize) -> Option<u64> {
         let parent =
@@ -298,11 +193,6 @@ impl ScriptHarness {
         })
     }
 
-    /// How many children an element has.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the id is malformed.
     #[must_use]
     pub fn child_count(&mut self, parent: u64) -> usize {
         let parent =
@@ -319,15 +209,10 @@ impl ScriptHarness {
     }
 }
 
-/// One painter post for [`ScriptHarness::scroll_frame`]: a container moved
-/// to the vertical offset `y`, and whether it came to rest there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollPost {
-    /// The container's packed handle.
     pub node: u64,
-    /// The vertical offset the painter posts.
     pub y: f32,
-    /// Whether the container is at rest at `y`, which ends a scroll.
     pub rest: bool,
 }
 

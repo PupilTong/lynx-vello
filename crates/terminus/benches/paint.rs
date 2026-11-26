@@ -93,41 +93,22 @@ fn main() {
     divan::main();
 }
 
-/// Ahem: one filled em box per glyph, no kerning, no ligatures. Registering it
-/// pins the text cases to one shaping outcome on every runner instead of to
-/// whatever the host's fallback font happens to be.
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-/// Elements on the card page the single-element cases mutate. Matches
-/// `benches/animation.rs` so the two files price the same document.
 const CARDS: usize = 120;
 
-/// Rows in the list page. The two arguments differ by 8x with the same
-/// scrollport, so a cost that tracks the document separates from one that
-/// tracks the visible rows.
 const ROW_ARGS: [usize; 2] = [64, 512];
 
-/// Text-carrying boxes on the paragraph page.
 const PARAGRAPHS: usize = 24;
 
-/// Characters per paragraph. Ahem maps every ASCII character to exactly one
-/// glyph, so `PARAGRAPHS * PARAGRAPH_CHARS` is the glyph count the encode pass
-/// walks.
 const PARAGRAPH_CHARS: usize = 40;
 
-/// How far a scrollport edge is kept from any row boundary, in CSS px. One
-/// scroll step is one pixel, so two is enough for both phases to clear.
 const MARGIN: f32 = 2.0;
 
-/// How many whole-pixel offsets past the list's midpoint [`list_page`] will try
-/// before giving up on finding one that clears every row boundary. A row is
-/// far shorter than this, so a clear offset always exists within it.
 const CANDIDATE_OFFSETS: f32 = 256.0;
 
-/// Replaced-content tiles on the image page.
 const TILES: usize = 64;
 
-/// Edge of a decoded tile, in pixels.
 const TILE_PIXELS: u32 = 32;
 
 #[derive(Debug)]
@@ -166,18 +147,6 @@ fn device() -> terminus::link::Device {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Page fixtures
-// ---------------------------------------------------------------------------
-
-/// `terminus` ships no user-agent sheet — [`Document::new`] installs the document
-/// element and nothing else, and the Lynx cascade (`page`/`view` box sizing,
-/// the `display` default, the `overflow` default) lives in `bobcat-core`,
-/// above this crate. Every fixture here therefore states its own geometry.
-///
-/// Two defaults still come from the Stylo fork rather than from any sheet and
-/// are relied on below: `display` initializes to `flex`, and `overflow`
-/// initializes to `visible`. A box that must clip says so.
 fn page_document(css: &str) -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(css, StylesheetOrigin::Author);
@@ -193,12 +162,6 @@ const CARD_CSS: &str = "page { display: flex; position: relative; width: 800px; 
          .chip { display: flex; width: 60px; height: 20px;
                  background-color: #3366ff; border-radius: 10px; }";
 
-/// The original render fixture, plus the id of the last card.
-///
-/// The tree and the sheet are unchanged from when `render_document` was the
-/// only benchmark in this file, so that benchmark's history stays comparable.
-/// Every mutation the `frame_*` cases apply to this page is an inline style or
-/// an attribute, never a sheet edit, for the same reason.
 fn card_page(cards: usize) -> (Document<()>, NodeId) {
     let mut dom = page_document(CARD_CSS);
     let root = dom.document_element().id();
@@ -229,38 +192,15 @@ const LIST_CSS: &str = "page { display: flex; position: relative; width: 800px; 
          .cell { display: flex; width: 120px; height: 40px;
                  background-color: #ccd4dd; border-radius: 6px; }";
 
-/// The one rule that separates the `auto` list from the plain one. The
-/// intrinsic height is the row's own outer box — `height: 60px` plus the 1px
-/// `border-bottom`, under the initial `content-box` sizing — so a skipped row
-/// takes exactly the room a laid-out one takes and the scroll range does not
-/// move when rows reveal.
 const AUTO_ROW_CSS: &str = "
          .row { content-visibility: auto; contain-intrinsic-size: 800px 61px; }";
 
-/// A tall scrolling list, scrolled to its midpoint so most rows sit outside the
-/// scrollport.
-///
-/// `flex-shrink: 0` is load-bearing: without it the column would compress every
-/// row into the 600px scrollport, the scrolling area would equal the
-/// scrollport, and `scroll_to` would clamp every offset to zero — the list
-/// would stop being a list.
 struct ListPage {
     dom: Document<()>,
-    /// The scroll container.
     list: NodeId,
-    /// A row inside the scrollport at the resting offset.
     visible_row: NodeId,
-    /// The first row, far above the scrollport at the resting offset.
     offscreen_row: NodeId,
-    /// The offset the list rests at. Both scroll phases are within a pixel of
-    /// it and neither clamps.
     resting_offset: f32,
-    /// An offset more than one whole encode window past
-    /// [`Self::resting_offset`], so a frame committed at either cannot
-    /// compose the other: the scroll between them is what a compositor
-    /// answers with a refill commit, and what re-determines every
-    /// `content-visibility: auto` row. Clear of every row edge on both its
-    /// scrollport edges, exactly like the resting offset.
     refill_offset: f32,
 }
 
@@ -270,14 +210,6 @@ impl std::fmt::Debug for ListPage {
     }
 }
 
-/// The list page before any layout: the tree an embedder hands the engine for
-/// its first frame, which is what the cold benchmarks must be given.
-///
-/// `skip_offscreen` adds `content-visibility: auto` to every row, with a
-/// `contain-intrinsic-size` matching the row's own outer box, so a skipped
-/// row occupies exactly the space a laid-out one does and the scroll range is
-/// the same either way. Every other property of the page is identical, so the
-/// pair of benchmarks over the two differs by the skipping and nothing else.
 fn cold_list_page(rows: usize, skip_offscreen: bool) -> (Document<()>, NodeId, Vec<NodeId>) {
     assert!(rows >= 32, "a list benchmark needs more rows than it shows");
     let sheet = if skip_offscreen {
@@ -326,10 +258,6 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
         "the rows must overflow the scrollport by more than one scroll step, got {max}"
     );
 
-    // Where the rows actually are is read back from the laid-out boxes rather
-    // than derived from the sheet: a row's outer height depends on
-    // `box-sizing` and on the border the sheet gives it, and a benchmark that
-    // guessed wrong would silently pair two rows on the same side of the clip.
     let edges: Vec<f32> = row_ids
         .iter()
         .flat_map(|row| {
@@ -345,12 +273,6 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
             .all(|boundary| (boundary - edge).abs() >= MARGIN)
     };
 
-    // Both scroll phases must show the same rows. Nothing culls today, so
-    // either offset paints every row regardless; once something does, an
-    // offset sitting on a row boundary would pull one row in on one phase and
-    // drop it on the other, and the reported mean would be an average of two
-    // different frames rather than one frame's cost. Both scrollport edges are
-    // therefore parked at least `MARGIN` away from every row boundary.
     let mut resting_offset = (max * 0.5).floor();
     let last_candidate = resting_offset + CANDIDATE_OFFSETS;
     while resting_offset < last_candidate
@@ -365,10 +287,6 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
         resting_offset < last_candidate && resting_offset + 1.0 <= max,
         "no offset near the list's midpoint keeps both scroll phases showing the same rows"
     );
-    // A second resting place one whole encode window past the first. The
-    // window is one scrollport in each direction, so a gap of a scrollport
-    // plus `MARGIN` puts each offset outside the other's committed window on
-    // both legs of the round trip.
     let mut refill_offset = resting_offset + scrollport + MARGIN;
     let last_refill_candidate = refill_offset + CANDIDATE_OFFSETS;
     while refill_offset < last_refill_candidate
@@ -416,8 +334,6 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
     }
 }
 
-/// A Lynx text element by its definition: each `text` here lays out as one
-/// Lynx paragraph.
 struct TextKind;
 
 impl terminus::link::CustomElement<()> for TextKind {
@@ -434,13 +350,6 @@ const PARAGRAPH_CSS: &str = "page { display: flex; flex-direction: column; posit
          .banner { display: flex; flex-shrink: 0; width: 760px; height: 24px;
                    background-color: #2255aa; }";
 
-/// `PARAGRAPHS` identical boxes, each carrying a text run when `with_text`.
-///
-/// The two variants share their box tree, their sheet, and their mutation, so
-/// the difference between the benchmarks over them is the glyph encode and
-/// nothing else. The `banner` is the box the mutation touches: the text is
-/// never rewritten, because reshaping is a different cost than encoding and
-/// mixing them would make neither readable.
 fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
     let mut dom = page_document(PARAGRAPH_CSS);
     dom.define("text", Box::new(TextKind));
@@ -465,8 +374,6 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
         paragraphs.push(paragraph);
     }
     if with_text {
-        // A text node lays out only inside a paragraph, here a Lynx text
-        // element: one that measured nothing would leave no glyph to encode.
         dom.layout();
         for paragraph in paragraphs {
             assert!(
@@ -482,8 +389,6 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
 const TILE_CSS: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
          .tile { display: flex; position: absolute; width: 64px; height: 64px; }";
 
-/// Decoded pixels for one tile: a flat color, so both phases of the swap are
-/// the same length and the same dimensions and only the bytes differ.
 fn tile_pixels(shade: u8) -> ImageData {
     let side = TILE_PIXELS as usize;
     let mut rgba = Vec::with_capacity(side * side * 4);
@@ -499,15 +404,8 @@ fn tile_pixels(shade: u8) -> ImageData {
     }
 }
 
-/// The source every tile in [`tile_page`] draws.
 const TILE_SOURCE: &str = "app:///tile.png";
 
-/// A grid of replaced-content tiles, all inside the viewport, plus the store
-/// holding their pixels.
-///
-/// Every tile draws the same source, which is what a page of identical
-/// replaced boxes does: one entry in the registry, one resolve per commit,
-/// and the same reference-counted buffer behind every draw.
 #[allow(
     clippy::cast_precision_loss,
     reason = "tile indices are small constants"
@@ -530,8 +428,6 @@ fn tile_page() -> (Document<()>, Rc<TestImages>) {
             ),
         );
         dom.append_child(root, tile);
-        // Presented at the size the store reports for it, as an embedder's
-        // element presents a URL once it has loaded.
         dom.set_picture(
             tile,
             Some((
@@ -543,45 +439,12 @@ fn tile_page() -> (Document<()>, Rc<TestImages>) {
     (dom, images)
 }
 
-// ---------------------------------------------------------------------------
-// Frame harness
-// ---------------------------------------------------------------------------
-
-/// Whether the step under test is required to invalidate the retained scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Staleness {
-    /// At least one phase must make `Document::render` rebuild. Asserted
-    /// before timing, because a step that writes a value already in place is
-    /// a no-op the render path exits from immediately, and the benchmark
-    /// would then measure that exit.
-    ///
-    /// One phase, not both, because a phase that legitimately stops
-    /// invalidating is a win the assertion must not report as a failure: a
-    /// damage tier that classifies one of two alternating writes clean is
-    /// exactly the outcome this file exists to measure. Two clean phases is
-    /// the case that cannot be a win — the benchmark would be timing an early
-    /// return.
     Repaints,
-    /// The step's effect on the retained scene is itself the subject, so
-    /// nothing is asserted. `frame_inert_attribute` rebuilds today and should
-    /// stop once a damage tier can classify it clean; pinning today's answer
-    /// would turn that improvement into a benchmark failure.
     Unconstrained,
 }
 
-/// Times one steady-state frame: apply the step for this phase, then produce
-/// the scene.
-///
-/// Everything outside the timed closure runs once per benchmark, not once per
-/// iteration: building the page, its first layout, its first paint order, its
-/// first scene encode, the Parley font collection the text cases force open,
-/// and both phases of the step. What is left inside is one mutation and one
-/// repaint of a warm document.
-///
-/// This deliberately does not use `Bencher::with_inputs`. `with_inputs` builds
-/// a fresh input per iteration, and a fresh document has never rendered, so
-/// every iteration would pay a first render again — which is `render_document`,
-/// not a frame.
 fn bench_frames(
     bencher: divan::Bencher<'_, '_>,
     page: Document<()>,
@@ -614,9 +477,6 @@ fn bench_frames(
     });
 }
 
-/// Two opaque solids. Both paint one background draw, so the two phases encode
-/// the same scene shape; a transparent phase would skip the draw entirely and
-/// the reported mean would be an average of two different frames.
 const fn flip_color(phase: bool) -> &'static str {
     if phase {
         "rgb(20, 90, 200)"
@@ -625,9 +485,6 @@ const fn flip_color(phase: bool) -> &'static str {
     }
 }
 
-/// Two non-singular, non-`none` transforms. `none` on one phase would drop the
-/// element's stacking context and change the paint order's shape between
-/// phases.
 const fn flip_transform(phase: bool) -> &'static str {
     if phase {
         "translateX(1px) rotate(0.5deg)"
@@ -636,12 +493,6 @@ const fn flip_transform(phase: bool) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cold render — unchanged, and named as it was, so its history carries over
-// ---------------------------------------------------------------------------
-
-/// The first render of a freshly built document: style flush, full layout, full
-/// paint-order build, full scene encode.
 #[divan::bench(args = [24, 120])]
 fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
     bencher
@@ -653,16 +504,6 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         });
 }
 
-/// The first render of a list page, with and without
-/// `content-visibility: auto` on its rows.
-///
-/// Cold on purpose: the page has never been laid out, so one iteration pays
-/// the first style flush, the first layout, the first paint-order build and
-/// the first encode — which is where skipping is supposed to pay, because the
-/// rows outside the first frame's encode window never measure anything. The
-/// `auto` arm costs one extra paint-order build for the pass that reveals the
-/// rows inside the window; the pair says whether skipping the rest is worth
-/// it, and at which row count.
 #[divan::bench(args = ROW_ARGS)]
 fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
     bencher
@@ -674,7 +515,6 @@ fn render_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         });
 }
 
-/// [`render_list_document`] with every row `content-visibility: auto`.
 #[divan::bench(args = ROW_ARGS)]
 fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
     bencher
@@ -686,14 +526,6 @@ fn render_auto_list_document(bencher: divan::Bencher<'_, '_>, rows: usize) {
         });
 }
 
-// ---------------------------------------------------------------------------
-// Single-element frames on the card page
-// ---------------------------------------------------------------------------
-
-/// One element's `background-color` changes. Paint-only: nothing moves, no box
-/// is re-measured, and no stacking context appears or disappears — so this is
-/// the smallest visual change the engine can be asked to show, against a
-/// document of `CARDS` cards it has to rebuild anyway.
 #[divan::bench]
 fn frame_background_flip(bencher: divan::Bencher<'_, '_>) {
     let (page, card) = card_page(CARDS);
@@ -702,10 +534,6 @@ fn frame_background_flip(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-/// One element's `transform` changes. Still paint-only — a transform cannot
-/// move a box — but unlike a color it changes the matrix every descendant item
-/// is composed against, which is the mutation a compositor-driven animation
-/// produces every frame.
 #[divan::bench]
 fn frame_transform_flip(bencher: divan::Bencher<'_, '_>) {
     let (page, card) = card_page(CARDS);
@@ -714,10 +542,6 @@ fn frame_transform_flip(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-/// A `data-` attribute no rule selects. Nothing about the page's appearance
-/// changes, and today the whole scene is rebuilt anyway: taking a snapshot
-/// notes a visual mutation without asking whether any rule cares. This is the
-/// frame a `Clean` damage tier has to make free.
 #[divan::bench]
 fn frame_inert_attribute(bencher: divan::Bencher<'_, '_>) {
     let (page, card) = card_page(CARDS);
@@ -731,26 +555,6 @@ fn frame_inert_attribute(bencher: divan::Bencher<'_, '_>) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// List frames — scrolling, and repaints inside and outside the scrollport
-// ---------------------------------------------------------------------------
-
-/// One pixel of scroll on a list whose rows mostly sit outside the scrollport.
-///
-/// The offset alternates between two values a pixel apart around the list's
-/// midpoint instead of advancing. Advancing would eventually leave the
-/// committed encode window, where the production path recommits; it would
-/// also change how many rows are inside the scrollport as it went.
-///
-/// Deliberately not [`bench_frames`]: a windowed scroll no longer touches
-/// the retained frame at all — the frame is baked unscrolled, and a scroll
-/// tick's whole cost is replaying its compose program at the live offsets,
-/// which is exactly what the presenting side does per frame. The loop times
-/// that path: move the document's offset, recompose into a reused scene
-/// buffer. The guard is the inverse of `Staleness::Repaints`: a scroll that
-/// starts invalidating the retained frame again is a regression this
-/// benchmark must fail on, because it would silently go back to timing a
-/// full rebuild.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let mut page = list_page(rows);
@@ -799,9 +603,6 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
-/// A `background-color` flip on a row the scrollport shows. The control for
-/// `frame_offscreen_row_flip`: this frame has to repaint something visible, so
-/// it is the cost a correct engine cannot avoid.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_visible_row_flip(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let page = list_page(rows);
@@ -811,13 +612,6 @@ fn frame_visible_row_flip(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
-/// One refill frame: a scroll far enough to leave the committed encode
-/// window, which is the one scroll the compositor cannot answer on its own.
-///
-/// Unlike [`frame_scroll_tick`] this really does rebuild — that is the point.
-/// The two offsets are more than a window apart in both directions, so each
-/// phase's render starts from a frame that cannot compose the offset it is
-/// moving to.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let page = list_page(rows);
@@ -827,13 +621,6 @@ fn frame_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
-/// [`frame_scroll_refill`] with every row `content-visibility: auto`.
-///
-/// This is the frame the whole feature is priced by: the refill commit
-/// re-determines every `auto` row, reveals the ones entering the new window,
-/// re-skips the ones leaving it, and builds the paint order twice to do it.
-/// Against its plain pair it says whether laying out two scrollports of rows
-/// instead of all of them pays for the second build.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_auto_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let page = auto_list_page(rows);
@@ -843,14 +630,6 @@ fn frame_auto_scroll_refill(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
-/// The same flip on a row far above the scrollport, clipped away by the list.
-/// Nothing the user can see changes, and today it costs what the visible flip
-/// costs, on both row counts.
-///
-/// Viewport culling does not separate this from its control — both frames are
-/// re-encoded from the same scroll offset, so culling drops the same rows out
-/// of both. What separates them is a damage tier that can decide the repaint
-/// is entirely clipped away and skip the frame.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_offscreen_row_flip(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let page = list_page(rows);
@@ -860,14 +639,6 @@ fn frame_offscreen_row_flip(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Text frames — the glyph encode, isolated by a paired empty page
-// ---------------------------------------------------------------------------
-
-/// A frame of a page carrying `PARAGRAPHS * PARAGRAPH_CHARS` glyphs. The
-/// mutation touches a box that carries no text, so no run is reshaped and no
-/// line is re-broken: what repeats every frame is the encode of retained Parley
-/// layouts into glyph runs.
 #[divan::bench]
 fn frame_with_text_runs(bencher: divan::Bencher<'_, '_>) {
     let (page, banner) = paragraph_page(true);
@@ -881,8 +652,6 @@ fn frame_with_text_runs(bencher: divan::Bencher<'_, '_>) {
     );
 }
 
-/// The same page, the same boxes, the same mutation, with the text nodes left
-/// out. Subtracting this from `frame_with_text_runs` leaves the glyph encode.
 #[divan::bench]
 fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
     let (page, banner) = paragraph_page(false);
@@ -891,10 +660,6 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-/// The glyphs of `frame_with_text_runs`, each paragraph's text loose in a
-/// `display: flex` box: terminus wraps it in an anonymous block box laid out as a
-/// CSS inline formatting context, so the repeated encode goes through the
-/// anonymous boxes.
 #[divan::bench]
 fn frame_with_loose_text_runs(bencher: divan::Bencher<'_, '_>) {
     let (page, banner) = loose_text_page();
@@ -908,8 +673,6 @@ fn frame_with_loose_text_runs(bencher: divan::Bencher<'_, '_>) {
     );
 }
 
-/// `paragraph_page(true)` with each paragraph a shrink-to-fit
-/// `display: flex` box around its text node, which is then loose text.
 fn loose_text_page() -> (Document<()>, NodeId) {
     let mut dom = page_document(&format!(
         "{PARAGRAPH_CSS}
@@ -934,8 +697,6 @@ fn loose_text_page() -> (Document<()>, NodeId) {
         dom.append_child(holder, text);
         holders.push(holder);
     }
-    // A shrink-to-fit holder is exactly as wide as its anonymous box: one
-    // 16px Ahem glyph per character.
     dom.layout();
     for holder in holders {
         assert_eq!(
@@ -947,24 +708,9 @@ fn loose_text_page() -> (Document<()>, NodeId) {
     (dom, banner)
 }
 
-// ---------------------------------------------------------------------------
-// Image frames
-// ---------------------------------------------------------------------------
-
-/// A page of `TILES` replaced boxes, all drawing one already-loaded image,
-/// repainting.
-///
-/// This is the cost that actually recurs. An image *arriving* cannot be
-/// benchmarked in two phases any more: one URL has one content, so a load
-/// report lands exactly once per document and the second phase would
-/// invalidate nothing. What a page pays over and over is rebuilding its image
-/// draws — one `ImageDraw` per tile, and one program op per draw — which is
-/// what this measures, against a mutation that touches no image at all.
 #[divan::bench]
 fn frame_image_repaint(bencher: divan::Bencher<'_, '_>) {
     let (mut page, images) = tile_page();
-    // Load once, before timing: from here the registry is `Ready` and every
-    // commit draws real pixels.
     prime_radiant::render_with_images(&mut page, &images);
     let root = page.document_element().id();
     bench_frames(bencher, page, Staleness::Repaints, move |dom, phase| {
@@ -972,15 +718,6 @@ fn frame_image_repaint(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Strip generation — the rasterizer's CPU half
-// ---------------------------------------------------------------------------
-
-/// Replays `dom`'s committed display list into a sparse-strip scene of its
-/// device size, once per iteration: the work every render does on the CPU
-/// before it submits anything — every path flattened, every glyph outlined,
-/// every draw turned into strips. No device is created; a bitmap draws as a
-/// placeholder image.
 fn bench_strips(bencher: divan::Bencher<'_, '_>, mut dom: Document<()>) {
     dom.render();
     let list = dom.scene(&terminus::link::NoImages).clone();
@@ -1000,15 +737,11 @@ fn bench_strips(bencher: divan::Bencher<'_, '_>, mut dom: Document<()>) {
     bencher.bench_local(move || divan::black_box(strips.fill(&list)));
 }
 
-/// The card page's frame: rounded borders and backgrounds, blurred
-/// shadows, opacity layers and `overflow` clips, no text.
 #[divan::bench]
 fn strips_cards(bencher: divan::Bencher<'_, '_>) {
     bench_strips(bencher, card_page(24).0);
 }
 
-/// [`frame_with_text_runs`]'s page: `PARAGRAPHS * PARAGRAPH_CHARS` glyphs,
-/// each outlined and stripped.
 #[divan::bench]
 fn strips_paragraphs(bencher: divan::Bencher<'_, '_>) {
     bench_strips(

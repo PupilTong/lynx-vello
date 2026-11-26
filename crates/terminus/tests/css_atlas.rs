@@ -770,13 +770,6 @@ fn asset_basenames(directory: &Path, extension: &str) -> BTreeSet<String> {
     result
 }
 
-/// The `text-block` class really reaches the fixtures.
-///
-/// `support/html.rs` creates every element that wears the class as a Lynx text
-/// element, and the text goldens above depend on that. This test pins it
-/// directly: the fixture's text holder keeps its own inline `display: flex` as
-/// its computed value, and still establishes a committed Lynx paragraph,
-/// which only a Lynx text element does under `display: flex`.
 #[test]
 fn the_text_block_class_makes_a_fixture_element_a_lynx_paragraph() {
     use terminus::link::stylo::values::computed::Display;

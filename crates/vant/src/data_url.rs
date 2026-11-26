@@ -12,7 +12,6 @@ use url::Url;
 
 use crate::mime::MediaType;
 
-/// A decoded `data:` URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataUrl {
     pub media_type: MediaType,
@@ -29,16 +28,10 @@ pub enum DataUrlError {
     InvalidBase64,
 }
 
-/// Decodes `url` per the fetch standard: an optional media type (defaulting
-/// to `text/plain;charset=US-ASCII`, and to `text/plain` in front of a bare
-/// `;charset=...`), a `;base64` suffix selecting forgiving base64, and a
-/// percent-encoded body otherwise.
 pub fn parse(url: &Url) -> Result<DataUrl, DataUrlError> {
     if url.scheme() != "data" {
         return Err(DataUrlError::NotDataUrl);
     }
-    // The serialization without its fragment, minus the `data:` prefix — the
-    // spec's input, which the `Url` type already holds normalized.
     let serialized = url.as_str();
     let without_fragment = serialized
         .find('#')
@@ -67,9 +60,6 @@ pub fn parse(url: &Url) -> Result<DataUrl, DataUrlError> {
     Ok(DataUrl { media_type, bytes })
 }
 
-/// `mimeType` ending in `;` + spaces + `base64` (any case), with that suffix
-/// removed — the spec's exact rule, which is why a `; base64` with spaces is
-/// accepted while a `;base64 ` with a trailing space was already trimmed.
 fn strip_base64_suffix(media_type: &str) -> Option<String> {
     let trimmed_length = media_type.len().checked_sub("base64".len())?;
     let (head, tail) = media_type.split_at(trimmed_length);
@@ -115,10 +105,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// The WHATWG "forgiving-base64 decode": ASCII whitespace is removed, up to
-/// two trailing `=` are dropped when the length is a multiple of four, a
-/// length of one modulo four is a failure, and so is any byte outside the
-/// standard alphabet.
 #[must_use]
 pub fn decode_forgiving_base64(input: &str) -> Option<Vec<u8>> {
     let mut data: Vec<u8> = input

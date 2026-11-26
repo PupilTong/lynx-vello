@@ -16,8 +16,6 @@ use bobcat_core::{
 use prime_radiant::{Image, Screenshots};
 use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -29,7 +27,6 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-/// Builds a `.card` with a `.badge` child; every visual is author CSS.
 const STYLED_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -42,9 +39,6 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-/// The `raw-text` carrier written by `__CreateRawText`, painted: a plain run,
-/// an inline-styled one, one reached through a wrapper, one whose value
-/// carries a literal newline, and one long enough to wrap.
 const TEXT_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -90,11 +84,6 @@ globalThis.renderPage = function renderPage() {
 };
 "#;
 
-/// The Lynx `<image>` element written the only way script can write one:
-/// `__CreateImage` mints the tag, `__SetAttribute` names the source. The three
-/// boxes are the three sizing cases the tag has — an authored box, an image
-/// asked to fill a container's cross axis, and one with no definite axis at
-/// all, which Lynx renders as nothing.
 const IMAGE_ELEMENT_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -120,8 +109,6 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     }
 }
 
-/// A booted, offscreen-attached view over `source`, waited out so the frame
-/// it captured is the one its entry module committed.
 fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
     let source = source.to_vec();
     move |_sink| Rc::new(FetcherDouble::card(source).resolving_to(SCRIPT_URL))
@@ -146,7 +133,6 @@ async fn booted(
     (view, painter)
 }
 
-/// A view whose stylesheet request the double answers pre-parsed.
 async fn booted_with_sheet(
     source: &[u8],
     sheet: PreparsedStyleSheet,
@@ -173,9 +159,6 @@ async fn booted_with_sheet_at(
     .await
 }
 
-/// [`booted_with_sheet_at`] with the view's own `ViewSources` — the shape a
-/// fixture needs when the sheet it mounts styles *text*, since the face has
-/// to be registered at construction.
 async fn booted_with_sheet_sources(
     source: &[u8],
     sheet: PreparsedStyleSheet,
@@ -204,14 +187,6 @@ async fn booted_with_sheet_sources(
     (view, painter)
 }
 
-/// Drives both halves until `ready` answers true, or fails naming what it was
-/// waiting for.
-///
-/// The view's turn comes first in every round. It is the one call that
-/// services the resource protocol at all, and the image reports it sends ride
-/// the command FIFO ahead of the tick's frame post, whose fence holds it back
-/// until main has applied them — so the acknowledgement the tick waits for
-/// implies a commit that saw them.
 fn settle(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -230,12 +205,6 @@ fn settle(
     }
 }
 
-/// Drives both halves until the painter has resolved a frame that draws an
-/// image.
-///
-/// The store's retain log is the precise signal: it is written by the
-/// painter's resolve pass, so a non-empty working set means a committed frame
-/// actually named an image and the painter read its pixels.
 fn settle_images(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -249,15 +218,6 @@ fn settle_images(
     );
 }
 
-/// Drives both halves until the newest composed frame draws exactly
-/// `expected`, in any order.
-///
-/// Stronger than [`settle_images`], and the wait every `<image>` case below
-/// needs: which bitmaps a frame drew is the whole subject of those pictures,
-/// and a source held pending or failed by the store is one the retain log
-/// must never name. It is also what makes the capture land after the page
-/// epilogue that dispatched a `load` — the mutation a listener makes rides
-/// the same commit as the frame that first draws the bitmap it announced.
 fn settle_drawing(
     view: &mut LynxView<Rc<FetcherDouble>>,
     painter: &mut Painter,
@@ -283,13 +243,11 @@ fn screenshots() -> Screenshots {
     prime_radiant::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The painter's newest frame, ready to compare with a golden.
 fn captured(painter: &mut Painter) -> Image {
     let shot = painter.capture().expect("capture the committed page");
     Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels).expect("captured RGBA image")
 }
 
-/// A store carrying the one checker the image page draws.
 fn checker_store() -> Rc<prime_radiant::TestImages> {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
@@ -325,16 +283,6 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
     );
 }
 
-/// Requirement: an embedder-owned store reaches the painter through the whole
-/// public path, and does so **without the host asking**.
-///
-/// Nothing here loads the image. The paint walk meets the script's
-/// `background-image: url(...)`, reports the source, the painter names it
-/// against the store and reports the completed load back, the document
-/// records it and republishes, and only then does a frame carry the image for
-/// the painter to resolve. That whole round trip is what this asserts, and
-/// nothing covered it before: the old shape needed an explicit
-/// `view.load_image(...)` from the embedder.
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
@@ -355,20 +303,6 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     screenshots().assert_matches(&["embedder-image-store"], &captured(&mut painter));
 }
 
-/// Requirement: the Lynx `<image>` element loads and paints from its `src`
-/// alone, with the embedder asked for nothing.
-///
-/// The whole path is under test: `__SetAttribute` raises the tag's component,
-/// which makes the element replaced content and binds its source; the painter
-/// names that source against the store and reports the load back; the document
-/// records it and republishes; the next frame draws the bitmap.
-///
-/// The golden also pins the sizing rule the tag exists for. Lynx gives
-/// `<image>` no measurement of its own, so only a definite axis produces one:
-/// the first box is 128x96 because it says so, the second is 48 tall and
-/// stretches across the page's cross axis, and the third — which authors
-/// neither axis — is zero-height and draws nothing at all. An `<img>` would
-/// have sized all three from the 4x4 checker.
 #[tokio::test]
 async fn an_image_element_loads_and_paints_from_its_src() {
     let images = checker_store();
@@ -389,14 +323,10 @@ async fn an_image_element_loads_and_paints_from_its_src() {
     screenshots().assert_matches(&["image-element"], &captured(&mut painter));
 }
 
-/// Requirement: text written the only way Lynx can write it — a `raw-text`
-/// element carrying its run in an attribute — reaches the painter as glyphs.
 #[tokio::test]
 async fn raw_text_reaches_the_private_painter_as_glyphs() {
     const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
-    // Selecting the face by name is what proves the container registered: an
-    // unknown default family fails the construction.
     let (_view, mut painter) = booted(
         fetcher(TEXT_SCRIPT.as_bytes()),
         ViewSources {
@@ -410,12 +340,6 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
     screenshots().assert_matches(&["raw-text-runs"], &captured(&mut painter));
 }
 
-/// Requirement: an `<x-markdown>` written through the Element PAPI renders
-/// its `content` in its UA shadow tree: web-core's `basic.html` fixture (a
-/// heading, bold and italic runs, a list with its markers, inline code and a
-/// code block on its grey panel) with a link in the template's blue and a
-/// two-column table after it, and a `markdown-style` that recolours the
-/// inline code.
 #[tokio::test]
 async fn markdown_renders_its_content_in_its_shadow_tree() {
     const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
@@ -467,8 +391,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["markdown-card"], &captured(&mut painter));
 }
 
-/// Both layout and glyph painting must lose the second line. At DPR 2 the
-/// same 21px line height makes the two boxes 84 and 42 device pixels tall.
 #[tokio::test]
 async fn text_maxline_halves_the_rendered_box_at_device_pixel_ratio_two() {
     const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
@@ -527,11 +449,6 @@ globalThis.renderPage = function () {
     screenshots().assert_matches(&["text-maxline"], &image);
 }
 
-/// `x-input` and `x-textarea` (editable text E5): an empty input shows its
-/// placeholder grey (or in `placeholder-color`) centred in its content box, a
-/// filled one its value in the field's own colour on one line, and a
-/// textarea wraps its value from the top. Ahem squares make every glyph a
-/// box, so the picture is exact.
 #[tokio::test]
 async fn text_fields_draw_their_placeholder_or_their_value() {
     const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
@@ -570,12 +487,6 @@ globalThis.renderPage = function () {
     screenshots().assert_matches(&["text-fields"], &captured(&mut painter));
 }
 
-/// web-core's `basic-element-x-input-placeholder-pseudo-element` card: an
-/// author's `.target::placeholder` rule colours, sizes and weights the
-/// placeholder's text — the field's `::placeholder` is the block holding it —
-/// where the field itself keeps its own colour and size. Ahem squares make the
-/// 20px red placeholder exact against the 10px blue value of the second
-/// field, whose rule does not apply to it.
 #[tokio::test]
 async fn a_placeholder_rule_draws_the_placeholder_in_its_style() {
     const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
@@ -620,9 +531,6 @@ globalThis.renderPage = function () {
     screenshots().assert_matches(&["text-fields-placeholder-rule"], &captured(&mut painter));
 }
 
-/// Requirement: a class change made by script must restyle against author
-/// rules that were never parsed from text. The script paints itself red, then
-/// swaps the class and flushes again; only the second commit is captured.
 #[tokio::test]
 async fn a_scripted_class_change_restyles_against_preparsed_rules() {
     const SWAP_SCRIPT: &str = r"
@@ -679,9 +587,6 @@ globalThis.renderPage = function renderPage() {
     assert_eq!(count([255, 0, 0, 255]), 0, "no pre-swap pixels survive");
 }
 
-/// The whole pre-parsed ingestion path, end to end: a host-decoded sheet is
-/// loaded through the resource provider, a script builds a classed element,
-/// and the committed frame is compared against a golden.
 #[tokio::test]
 async fn a_preparsed_author_sheet_paints() {
     let (_view, mut painter) = booted_with_sheet(
@@ -713,17 +618,6 @@ async fn a_preparsed_author_sheet_paints() {
     screenshots().assert_matches(&["preparsed-author-sheet"], &captured(&mut painter));
 }
 
-// The Lynx `<image>` surface in pixels: `mode`, `placeholder`, `auto-size`
-// and the `load`/`error` events, each written the only way a card can write
-// them — `__CreateImage`, `__SetAttribute`, `__AddEvent` — and read back off
-// the committed frame. `crates/bobcat-core/src/main/tree/image.rs` carries the
-// model these pictures are of; `blur-radius` is deliberately absent: it
-// paints as a whole-element `filter: blur()` today, ruled an interim state
-// until a bitmap-only blur lands, and a golden would pin the interim.
-
-/// The sources the `<image>` pages below name, in the three states a host can
-/// leave one in: settled with pixels, settled as a failure, and never
-/// answered at all.
 const LANDSCAPE_SOURCE: &str = "https://example.test/landscape.png";
 const PORTRAIT_SOURCE: &str = "https://example.test/portrait.png";
 const HOLDING_SOURCE: &str = "https://example.test/holding.png";
@@ -731,14 +625,8 @@ const PUNCHED_SOURCE: &str = "https://example.test/punched.png";
 const PENDING_SOURCE: &str = "https://example.test/never-answered.png";
 const BROKEN_SOURCE: &str = "https://example.test/broken.png";
 
-/// The frame every quadrant bitmap carries, in source pixels. Cropping eats
-/// it on the axis a fit overflows, which is what makes `aspectFill` and
-/// `center` readable against `aspectFit`.
 const BITMAP_FRAME: u32 = 2;
 
-/// A bitmap whose four quadrants and framed edge make its orientation, its
-/// letterboxing and its cropping readable at a glance: `quadrants` is
-/// top-left, top-right, bottom-left, bottom-right.
 fn quadrant_rgba8(
     width: u32,
     height: u32,
@@ -759,8 +647,6 @@ fn quadrant_rgba8(
     (width, height, rgba)
 }
 
-/// The picture a `src` names: a 2:1 landscape in the palette the checker of
-/// `an_image_element_loads_and_paints_from_its_src` already uses.
 fn landscape_bitmap() -> (u32, u32, Vec<u8>) {
     quadrant_rgba8(
         40,
@@ -775,8 +661,6 @@ fn landscape_bitmap() -> (u32, u32, Vec<u8>) {
     )
 }
 
-/// The same picture turned 1:2, so a box sized from it is unmistakably not
-/// the one the landscape sized.
 fn portrait_bitmap() -> (u32, u32, Vec<u8>) {
     quadrant_rgba8(
         20,
@@ -791,8 +675,6 @@ fn portrait_bitmap() -> (u32, u32, Vec<u8>) {
     )
 }
 
-/// What a `placeholder` names: the same shape in a palette no `src` uses, so
-/// which of an element's two sources is on screen needs no measuring.
 fn holding_bitmap() -> (u32, u32, Vec<u8>) {
     quadrant_rgba8(
         40,
@@ -807,12 +689,6 @@ fn holding_bitmap() -> (u32, u32, Vec<u8>) {
     )
 }
 
-/// A `src` whose right half is fully transparent.
-///
-/// It is the one bitmap that can say a loaded source suppressed its
-/// placeholder *for good* rather than merely covering it: anything drawn
-/// underneath would show through the hole, and what has to show there is the
-/// element's own background.
 fn punched_bitmap() -> (u32, u32, Vec<u8>) {
     let (width, height) = (40, 20);
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
@@ -829,12 +705,6 @@ fn punched_bitmap() -> (u32, u32, Vec<u8>) {
     (width, height, rgba)
 }
 
-/// The store the `<image>` pages draw from, warmed before the view exists.
-///
-/// Three sources have pixels, one has failed, and the two the pages name and
-/// this never publishes — `PENDING_SOURCE` and, until a test publishes it,
-/// `PORTRAIT_SOURCE` — stay pending for the whole run. Nothing here is
-/// timing: which state a source is in is the test's to choose.
 fn picture_store() -> Rc<prime_radiant::TestImages> {
     let images = Rc::new(prime_radiant::TestImages::new());
     for (source, bitmap) in [
@@ -849,9 +719,6 @@ fn picture_store() -> Rc<prime_radiant::TestImages> {
     images
 }
 
-/// One `<image>` page, with the source names it writes bound as JavaScript
-/// constants — so a URL a page draws and a URL a test publishes cannot drift
-/// apart.
 fn image_page(body: &str) -> String {
     format!(
         "const LANDSCAPE = {LANDSCAPE_SOURCE:?};\n\
@@ -864,8 +731,6 @@ fn image_page(body: &str) -> String {
     )
 }
 
-/// A booted, offscreen-attached view of exactly `width` x `height` CSS pixels
-/// at a device pixel ratio of 1, serving `images`.
 async fn booted_with_images(
     source: String,
     images: &Rc<prime_radiant::TestImages>,
@@ -895,22 +760,6 @@ async fn booted_with_images(
     (view, painter)
 }
 
-/// Requirement: `mode` decides how the bitmap meets the box, in pixels.
-///
-/// Eight boxes over the same 2:1 bitmap, each on a slate background so what
-/// the bitmap does not cover is visible — six with an 80x60 content box, and
-/// two with a 60x40 one inside a frame. Reading the picture left to right,
-/// top to bottom:
-///
-/// 1. no `mode` at all, `scaleToFill`, and `aspectFit` — the first two are the initial `fill` and
-///    stretch the bitmap over the whole box; the third contains it, 80x40 centred between two 10px
-///    slate bands.
-/// 2. `aspectFill`, `center`, and the unrecognised `aspectfit` — cover crops the bitmap's left and
-///    right edges away at 120x60, `center` draws it at one source pixel per CSS pixel in the middle
-///    of the box, and an unknown value is the initial `fill` again, exactly like box 1.
-/// 3. the two overflowing modes again inside a 10px padding, a 5px border and a 30px radius, which
-///    pins that the bitmap is drawn into the *content* box and clipped to the rounded content shape
-///    rather than to the border box.
 #[tokio::test]
 async fn the_image_mode_attribute_fits_the_bitmap_to_the_content_box() {
     const BODY: &str = r"
@@ -956,17 +805,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-mode"], &captured(&mut painter));
 }
 
-/// Requirement: the two sources are concurrent, and which of them an element
-/// draws follows `terminus`'s rule rather than a fallback chain.
-///
-/// Four 80x60 boxes, all with the same ready placeholder:
-///
-/// 1. no `src` at all — the placeholder is what there is.
-/// 2. a `src` the host never answers — the placeholder holds the box.
-/// 3. a ready `src` whose right half is transparent — the source wins outright, and the hole in it
-///    shows the element's own slate background rather than the placeholder underneath.
-/// 4. a `src` that failed — a failure is terminal and reaches for nothing, so the placeholder that
-///    was already loaded stays.
 #[tokio::test]
 async fn an_image_draws_its_placeholder_until_its_own_source_has_pixels() {
     const BODY: &str = r"
@@ -1005,17 +843,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-placeholder"], &captured(&mut painter));
 }
 
-/// Requirement: rewriting `src` to a source that has no pixels gives the
-/// placeholder the box back.
-///
-/// Both boxes load the landscape and then rewrite `src` to a source the host
-/// never answers. The left one has a placeholder and shows it; the right one
-/// has none and shows its own background. Neither shows the landscape, which
-/// is the whole point: the source it drew is gone.
-///
-/// The rewrite rides the element's own `load`, which is the one moment at
-/// which the first source is known to have pixels — and, by the epilogue's
-/// order, one that still commits inside the turn that settled it.
 #[tokio::test]
 async fn rewriting_src_to_a_pending_source_shows_the_placeholder_again() {
     const BODY: &str = r"
@@ -1052,21 +879,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-src-swap"], &captured(&mut painter));
 }
 
-/// Requirement: `auto-size` makes the box an ordinary replaced flex item, and
-/// the six parents of `auto_size_sizes_the_box_from_its_bitmap` — web-core's
-/// own `basic-element-image-auto-size` fixture — size it the way both
-/// references do.
-///
-/// Every inner view is blue and every outer one pink, so the box the image
-/// ended up with is whatever the bitmap covers. Top block, a column outer:
-/// an inner constraining both axes stretches the image across it (100x80), an
-/// inner 40 wide derives the height through the ratio (40x20), and an inner
-/// 50 tall derives the width (100x50) inside a view stretched to the outer's
-/// own 200. Middle block, a row outer: the same three inners, with the middle
-/// one now stretched to the outer's full height (40x120). Bottom row: the
-/// literal `auto-size="false"` is off, so containment stands and the box is
-/// zero on its free axis and draws nothing; an authored width under
-/// `auto-size` keeps that width and takes the height from the ratio (60x30).
 #[tokio::test]
 async fn auto_size_sizes_an_image_box_from_its_bitmap() {
     const BODY: &str = r"
@@ -1112,24 +924,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-auto-size"], &captured(&mut painter));
 }
 
-/// Requirement: the box `auto-size` derives is a content box, so `padding`
-/// and `box-sizing` move it exactly as they move any other replaced element's.
-///
-/// web-core's `basic-element-image-auto-size-with-padding` fixture, at this
-/// suite's scale and over this suite's bitmap: an asymmetric
-/// `5px 10px 15px 30px` padding under both box-sizings, with and without
-/// `auto-size`. Every image is blue, so the padding is the blue margin around
-/// the bitmap and the bitmap itself is the content box; every pink holder is
-/// large enough that no box shrinks to fit it.
-///
-/// Top row, border-box: `auto-size` reads a 40-tall content box out of a
-/// 60-tall border box and derives 80 of content width from the ratio, which
-/// is a 120x60 box — pixel for pixel the box beside it, where the author
-/// wrote `width: 120px` instead. Bottom row, content-box: the same `height:
-/// 60px` is now 60 of *content*, so the derived width is 120 and the box is
-/// 160x80 — again exactly the authored box beside it. The padding is
-/// asymmetric so which side the content box sits on is readable: 30 of it is
-/// on the left and 10 on the right, 5 on top and 15 below.
 #[tokio::test]
 async fn auto_size_derives_a_content_box_under_both_box_sizings() {
     const BODY: &str = r"
@@ -1175,15 +969,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-auto-size-padding"], &captured(&mut painter));
 }
 
-/// Requirement: under `auto-size` the natural size is a layout input, and the
-/// bitmap it names is whichever one the element draws — so a placeholder
-/// sizes the box until the source has pixels, and the box then resizes.
-///
-/// Two captures of one view. In the first the source is still pending, so the
-/// 2:1 placeholder gives the box its 40x20. The test then publishes the 1:2
-/// source, and the second capture is 20x40 of the source's own palette. That
-/// a placeholder can size a box at all follows iOS and web-core; Android
-/// sizes from `src` alone.
 #[tokio::test]
 async fn an_auto_size_box_resizes_when_its_source_replaces_its_placeholder() {
     const BODY: &str = r"
@@ -1223,28 +1008,6 @@ globalThis.renderPage = function renderPage() {
     );
 }
 
-/// Requirement: `load` and `error` reach a card's own handlers, carry
-/// web-core's details, fire for the element's own `src` alone, and do not
-/// bubble — all of it read off the pixels the handlers painted.
-///
-/// The top row is the two images: a `src` that loads, and a `src` that fails
-/// behind a placeholder that loads. The bottom row is five markers, grey
-/// until a handler repaints one, left to right:
-///
-/// 1. the image's own `bindEvent` `load` — green, and **40x20 rather than the 20x20 it started
-///    at**, because the handler sized it from `event.detail.width` and `event.detail.height`.
-/// 2. a `bindEvent` `load` on the page — still grey: `load` does not bubble, so the bind pass runs
-///    on the target alone.
-/// 3. a `capture-bind` `load` on the images' own parent view — blue: a non-bubbling event still
-///    captures down the whole path.
-/// 4. the failing image's `bindEvent` `error` — red.
-/// 5. a `bindEvent` `load` on that same failing image — still grey. Its placeholder loaded, and a
-///    placeholder's own ending is nobody's event.
-///
-/// The two path registrations are on different elements on purpose: within
-/// one kind, `__AddEvent` keys on the event name alone, so a `capture-bind`
-/// filed over a `bindEvent` of the same name on one node would replace it and
-/// the grey marker would prove nothing.
 #[tokio::test]
 async fn image_load_and_error_reach_their_handlers_without_bubbling() {
     const BODY: &str = r"
@@ -1314,8 +1077,6 @@ globalThis.renderPage = function renderPage() {
     screenshots().assert_matches(&["image-events"], &captured(&mut painter));
 }
 
-/// A card built the only way script can: two `.card` views, each holding a
-/// `.badge` and a `<text>` run, with the second one opting out of the filter.
 const BLUR_CARD_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -1337,19 +1098,6 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-/// Requirement: `filter: blur()` survives the whole embedder path — an author
-/// sheet the host pre-parsed, a commit on `bobcat-main`, and the painter's own
-/// `compose_and_render`, which bakes the group offscreen before it composes.
-///
-/// This is the one golden that covers that pre-step end to end. `terminus`'s own
-/// blur screenshots drive the headless renderer directly and would pass
-/// unchanged if `Painter` never called `prepare_filters` at all; here the
-/// blurred card would simply come out crisp.
-///
-/// The second card is the same card with `filter: none`, so the golden shows
-/// a relationship rather than a picture: background, 4 px border, 18 px radius,
-/// padding, a badge and a Roboto run are all inside the blurred group, and all
-/// of them have a crisp twin 40 px below to be compared against.
 #[tokio::test]
 async fn a_blurred_card_reaches_the_offscreen_draw_target() {
     const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
@@ -1384,9 +1132,6 @@ async fn a_blurred_card_reaches_the_offscreen_draw_target() {
                         declaration("filter", "blur(3px)"),
                     ],
                 },
-                // Source order decides: `.plain` is declared after `.card`, so
-                // the second card keeps every other declaration and drops only
-                // the filter.
                 PreparsedRule::Style {
                     selectors: ".plain".to_owned(),
                     declarations: vec![declaration("filter", "none")],
@@ -1428,8 +1173,6 @@ async fn a_blurred_card_reaches_the_offscreen_draw_target() {
     screenshots().assert_matches(&["filter-blur-card"], &image);
 }
 
-/// One `display: flex` rule over `properties` — the backdrop golden's whole
-/// sheet is boxes, and naming `display` in every one of them is noise.
 fn block(selectors: &str, properties: &[(&str, &str)]) -> PreparsedRule {
     PreparsedRule::Style {
         selectors: selectors.to_owned(),
@@ -1443,9 +1186,6 @@ fn block(selectors: &str, properties: &[(&str, &str)]) -> PreparsedRule {
     }
 }
 
-/// The backdrop board, built the only way script can: a crimson left half,
-/// two amber bars, one Roboto run, and two `.card` views over them — the
-/// first with `backdrop-filter`, the second opting out.
 const BACKDROP_CARD_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -1470,16 +1210,6 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-/// Requirement: `backdrop-filter` survives the whole embedder path — an author
-/// sheet the host pre-parsed, a commit on `bobcat-main`, and the painter's own
-/// `compose_and_render`, whose bake pre-step now produces backdrops beside
-/// blur groups.
-///
-/// The two cards are the same translucent rounded box over the same crimson /
-/// white seam and the same amber bar, one above the other, and the lower one
-/// carries `backdrop-filter: none`. So the golden shows a relationship rather
-/// than a picture: everything behind the upper card is filtered and everything
-/// behind the lower one is not.
 #[tokio::test]
 async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
     const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
@@ -1558,9 +1288,6 @@ async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
                         ("backdrop-filter", "blur(7px)"),
                     ],
                 ),
-                // Source order decides: `.plain` is declared after `.card`, so
-                // the second card keeps every other declaration, drops to the
-                // lower band, and gives up only the filter.
                 PreparsedRule::Style {
                     selectors: ".plain".to_owned(),
                     declarations: vec![
@@ -1587,12 +1314,6 @@ async fn a_backdrop_filtered_card_reaches_the_offscreen_draw_target() {
     screenshots().assert_matches(&["backdrop-filter-card"], &image);
 }
 
-/// The Lynx `<blur-view>`, written the only way script can: `__CreateElement`
-/// mints the tag and `__SetAttribute` names the radius. The two cards are the
-/// same translucent rounded box with the same `<text>` child over the same
-/// crimson / white seam and amber bar — one is a `blur-view` carrying
-/// `blur-radius="25"`, the other an `x-blur-view` carrying no attribute at all,
-/// which is web-core's own `x-blur-view/basic.html` fixture reduced to blocks.
 const BLUR_VIEW_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -1623,16 +1344,6 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-/// Requirement: the `blur-radius` attribute reaches the same painter path
-/// author `backdrop-filter` reaches, through the whole embedder stack — the
-/// component's presentational hint, a commit on `bobcat-main`, and the
-/// painter's backdrop bake.
-///
-/// The golden shows a relationship rather than a picture: the two cards differ
-/// only in the attribute, so everything behind the upper one is filtered and
-/// everything behind the lower one is not. The two tag names are split between
-/// them on purpose — `blur-view` above, `x-blur-view` below — so the golden
-/// would also catch one name losing its component.
 #[tokio::test]
 async fn a_blur_view_reaches_the_offscreen_draw_target() {
     const ROBOTO: &[u8] = include_bytes!("../../seldon/tests/fixtures/Roboto-Regular.ttf");
@@ -1685,9 +1396,6 @@ async fn a_blur_view_reaches_the_offscreen_draw_target() {
                     selectors: ".lower".to_owned(),
                     declarations: vec![declaration("top", "340px")],
                 },
-                // No `display` here: the box has to keep the UA sheet's own
-                // container mode, which is what the golden is checking on the
-                // cascade side.
                 PreparsedRule::Style {
                     selectors: ".frost".to_owned(),
                     declarations: vec![
@@ -1703,9 +1411,6 @@ async fn a_blur_view_reaches_the_offscreen_draw_target() {
                         declaration("background-color", "rgb(255 255 255 / 25%)"),
                     ],
                 },
-                // Source order decides: `.plain` follows `.frost`, so the
-                // second card keeps every other declaration and only drops to
-                // the lower band.
                 PreparsedRule::Style {
                     selectors: ".plain".to_owned(),
                     declarations: vec![declaration("top", "310px")],

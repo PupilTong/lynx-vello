@@ -22,12 +22,9 @@ use crate::main::tree::test_support::{
 };
 use crate::main::tree::{LynxDocument, PageConfig};
 
-/// `test_support`'s viewport.
 const VIEWPORT_WIDTH: f32 = 393.0;
 const VIEWPORT_HEIGHT: f32 = 727.0;
 
-/// A `height`-tall box `top` px down the page, positioned out of flow so
-/// its geometry is exactly what is written.
 fn boxed(document: &mut LynxDocument, top: f32, height: f32) -> NodeId {
     child(
         document,
@@ -36,9 +33,6 @@ fn boxed(document: &mut LynxDocument, top: f32, height: f32) -> NodeId {
     )
 }
 
-/// Writes one attribute the way `__SetAttribute` does: the mutation and the
-/// re-arm `setAttribute` makes, then the record listener the Lynx layer
-/// files or removes.
 fn set(
     exposure: &mut Exposure,
     document: &mut LynxDocument,
@@ -51,23 +45,16 @@ fn set(
     follow(exposure, document, node, None);
 }
 
-/// Removes one attribute the way `__SetAttribute` with a null value does.
 fn remove(exposure: &mut Exposure, document: &mut LynxDocument, node: NodeId, name: &str) {
     document.remove_attribute(node, name);
     exposure.attribute_changed(document, node);
     follow(exposure, document, node, None);
 }
 
-/// Files (`on`) or removes the element's `uiappear`/`uidisappear` handler,
-/// with the record listener the Lynx layer files or removes beside it.
 fn listen(exposure: &mut Exposure, document: &mut LynxDocument, node: NodeId, on: bool) {
     follow(exposure, document, node, Some(on));
 }
 
-/// What the listener table tells exposure once the Lynx layer has followed
-/// `node`: the record listener is there while the element has a non-empty
-/// `exposure-id` or a handler. `handler` is the handler's new state, `None`
-/// to keep the one the registration has.
 fn follow(
     exposure: &mut Exposure,
     document: &mut LynxDocument,
@@ -89,8 +76,6 @@ fn follow(
     exposure.set_registered(document, node, id || handler, handler);
 }
 
-/// One render, one update and one notify loop, then every pending
-/// change.
 fn deliver(exposure: &Exposure, document: &mut LynxDocument) -> Vec<ExposureChange> {
     document.render();
     document.update_intersection_observations(0.0);
@@ -98,8 +83,6 @@ fn deliver(exposure: &Exposure, document: &mut LynxDocument) -> Vec<ExposureChan
     exposure.take_changes()
 }
 
-/// A record-only change: an element with an `exposure-id` and no
-/// listener.
 fn record(node: NodeId, appeared: bool, id: &str) -> ExposureChange {
     ExposureChange {
         node,
@@ -110,7 +93,6 @@ fn record(node: NodeId, appeared: bool, id: &str) -> ExposureChange {
     }
 }
 
-/// The root margin the registration of `node` made its observer with.
 fn root_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> IntersectionMargin {
     let observer = exposure
         .observer_of(node)
@@ -118,7 +100,6 @@ fn root_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> In
     *document.intersection_observer(observer).root_margin()
 }
 
-/// The target margin the registration of `node` made its observer with.
 fn target_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> IntersectionMargin {
     let observer = exposure
         .observer_of(node)
@@ -126,17 +107,12 @@ fn target_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> 
     *document.intersection_observer(observer).target_margin()
 }
 
-/// A margin with `0px` on every side but those `sides` writes.
 fn margin(sides: impl FnOnce(&mut IntersectionMargin)) -> IntersectionMargin {
     let mut margin = IntersectionMargin::ZERO;
     sides(&mut margin);
     margin
 }
 
-// --- registration and the first update -----------------------------------
-
-/// An `exposure-id` registers the element; the first update after it reports
-/// whatever is visible, and an element that is not visible says nothing.
 #[test]
 fn an_exposure_id_registers_and_the_first_update_reports_what_is_visible() {
     let mut document = fresh_document();
@@ -152,9 +128,6 @@ fn an_exposure_id_registers_and_the_first_update_reports_what_is_visible() {
     );
 }
 
-/// The record listener registers the element, whatever its attributes, and
-/// its removal unregisters it; an element registered with no id and no
-/// handler queues nothing, as it can deliver neither a record nor an event.
 #[test]
 fn the_record_listener_registers_and_its_removal_unregisters() {
     let mut document = fresh_document();
@@ -171,9 +144,6 @@ fn the_record_listener_registers_and_its_removal_unregisters() {
     assert!(!exposure.has_changes());
 }
 
-/// An `exposure-id` alone registers nothing: an attribute write only re-arms
-/// an element the listener table has registered, and the record listener
-/// filed later arms it from the attributes as they are then.
 #[test]
 fn an_exposure_id_alone_does_not_register() {
     let mut document = fresh_document();
@@ -191,9 +161,6 @@ fn an_exposure_id_alone_does_not_register() {
     );
 }
 
-/// A change of whether the element hears its events, with the record
-/// listener staying, keeps the observer and changes what the next change
-/// says.
 #[test]
 fn a_handler_change_alone_keeps_the_observer() {
     let mut document = fresh_document();
@@ -212,9 +179,6 @@ fn a_handler_change_alone_keeps_the_observer() {
     );
 }
 
-/// An update with nothing moved queues nothing, and a re-arm whose element
-/// is where it was recorded queues nothing either: the observer is new, its
-/// first entry is reported, and it agrees with the record.
 #[test]
 fn nothing_is_queued_when_nothing_moved() {
     let mut document = fresh_document();
@@ -229,8 +193,6 @@ fn nothing_is_queued_when_nothing_moved() {
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 }
 
-/// `exposure-area` asks for that share of the element to be visible: a
-/// 40px element in a 100px scrollport, half of it at offset 20.
 #[test]
 fn exposure_area_asks_for_that_share_of_the_element() {
     let mut document = fresh_document();
@@ -255,10 +217,8 @@ fn exposure_area_asks_for_that_share_of_the_element() {
     );
     set(&mut exposure, &mut document, target, "exposure-area", "50%");
     set(&mut exposure, &mut document, target, "exposure-id", "half");
-    // On the scrollport's edge: intersecting, with ratio 0.
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
-    // (offset, whether the element is exposed after it)
     for (offset, expected) in [
         (19.0, None),
         (20.0, Some(true)),
@@ -278,11 +238,6 @@ fn exposure_area_asks_for_that_share_of_the_element() {
     }
 }
 
-// --- lengths and margins -------------------------------------------------
-
-/// `<n>px`, `<n>rpx` (the viewport width over 750), `<n>%`, a bare number
-/// as px, and 0 for everything else; white space around either part is
-/// ignored and a negative length is kept.
 #[test]
 fn margin_lengths_read_px_rpx_percent_and_bare_numbers() {
     let width = VIEWPORT_WIDTH;
@@ -305,9 +260,6 @@ fn margin_lengths_read_px_rpx_percent_and_bare_numbers() {
     }
 }
 
-/// The screen margins, through an element: a positive one on the target
-/// margin of the opposite side, a negative one on the root margin of its
-/// own side, and a percentage left for the primitive to resolve.
 #[test]
 fn screen_margins_reach_the_observer() {
     let mut document = fresh_document();
@@ -337,18 +289,11 @@ fn screen_margins_reach_the_observer() {
     );
 }
 
-/// A positive screen margin grows the screen on its side and a negative one
-/// shrinks it: an element 10px below the viewport is exposed by a 20px
-/// bottom margin, and one at the top leaves when the top shrinks past it.
 #[test]
 fn screen_margins_grow_and_shrink_the_screen() {
     grow_and_shrink_the_screen(fresh_document());
 }
 
-/// The same answers on a page that clips, as native's page does: the
-/// element below the viewport is cut off by the page before the root is
-/// seen, and the 20px bottom margin still exposes it, because it grows the
-/// element, whose grown rect the page's clip cuts.
 #[test]
 fn screen_margins_reach_past_a_clipping_page() {
     grow_and_shrink_the_screen(with_config(PageConfig {
@@ -357,7 +302,6 @@ fn screen_margins_reach_past_a_clipping_page() {
     }));
 }
 
-/// [`screen_margins_grow_and_shrink_the_screen`] over `document`.
 fn grow_and_shrink_the_screen(mut document: LynxDocument) {
     let mut exposure = Exposure::new();
     let below = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
@@ -389,11 +333,6 @@ fn grow_and_shrink_the_screen(mut document: LynxDocument) {
     );
 }
 
-/// A positive screen margin reaches an element a scrollport cuts off, the
-/// card `api-exposure-dynamic-screen-margin`'s case: an element scrolled
-/// 10px below a `scroll-view`'s scrollport, on screen but cut by it, is
-/// not exposed, and a 20px bottom margin grows the element's top back into
-/// the scrollport.
 #[test]
 fn screen_margins_reach_past_a_scrollport() {
     let mut document = fresh_document();
@@ -403,8 +342,6 @@ fn screen_margins_reach_past_a_scrollport() {
         "scroll-view",
         "position:absolute;left:0;top:0;width:100px;height:100px",
     );
-    // At 140 in the scroller's scroll coordinates, past 140px of filler,
-    // and followed by enough content for an offset of 30.
     let [_, node, _] = [140.0, 20.0, 100.0].map(|height| {
         element_under(
             &mut document,
@@ -414,8 +351,6 @@ fn screen_margins_reach_past_a_scrollport() {
         )
     });
     set(&mut exposure, &mut document, node, "exposure-id", "a");
-    // 40px below the scrollport before the scroll, which needs a layout to
-    // have a range, and 10px after it.
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     document.scroll_to(scroller, Vector2D::new(0.0, 30.0));
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
@@ -433,10 +368,6 @@ fn screen_margins_reach_past_a_scrollport() {
     );
 }
 
-/// The ui margins apply with no switch: an element's own
-/// `enable-exposure-ui-margin` is not read, `"false"` included. An element
-/// 10px below the viewport whose own top edge a 20px ui margin moves up into
-/// it.
 #[test]
 fn ui_margins_apply_whatever_the_element_s_switch_says() {
     let mut document = fresh_document();
@@ -467,18 +398,12 @@ fn ui_margins_apply_whatever_the_element_s_switch_says() {
     );
 }
 
-/// The fold: a ui margin lands on the target margin of its own side, a
-/// positive screen margin on the target margin of the opposite side, and a
-/// negative screen margin on the root margin of its own side. A
-/// percentage stays one, of the rect it lands on; a percentage and a
-/// length that land on one side keep the length.
 #[test]
 fn margins_fold_onto_the_target_and_the_root() {
     let px = |px| MarginLength::Px(px);
     let percent = |percent| MarginLength::Percent(percent);
     let zero = [Length::Px(0.0); 4];
 
-    // ui margins, same side, either sign.
     assert_eq!(
         fold_margins(
             zero,
@@ -499,7 +424,6 @@ fn margins_fold_onto_the_target_and_the_root() {
             },
         }
     );
-    // Positive screen margins, opposite side, a percentage included.
     assert_eq!(
         fold_margins(
             [
@@ -520,8 +444,6 @@ fn margins_fold_onto_the_target_and_the_root() {
             },
         }
     );
-    // Negative screen margins, same side on the root, a percentage
-    // included; zero contributes nothing.
     assert_eq!(
         fold_margins(
             [
@@ -540,10 +462,6 @@ fn margins_fold_onto_the_target_and_the_root() {
             target: IntersectionMargin::ZERO,
         }
     );
-    // Both kinds on one side add: ui top plus screen bottom in px, ui left
-    // plus screen right in percent. On the right a ui length and the
-    // screen-left percentage meet, and the length is kept. Screen top, which
-    // is negative, leaves the target's bottom to the ui margin alone.
     assert_eq!(
         fold_margins(
             [
@@ -571,9 +489,6 @@ fn margins_fold_onto_the_target_and_the_root() {
     );
 }
 
-/// Through an element above the viewport, whose bottom edge a 20px ui
-/// margin moves down into it: the target margin of the same side, and no
-/// root margin.
 #[test]
 fn a_ui_margin_grows_the_element_on_its_own_side() {
     let px = |px| MarginLength::Px(px);
@@ -603,8 +518,6 @@ fn a_ui_margin_grows_the_element_on_its_own_side() {
     );
 }
 
-/// A ui percentage is of the element's own size: an element 20px tall and
-/// 10px below the viewport, whose top a `100%` ui margin moves up by 20px.
 #[test]
 fn a_ui_percentage_is_of_the_element_s_own_size() {
     let mut document = fresh_document();
@@ -629,7 +542,6 @@ fn a_ui_percentage_is_of_the_element_s_own_size() {
         vec![record(node, true, "a")]
     );
 
-    // `25%`, 5px of 20, leaves it 5px short.
     set(
         &mut exposure,
         &mut document,
@@ -643,8 +555,6 @@ fn a_ui_percentage_is_of_the_element_s_own_size() {
     );
 }
 
-/// `exposure-area` is `parseFloat(value) / 100`, clamped to `[0, 1]`, and 0
-/// for what does not parse.
 #[test]
 fn exposure_area_is_parse_float_over_a_hundred() {
     for (value, expected) in [
@@ -668,11 +578,6 @@ fn exposure_area_is_parse_float_over_a_hundred() {
     }
 }
 
-// --- teardown and re-arm -------------------------------------------------
-
-/// A changed `exposure-id` sends a `disexposure` under the id the element
-/// was exposed under, at once, and the next update exposes it under the new
-/// one.
 #[test]
 fn a_changed_exposure_id_leaves_under_the_old_id_and_appears_under_the_new() {
     let mut document = fresh_document();
@@ -695,8 +600,6 @@ fn a_changed_exposure_id_leaves_under_the_old_id_and_appears_under_the_new() {
     );
 }
 
-/// Removing the `exposure-id` of an element nothing else registers sends a
-/// `disexposure` with no element event and unregisters it.
 #[test]
 fn removing_the_exposure_id_leaves_and_unregisters() {
     let mut document = fresh_document();
@@ -721,9 +624,6 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 }
 
-/// A listener alone registers an element, which hears its own events and
-/// has no record; removing the listener of an element that is not exposed
-/// says nothing.
 #[test]
 fn a_listener_alone_registers_and_hears_its_element_events() {
     let mut document = fresh_document();
@@ -750,8 +650,6 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
     assert!(!exposure.has_changes());
 }
 
-/// A listener and an `exposure-id` on one element make one change that
-/// carries both: the element's event and its record.
 #[test]
 fn a_listener_and_an_id_make_one_change() {
     let mut document = fresh_document();
@@ -771,18 +669,11 @@ fn a_listener_and_an_id_make_one_change() {
         }]
     );
 
-    // The listener going leaves the element registered by its id, and
-    // exposed: nothing is sent.
     listen(&mut exposure, &mut document, node, false);
     assert!(exposure.is_registered(node));
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 }
 
-// --- stop and resume -----------------------------------------------------
-
-/// Three 100px boxes down the page, `a` and `b` shown and `c` below the
-/// viewport, with the `exposure-id`s `a`, `b` and `c`, and the first
-/// delivery, which exposes `a` and `b`, taken.
 fn three_exposed(exposure: &mut Exposure, document: &mut LynxDocument) -> [NodeId; 3] {
     let a = boxed(document, 0.0, 100.0);
     let b = boxed(document, 100.0, 100.0);
@@ -797,7 +688,6 @@ fn three_exposed(exposure: &mut Exposure, document: &mut LynxDocument) -> [NodeI
     [a, b, c]
 }
 
-/// Moves a [`boxed`] element to `top`.
 fn move_to(document: &mut LynxDocument, node: NodeId, top: f32) {
     document.set_inline_style(
         node,
@@ -805,11 +695,6 @@ fn move_to(document: &mut LynxDocument, node: NodeId, top: f32) {
     );
 }
 
-/// `stopExposure({sendEvent: true})` sends one `disexposure` per listed
-/// exposed element, in the order listed, answers how many it queued, and
-/// forgets them as exposed; while stopped nothing listed is detected, though
-/// every observer stays; `resumeExposure()` exposes whatever listed is
-/// visible again. A second stop with nothing exposed queues nothing.
 #[test]
 fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     let mut document = fresh_document();
@@ -827,7 +712,6 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     );
     assert!([a, b, c].iter().all(|node| exposure.is_stopped(*node)));
 
-    // Stopped: `c` moving into view is not detected.
     move_to(&mut document, c, 200.0);
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     assert_eq!(exposure.switch(&mut document, false, true, &[a, b, c]), 0);
@@ -845,9 +729,6 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     );
 }
 
-/// `stopExposure({sendEvent: false})` sends nothing and keeps the exposed
-/// record: a resume that finds an element still visible sends nothing for
-/// it, and one that went away while stopped leaves.
 #[test]
 fn stopping_without_send_event_keeps_the_exposed_record() {
     let mut document = fresh_document();
@@ -874,10 +755,6 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
     );
 }
 
-/// A switch reaches the elements it lists and no other: a stop of `a` and
-/// `b` leaves `c` detected, and a resume of `a` alone leaves `b` stopped.
-/// That is how one card's stop leaves the page and every other card running:
-/// each realm lists the elements it registered.
 #[test]
 fn a_switch_reaches_only_the_listed_elements() {
     let mut document = fresh_document();
@@ -893,7 +770,6 @@ fn a_switch_reaches_only_the_listed_elements() {
     exposure.take_changes();
     assert!(!exposure.is_stopped(c));
 
-    // `c` leaves and is told; `a` and `b` leaving are not detected.
     for node in [a, b, c] {
         move_to(&mut document, node, 1000.0);
     }
@@ -902,7 +778,6 @@ fn a_switch_reaches_only_the_listed_elements() {
         vec![record(c, false, "c")]
     );
 
-    // Back in view; `a` alone resumes.
     for (node, top) in [(a, 0.0), (b, 100.0), (c, 200.0)] {
         move_to(&mut document, node, top);
     }
@@ -926,11 +801,6 @@ fn a_switch_reaches_only_the_listed_elements() {
     assert!(exposure.is_stopped(b));
 }
 
-/// What a stop answers is the records it queued: none without `sendEvent`,
-/// none for listed elements with nothing exposed, and none for an exposed
-/// element with no `exposure-id`, which is forgotten as exposed all the
-/// same. A stop with `sendEvent` after one without sends the records the
-/// first kept, as native's sends whatever it has recorded as exposed.
 #[test]
 fn a_stop_answers_the_records_it_queued() {
     let mut document = fresh_document();
@@ -955,7 +825,6 @@ fn a_stop_answers_the_records_it_queued() {
     assert_eq!(exposure.take_changes(), vec![record(a, false, "a")]);
     assert!(!exposure.is_exposed(quiet));
 
-    // `c` is registered and below the viewport: nothing is exposed to send.
     assert_eq!(exposure.switch(&mut document, false, true, &[c]), 0);
     assert!(!exposure.has_changes());
     assert!(
@@ -964,10 +833,6 @@ fn a_stop_answers_the_records_it_queued() {
     );
 }
 
-/// An element registered while its realm is stopped is stopped by the realm
-/// right after it files the record listener — a stop that lists it alone,
-/// without `sendEvent` — so its first report is ignored, and the resume
-/// that lists it exposes it.
 #[test]
 fn an_element_registered_while_its_realm_is_stopped_waits_for_the_resume() {
     let mut document = fresh_document();
@@ -993,11 +858,6 @@ fn an_element_registered_while_its_realm_is_stopped_waits_for_the_resume() {
     );
 }
 
-/// A stopped element stays stopped wherever it goes: the mark is the
-/// element's, not its tree's, so one moved under another parent while
-/// stopped is not detected there, visible and not exposed as it is, and an
-/// id write re-arms it without resuming it; the resume that lists it exposes
-/// it under its new id.
 #[test]
 fn a_stopped_element_stays_stopped_wherever_it_moves() {
     let mut document = fresh_document();
@@ -1020,9 +880,6 @@ fn a_stopped_element_stays_stopped_wherever_it_moves() {
     );
 }
 
-/// Ids that name no registered element are skipped, by a stop and a resume
-/// alike: an element never registered, and one freed — whose registration
-/// went with its handler — even once its arena slot names another element.
 #[test]
 fn unregistered_and_freed_ids_are_ignored() {
     let mut document = fresh_document();
@@ -1052,11 +909,6 @@ fn unregistered_and_freed_ids_are_ignored() {
     assert!(!exposure.has_changes());
 }
 
-// --- element lifetime ----------------------------------------------------
-
-/// A freed element that was exposed sends nothing: its observer's drop
-/// inside the free only lets the registration go, as there is no target to
-/// dispatch a record at.
 #[test]
 fn a_freed_element_that_was_exposed_sends_nothing() {
     let mut document = fresh_document();
@@ -1066,16 +918,12 @@ fn a_freed_element_that_was_exposed_sends_nothing() {
     listen(&mut exposure, &mut document, node, true);
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
 
-    // The collection path: a detached element whose handle was collected.
     document.remove_element(node);
     document.drop_element(node);
     assert!(!exposure.is_registered(node));
     assert!(!exposure.has_changes());
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
-    // Freed while stopped, with the exposed record kept: its observer
-    // stayed, so its drop lets the registration go at once, sending nothing
-    // either, and the resume that lists it finds nothing of it.
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "b");
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
@@ -1088,9 +936,6 @@ fn a_freed_element_that_was_exposed_sends_nothing() {
     assert!(!exposure.has_changes());
 }
 
-/// An element unlinked but alive stays registered and leaves through the
-/// primitive: it is no longer rendered, so its update reports it not
-/// intersecting, and its listener hears it.
 #[test]
 fn an_unlinked_element_leaves_through_the_primitive() {
     let mut document = fresh_document();
@@ -1112,13 +957,6 @@ fn an_unlinked_element_leaves_through_the_primitive() {
     assert!(exposure.is_registered(node));
 }
 
-// --- observers per option set --------------------------------------------
-
-/// Elements whose attributes fold to one set of options share one observer,
-/// and another set has its own. One delivery hands each observer's entries
-/// over in observer creation order, so its changes come grouped by option
-/// set, each set's in arm order (user ruling, 2026-10-22): `x`, `z` (area
-/// 50%) before `y` (area 0), though `y` was armed between them.
 #[test]
 fn one_observer_per_option_set_and_one_delivery_groups_by_it() {
     let mut document = fresh_document();

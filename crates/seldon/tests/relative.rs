@@ -1383,9 +1383,6 @@ fn quantitative_values_survive_intrinsic_resolution() {
 
 #[test]
 fn a_scrolling_relative_container_counts_its_items_margin_areas() {
-    // web-core has no `display: relative` (the declaration is dropped and the
-    // element keeps its UA `display: flex`), so its children are flex items
-    // whose margin areas css-overflow-3 §3.3 counts in a scroll container.
     use stylo::values::computed::Overflow;
     let mut tree = TestTree::default();
     let item = relative_leaf_with(&mut tree, 120.0, 20.0, 1, |style| {
@@ -1407,9 +1404,6 @@ fn a_scrolling_relative_container_counts_its_items_margin_areas() {
 
 #[test]
 fn wrap_width_refresh_keeps_a_basis_free_measurement_the_content_width_still_fits() {
-    // The 200px item took its max-content width under 300px, and the 200px
-    // content width the third pass makes definite still fits it, so that
-    // pass reuses the measurement: one probe, then the commit.
     let mut tree = TestTree::default();
     let item = tree.push_measured_leaf(TestStyle::default(), width_bounded_by_available);
     let root = relative_container(&mut tree, two_pass(), &[item]);
@@ -1428,9 +1422,6 @@ fn wrap_width_refresh_keeps_a_basis_free_measurement_the_content_width_still_fit
 
 #[test]
 fn wrap_width_refresh_remeasures_an_item_its_available_width_capped() {
-    // A 300px sibling widens the content box past the 150px the auto item was
-    // measured at and took all of, so the third pass measures it again at
-    // 300px and it grows to its 200px max-content width.
     let mut tree = TestTree::default();
     let wide = relative_leaf(&mut tree, 300.0, 10.0, 1);
     let item = tree.push_measured_leaf(TestStyle::default(), width_bounded_by_available);
@@ -1449,8 +1440,6 @@ fn wrap_width_refresh_remeasures_an_item_its_available_width_capped() {
 
 #[test]
 fn wrap_width_refresh_remeasures_a_percentage_item() {
-    // A percentage margin reads the width basis the third pass moves, so the
-    // item is measured again even though the content width fits it.
     let mut tree = TestTree::default();
     let item = tree.push_measured_leaf(
         TestStyle {

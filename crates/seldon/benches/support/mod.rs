@@ -34,8 +34,6 @@ pub(super) const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");
 pub(super) enum LeafContent {
     Synthetic,
     Text,
-    /// The text sample directly in a `display: flex` leaf: loose text, which
-    /// terminus lays out in a CSS anonymous block box.
     LooseText,
 }
 
@@ -81,7 +79,6 @@ fn device(viewport: Size<f32>) -> terminus::link::Device {
     )
 }
 
-/// A terminus document ready for a cold production style/layout commit.
 #[derive(Debug)]
 pub(super) struct LayoutFixture {
     document: Document<()>,
@@ -89,18 +86,12 @@ pub(super) struct LayoutFixture {
     node_count: usize,
     expected_display: Display,
     text_fonts_registered: bool,
-    /// The text leaves: each one that renders must lay its text out as a
-    /// paragraph.
     paragraphs: Vec<NodeId>,
-    /// The loose-text leaves: each one that renders must box its text.
     loose_text_holders: Vec<NodeId>,
 }
 
-/// The tag of a text leaf: defined as a Lynx text element, so each lays its
-/// text out as one Lynx paragraph.
 const TEXT_TAG: &str = "text";
 
-/// The definition `crates/bobcat-core` gives `<text>`, minus its method.
 struct TextKind;
 
 impl terminus::link::CustomElement<()> for TextKind {
@@ -111,8 +102,6 @@ impl terminus::link::CustomElement<()> for TextKind {
 
 impl LayoutFixture {
     pub(super) fn new(viewport: Size<f32>, root_style: &str) -> Self {
-        // Each arm is the whole declaration, not a prefix of one: `grid` and
-        // `grid-lanes` are two displays whose spellings share a prefix.
         let expected_display = root_style
             .split(';')
             .find_map(|declaration| match declaration.trim() {
@@ -157,10 +146,6 @@ impl LayoutFixture {
         self.push(parent, style, Some((intrinsic, first_baseline)))
     }
 
-    /// A replaced element (an image, to layout) whose natural size is
-    /// `natural`. Unlike [`Self::leaf`], whose metrics only a box `terminus` lays
-    /// out as a leaf reads, this one has min- and max-content sizes a flex
-    /// container's probes see.
     pub(super) fn replaced(&mut self, parent: NodeId, style: &str, natural: Size<f32>) -> NodeId {
         let node = self.push(parent, style, None);
         self.document
@@ -180,8 +165,6 @@ impl LayoutFixture {
         match content {
             LeafContent::Synthetic => self.leaf(parent, style, intrinsic, first_baseline),
             LeafContent::Text => {
-                // The leaf is the paragraph, a Lynx text element: a text node
-                // lays out only inside a paragraph.
                 let font_size = 12 + sample_index % 4 * 2;
                 let style = format!("font-family:Ahem; font-size:{font_size}px; {style}");
                 let node = self.push_tagged(parent, TEXT_TAG, &style, None);

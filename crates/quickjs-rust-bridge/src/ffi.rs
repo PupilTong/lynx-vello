@@ -11,25 +11,10 @@ pub(crate) const HOST_ARG_NULL: i32 = 1;
 pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
 pub(crate) const HOST_ARG_NUMBER: i32 = 3;
 pub(crate) const HOST_ARG_STRING: i32 = 4;
-/// A structured clone: `JS_WriteObject`'s own bytes in `text`.
-///
-/// The C enum has one more kind, `QJS_ARG_FAILED = 7`, for a value the
-/// serializer refused: `shim.c` returns the pending exception instead of
-/// dispatching, so it never crosses into Rust and has no constant here.
 pub(crate) const HOST_ARG_STRUCTURED: i32 = 6;
-/// Bytes that become, or came from, an `ArrayBuffer`, in `text`: an
-/// argument's copy the trampoline owns, or bytes the host lends into a call,
-/// which `qjs_host_build` copies.
 pub(crate) const HOST_ARG_BYTES: i32 = 8;
-/// A host function's returned `Box<[u8]>`, whose ownership passes to
-/// `qjs_host_build`: it becomes the new `ArrayBuffer`'s storage and is
-/// released by `qjs_rust_bytes_free`. Only ever a result.
 pub(crate) const HOST_ARG_BYTES_OWNED: i32 = 9;
-/// A structured clone written with a transfer list: its bytes in `text`, its
-/// slot count in `number`.
 pub(crate) const HOST_ARG_TRANSFERRED: i32 = 10;
-/// A transferred clone with one descriptor per slot, lent into a call:
-/// `text` points at a [`QjsRevival`]. Only ever an argument the host lends.
 pub(crate) const HOST_ARG_REVIVE: i32 = 11;
 
 pub(crate) const REJECTION_NONE: i32 = 0;
@@ -43,13 +28,8 @@ pub(crate) struct QjsHostArg {
     pub(crate) text_len: usize,
 }
 
-/// The result of a host call has the same shape an argument does: both are
-/// the boundary's vocabulary — primitives, opaque structured clones and
-/// `ArrayBuffer` bytes — and both carry their bytes in `text`.
 pub(crate) type QjsHostResult = QjsHostArg;
 
-/// What a [`HOST_ARG_REVIVE`] argument points at: the stream, its slot
-/// count, and one descriptor per slot.
 #[repr(C)]
 pub(crate) struct QjsRevival {
     pub(crate) bytes: *const u8,
@@ -81,16 +61,6 @@ pub(crate) const REQUIRED_JSON: i32 = 1;
 pub(crate) const REQUIRED_MODULE: i32 = 2;
 pub(crate) const REQUIRED_DETECT: i32 = 3;
 
-/// One synchronous source load, as the shim reads it back.
-///
-/// The host writes either the three source fields or `error`, and keeps
-/// owning both buffers: the shim borrows them only until it enters the
-/// callback again, which a load started from a loaded file's own text does,
-/// and which an import linked inline during that file's compile does too.
-///
-/// `cached` (with `cached_length` and `cached_kind`, one of the
-/// `REQUIRED_*` kinds) is bytecode the host lends on the same terms, or null;
-/// `capture` asks the shim to keep the bytecode of what it compiles.
 #[repr(C)]
 pub(crate) struct QjsRequiredSource {
     pub(crate) url: *const c_char,
@@ -104,8 +74,6 @@ pub(crate) struct QjsRequiredSource {
     pub(crate) capture: i32,
 }
 
-/// `parameters` is the list the load was asked with, or null for an import
-/// being linked inline.
 pub(crate) type RequireLoad = unsafe extern "C" fn(
     opaque: *mut c_void,
     url: *const c_char,
@@ -116,9 +84,6 @@ pub(crate) type RequireLoad = unsafe extern "C" fn(
 pub(crate) const COMPILED_MODULE: i32 = 0;
 pub(crate) const COMPILED_COMMONJS: i32 = 1;
 
-/// One compile whose bytecode a realm kept, as `qjs_context_take_compiled`
-/// hands it over: owned by the caller until `qjs_compiled_free`. `parameters`
-/// is null for a module.
 #[repr(C)]
 pub(crate) struct QjsCompiled {
     pub(crate) kind: i32,
@@ -129,10 +94,6 @@ pub(crate) struct QjsCompiled {
     _next: *mut QjsCompiled,
 }
 
-/// `HostInitializeShadowRealm`, called inside `new ShadowRealm()` with the
-/// fresh child realm. The child is the host's from the call on, whatever it
-/// answers. Nonzero refuses the construction, and `message` — which the host
-/// keeps alive until its next call — is what the `TypeError` says.
 pub(crate) type ShadowRealmInit = unsafe extern "C" fn(
     opaque: *mut c_void,
     child: *mut QjsContext,
@@ -144,7 +105,6 @@ pub(crate) struct QjsRuntime {
     _private: [u8; 0],
 }
 
-/// One realm: a `JSContext` plus the module state that belongs to it.
 #[repr(C)]
 pub(crate) struct QjsContext {
     _private: [u8; 0],
@@ -155,22 +115,12 @@ pub(crate) struct QjsValue {
     _private: [u8; 0],
 }
 
-/// What a runtime's heap holds, as `QuickJS`'s `JS_ComputeMemoryUsage`
-/// reports it (`Runtime::memory_usage`): `QuickJS`'s `JSMemoryUsage`
-/// (`quickjs.h`), field for field and member for member, each a byte size
-/// or a count. The heap is the runtime's, so the numbers cover every realm
-/// on it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryUsage {
-    /// Bytes the runtime's allocator holds, its per-allocation overhead
-    /// included.
     pub malloc_size: i64,
-    /// The runtime's memory limit; `-1` when it has none.
     pub malloc_limit: i64,
-    /// Bytes of the objects the walk found, by `QuickJS`'s own estimate.
     pub memory_used_size: i64,
-    /// Live allocations.
     pub malloc_count: i64,
     pub memory_used_count: i64,
     pub atom_count: i64,
@@ -239,7 +189,6 @@ unsafe extern "C" {
     ) -> c_int;
     pub(crate) fn qjs_context_take_compiled(context: *mut QjsContext) -> *mut QjsCompiled;
     pub(crate) fn qjs_compiled_free(context: *mut QjsContext, compiled: *mut QjsCompiled);
-    /// `BC_VERSION`, read off a write on a scratch runtime; -1 if that failed.
     pub(crate) fn qjs_bytecode_format_version() -> c_int;
     pub(crate) fn qjs_context_resume_module_loads(context: *mut QjsContext);
     pub(crate) fn qjs_context_load_module(
@@ -247,8 +196,6 @@ unsafe extern "C" {
         name: *const c_char,
     ) -> *mut QjsValue;
     pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
-    /// `JS_ComputeMemoryUsage` on the runtime's `JSRuntime`: a walk of the
-    /// whole heap, which fills `usage`.
     pub(crate) fn qjs_runtime_compute_memory_usage(
         runtime: *mut QjsRuntime,
         usage: *mut MemoryUsage,
@@ -296,7 +243,6 @@ unsafe extern "C" {
         name: *const c_char,
         export_name: *const c_char,
     ) -> c_int;
-    /// `member` 0 adds `markUncloneable`, 1 adds `setTransferReviver`.
     pub(crate) fn qjs_context_add_host_module_transfer_member(
         context: *mut QjsContext,
         name: *const c_char,

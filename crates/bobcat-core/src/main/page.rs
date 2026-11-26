@@ -185,118 +185,27 @@ use crate::view::{
     EngineEvent, LynxViewError, StartupSource, StartupSources, ViewSources, Viewport,
 };
 
-/// One view's page: what every task of that view acts on.
-///
-/// Shared as an `Rc` rather than owned by one task, because a view has as
-/// many tasks as it has things to wait for and each of them acts on this.
-/// `!Send` and `!Sync` by construction — it holds the group's `Rc`s and,
-/// through the realm, a document whose arena backpointer is a raw pointer.
 pub(super) struct Page {
-    /// What every view on this thread shares: the script runtime, the style
-    /// pool, the wakeup, and the factory that names workers.
     context: Rc<GroupContext>,
     outbox: ViewOutbox,
-    /// What this view's realm asks the host through, over the view's own
-    /// token: the module requests the epilogue makes.
     host: HostOutbox,
-    /// This view's realm, from the moment [`Page::open_realm`] returns: `None`
-    /// only before that first job has run, and again once the realm could not
-    /// be opened or the owner has released it. It is the only thing that
-    /// decides what a command can do to this page.
-    ///
-    /// Because that job is the view's first, nothing else of this view's can
-    /// observe the `None`: a burst that arrived earlier is a job queued behind
-    /// it, and a realm that failed to open has already ended the view.
-    ///
-    /// Read and written only inside a job, which holds this borrow for its
-    /// whole length, its own synchronous wait included.
-    ///
-    /// Boxed because this is one field of a page every task of the view holds,
-    /// and a page is live for exactly one phase of its life.
     realm: RefCell<Option<Box<MainThreadRuntime>>>,
-    /// The painter's metrics, as the view's seat publishes them: `None` until
-    /// one binds.
-    ///
-    /// Held here only to hand a clone to the realm as it opens — the document
-    /// is what reads it, and [`consume_metrics`] owns a clone of its own so
-    /// that marking a value seen on one receiver says nothing about the
-    /// other.
     metrics: watch::Receiver<Option<Viewport>>,
-    /// The same inbox serves ordinary events and the final JS disposal RPC.
-    /// The owner takes it only after the ordinary consumer has been reaped.
     worker_events: RefCell<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
-    /// What the painter posts into: its scroll offsets, its frame requests
-    /// and its clock. Taken at a [`ToMain::Posted`] marker; the clock is read
-    /// at the start of every entry.
     scroll: Arc<ScrollMailbox>,
-    /// The entries the last take swapped out, drained and kept for their
-    /// capacity.
     scrolled: RefCell<FxHashMap<NodeId, ScrollEntry>>,
-    /// The frame post a marker took and not yet applied: applied once, after
-    /// the last command of the first burst that reaches its fence.
     frame_due: Cell<Option<FramePost>>,
-    /// How many commands this view has been sent and has applied, counted
-    /// the way [`crate::link::CommandSender`] counts them: a
-    /// [`ToMain::ModuleCallback`] and a [`ToMain::CanvasResized`] are sent
-    /// outside that sender and are not counted here either.
     applied: Cell<u64>,
-    /// The newest frame-post sequence taken and not yet acknowledged.
-    ///
-    /// Acknowledged in the epilogue rather than where it is taken: a host
-    /// blocked on this number is waiting for the frame it implies, which the
-    /// epilogue's commit is what publishes. The end acknowledges it too,
-    /// because that frame will then never come.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
-    /// Whether an entry that will deliver `terminus`'s queued
-    /// `contentvisibilityautostatechange` changes is already queued and has
-    /// not run yet.
-    ///
-    /// The queue outlives the epilogue that noticed it — the drain is the
-    /// delivery entry's, because the point of the entry is that the walk does
-    /// not run inside the commit — so without this latch every entry between
-    /// the two would post one of its own and each would find the batch
-    /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
-    /// Whether an entry that will deliver the entries `terminus`'s intersection
-    /// observers have queued, and the exposure changes waiting with them,
-    /// is already queued and has not run yet — the spec's per-document
-    /// `IntersectionObserverTaskQueued` flag, set where it queues the task
-    /// and cleared as that task's first step.
-    ///
-    /// The same latch as [`Self::content_visibility_posted`], for the same
-    /// reason: the queues outlive the epilogue whose update filled them —
-    /// the drain is the delivery entry's, because the point of the entry is
-    /// that no hook runs inside the commit — so without it every entry
-    /// between the two would post one more and find the queues already
-    /// taken. One post per batch.
     intersections_posted: Cell<bool>,
-    /// Whether an entry that will deliver the entries `terminus`'s resize
-    /// observers have queued — the document's `layoutchange` observer's —
-    /// is already queued and has not run yet.
-    ///
-    /// The same latch as [`Self::intersections_posted`], for the same
-    /// reason: the queues outlive the epilogue whose update filled them, and
-    /// the drain is the delivery entry's.
     resizes_posted: Cell<bool>,
-    /// Whether an entry that will deliver the component events the runtime
-    /// has queued — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
-    /// `close`s — is already queued and has not run yet.
-    ///
-    /// The same latch as [`Self::content_visibility_posted`], for the same
-    /// reason: the drain belongs to the delivery entry, so every entry that
-    /// runs between the post and it would otherwise post one more.
     component_events_posted: Cell<bool>,
-    /// Every task of this view, the token that ends them, the latch this thread
-    /// reads, the latches its `StartupFailed` and its `Panicked` go through,
-    /// and the two numbers this realm's clock task waits on — the deadline it
-    /// armed and the generation its own last entry recorded.
     lifetime: Lifetime,
 }
 
 impl Page {
-    /// A page whose realm has not been opened yet, over the token that ends
-    /// it.
     fn new(
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
@@ -331,18 +240,6 @@ impl Page {
         self.lifetime.ended()
     }
 
-    /// Queues one memory monitor sample for the configuration of `epoch`,
-    /// as an entry of this view's: the main thread's two readings — the
-    /// script runtime this view's realm runs on
-    /// (`mainThreadScriptingEngine`, a walk of the whole heap) and the
-    /// document's element arena (`lynxTasmElement`, three field reads) —
-    /// written to the registry, then the view's BTS asked for its runtime's
-    /// reading ([`WorkerMessage::MemorySample`]). Runs no JavaScript. An
-    /// entry rather than a bare job because it reads the document, which
-    /// only an entry does; a sample for a configuration no longer current
-    /// reads nothing.
-    ///
-    /// [`WorkerMessage::MemorySample`]: crate::background::WorkerMessage::MemorySample
     fn sample_memory(self: &Rc<Self>, epoch: u64) {
         let page = Rc::clone(self);
         owner::queue(self, JobKind::Memory, move |runtime, js| {
@@ -370,46 +267,9 @@ impl Page {
         });
     }
 
-    /// Queues the entry that delivers one commit's
-    /// `contentvisibilityautostatechange` events
-    /// ([css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)),
-    /// and waits for nothing.
-    ///
-    /// The spec dispatches the event "by posting a task at the time when the
-    /// state change occurs", and this is that post: [`owner::enter`] queues
-    /// its job at the call rather than at the first poll of the future it
-    /// answers with, so dropping that future leaves one fresh entry behind
-    /// every job already queued — with an epilogue of its own, so a handler
-    /// that mutates the tree gets its commit. The event is therefore never
-    /// delivered inside the entry that committed, and a view that ends in
-    /// between delivers nothing.
-    ///
-    /// **Nothing here enters JavaScript.** The listeners are the engine's own
-    /// components, the walk is `terminus`'s, and this entry is a job only because
-    /// *when* it runs is the whole point. It still goes through
-    /// [`owner::enter`] rather than a bare job, because everything that
-    /// touches this view's document does: one boundary, one epilogue, one
-    /// end latch.
-    ///
-    /// One entry for the whole batch, in the order the commit queued them:
-    /// the queue is drained by this entry rather than by the epilogue that
-    /// noticed it, so [`Self::content_visibility_posted`] is what keeps an
-    /// entry that runs in between from posting a second one. It is cleared
-    /// here, inside the entry; a view that ended before it ran never needs it
-    /// again, because nothing is delivered after the end.
-    ///
-    /// A handler that panics is the view's panic, as a lifecycle callback's
-    /// already is: [`run_job`] catches it, [`owner::trapped`] reports the
-    /// `Panicked` and the view ends. There is no per-change
-    /// `catch_unwind` — a panicking handler leaves the document unspecified,
-    /// which is `terminus`'s own recorded contract for one, and delivering the
-    /// rest of the batch into it would be worse than stopping.
     fn post_content_visibility_changes(self: &Rc<Self>) {
         let page = Rc::clone(self);
         owner::queue(self, JobKind::ContentVisibility, move |runtime, js| {
-            // Cleared before the walk, not after: what a handler's own
-            // mutation leaves for this entry's epilogue to commit is a batch
-            // of its own, and it owes an entry of its own too.
             page.content_visibility_posted.set(false);
             for failure in runtime.dispatch_content_visibility_changes(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
@@ -417,55 +277,9 @@ impl Page {
         });
     }
 
-    /// Queues the entry that delivers what the update just queued on `terminus`'s
-    /// intersection observers, and waits for nothing.
-    ///
-    /// This is the spec's "queue an intersection observer task"
-    /// ([§3.2.4](https://w3c.github.io/IntersectionObserver/#queue-intersection-observer-task)),
-    /// with [`Self::intersections_posted`] as its `IntersectionObserverTaskQueued`
-    /// flag: the update only queues entries, and the callbacks run from a
-    /// task of their own, which "notify intersection observers"
-    /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo))
-    /// is the body of. It is posted rather than run in the epilogue that updated,
-    /// for the reason [`Self::post_content_visibility_changes`] is: a hook
-    /// that mutates the tree gets a commit of its own, from this entry's own
-    /// epilogue, and a delivery never runs inside a commit. A view that ends
-    /// in between delivers nothing.
-    ///
-    /// The loop itself enters no JavaScript: an engine component's observer
-    /// calls its `intersections_changed` hook through `terminus::link::ElementHandler`,
-    /// and an exposure registration's records a change. What enters the
-    /// realm is the exposure drain after the loop — each element's
-    /// `uiappear`/`uidisappear`, then each element's `bobcat:exposure` record
-    /// event (`crate::main::exposure`) — and that is why this is also the
-    /// entry posted for exposure changes that formed outside any update:
-    /// a teardown or a `stopExposure` that sent records. A
-    /// listener that throws is nonfatal — `ListenerFailed`, the standing
-    /// every listener here has — and the rest is still delivered.
-    ///
-    /// One entry for every observer's queue, in creation order: `terminus` runs
-    /// the loop and calls each observer's handler. The latch is cleared at
-    /// the start, before the loop, as §3.2.5's first step clears the flag:
-    /// what a hook's or a listener's own mutation moves is seen by this
-    /// entry's epilogue, whose update queues a batch of its own, and that
-    /// batch owes an entry of its own too.
-    ///
-    /// The chain ends where the observations stop moving: the epilogue's
-    /// update queues an entry only where a target's `(thresholdIndex,
-    /// isIntersecting)` pair changed, so a delivery whose hook moved no
-    /// observed target across a threshold — or wrote nothing at all — posts
-    /// no other.
-    ///
-    /// A hook that panics is the view's panic, as a content-visibility
-    /// handler's is: [`run_job`] catches it, [`owner::trapped`] reports the
-    /// `Panicked`, and the view ends, with no per-notification
-    /// `catch_unwind`.
     fn post_intersection_notifications(self: &Rc<Self>) {
         let page = Rc::clone(self);
         owner::queue(self, JobKind::Intersection, move |runtime, js| {
-            // Cleared before the loop, not after: what a hook moves is a
-            // batch of this entry's own epilogue, which owes an entry of
-            // its own.
             page.intersections_posted.set(false);
             for failure in runtime.notify_intersection_observers(js) {
                 policy::report(&page, Scene::Listener, failure.into_script_error());
@@ -473,30 +287,6 @@ impl Page {
         });
     }
 
-    /// Queues the entry that delivers what `terminus`'s resize observers queued —
-    /// the document's `layoutchange` observer's entries
-    /// (`crate::main::layout_change`) — and waits for nothing.
-    ///
-    /// Posted after the frame, as the intersection delivery is, rather than
-    /// run inside the commit before paint as resize-observer-1 §3.4 and HTML's
-    /// "update the rendering" place it (the user's ruling 2 of 2026-10-20):
-    /// a listener's writes land in the next commit, and the spec's depth loop
-    /// and its loop error do not exist, since every observation is delivered
-    /// by the next entry and none is held back. The epilogue posts it before
-    /// the intersection delivery, so of two entries one epilogue posts, the
-    /// resize one runs first, as HTML gathers resize observations before it
-    /// updates intersection observations.
-    ///
-    /// The loop itself enters no JavaScript: the `layoutchange` observer's
-    /// handler records its targets. What enters the realm is the dispatch of
-    /// `layoutchange` at each of them, after the loop. A listener that throws
-    /// is nonfatal — `ListenerFailed` — and the rest is still delivered.
-    ///
-    /// The latch is cleared at the start, before the loop: a listener that
-    /// resizes an observed element makes a batch of this entry's own
-    /// epilogue, which owes an entry of its own. The chain ends where the
-    /// sizes stop moving, since the update queues an entry only for a target
-    /// whose border-box size differs from the one it last reported.
     fn post_resize_notifications(self: &Rc<Self>) {
         let page = Rc::clone(self);
         owner::queue(self, JobKind::ResizeObserver, move |runtime, js| {
@@ -507,57 +297,6 @@ impl Page {
         });
     }
 
-    /// Queues the entry that delivers one batch of component events —
-    /// `<image>` `load` and `error`, `<svg>` `load`, `<dialog>` `cancel` and
-    /// `close`, `<text>` `layout` — and waits for nothing.
-    ///
-    /// The same post as [`Self::post_content_visibility_changes`], because
-    /// these events have the same standing: a browser fires an `<img>`'s
-    /// `load` from a task, even for a URL the cache already holds, and
-    /// queues a dialog's `close` as a task too, so a listener never runs
-    /// inside the entry that produced the event and what it mutates is
-    /// committed by this entry's own epilogue rather than by that one's.
-    /// Posting is also what makes every producer answerable the same way at
-    /// all: the `image` component settles a source from inside the
-    /// `__SetAttribute` that wrote it, a dialog closes inside the
-    /// `__InvokeUIMethod` that asked, and dispatching from either would
-    /// re-enter the realm in the middle of a host call.
-    ///
-    /// The epilogue asks after its commit, beside the content-visibility
-    /// check, rather than before it. A commit produces one kind of component
-    /// event, a reporting `<text>`'s `layout`, which the epilogue drains into
-    /// the queue right after the commit and before this check; the rest is
-    /// filled by a bind, a UI method or the painting side's report, all of
-    /// which happen in the entry's body.
-    ///
-    /// It posts only when that commit left nothing uncommitted
-    /// ([`MainThreadRuntime::needs_render`] is `false`). An `<svg>`'s `load`
-    /// detail is the element's layout size read at delivery, so the
-    /// delivery has to follow the commit that applied the natural size its
-    /// report set. The commit is skipped only while a listed author sheet is
-    /// outstanding, which ends at the first `__FlushElementTree`: it settles
-    /// the sheets and commits, and its entry's epilogue posts what was held.
-    /// Holding drains nothing and sets no latch, so a held batch is never
-    /// dropped, only delayed; after the first flush every epilogue commits
-    /// and this posts exactly as it would without the hold.
-    ///
-    /// The hold covers the whole batch, not only `<svg>` outcomes: an
-    /// `<image>`'s `load` or `error` and a `<dialog>`'s or `<overlay>`'s
-    /// events queued before the first flush wait for the first commit as
-    /// well. Each is still delivered exactly once, in queue order; none is
-    /// lost or duplicated.
-    ///
-    /// Unlike that one, this delivery **does** enter JavaScript: these are
-    /// script events, and the dispatch is the realm's
-    /// `__BobcatDispatchEvent` walk like every other one. A listener that
-    /// throws is nonfatal — [`EngineEvent::ListenerFailed`], the standing
-    /// every listener here has — and the rest of the batch is still
-    /// delivered.
-    ///
-    /// The latch is cleared at the start of the entry, before the drain: a
-    /// handler that writes a `src` this document has already seen settle gets
-    /// its outcome at the bind, and one that closes a dialog queues its
-    /// `close`, either of which is a new batch that owes an entry of its own.
     fn post_component_events(self: &Rc<Self>) {
         let page = Rc::clone(self);
         owner::queue(self, JobKind::ComponentEvent, move |runtime, js| {
@@ -568,35 +307,10 @@ impl Page {
         });
     }
 
-    /// Applies one burst of commands: one entry, one commit, one
-    /// acknowledgement.
-    ///
-    /// Total over every state a page can be in. A live page takes the whole
-    /// burst inside one [`owner::enter`]; a page that has ended drops the
-    /// burst, a marker included — what the mailbox holds is dropped with the
-    /// page, and the end has already acknowledged the pending frame post.
-    /// There is no third state a task can observe: the job that opens the
-    /// realm is the first of the view, so a burst that arrived before it is
-    /// queued behind it and finds a document.
-    ///
-    /// The burst's job reads the view's token as it starts. The token is what
-    /// the *embedder* cancelled, and a job start is a wake boundary rather
-    /// than the middle of an entry — which matters because the top loop runs
-    /// queued jobs back to back, so the owner may not have mirrored a release
-    /// onto the latch yet.
-    ///
-    /// The loop inside the entry checks the latch before each command. It
-    /// cannot be truncated from another thread, so one entry is still one
-    /// commit; what it stops is the rest of a burst behind a command that
-    /// ended the view.
     async fn apply(self: &Rc<Self>, commands: Vec<ToMain>) {
         if self.ended() {
             return;
         }
-        // What `CommandSender` counted of this burst: every command but a
-        // native module's answer, which is sent outside that sender, so no
-        // fence includes it. Counted before the seam below is taken out,
-        // which the sender counted like any other command.
         let count = commands
             .iter()
             .filter(|command| {
@@ -606,9 +320,6 @@ impl Page {
                 )
             })
             .count() as u64;
-        // Taken here rather than in the job, because what the seam spawns has
-        // to trap the way any other task of this view does, rather than into
-        // the `catch_unwind` an entry runs under.
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
@@ -624,11 +335,6 @@ impl Page {
                 page.apply_command(runtime, js, command);
             }
             page.applied.set(page.applied.get() + count);
-            // Once, after the last command of a burst that reached the
-            // post's fence: every command `CommandSender` sent before the
-            // post has run, so the events a pass dispatched and the host's
-            // updates are in the frame the acknowledgement implies, and an
-            // animation a listener armed starts on that frame.
             if let Some(frame) = page.frame_due.get()
                 && frame.fence <= page.applied.get()
                 && !page.ended()
@@ -642,9 +348,6 @@ impl Page {
         .await;
     }
 
-    /// Takes what the painter posted: the scroll offsets go into the document
-    /// at once, and the frame post is kept for the end of the burst that
-    /// reaches its fence.
     fn adopt_posted(&self, runtime: &mut MainThreadRuntime) {
         let mut scrolled = self.scrolled.borrow_mut();
         if let Some(frame) = self.scroll.take(&mut scrolled) {
@@ -655,15 +358,6 @@ impl Page {
         runtime.adopt_scroll_offsets(scrolled.drain());
     }
 
-    /// Applies one command to a view whose realm exists, including during boot.
-    ///
-    /// A command whose script fails is reported and the burst goes on, boot
-    /// finished or not: the failure is the app's, and the realm is still
-    /// there for the next command. What it is reported as is the MTS table's
-    /// row for the kind of command — a page update and a native module's
-    /// answer are host calls, an input event a listener's, a vsync a frame's.
-    /// A panic is the view's, as anywhere else in an entry: [`run_job`]
-    /// catches it and [`owner::trapped`] reports it.
     fn apply_command(
         self: &Rc<Self>,
         runtime: &mut MainThreadRuntime,
@@ -672,7 +366,6 @@ impl Page {
     ) {
         match command {
             ToMain::PageUpdate(update) => {
-                // All host lifecycle commands passed LynxView's MTS-boot gate.
                 if let Err(error) = runtime.apply_page_update(js, &update) {
                     policy::report(self, Scene::HostCall, error.into_script_error());
                 }
@@ -717,9 +410,6 @@ impl Page {
                     policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
-            // A task of this view's, so the view's end reaps it; it enters
-            // no realm itself — a memory sample is a job it queues — and
-            // the next configuration ends it.
             ToMain::StartMonitorTask(task) => {
                 let page = Rc::clone(self);
                 owner::spawn(
@@ -734,63 +424,20 @@ impl Page {
         }
     }
 
-    /// Opens this view's realm and runs its entry, then starts the waits that
-    /// only a live realm has.
-    ///
-    /// **The first job of every view**, queued by [`serve_view`] before any of
-    /// that view's tasks is spawned and before anything has been fetched: the
-    /// boot module creates the document as its first statement and imports
-    /// the entry, which [`load_entry`] completes when its answer arrives; the
-    /// author sheets are the realm's, settled by boot's first flush. So a
-    /// command or the entry that arrived before the realm existed is a job
-    /// queued behind this one, and finds a document.
-    ///
-    /// A job like every other entry, and the one that does not go through
-    /// [`owner::enter`], because the realm it would enter does not exist until
-    /// it returns. It holds the shared runtime
-    /// for the whole stretch, as an entry does — an entry already completed
-    /// runs inside it, and may adopt a stylesheet and wait — but takes and
-    /// stores `realm` under short borrows
-    /// either side of it, since what it is building is a local until the last
-    /// of them. The checkpoint receiver is created while the runtime borrow is
-    /// still held, so no sibling's bump between boot and the clock task's first
-    /// poll can be lost.
-    ///
-    /// It ends by running the first epilogue inline rather than queueing one,
-    /// so a boot that finished synchronously is reported in this same stretch.
-    ///
-    /// The [`RealmStartup`] is everything that realm is opened with, and
-    /// opening spends it. A group whose runtime could not be built opens no
-    /// realm: the view fails its startup with the runtime's error, and the
-    /// startup — the answers to its listed sheets included — is dropped.
     fn open_realm(self: &Rc<Self>, ingredients: DocumentIngredients, startup: RealmStartup) {
-        // A view that has already ended builds no realm and runs no entry:
-        // its tasks are about to be reclaimed, and the ingredients go with the
-        // page rather than into a document nobody will ever see.
         if self.ended() {
             return;
         }
         let opened = {
             let mut js = self.context.js.borrow_mut();
             match js.as_mut() {
-                // The runtime failed once, for every view that will ever
-                // attach to this group. Each hears the same reason.
                 Err(error) => Some(Err(error.clone())),
                 Ok(js) => self.build_realm(js, ingredients, startup),
             }
         };
         match opened {
-            // Nobody is listening for this view any more, so there is nobody
-            // to report to.
             None => owner::end(self),
             Some(Err(error)) => policy::report(self, Scene::Open, error),
-            // The latch can have flipped while the entry was inside a
-            // synchronous wait: a task ran during it and ended the view, and
-            // the owner may already be past its reap and have taken the worker
-            // inbox. Tasks spawned behind that reap would never be joined, so
-            // none is started and the inbox is left where it is. The realm
-            // stays where it is for the owner's release job, which is FIFO
-            // behind this one.
             Some(Ok(_)) if self.ended() => {}
             Some(Ok((worker_events, checkpoints))) => {
                 *self.worker_events.borrow_mut() = Some(worker_events);
@@ -799,22 +446,11 @@ impl Page {
                     self,
                     serve_clock(Rc::clone(self), self.lifetime.deadlines(), checkpoints),
                 );
-                // The first epilogue, inline: this is already job context and
-                // the borrows the stretch above held are released, so a boot
-                // that finished synchronously reports in this same stretch
-                // rather than a queue trip later. It is what publishes the
-                // boot's `ScriptFinished` and spawns the module requests its
-                // entry left.
                 let _ = owner::enter_now(self, |_, _| ());
             }
         }
     }
 
-    /// Furnishes the realm and evaluates the entry in it, leaving it live.
-    ///
-    /// `None` is a view released while this ran — the flag is written from the
-    /// embedder's own thread, so it can change between two statements here,
-    /// and the entry's own synchronous waits are where it usually does.
     #[expect(clippy::type_complexity, reason = "one call site, spelled once")]
     fn build_realm(
         self: &Rc<Self>,
@@ -857,16 +493,6 @@ impl Page {
         Some(Ok((worker_events, checkpoints)))
     }
 
-    /// The JavaScript disposal exchange, as a run of [`owner::after_end`] jobs
-    /// the owner awaits.
-    ///
-    /// Two jobs per event rather than three: the first starts the disposal and
-    /// answers whether it has already finished, and each delivery answers the
-    /// same question about the state it left behind, so the question never
-    /// costs a queue trip of its own.
-    ///
-    /// `Ok(())` is a disposal that finished, one that was never started
-    /// because the realm was not live, or a BTS that stopped answering.
     async fn dispose(
         self: &Rc<Self>,
         events: &mut mpsc::UnboundedReceiver<WorkerEvent>,
@@ -908,12 +534,6 @@ impl Page {
         }
     }
 
-    /// Takes the one command that is not the realm's out of a burst.
-    ///
-    /// It spawns two tasks of this view — one that panics on its first poll,
-    /// and behind it one that records what [`Self::ended`] says when it is
-    /// next polled — which is the only way a test can watch a panic reach a
-    /// sibling before it reaches the owner.
     #[cfg(test)]
     fn take_test_seams(self: &Rc<Self>, commands: Vec<ToMain>) -> Vec<ToMain> {
         let mut rest = Vec::new();
@@ -931,70 +551,47 @@ impl Page {
         rest
     }
 
-    /// [`owner::spawn`], for a test that starts a task of this view's itself.
     #[cfg(test)]
     fn spawn(self: &Rc<Self>, future: impl std::future::Future<Output = ()> + 'static) {
         owner::spawn(self, future);
     }
 
-    /// [`owner::terminal`], for a test that fails this view itself.
     #[cfg(test)]
     fn fail(self: &Rc<Self>, event: EngineEvent) {
         owner::terminal(self, event);
     }
 
-    /// [`owner::run_owner`], for a test that runs this view's tail itself.
     #[cfg(test)]
     async fn run_owner(self: &Rc<Self>) {
         owner::run_owner(self).await;
     }
 
-    /// How many tasks this view still has, for a test that pins an end
-    /// reaching every one of them.
     #[cfg(test)]
     pub(super) fn task_count(&self) -> usize {
         self.lifetime.task_count()
     }
 
-    /// How many times the epilogue has run.
     #[cfg(test)]
     pub(super) fn epilogue_count(&self) -> u64 {
         self.lifetime.epilogue_count()
     }
 
-    /// Leaves a frame post taken and unacknowledged, which is the state a
-    /// painter blocked on that sequence number leaves a view in.
     #[cfg(test)]
     pub(super) fn arm_begin_frame_for_test(&self, seq: u64) {
         self.pending_begin_frame.set(Some(seq));
     }
 
-    /// This view's earliest armed timer, for a test that pins the end
-    /// withdrawing it.
     #[cfg(test)]
     pub(super) fn armed_deadline(&self) -> Option<ClockInstant> {
         self.lifetime.armed_deadline()
     }
 }
 
-/// What the driver in [`owner`] is told about a view: where its realm, its
-/// runtime and its host are, that its reports are engine events, and what a
-/// page adds to an entry, the epilogue, the end and the release — the
-/// animation clock moved to the painter's before the operation, the commit
-/// and the deliveries it posts, the boot report, the frame-post
-/// acknowledgement, the `@font-face` loads, the acknowledgement of a pending
-/// frame post at the end, and the JavaScript disposal before the release.
 impl RealmOwner for Page {
     type Realm = MainThreadRuntime;
     type Event = EngineEvent;
     const THREAD: JsThreadName = JsThreadName::Main;
 
-    /// A rejection of boot's own module is the engine's code failing, not
-    /// the app's: boot catches what the entry's evaluation throws (see
-    /// [`MainThreadRuntime::run_boot_module`]), so what rejects it is
-    /// `bobcat:runtime`, the document's construction, connecting the BTS, or
-    /// boot's own flush — a listed sheet that could not be loaded included.
-    /// It fails the view's startup.
     const BOOT_REJECTION: Option<(Scene, Option<&'static str>)> =
         Some((Scene::Open, Some("booting the MTS entry")));
 
@@ -1022,9 +619,6 @@ impl RealmOwner for Page {
         self.outbox.engine_event(event);
     }
 
-    /// The MTS table: what could not be made ready fails the view's startup
-    /// and ends it, and everything else is the app's failure, reported while
-    /// the view goes on.
     fn row(scene: Scene) -> Row<EngineEvent> {
         policy::main_thread(scene)
     }
@@ -1033,67 +627,19 @@ impl RealmOwner for Page {
         policy::main_thread_panic()
     }
 
-    /// The document's animation clock moves to the one the painter last wrote
-    /// into the scroll mailbox, at the start of every entry: a burst, a
-    /// module completion and a settle that carries no operation alike.
     fn before_operation(&self, runtime: &mut MainThreadRuntime) {
-        // HTML's order: the timelines are current before anything this job
-        // runs restyles.
         runtime.sync_animation_clock(self.scroll.clock());
     }
 
-    /// The realm's own due timers, and the collection the removals they made
-    /// may have made due. A zero-delay timer armed during boot therefore
-    /// fires inside boot's own epilogue and adds no commit of its own.
     fn run_due_timers(runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) -> Vec<ScriptError> {
         runtime.run_due_timers(js)
     }
 
-    /// The realm's next timer or an `x-swiper`'s next autoplay turn,
-    /// whichever is sooner: the clock task waits for one deadline, and the
-    /// epilogue it wakes runs both kinds.
     fn next_deadline(runtime: &mut MainThreadRuntime) -> Option<ClockInstant> {
         runtime.next_deadline()
     }
 
-    /// First the documents an `<svg content>` handed over in this entry,
-    /// asked of the host as one [`crate::link::ViewNotice::RequestDocuments`]
-    /// beside the image sources the commit asks for: the host parses each,
-    /// off this thread, and its report applies in a later entry as every
-    /// other image report does. Then the commit, which is what publishes the
-    /// frame and the image sources the walk discovered — skipped while any
-    /// listed author sheet is outstanding, because the first
-    /// `__FlushElementTree` is what waits for them and a commit without them
-    /// would publish an unstyled frame. Then the `layout` events of the
-    /// `text` paragraphs that commit recomputed, queued with the component
-    /// events. Then the resize observations, updated against that commit's
-    /// layout, and their entries — the `layoutchange` deliveries. Then the
-    /// intersection observations,
-    /// updated against that commit's layout and the live scroll offsets
-    /// whether or not the commit built anything — a scroll composed inside the
-    /// encode window moves an offset and commits nothing — and their entries,
-    /// which the same entry delivers with any exposure change that formed
-    /// outside an update, the `contentvisibilityautostatechange` deliveries
-    /// that commit decided
-    /// and the component events this entry produced — `<image>` `load`s and
-    /// `error`s, `<svg>` `load`s, `<dialog>` `cancel`s and `close`s, the
-    /// `scroll`s of the instant scrolls it performed (queued after the
-    /// commit, whose move to a new `scroll-initial-target` is one), the
-    /// `scroll`s and `scrollend`s of the offsets it
-    /// adopted, and the `text` `layout`s — each
-    /// posted as an entry of its own and never run here, the component events
-    /// only once the commit has run: see
-    /// [`Page::post_resize_notifications`],
-    /// [`Page::post_intersection_notifications`],
-    /// [`Page::post_content_visibility_changes`] and
-    /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
-        // Posted in the order the settle decided them, resize first, as HTML
-        // gathers resize observations before it updates intersection ones.
-        // Each post queues a job behind this one, so posting after the whole
-        // settle rather than between its steps changes nothing they see. A
-        // held component-event batch is neither drained nor latched, so the
-        // first later epilogue whose commit runs posts it.
         let owed = runtime.settle_entry();
         if owed.contains(Deliveries::RESIZE) && !page.resizes_posted.replace(true) {
             page.post_resize_notifications();
@@ -1121,45 +667,26 @@ impl RealmOwner for Page {
         self.boot_reported.set(true);
     }
 
-    /// MTS boot alone: the entry module evaluated and boot's first flush
-    /// committed. The BTS Worker's own state is not part of it.
     fn on_booted(&self) {
         self.outbox.engine_event(EngineEvent::ScriptFinished);
     }
 
-    /// The frame-post acknowledgement, after the commit and the boot report:
-    /// a host blocked on the sequence number is blocked on the frame it
-    /// implies. Only a post a burst has applied is acknowledged here; one
-    /// still waiting for its fence stays in [`Page::frame_due`].
     fn after_boot(&self) {
         if let Some(seq) = self.pending_begin_frame.take() {
             self.outbox.begin_frame_serviced(seq);
         }
     }
 
-    /// The entry's own request is answered by [`load_entry`], a task of this
-    /// view since it was served, from the answer `create_lynx_view` already
-    /// asked for.
     fn entry_name(&self, runtime: &MainThreadRuntime) -> Option<String> {
         runtime.entry_module_name().ok()
     }
 
-    /// One `@font-face` load per rule this entry's sheets declared. Every
-    /// path that mounts author CSS — the listed sheets the first
-    /// `__FlushElementTree` mounts, `adoptStyleSheet`, and any rules a card
-    /// appends — runs inside an entry, so draining here is what covers them
-    /// all with one call site rather than one per mount.
     fn after_settles(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
         for request in runtime.take_font_face_requests() {
             owner::spawn(page, load_font_face(Rc::clone(page), request));
         }
     }
 
-    /// A host waiting for a frame post to be serviced is released rather than
-    /// left to its own deadline: the frame it was waiting for will never come. What is acknowledged
-    /// is the newest frame post taken and not yet acknowledged, whether a
-    /// burst has applied it or it is still waiting for its fence. The deadline
-    /// the realm had armed is withdrawn by the lifetime's own end.
     fn on_end(&self) {
         let due = self.frame_due.take().map(|frame| frame.seq);
         if let Some(seq) = self.pending_begin_frame.take().max(due) {
@@ -1167,14 +694,6 @@ impl RealmOwner for Page {
         }
     }
 
-    /// The JavaScript disposal: the view has ended, but its MTS realm remains
-    /// alive to exchange disposal messages with the BTS over the worker inbox,
-    /// which is taken only now that its ordinary consumer has been reaped. No
-    /// view token cancels its Workers first.
-    ///
-    /// The release that follows drops the realm, and with it the remaining
-    /// Worker handles, whose channels close with them: there is no Rust
-    /// termination sweep.
     async fn before_release(page: &Rc<Self>) {
         let events = page.worker_events.borrow_mut().take();
         if let Some(mut events) = events
@@ -1185,11 +704,6 @@ impl RealmOwner for Page {
     }
 }
 
-/// One view's whole life on this thread: build the page, spawn its waits,
-/// wait for the end, reclaim.
-///
-/// Task lifetime and nothing else. No command, no source, no timer and no
-/// frame is decided here.
 pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, outbox: ViewOutbox) {
     let AttachedView {
         viewport,
@@ -1202,19 +716,10 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         scroll,
         cancel,
     } = view;
-    // On every exit path, ordinary or trapped: a host still holding one of
-    // this view's source completions must see it cancelled without waiting
-    // for a turn of its own. Workers retain their independent lifetimes.
     let _cancel = cancel.clone().drop_guard();
     let ViewSources {
-        // Spent on the embedder's thread, where `create_lynx_view` resolved
-        // `entry` and `background_entry` against it. Its parsed form rides in
-        // `outbox`, for the realms' synchronous loads.
         base_url: _,
         config,
-        // Spent on the embedder's thread: the fonts and the default family
-        // became `text_context` above, and these two became the requests
-        // whose answers `startup` carries, beside the URL each was named by.
         fonts: _,
         default_font_family: _,
         fallback_fonts: _,
@@ -1235,16 +740,8 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         style_pool: context.style_pool.clone(),
     };
     let StartupSources { sheets, entry } = startup;
-    // What boot imports the entry by, and so what `load_entry` completes.
     let entry_url = entry.url.clone();
     let page = Page::new(context, outbox, metrics.clone(), scroll, cancel);
-    // Queued before the first task of this view is spawned, so it is the first
-    // job of the view and nothing it owns can be served ahead of it. Nothing
-    // is waited for here: the realm opens now and boot creates the document
-    // at once, which is what lets the whole of boot run while the embedder
-    // builds this view's painter. The answer is dropped because there is
-    // nothing to do with it — a job is queued by the call rather than by the
-    // future it hands back, and `run_job` is what reports a trap inside it.
     drop(run_job(&page, JobKind::Start, move |page| {
         page.open_realm(
             ingredients,
@@ -1262,96 +759,35 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         );
         Some(())
     }));
-    // The entry is a task, entering the realm as its answer arrives and
-    // therefore behind `open_realm`. The sheets went to the realm with the
-    // rest of its startup: boot's first flush waits for each, in listed
-    // order, and they need no task of their own because the fetcher answers
-    // them without one.
     owner::spawn(&page, load_entry(Rc::clone(&page), entry));
     owner::spawn(&page, consume_commands(Rc::clone(&page), commands));
     owner::spawn(&page, consume_metrics(Rc::clone(&page), metrics));
     owner::run_owner(&page).await;
 }
 
-/// `first` and every message already queued behind it when it was read: one
-/// burst, which one entry runs. What arrives while that entry runs is a later
-/// burst, read once this one is done.
 fn burst<T, C: FromIterator<T>>(receiver: &mut mpsc::UnboundedReceiver<T>, first: T) -> C {
     let queued = receiver.len();
     let rest = std::iter::from_fn(|| receiver.try_recv().ok()).take(queued);
     std::iter::once(first).chain(rest).collect()
 }
 
-/// The one ordered consumer of this view's command stream.
-///
-/// A burst rather than a command: the rest of what is already queued goes
-/// with the first, so a host's whole round of input is one commit and one
-/// acknowledgement. Bounded by the snapshot the count was taken from, so a
-/// producer faster than this task cannot starve the epilogue.
-///
-/// **A burst queued behind the embedder's release is discarded.** The token is
-/// read once per burst, below, and a command whose wake is served after the
-/// release ends the view instead of being applied. Not because of wake order:
-/// a command already queued wakes this task *before* the release wakes the
-/// owner, so on that path this check is the only thing between the burst and
-/// the realm. It is a decision rather than an accident — the embedder released
-/// the view and can observe nothing of it afterwards. A fatal event's cancel
-/// in `LynxView::pump`, which leaves the channel open, takes the same path.
-///
-/// A painter that was watching is unaffected either way. On the release path
-/// the view's seat goes with it — the host's resource system among its fields —
-/// so `Painter::poll_link` can no longer upgrade it and does not adopt a commit
-/// whose pixels it is not already holding; on the fatal-`pump` path that seat
-/// is still alive, and this check is what keeps a frame from being published
-/// after the cancel at all.
-///
-/// What is left over is a burst that was already inside [`Page::apply`] when
-/// the cancel landed: it finishes, the way synchronous JavaScript already
-/// executing does. Only this thread writes the latch an entry reads.
 async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<ToMain>) {
     while let Some(first) = commands.recv().await {
-        // The embedder released the view between this command's send and this
-        // poll. The token is read here and never inside an entry: a wake
-        // boundary is not a synchronous stretch another thread could flip it
-        // in the middle of.
         if page.outbox.is_cancelled() {
             owner::end(&page);
             return;
         }
-        // Collected rather than handed over as an iterator, because a job owns
-        // what it runs on: one allocation per burst, not per command. Awaited,
-        // so the next burst is read only once this one has been applied —
-        // which is what makes what arrives meanwhile one later burst rather
-        // than a queue of entries.
         page.apply(burst(&mut commands, first)).await;
     }
-    // The embedder released this view. Everything it owns goes with the
-    // tasks the owner is about to reclaim.
     owner::end(&page);
 }
 
-/// The one consumer of this view's metrics watch: one settle per change.
-///
-/// A settle rather than an operation, because there is nothing to do in the
-/// realm — the epilogue's `commit_if_dirty` reads the watch itself, adopts
-/// whatever it holds and commits if that moved the viewport. What this task
-/// exists for is the case where nothing else would enter the realm at all: a
-/// painter that resizes while the page is idle.
-///
-/// A receiver of its own, because `borrow_and_update` marks a value seen for
-/// one receiver alone: the document's clone and this one are independent
-/// readers of the same state.
-///
-/// While the page is still loading [`owner::enter`] answers `None` at once and
-/// nothing happens, which is right — a document that does not exist yet reads
-/// the watch when it is created.
 async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Viewport>>) {
     loop {
         tokio::select! {
             biased;
             () = page.lifetime.token().cancelled() => return,
             changed = metrics.changed() => if changed.is_err() {
-                // The view's seat is gone, so no further metrics can arrive.
                 return;
             },
         }
@@ -1359,41 +795,6 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
     }
 }
 
-/// The view's MTS entry: the answer to the request `create_lynx_view` made,
-/// completed into the realm as the module boot imports by the entry's URL.
-///
-/// A task like [`owner::load_module`], and for the same reason: the answer may take
-/// as long as the fetcher likes, and waiting for it on a task parks nothing —
-/// no job of this view's, no job of a sibling's. Its entry into the realm is
-/// queued behind `open_realm`, the view's first job, so the realm it completes
-/// the module in always exists. Boot's `import` of the entry may have been
-/// made already, in which case this is what resumes it, or not yet, in which
-/// case the import finds the module in the registry.
-///
-/// The entry is read here, before any of it runs, by
-/// [`owner::module_answer`] as every import's answer is, so an entry that
-/// cannot be loaded fails the boot: a load the fetcher could not make is
-/// reported as the fetcher's own error, and an answer that is not a script,
-/// or a script whose response URL is not an absolute URL, as a `Script` error
-/// naming the URL, each as `StartupFailed`. The module is not completed
-/// then — the view has ended, and boot's `import` of it is released with the
-/// realm. The entry's *evaluation* is the app's code: boot catches what it
-/// throws, so a failure there, or in a module it imports, is reported as
-/// `ScriptRunError` and boot goes on past it. The rest of boot runs in this
-/// same entry, and a failure of the engine's own boot code there — most often
-/// a listed sheet boot's flush could not load — is reported twice, with one
-/// message: this entry reports the rejection its checkpoint returned as
-/// `ScriptRunError`, and the epilogue then reports boot's failure as
-/// `StartupFailed`. Naming the entry, which is engine code too, fails the
-/// boot from here directly.
-///
-/// Except where the embedder released the view meanwhile. Completing the entry
-/// evaluates it and runs the rest of boot, and an entry that adopts a
-/// stylesheet, like boot's own flush waiting for the listed sheets or the
-/// binding, parks inside that evaluation on a wait whose first arm is the
-/// view's token, so a release makes the evaluation throw; a release also
-/// drops the answer's completion, which fails the load. Either is the end of a
-/// view nobody is watching rather than a failure of it, and is not reported.
 async fn load_entry(page: Rc<Page>, entry: StartupSource) {
     let StartupSource { url, answer } = entry;
     let answered = owner::await_source(answer).await.and_then(|answer| {
@@ -1409,25 +810,12 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
             Ok(Ok(())) => {}
             _ if completing.outbox.is_cancelled() => owner::end(&completing),
             Ok(Err(error)) => policy::report(&completing, Scene::Boot, error.into_script_error()),
-            // The Open row's event, sent without the row: a load the fetcher
-            // could not make, an answer that is not a script or is from a URL
-            // that is not absolute, and naming the entry are each already a
-            // `LynxViewError` — the first the fetcher's own — which
-            // `StartupFailed` carries as it is.
             Err(error) => owner::terminal(&completing, EngineEvent::StartupFailed(error)),
         }
     })
     .await;
 }
 
-/// The entry's response URL, which must be an absolute URL, or why it is
-/// not, naming `url`, the URL the entry was requested by, and the response
-/// URL.
-///
-/// It is the entry's `import.meta.url` and, for a view that named no
-/// [`ViewSources::card_url`], `__Card__`, the base every `new Worker` URL is
-/// joined to by URL rules — and a join to a base that does not parse fails
-/// for every specifier, boot's own `bobcat:bts` included.
 fn absolute_response(url: &str, response: String) -> Result<String, String> {
     match url::Url::parse(&response) {
         Ok(_) => Ok(response),
@@ -1437,19 +825,6 @@ fn absolute_response(url: &str, response: String) -> Result<String, String> {
     }
 }
 
-/// One `@font-face` rule's sources, tried in author order until one loads.
-///
-/// Unlike a module, nothing is waiting for a declared face, so no failure
-/// here ends the view: a rule whose every source fails leaves the runs that
-/// name its family on the fallback they already had, which is what a browser
-/// does for a face it could not fetch. It is dropped without a word — this
-/// workspace has no logging facade and this would be its only use, and an
-/// [`EngineEvent`] is the wrong seam because every variant of it is either
-/// fatal or something a realm said.
-///
-/// `local()` is skipped: naming a face already installed on the platform needs
-/// a platform font enumerator this engine does not have, and the native
-/// Harmony loader refuses it too.
 async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest) {
     let terminus::link::FontFaceRequest { family, sources } = request;
     let mut loaded = None;
@@ -1460,8 +835,6 @@ async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest
         if page.ended() {
             return;
         }
-        // A face the fetcher answered with a script or a stylesheet is a
-        // failed source like any other: try the next one.
         if let Ok(LoadedSource::Font(blob)) =
             request_source(&page.outbox, SourceRequest::Font { url }).await
         {
@@ -1472,29 +845,12 @@ async fn load_font_face(page: Rc<Page>, request: terminus::link::FontFaceRequest
     let Some(blob) = loaded else {
         return;
     };
-    // The entry's own epilogue commits: registering a face invalidates the
-    // layout of every run that names it.
     owner::enter(&page, JobKind::FontFace, move |runtime, _| {
         runtime.register_font_face(&family, blob);
     })
     .await;
 }
 
-/// The one ordered consumer of everything this view's workers say — the page
-/// realm's and its `ShadowRealm` children's alike, each event handed to the
-/// realm that created its worker by `dispatch_worker_event`.
-///
-/// The channel's senders are the realms' worker owners and this view's
-/// worker tasks, so it closes only once the realm is gone — which is to say,
-/// with the view.
-///
-/// One entry per burst, as [`consume_commands`] runs one per burst of
-/// commands: the event read and every event already queued behind it, each
-/// delivered by its own call with its own checkpoint, so what one message's
-/// handlers queued runs before the next message is delivered, and one
-/// epilogue after the last. A view the embedder released while an event's
-/// handler was parked on a synchronous wait has ended, and the rest of the
-/// burst is not delivered, as [`Page::apply`] stops a burst of commands.
 async fn consume_worker_events(page: Rc<Page>) {
     loop {
         let event = tokio::select! {
@@ -1511,7 +867,6 @@ async fn consume_worker_events(page: Rc<Page>) {
         let Some(first) = event else {
             return;
         };
-        // Inline for one event, the steady state of one message per turn.
         let events: SmallVec<[WorkerEvent; 1]> = burst(
             page.worker_events
                 .borrow_mut()
@@ -1519,12 +874,6 @@ async fn consume_worker_events(page: Rc<Page>) {
                 .expect("the live realm installed its Worker inbox"),
             first,
         );
-        // Reported inside the entry, before its epilogue, as every other kind
-        // of entry reports its failure. Boot can settle in here, when the MTS
-        // entry's top-level await was waiting on this worker, and the error
-        // is then the first rejection of the ones boot left: the entry's own
-        // throw where it threw, or boot's own failure, which the epilogue goes
-        // on to report as StartupFailed too.
         let delivering = Rc::clone(&page);
         owner::enter(&page, JobKind::WorkerEvent, move |runtime, js| {
             for WorkerEvent { key, payload } in events {
@@ -1540,8 +889,6 @@ async fn consume_worker_events(page: Rc<Page>) {
     }
 }
 
-/// Asks the host for one source and waits for it. A fetcher that dropped the
-/// request without answering is a failed load, not a wait forever.
 async fn request_source(
     outbox: &ViewOutbox,
     request: SourceRequest,

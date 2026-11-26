@@ -17,8 +17,6 @@ use bobcat_core::{
     ViewSources, compile_native_module_esm,
 };
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
@@ -34,30 +32,19 @@ const UNREADABLE_ESM_URL: &str = "app:///unreadable-esm.js";
 const MAIN_LYNX_URL: &str = "app:///main-lynx.js";
 
 thread_local! {
-    /// Every source the fetcher of this test's thread was asked for, in
-    /// order: a test's views are pumped on its own thread, which is the
-    /// only thread a fetcher is called on.
     static REQUESTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Whether the fetcher of this test's thread was ever asked for a `lynx:`
-/// name.
 fn requested_a_native_esm() -> bool {
     REQUESTED.with_borrow(|requested| requested.iter().any(|url| url.starts_with("lynx:")))
 }
 
-/// A minimal main-thread entry: a card with one element, so boot finishes.
 const MAIN_ENTRY: &str = r"
 globalThis.renderPage = function () {
   __AppendElement(__CreatePage('card', 0), __CreateView(0));
 };
 ";
 
-/// A main-thread entry that calls `Echo` through the transport itself, as
-/// its top level runs: the MTS realm's `NativeModules` is `undefined`, since
-/// the view's table is only posted to the BTS, but `bobcat:native-modules`
-/// links there and the view answers the call back to this realm. The card is
-/// the one [`MAIN_ENTRY`] renders.
 const MAIN_CALLER_ENTRY: &str = r"
 import { callNativeModule } from 'bobcat:native-modules';
 if (NativeModules !== undefined) throw Error('the MTS NativeModules is undefined');
@@ -69,7 +56,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// Serves the entries these tests have out of memory.
 struct Entries;
 
 impl bobcat_core::FrameImages for Entries {
@@ -83,15 +69,12 @@ impl bobcat_core::FrameImages for Entries {
         None
     }
 
-    /// Nothing is ever answered, so nothing is ever wanted.
     fn want(&self, _picture: &bobcat_core::PictureKey, _hint: bobcat_core::ImageSizeHint) {}
 
     fn retain(&self, _frame: &[bobcat_core::PictureKey]) {}
 }
 
 impl Entries {
-    /// A main-thread entry is a card's MTS body, served as `bobcat-source`
-    /// registers a card's root; a background entry is served as it stands.
     fn source(specifier: &str) -> Option<String> {
         let card = |body: &str| format!("{}{body}", bobcat_core::MTS_CHUNK_PREAMBLE);
         match specifier {
@@ -112,9 +95,6 @@ impl Entries {
 
 impl ResourceFetcher for Entries {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
-        // Every request this host can be asked is named by one string, and it
-        // is the same string in every case: this page has no stylesheets and
-        // no fonts, so a specifier it does not know is refused below.
         let specifier = match &request {
             SourceRequest::Module(url)
             | SourceRequest::StyleSheet(url)
@@ -143,11 +123,6 @@ impl ResourceFetcher for Entries {
     }
 }
 
-/// The background entry: one call, whose callback prints what came back.
-///
-/// It imports its own bindings, as a BTS entry that is not a card's body
-/// does: `BTS_CHUNK_PREAMBLE` is what `bobcat-source` prepends to a card's
-/// bodies, and the engine adds nothing to an entry.
 const BACKGROUND_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
 const modules = lynx.getApp().NativeModules;
@@ -158,18 +133,6 @@ modules.Echo.echo({ note: 'hello' }, function (method, echoed) {
 });
 ";
 
-/// A background entry that first calls a method `Echo` never declared. Only
-/// the host member reaches it, because `NativeModules.Echo.nope` is
-/// `undefined`; the callback prints if anything ever answers it. The declared
-/// call after it is what the test waits for, and its callback also prints
-/// whether the realm still holds the undeclared call's function.
-///
-/// That function is an arrow function created inside a function that has
-/// returned, so the realm's table of outstanding calls holds its only strong
-/// reference. An arrow function has no `prototype` object pointing back at
-/// it, so dropping that reference frees it at once, and `QuickJS` answers a
-/// `WeakRef` from the reference count: `deref()` is `undefined` from then on,
-/// with no collection needed.
 const UNDECLARED_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
 import { callNativeModule } from 'bobcat:native-modules';
@@ -185,8 +148,6 @@ lynx.getApp().NativeModules.Echo.echo({ note: 'hello' }, function (method, echoe
 });
 ";
 
-/// A background entry that makes its call only when the host sends it the
-/// `call` global event, so the call comes after whatever the host did first.
 const ON_EVENT_ENTRY: &str = r"
 import { console, lynx } from 'bobcat:bts-runtime';
 lynx.getJSModule('GlobalEventEmitter').addListener('call', () => {
@@ -196,9 +157,6 @@ lynx.getJSModule('GlobalEventEmitter').addListener('call', () => {
 });
 ";
 
-/// The ES module the `Echo` module supplies in the tests below: a wrapper
-/// over its own `echo` method, written over `bobcat:native-modules`, and the
-/// URL it knows itself by.
 const ECHO_ESM: &str = r"
 import { callNativeModule } from 'bobcat:native-modules';
 export const url = import.meta.url;
@@ -207,8 +165,6 @@ export function echo(value, callback) {
 }
 ";
 
-/// A background entry that imports `Echo`'s ES module statically and calls
-/// the module through it.
 const ESM_CALLER_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import { echo, url } from 'lynx:Echo';
@@ -217,15 +173,11 @@ echo({ note: url }, function (method, echoed) {
 });
 ";
 
-/// A background entry that prints, as its top level runs, which native
-/// module ES modules have run so far.
 const ORDER_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 console.log('order ' + JSON.stringify(globalThis.ran ?? []));
 ";
 
-/// A native module ES module that records it ran, and what `NativeModules`
-/// named when it did. `{name}` is the module's name.
 fn recording_esm(name: &str) -> String {
     format!(
         r"
@@ -236,8 +188,6 @@ globalThis.ran = (globalThis.ran ?? []).concat(
     )
 }
 
-/// A background entry that loads a `lynx:` name the view has no ES module
-/// for, both ways a realm can: `require` and `import()`.
 const UNKNOWN_ESM_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import { createRequire } from 'bobcat:module';
@@ -254,8 +204,6 @@ import('lynx:Missing').then(
 );
 ";
 
-/// A background entry that imports `Echo`'s ES module and prints how that
-/// went.
 const UNREADABLE_ESM_ENTRY: &str = r"
 import { console } from 'bobcat:bts-runtime';
 import('lynx:Echo').then(
@@ -264,8 +212,6 @@ import('lynx:Echo').then(
 );
 ";
 
-/// A main-thread entry that imports `Echo`'s ES module, which only a worker
-/// realm loads, and prints how that went; the card is [`MAIN_ENTRY`]'s.
 const MAIN_LYNX_ENTRY: &str = r"
 import('lynx:Echo').then(
   () => console.log('loaded'),
@@ -276,8 +222,6 @@ globalThis.renderPage = function () {
 };
 ";
 
-/// A module that supplies an ES module beside [`Echo`]'s method: what
-/// [`NativeModule::esm`] answers is fixed when it is built.
 struct WithEsm {
     echo: Echo,
     bytecode: bytes::Bytes,
@@ -285,7 +229,6 @@ struct WithEsm {
 }
 
 impl WithEsm {
-    /// `name`'s module, its ES module compiled from `source`.
     fn new(name: &'static str, source: &str, import_before_entry: bool) -> Self {
         Self::with_bytecode(
             name,
@@ -324,8 +267,6 @@ impl NativeModule for WithEsm {
     }
 }
 
-/// Builds a view of `modules` whose BTS entry is `background`, and binds a
-/// painter to it, which boot's flush waits for.
 async fn esm_view(
     group: &LynxGroup,
     modules: Vec<Box<dyn NativeModule>>,
@@ -341,17 +282,9 @@ async fn esm_view(
     (view, painter)
 }
 
-/// An embedder's module: it hands the call's own arguments back through the
-/// callback, on the thread `pump` gave it.
 struct Echo {
-    /// The `NativeModules` key, held rather than spelled in `name` so the
-    /// answer is this module's own rather than a `'static` literal.
     name: &'static str,
-    /// Which thread each call arrived on, for the assertion that it is the
-    /// embedder's own.
     calls: RefCell<Vec<std::thread::ThreadId>>,
-    /// Which method each call named, for the assertion that only a declared
-    /// one arrives.
     named: RefCell<Vec<String>>,
 }
 
@@ -386,8 +319,6 @@ impl NativeModule for Echo {
             return;
         };
         assert_eq!(callback.argument_index(), 1);
-        // The method name, then whatever the realm sent — the argument list
-        // is JSON array text, so it is spliced rather than parsed.
         callback.invoke(format!(
             "[{},{arguments}]",
             serde_json::to_string(&method).expect("a string is JSON")
@@ -395,9 +326,6 @@ impl NativeModule for Echo {
     }
 }
 
-/// The handle the test keeps while the view holds its own: a module is the
-/// embedder's, and an embedder that wants to read what its module did keeps a
-/// share of it.
 struct Shared<M>(Rc<M>);
 
 impl<M: NativeModule> NativeModule for Shared<M> {
@@ -418,15 +346,9 @@ impl<M: NativeModule> NativeModule for Shared<M> {
     }
 }
 
-/// A module that reads the painter of its own view inside `invoke` — an
-/// embedder whose module drives its display synchronously — and then answers
-/// the way [`Echo`] does.
 struct Driver {
     echo: Echo,
-    /// The painter attached to the view this module serves, `None` until the
-    /// test has attached it.
     painter: Rc<RefCell<Option<Painter>>>,
-    /// What the painter said, once per call.
     animating: RefCell<Vec<bool>>,
 }
 
@@ -444,13 +366,11 @@ impl NativeModule for Driver {
         let painter = painter
             .as_ref()
             .expect("the painter is attached before the view is pumped");
-        // Reads the view's frame demand, the cell `pump` also borrows.
         self.animating.borrow_mut().push(painter.is_animating());
         self.echo.invoke(call);
     }
 }
 
-/// A module that declares a name somebody else already has.
 struct Twin(&'static str);
 
 impl NativeModule for Twin {
@@ -473,12 +393,6 @@ fn sources(background: &str) -> ViewSources {
     sources
 }
 
-/// Pumps `view` until the background realm prints, and answers with what it
-/// printed first.
-///
-/// The background realm is the worker whose URL is `bobcat:bts`, which is the
-/// comparison an embedder makes. Its id is 1 here: each test's group has one
-/// view, whose entry constructs no worker, so boot's BTS is the group's first.
 fn first_console_message(view: &mut LynxView<Entries>) -> String {
     let (source, message) = first_console_output(view);
     let ScriptSource::Worker { id, url } = &source else {
@@ -489,10 +403,6 @@ fn first_console_message(view: &mut LynxView<Entries>) -> String {
     message
 }
 
-/// Pumps `view` until a realm prints, and answers with which realm printed
-/// first and what. Every event of the batch that message arrived in is still
-/// read, so a failure of a realm in that batch or an earlier one fails the
-/// test.
 fn first_console_output(view: &mut LynxView<Entries>) -> (ScriptSource, String) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut first = None;
@@ -541,8 +451,6 @@ async fn an_injected_module_answers_a_background_call_on_the_embedders_own_threa
             sources(BACKGROUND_URL),
         )
         .expect("the view is built");
-    // The BTS `console` this waits for is forwarded through MTS, whose boot
-    // flush waits for a painter to bind the view.
     let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
         .await
         .expect("the painter is built");
@@ -560,10 +468,6 @@ async fn an_injected_module_answers_a_background_call_on_the_embedders_own_threa
     );
 }
 
-/// A call the MTS realm makes through `bobcat:native-modules` reaches the
-/// embedder's module like a BTS call does, and its answer goes back to the
-/// MTS realm: `pump` answers a call with no worker through the view's own
-/// command FIFO, and the callback runs in the realm that made the call.
 #[tokio::test]
 async fn a_main_thread_call_is_answered_back_to_the_main_thread() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -580,8 +484,6 @@ async fn a_main_thread_call_is_answered_back_to_the_main_thread() {
             ViewSources::new("app:///", MAIN_CALLER_URL, SCREEN, "en-US"),
         )
         .expect("the view is built");
-    // The answer is applied by a job of the view, which runs once boot's
-    // flush has found a painter bound.
     let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
         .await
         .expect("the painter is built");
@@ -598,12 +500,6 @@ async fn a_main_thread_call_is_answered_back_to_the_main_thread() {
     assert_eq!(echo.named.borrow().as_slice(), ["echo"]);
 }
 
-/// A script failure after boot leaves the view running, and its native
-/// modules with it: a page update the main-thread realm fails is reported as a
-/// `ScriptRunError`, and a background call made after it is still answered.
-///
-/// A failure that ended the view would have cleared the table `pump` answers
-/// a call through, so the callback would never have arrived.
 #[tokio::test]
 async fn a_script_failure_after_boot_leaves_native_module_calls_answered() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -678,11 +574,6 @@ async fn two_modules_of_one_name_refuse_to_build_a_view() {
     );
 }
 
-/// A call naming a method its module never declared is dropped by `pump`
-/// rather than handed to the module, and dropping it releases its function in
-/// the realm uninvoked. The release reaches the realm ahead of the declared
-/// call's answer, so the first thing printed is that answer, and by then the
-/// realm no longer holds the released function.
 #[tokio::test]
 async fn an_undeclared_method_never_reaches_its_module() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -716,9 +607,6 @@ async fn an_undeclared_method_never_reaches_its_module() {
     );
 }
 
-/// A module may read the painter attached to its own view while it serves a
-/// call: `pump` holds no borrow of the view's frame demand across `invoke`,
-/// and the painter borrows that same cell.
 #[tokio::test]
 async fn a_module_may_drive_its_painter_inside_invoke() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -760,14 +648,8 @@ async fn a_module_may_drive_its_painter_inside_invoke() {
     );
 }
 
-/// Nothing here reads a callback, but the type has to be nameable by an
-/// embedder that stores one.
 const _: fn(ModuleCallback) -> usize = |callback| callback.argument_index();
 
-/// A module's ES module is what a BTS entry's `import` of `lynx:<name>`
-/// loads: its `import.meta.url` is that specifier, its own import of
-/// `bobcat:native-modules` links, and a call through it reaches the module's
-/// `invoke`. The fetcher is never asked for it.
 #[tokio::test]
 async fn a_background_entry_calls_its_module_through_the_modules_es_module() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -789,10 +671,6 @@ async fn a_background_entry_calls_its_module_through_the_modules_es_module() {
     assert!(!requested_a_native_esm(), "a `lynx:` name is never fetched");
 }
 
-/// The modules flagged `import_before_entry` run before the BTS entry's top
-/// level, one after another in the order the view was given them, each after
-/// `initialize` has supplied `NativeModules`; a module not flagged does not
-/// run when nothing imports it.
 #[tokio::test]
 async fn flagged_es_modules_run_in_order_before_the_entry_and_others_do_not_run() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -816,8 +694,6 @@ async fn flagged_es_modules_run_in_order_before_the_entry_and_others_do_not_run(
     assert!(!requested_a_native_esm());
 }
 
-/// A flagged module that throws is the entry's failure: reported as the
-/// BTS's uncaught exception, and the entry is not imported.
 #[tokio::test]
 async fn a_flagged_es_module_that_throws_fails_the_entry() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -858,7 +734,6 @@ async fn a_flagged_es_module_that_throws_fails_the_entry() {
         error.message.contains("the native module ES module failed"),
         "{error:?}"
     );
-    // A turn later, the entry has still printed nothing.
     std::thread::sleep(Duration::from_millis(50));
     for event in view.pump() {
         assert!(
@@ -868,9 +743,6 @@ async fn a_flagged_es_module_that_throws_fails_the_entry() {
     }
 }
 
-/// A `lynx:` name the view has no ES module for fails in the BTS realm,
-/// naming the specifier — an `import` and a `require` alike — and is never
-/// fetched.
 #[tokio::test]
 async fn an_unknown_native_es_module_fails_without_a_request() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -898,8 +770,6 @@ async fn an_unknown_native_es_module_fails_without_a_request() {
     assert!(!requested_a_native_esm(), "{:?}", REQUESTED.take());
 }
 
-/// The MTS realm does not load a native module's ES module: its import fails
-/// with a `ReferenceError` naming the specifier, and nothing is fetched.
 #[tokio::test]
 async fn the_main_thread_does_not_load_a_native_es_module() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -920,8 +790,6 @@ async fn the_main_thread_does_not_load_a_native_es_module() {
     assert!(!requested_a_native_esm());
 }
 
-/// Bytecode whose frame is not this build's — another build's id, or cut
-/// short — refuses the view where it is built, naming the module.
 #[tokio::test]
 async fn an_es_module_outside_this_builds_frame_refuses_the_view() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
@@ -957,17 +825,12 @@ async fn an_es_module_outside_this_builds_frame_refuses_the_view() {
     );
 }
 
-/// Bytecode in a whole frame that cannot be read as the module fails its
-/// import in the importing realm with a `TypeError` naming it, and nothing
-/// runs in its place.
 #[tokio::test]
 async fn an_unreadable_es_module_fails_its_import() {
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .expect("the group starts");
     let mut garbage = compile_native_module_esm("Echo", ECHO_ESM).expect("the ES module compiles");
-    // The frame — the engine id and the length, 16 bytes — stands; the
-    // payload is not bytecode.
     garbage[16..].fill(b'x');
     let (mut view, _painter) = esm_view(
         &group,

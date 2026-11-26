@@ -199,10 +199,6 @@ use super::image_sources::{ImageRole, ImageSources};
 use super::{ComponentEvents, LynxDocument};
 use crate::main::record::write_record_field;
 
-/// The UI methods an `image` answers, the control each sends to the picture
-/// its animated `src` plays into, and the message each answers with: native's
-/// own (`platform/darwin/ios/lynx_service/image/LynxImageService.m:294-352`,
-/// `platform/android/.../ui/image/LynxImageManager.java:773-793`).
 const ANIMATION_METHODS: [(&str, PlaybackControl, &str); 4] = [
     (
         "startAnimate",
@@ -222,77 +218,13 @@ const ANIMATION_METHODS: [(&str, PlaybackControl, &str); 4] = [
     ("stopAnimation", PlaybackControl::Stop, "Animation stopped."),
 ];
 
-/// Lynx's picture tag, and the attributes this module reflects off it.
-///
-/// `mode` and `auto-size` are absent on purpose: they are selectors in
-/// [`UA_RULES`], so nothing observes them here.
 const IMAGE_TAG: &str = "image";
 const SRC_ATTRIBUTE: &str = "src";
 const PLACEHOLDER_ATTRIBUTE: &str = "placeholder";
 const BLUR_RADIUS_ATTRIBUTE: &str = "blur-radius";
 
-/// The property `blur-radius` reflects into, as a presentational hint.
 const FILTER_PROPERTY: &str = "filter";
 
-/// What shape an `image` draws into, from `web-elements`' own sheet and from
-/// native's layout defaults.
-///
-/// The border box and the rest of `web-elements`' common block
-/// (`common-css/linear.css`) come from [`super::ua_sheet`], which hands them to
-/// `image` beside the container tags and `text`. `display: flex` computes nothing today — the
-/// fork's initial `display` is already `flex` — and is written to pin the fact that `web-elements`
-/// deliberately keeps `x-image` out of the `--lynx-display-toggle` list that
-/// `defaultDisplayLinear` drives, a parity native does not share (its display
-/// is tag-independent) and that no childless leaf can observe either way.
-/// `contain: size` is the load-bearing one; the module docs carry its argument.
-///
-/// The child rule is `web-elements`' `x-image > * { display: none; }` and
-/// native's refusal to let an image take children at all, which makes
-/// leaf-ness a property of the tag rather than of whether a `src` happens to
-/// be set — `terminus` hides a replaced element's children, but only once it is
-/// replaced. It ties on specificity with the `display` rules `view`,
-/// `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper` carry, and
-/// wins on source order, which is why
-/// this block is assembled last; see the module docs.
-///
-/// Nothing here is `!important`: see
-/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
-///
-/// What `x-image.css` carries that this deliberately does not: `object-fit:
-/// fill` (already both the CSS initial value and Lynx's default `mode`),
-/// `align-items`/`justify-content`/`--justify-content`/`flex-direction: row
-/// !important` (scaffolding for the shadow `<img>` this engine does not have),
-/// and `overflow`/`position`/`border-*`/`min-*`/`scrollbar-width` (whole-sheet
-/// container policy this sheet withholds from every tag — and `min-*: 0` is
-/// moot here anyway, since containment already makes the automatic minimum
-/// size zero).
-///
-/// # `mode` and `auto-size`
-///
-/// Both are attribute selectors rather than node state, which is web-core's
-/// own spelling of them (`x-image.css:38-57`). Three literals cover `mode`
-/// whole: `scaleToFill`, an absent attribute and anything unrecognised all
-/// leave the initial `fill`, and the three that are not `fill` name the CSS
-/// keyword each reference already maps them to — Android's
-/// `FIT_CENTER`/`CENTER_CROP`/`CENTER` (`LynxImageManager.getMode`), Harmony's
-/// `ARKUI_OBJECT_FIT_CONTAIN`/`COVER`/`NONE` (`ui_new_image.cc:220-231`), and
-/// web-core's `contain`/`cover` plus, for `center`, an absolutely positioned
-/// unscaled `<img>` centred in the host — which is `object-fit: none` with the
-/// initial `object-position: 50% 50%`, one source pixel per CSS pixel.
-///
-/// The literals are case-sensitive, matching web-core's selectors and native's
-/// `equals`/`isEqualToString` readers; this is not an HTML document, so the
-/// fork matches attribute values case-sensitively by default.
-///
-/// `auto-size` is a boolean, and `:not([auto-size="false"])` is how a boolean
-/// survives the two stacks' opposite spellings of "off": `__SetAttribute`
-/// stringifies `false` into the literal `"false"`
-/// (`packages/bobcat-element/src/element-papi.ts:1377-1385`), while web-core's
-/// component framework strips any attribute whose value is `"false"` outright
-/// (`web-elements/src/element-reactive/component.ts:158-205`) and native parses
-/// a bool. Matching the string covers the first and is vacuous for the second.
-///
-/// Nothing pairs `mode` or `blur-radius` with `auto-size`: see the module docs.
 pub(super) const UA_RULES: &str = r#"image { display: flex; contain: size; }
 image[mode="aspectFit"] { object-fit: contain; }
 image[mode="aspectFill"] { object-fit: cover; }
@@ -301,10 +233,6 @@ image[auto-size]:not([auto-size="false"]) { contain: none; max-width: 100%; max-
 image > * { display: none; }
 "#;
 
-/// Installs the component, over the queue its write-time outcomes go into
-/// and the record of its elements' sources. Must run before any element
-/// could carry the tag, which is
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(
     document: &mut LynxDocument,
     outcomes: ComponentEvents,
@@ -313,20 +241,8 @@ pub(super) fn define(
     document.define(IMAGE_TAG, Box::new(Image { outcomes, sources }));
 }
 
-/// Points the element at whatever its attributes currently name.
-///
-/// `attribute_changed_callback` is the whole of the reflection.
-/// `constructed` could observe nothing: `__CreateImage` mints the element
-/// before `__SetAttribute` writes on it, so the reaction that carries the
-/// source always comes later. Nothing runs on disconnect either — a removal
-/// frees nothing, so a detached image keeps its sources and its requests.
-/// The free drops the element's record ([`CustomElement::freed`]), and the
-/// box's own hold on the picture it presents goes in `terminus`'s free.
 struct Image {
-    /// Where a `src` that settles at the write leaves its outcome. The
-    /// reaction runs inside a JavaScript call, so it cannot dispatch.
     outcomes: ComponentEvents,
-    /// The sources every `image` and `svg` element names.
     sources: ImageSources,
 }
 
@@ -348,55 +264,17 @@ impl CustomElement<()> for Image {
         new: Option<&str>,
     ) {
         match name {
-            // An empty value names nothing, and is the same case as no
-            // attribute at all: web-core relays `newval || placeholder` to the
-            // inner image, which with no placeholder present makes `''` and a
-            // removal identical, and native refuses to build a request for an
-            // empty URL.
-            //
-            // Nothing is trimmed, resolved, or validated. The registry keys on
-            // the raw string the page wrote, and turning that into bytes —
-            // resolving it against a base URL included — is the embedder's
-            // resource system's job, not this engine's.
-            //
-            // No `old == new` guard: the setter already returns before it
-            // asks for or invalidates anything when handed the value that
-            // role already holds.
-            //
-            // A source the document has already settled answers here, at the
-            // write, because no report will ever arrive for it again — the
-            // second mount of a URL this document has seen. It is queued
-            // rather than dispatched: this runs inside `__SetAttribute`, and
-            // an event delivered from there would re-enter the realm in the
-            // middle of the call that wrote the attribute. web-core's
-            // equivalent is asynchronous for the same reason — an `<img>`
-            // load event is a task, even for a cached URL.
             SRC_ATTRIBUTE => self.outcomes.queue_image(self.sources.set_playable(
                 document,
                 element,
                 ImageRole::Source,
                 source(new),
             )),
-            // The placeholder is the same string relayed the same way, into
-            // the same setter, because in native it is the same kind of thing:
-            // a URL requested in its own right, concurrently with `src`,
-            // rather than a fallback the element reaches for when `src` fails.
-            // Only the role differs — and with it the outcome, which
-            // `ImageRole::Placeholder` never produces, so there is nothing to
-            // queue here.
             PLACEHOLDER_ATTRIBUTE => {
                 let _ = self
                     .sources
                     .set(document, element, ImageRole::Placeholder, source(new));
             }
-            // Removing first is load-bearing: a hint keeps its old declaration
-            // when handed a value that does not parse, so offering
-            // `blur(garbage)` on its own would leave a previous `blur(10px)`
-            // standing. The raw attribute value goes into `blur(…)` unchanged,
-            // which is web-core's grammar — it writes the value into
-            // `--blur-radius` and lets the browser's `blur()` judge it — and
-            // costs a unitless number, which Android reads as physical pixels
-            // and CSS rejects.
             BLUR_RADIUS_ATTRIBUTE => {
                 document.set_presentational_hint(element, FILTER_PROPERTY, "");
                 if let Some(radius) = source(new) {
@@ -415,10 +293,6 @@ impl CustomElement<()> for Image {
         self.sources.forget(element);
     }
 
-    /// `startAnimate`, `pauseAnimation`, `resumeAnimation` and
-    /// `stopAnimation`: the control sent to the picture the element plays an
-    /// animated `src` into, when it plays one, and code 0 with native's
-    /// message either way. `params` is not read.
     fn invoke(
         &self,
         _document: &mut LynxDocument,
@@ -438,16 +312,12 @@ impl CustomElement<()> for Image {
     }
 }
 
-/// An attribute value that names something, with the empty string and a
-/// removal being the same nothing.
 fn source(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
-    // Every size asserted here is an authored pixel count, a viewport edge, or
-    // the exact zero Lynx's rule produces — no measurement, so no tolerance.
     #![allow(clippy::float_cmp)]
 
     use terminus::link::NodeId;
@@ -465,8 +335,6 @@ mod tests {
     const PLACEHOLDER: &str = "app:///holding.png";
     const AUTO_SIZE_ATTRIBUTE: &str = "auto-size";
     const MODE_ATTRIBUTE: &str = "mode";
-    /// Enough of a bitmap to derive a ratio from, if anything ever did — as
-    /// layout wants it, and as the host reports it.
     const NATURAL: (f32, f32) = (40.0, 20.0);
     const NATURAL_PIXELS: (u32, u32) = (40, 20);
 
@@ -474,7 +342,6 @@ mod tests {
         child(document, IMAGE_TAG, style)
     }
 
-    /// Writes `value`, or removes the attribute when it is `None`.
     fn set(document: &mut LynxDocument, element: NodeId, name: &str, value: Option<&str>) {
         if let Some(value) = value {
             document.set_attribute(element, name, value);
@@ -483,8 +350,6 @@ mod tests {
         }
     }
 
-    /// An image with a source and a reported intrinsic size — the state in
-    /// which an `<img>` would size itself from its pixels.
     fn loaded_image(document: &mut LynxDocument, style: &str) -> NodeId {
         let element = image(document, style);
         document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
@@ -563,10 +428,6 @@ mod tests {
         );
     }
 
-    /// The rule this module exists for: Lynx gives `<image>` no measurement, so
-    /// a box with no definite axis is zero on that axis however large the
-    /// bitmap is. An `<img>` would be 393x150 here, deriving the height from
-    /// the 2:1 ratio.
     #[test]
     fn an_unsized_image_is_not_sized_by_its_bitmap() {
         let mut document = document();
@@ -640,10 +501,6 @@ mod tests {
         }
     }
 
-    /// The reflection is the tag's, which is the whole reason it is a
-    /// `CustomElement` rather than an attribute hook keyed on the name alone:
-    /// a `src` written on a `view` must not turn it into replaced content and
-    /// swallow its children.
     #[test]
     fn a_src_on_another_tag_is_not_an_image_source() {
         let mut document = document();
@@ -660,12 +517,6 @@ mod tests {
         );
     }
 
-    /// The tripwire for [`UA_RULES`]' one ordering constraint.
-    ///
-    /// `image > *` only *ties* with `view`'s, `scroll-view`'s, `list`'s and
-    /// `wrapper`'s own `display` rules, so it wins on source order alone. This
-    /// fails the moment the block stops being assembled last — which is the
-    /// whole reason it is safe to keep the selector short.
     #[test]
     fn nothing_inside_an_image_generates_a_box() {
         for sourced in [false, true] {
@@ -697,9 +548,6 @@ mod tests {
         }
     }
 
-    /// The sheet gives a `text` no `display` of its own, so the `image > *`
-    /// rule reaches a `text` child like any other. With a `src` the
-    /// image is replaced, and `terminus` hides its children on top of the cascade.
     #[test]
     fn a_text_inside_an_image_is_suppressed_like_any_other_child() {
         let mut document = document();
@@ -734,8 +582,6 @@ mod tests {
         );
     }
 
-    /// `placeholder` is a second source, not a fallback, so it is relayed
-    /// exactly as `src` is — same request, same "nothing is normalized" rule.
     #[test]
     fn a_placeholder_is_asked_for_exactly_like_a_source() {
         for (attribute, url, other) in [
@@ -776,14 +622,6 @@ mod tests {
         }
     }
 
-    /// An empty `placeholder` is the same nothing a removed one is, and the
-    /// place that shows is the box: under `auto-size` the natural size is a
-    /// layout input, and `terminus` takes it from whichever bitmap the element
-    /// draws — the placeholder's while `src` has no pixels.
-    ///
-    /// That a placeholder can size the box at all follows iOS and web-core;
-    /// Android's `AutoSizeImage` is fed by the source load alone
-    /// (`AutoSizeImage.justSize`), so there a placeholder never sizes anything.
     #[test]
     fn an_empty_or_removed_placeholder_leaves_the_element_nothing_to_draw() {
         let (mut document, _, sources) = with_image_sources(PageConfig::default());
@@ -820,9 +658,6 @@ mod tests {
         }
     }
 
-    /// Both sources at once, which is the state native's model exists for: the
-    /// element asks for each of them once, and neither request waits on the
-    /// other.
     #[test]
     fn a_source_and_a_placeholder_are_two_concurrent_requests() {
         let mut document = document();
@@ -844,11 +679,6 @@ mod tests {
         *style_of(document, element).get_object_fit()
     }
 
-    /// `mode` reaches the engine as three UA attribute rules and nothing else.
-    /// The literals are case-sensitive, exactly as web-core's selectors and
-    /// native's string comparisons are, and everything they do not name —
-    /// `scaleToFill`, a typo, an empty value, no attribute at all — is the CSS
-    /// initial `fill`, which is also Android's and Harmony's fallback.
     #[test]
     fn the_mode_attribute_selects_an_object_fit() {
         let mut document = document();
@@ -866,9 +696,6 @@ mod tests {
             (None, ObjectFit::Fill),
         ] {
             set(&mut document, element, MODE_ATTRIBUTE, mode);
-            // A whole layout pass between writes: the flip has to restyle
-            // through stylo's attribute dependencies, not through a first
-            // cascade that had not happened yet.
             document.layout();
             assert_eq!(object_fit(&document, element), fit, "mode={mode:?}");
             assert_eq!(
@@ -883,10 +710,6 @@ mod tests {
         }
     }
 
-    /// The `mode` rules are UA origin and plain, so a page's own CSS outranks
-    /// them — the standing the `text-overflow` attribute rules have. web-core
-    /// differs here and knows it: its `x-image[mode=…]` rule is (0,1,1) in an
-    /// author-level sheet, so it beats a page's class rule.
     #[test]
     fn author_css_outranks_the_mode_attribute() {
         let mut document = document();
@@ -914,9 +737,6 @@ mod tests {
         assert_eq!(object_fit(&document, element), ObjectFit::Contain);
     }
 
-    /// `auto-size` is the one attribute that lifts `contain: size`, and it is a
-    /// boolean: present is on, and the literal `"false"` — what
-    /// `__SetAttribute` writes for a JavaScript `false` — is off.
     #[test]
     fn auto_size_lifts_size_containment() {
         const CONTAINED: Contain = Contain::from_bits_retain(
@@ -945,24 +765,6 @@ mod tests {
         }
     }
 
-    /// web-core's own `basic-element-image-auto-size` fixture, as sizes.
-    ///
-    /// The fixture nests an outer view laid out in one direction, an inner view
-    /// constraining both axes, only the width, or only the height, and the
-    /// auto-size image inside that. Every expected pair here is what Chrome
-    /// renders for the element web-core actually lays out under those parents —
-    /// its shadow `<img>`, which `x-image[auto-size]`'s `display: contents`
-    /// promotes into the inner view and `::part(img)` sizes `max-width: 100%;
-    /// max-height: 100%` (`x-image.css:55-81`).
-    ///
-    /// Native reaches the same six sizes. Its measure functions never grow a
-    /// bitmap on an at-most axis (`AutoSizeImage.java:144-146`,
-    /// `LynxUIImage.mm:1992-2043`), but starlight measures a stretched item with
-    /// an exact cross constraint (`flex_layout_algorithm.cc:132-146`,
-    /// `:335-345`), and an exact axis derives the other through the ratio,
-    /// capped by the at-most constraint on it — which is the stretch, the ratio
-    /// transfer and `max-*: 100%` of the CSS path. See
-    /// `docs/tracking/deviations.md`.
     #[test]
     fn auto_size_sizes_the_box_from_its_bitmap() {
         for (direction, inner, expected) in [
@@ -1005,9 +807,6 @@ mod tests {
         }
     }
 
-    /// An authored axis still wins under `auto-size`: it is the "exact" branch
-    /// of `AutoSizeImage.measure` and the used value of `width`/`height` in
-    /// CSS. The free axis comes from the ratio, and `max-height: 100%` caps it.
     #[test]
     fn an_authored_axis_outranks_the_bitmap_under_auto_size() {
         for (own, expected) in [
@@ -1017,10 +816,6 @@ mod tests {
             ("", NATURAL),
         ] {
             let mut document = document();
-            // A row parent, so the cross axis the container stretches is the
-            // one the authored height already pins: what is asserted here is
-            // the ratio, not the stretch that
-            // `auto_size_sizes_the_box_from_its_bitmap` covers.
             let parent = child(&mut document, "view", "display: flex; flex-direction: row");
             let element = element_under(&mut document, parent, IMAGE_TAG, own);
             document.set_attribute(element, AUTO_SIZE_ATTRIBUTE, "");
@@ -1036,8 +831,6 @@ mod tests {
         }
     }
 
-    /// Flipping `auto-size` after a layout pass has to move the box, which is
-    /// the attribute-dependency half of the UA rule working.
     #[test]
     fn flipping_auto_size_after_a_layout_resizes_the_box() {
         let mut document = document();
@@ -1055,8 +848,6 @@ mod tests {
         }
     }
 
-    /// The blur radius in the element's computed `filter`, in CSS pixels;
-    /// `None` when the list holds no blur at all, the initial value included.
     fn blur(document: &LynxDocument, element: NodeId) -> Option<f32> {
         use terminus::link::stylo::values::computed::effects::Filter;
 
@@ -1066,30 +857,17 @@ mod tests {
         }
     }
 
-    /// `blur-radius` is the one `<image>` attribute that becomes a
-    /// presentational hint, because its value is a length rather than one of a
-    /// handful of literals. The raw string goes into `blur(…)`, so CSS judges
-    /// it — which is web-core's grammar, since it writes the value into
-    /// `--blur-radius` and lets `blur(var(--blur-radius))` parse it.
     #[test]
     fn blur_radius_reflects_into_a_filter() {
         let mut document = document();
         let element = image(&mut document, "width: 100px; height: 60px");
         for (value, expected) in [
             (Some("10px"), Some(10.0)),
-            // A relative length computes against this element's own font size,
-            // which the page's `font-family` block leaves at the initial 16px.
             (Some("2em"), Some(32.0)),
-            // An invalid value must not leave the previous one standing.
             (Some("garbage"), None),
             (Some("10px"), Some(10.0)),
-            // Android reads a unitless number as physical pixels
-            // (`UnitUtils.toPxWithDisplayMetrics`'s final `Float.parseFloat`);
-            // CSS `blur()` needs a length, so web-core drops it, and so do we.
             (Some("10"), None),
             (Some("10px"), Some(10.0)),
-            // Not a second declaration: one property's value is parsed on its
-            // own, so a `;` is simply invalid.
             (Some("10px); color: red"), None),
             (Some("10px"), Some(10.0)),
             (Some(""), None),
@@ -1111,8 +889,6 @@ mod tests {
         }
     }
 
-    /// The hint origin loses to author CSS and to inline style, so a page can
-    /// still take the blur off or replace it.
     #[test]
     fn author_css_outranks_the_blur_radius_attribute() {
         let mut document = document();

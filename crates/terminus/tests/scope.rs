@@ -94,19 +94,14 @@ const GREEN: &str = "rgb(0, 128, 0)";
 const BLACK: &str = "rgb(0, 0, 0)";
 const TRANSPARENT: &str = "rgba(0, 0, 0, 0)";
 
-/// The baseline every `assert_not_green` in the WPT files reads.
 const MAIN_BLACK: &str = "main * { background-color: black; }";
 
-/// A document whose tree is `<page><main id=main>…</main></page>`, built from
-/// WPT template markup.
 struct Page {
     doc: Doc,
     main: NodeId,
 }
 
 impl Page {
-    /// Mounts `css` (the WPT file's own `<style>`), then builds `markup` under
-    /// `main` and flushes.
     fn new(css: &str, markup: &str) -> Self {
         let mut doc = Doc::new();
         if !css.is_empty() {
@@ -118,8 +113,6 @@ impl Page {
         Self { doc, main }
     }
 
-    /// Builds `markup` directly under the document element, so `main` is the
-    /// document element itself.
     fn at_root(css: &str, markup: &str) -> Self {
         let mut doc = Doc::new();
         if !css.is_empty() {
@@ -139,12 +132,10 @@ impl Page {
         self.doc.flush();
     }
 
-    /// `main.querySelector(selectors)`.
     fn q(&self, selectors: &str) -> NodeId {
         self.q_in(self.main, selectors)
     }
 
-    /// `root.querySelector(selectors)`, for a shadow root or a host.
     fn q_in(&self, root: NodeId, selectors: &str) -> NodeId {
         self.doc
             .dom
@@ -153,7 +144,6 @@ impl Page {
             .unwrap_or_else(|| panic!("no element matches `{selectors}`"))
     }
 
-    /// `main.querySelectorAll(selectors)`.
     fn all(&self, selectors: &str) -> Vec<NodeId> {
         self.doc
             .dom
@@ -210,16 +200,7 @@ impl Page {
     }
 }
 
-/// Builds WPT template markup under `parent`.
-///
-/// The dialect: elements with `id`, `class` and other attributes (unquoted,
-/// quoted or bare); `<style>` mounts its text as a document stylesheet, or as
-/// a shadow stylesheet of the enclosing shadow root; `<template
-/// shadowrootmode=open>` attaches a shadow root to the element it sits in and
-/// builds its content there; `<input>` is void; comments and text are
-/// skipped.
 fn build(doc: &mut Doc, parent: NodeId, markup: &str) {
-    // (tag, container, the shadow root a `<style>` here belongs to)
     let mut stack: Vec<(String, NodeId, Option<NodeId>)> = vec![(String::new(), parent, None)];
     let mut rest = markup;
     while let Some(start) = rest.find('<') {
@@ -315,17 +296,12 @@ fn parse_tag(tag: &str) -> (String, Vec<(String, String)>) {
     (name, attrs)
 }
 
-// ---------------------------------------------------------------------------
-// scope-evaluation.html
-// ---------------------------------------------------------------------------
-
 const EVAL_BASE: &str = ":where(main *) { background-color: black; }";
 
 fn eval_page(markup: &str) -> Page {
     Page::new(EVAL_BASE, markup)
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Single scope".
 #[test]
 fn wpt_scope_evaluation_single_scope() {
     let page = eval_page(
@@ -339,8 +315,6 @@ fn wpt_scope_evaluation_single_scope() {
     page.not_green(":scope > span", "no .a ancestor, no scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Scope can not match its own root
-// without :scope".
 #[test]
 fn wpt_scope_evaluation_root_needs_scope_pseudo() {
     let page = eval_page(
@@ -354,7 +328,6 @@ fn wpt_scope_evaluation_root_needs_scope_pseudo() {
     page.not_green(".a > span", "the span is not .a");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Selecting self with :scope".
 #[test]
 fn wpt_scope_evaluation_selecting_self_with_scope() {
     let page = eval_page(
@@ -365,7 +338,6 @@ fn wpt_scope_evaluation_selecting_self_with_scope() {
     page.not_green(".a > span", ":scope is the root only");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Single scope with limit".
 #[test]
 fn wpt_scope_evaluation_single_scope_with_limit() {
     let page = eval_page(
@@ -379,8 +351,6 @@ fn wpt_scope_evaluation_single_scope_with_limit() {
     page.not_green(".c > span", "a limit's descendants are out of scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Single scope, :scope pseudo in
-// main selector".
 #[test]
 fn wpt_scope_evaluation_scope_pseudo_in_main_selector() {
     let page = eval_page(
@@ -394,8 +364,6 @@ fn wpt_scope_evaluation_scope_pseudo_in_main_selector() {
     page.not_green(".b > span", "a grandchild of :scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Single scope, :scope pseudo in
-// to-selector".
 #[test]
 fn wpt_scope_evaluation_scope_pseudo_in_to_selector() {
     let page = eval_page(
@@ -409,8 +377,6 @@ fn wpt_scope_evaluation_scope_pseudo_in_to_selector() {
     page.green(".a > .c > .b > span", "that .b is not a child of the root");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Multiple scopes, :scope pseudo
-// in to-selector".
 #[test]
 fn wpt_scope_evaluation_multiple_scopes_scope_pseudo_in_to_selector() {
     let page = eval_page(
@@ -427,8 +393,6 @@ fn wpt_scope_evaluation_multiple_scopes_scope_pseudo_in_to_selector() {
     );
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Inner @scope with :scope in
-// from-selector".
 #[test]
 fn wpt_scope_evaluation_inner_scope_with_scope_pseudo_in_from_selector() {
     let page = eval_page(
@@ -447,8 +411,6 @@ fn wpt_scope_evaluation_inner_scope_with_scope_pseudo_in_from_selector() {
     page.not_green(".a > div > .b > span", "that .b is not a child of .a");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Multiple scopes from same
-// @scope-rule, only one limited".
 #[test]
 fn wpt_scope_evaluation_multiple_scopes_only_one_limited() {
     let page = eval_page(
@@ -458,8 +420,6 @@ fn wpt_scope_evaluation_multiple_scopes_only_one_limited() {
     page.green(".c", "the outer .a scope does not limit .c");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Multiple scopes from same
-// @scope-rule, both limited".
 #[test]
 fn wpt_scope_evaluation_multiple_scopes_both_limited() {
     let page = eval_page(
@@ -469,7 +429,6 @@ fn wpt_scope_evaluation_multiple_scopes_both_limited() {
     page.not_green(".c", ".b limits both scopes");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Nested scopes".
 #[test]
 fn wpt_scope_evaluation_nested_scopes() {
     let page = eval_page(
@@ -485,7 +444,6 @@ fn wpt_scope_evaluation_nested_scopes() {
     page.not_green(":scope > .b > span", "that .b is outside .a");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Nested scopes, reverse".
 #[test]
 fn wpt_scope_evaluation_nested_scopes_reverse() {
     let page = eval_page(
@@ -502,8 +460,6 @@ fn wpt_scope_evaluation_nested_scopes_reverse() {
     page.not_green(".a > span", "no .b ancestor");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Nested scopes, with
-// to-selector".
 #[test]
 fn wpt_scope_evaluation_nested_scopes_with_to_selector() {
     let page = eval_page(
@@ -523,8 +479,6 @@ fn wpt_scope_evaluation_nested_scopes_with_to_selector() {
     page.not_green(":scope > .b > span", "that .b is outside .a");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Nested scopes, inner scoping
-// root may be the outer scoping root".
 #[test]
 fn wpt_scope_evaluation_inner_root_may_be_outer_root() {
     let page = eval_page(
@@ -534,7 +488,6 @@ fn wpt_scope_evaluation_inner_root_may_be_outer_root() {
     page.green(".a > span", "the scoping root is in its own scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, ":scope selecting itself".
 #[test]
 fn wpt_scope_evaluation_scope_selecting_itself() {
     let page = eval_page(
@@ -544,8 +497,6 @@ fn wpt_scope_evaluation_scope_selecting_itself() {
     page.green(".a", ":scope matches the root");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "The scoping limit is not in
-// scope".
 #[test]
 fn wpt_scope_evaluation_limit_is_not_in_scope() {
     let page = eval_page(
@@ -564,8 +515,6 @@ fn wpt_scope_evaluation_limit_is_not_in_scope() {
     page.not_green("#below", why);
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Simulated inclusive scoping
-// limit".
 #[test]
 fn wpt_scope_evaluation_simulated_inclusive_limit() {
     let page = eval_page(
@@ -584,7 +533,6 @@ fn wpt_scope_evaluation_simulated_inclusive_limit() {
     page.not_green("#limit", why);
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Scope with no elements".
 #[test]
 fn wpt_scope_evaluation_scope_with_no_elements() {
     let page = eval_page(
@@ -600,8 +548,6 @@ fn wpt_scope_evaluation_scope_with_no_elements() {
     }
 }
 
-// WPT css/css-cascade/scope-evaluation.html, ":scope direct adjacent
-// sibling".
 #[test]
 fn wpt_scope_evaluation_scope_direct_adjacent_sibling() {
     let page = eval_page(
@@ -611,8 +557,6 @@ fn wpt_scope_evaluation_scope_direct_adjacent_sibling() {
     page.not_green(".c", "a sibling of the root is never in its scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, ":scope indirect adjacent
-// sibling".
 #[test]
 fn wpt_scope_evaluation_scope_indirect_adjacent_sibling() {
     let page = eval_page(
@@ -622,8 +566,6 @@ fn wpt_scope_evaluation_scope_indirect_adjacent_sibling() {
     page.not_green(".c", "a sibling of the root is never in its scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Relative selector inside
-// @scope".
 #[test]
 fn wpt_scope_evaluation_relative_selector() {
     let page = eval_page(
@@ -633,8 +575,6 @@ fn wpt_scope_evaluation_relative_selector() {
     page.green(".a > span", "`> span` is relative to :scope");
 }
 
-// WPT css/css-cascade/scope-evaluation.html, ":scope in two different
-// compounds".
 #[test]
 fn wpt_scope_evaluation_scope_in_two_compounds() {
     let page = eval_page(
@@ -648,8 +588,6 @@ fn wpt_scope_evaluation_scope_in_two_compounds() {
     );
 }
 
-// WPT css/css-cascade/scope-evaluation.html, "Any scope limit makes the
-// element out of scope".
 #[test]
 fn wpt_scope_evaluation_any_limit_excludes() {
     let page = eval_page(
@@ -663,11 +601,6 @@ fn wpt_scope_evaluation_any_limit_excludes() {
     page.not_green("#out", "under the .b limit");
 }
 
-// ---------------------------------------------------------------------------
-// scope-proximity.html
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-proximity.html, "Alternating light/dark".
 #[test]
 fn wpt_scope_proximity_alternating_light_dark() {
     let page = Page::new(
@@ -692,8 +625,6 @@ fn wpt_scope_proximity_alternating_light_dark() {
     assert_eq!(page.border("#item4"), "rgb(200, 200, 200)", "{why}");
 }
 
-// WPT css/css-cascade/scope-proximity.html, "Proximity wins over order of
-// appearance".
 #[test]
 fn wpt_scope_proximity_wins_over_order() {
     let page = Page::new(
@@ -711,8 +642,6 @@ fn wpt_scope_proximity_wins_over_order() {
     );
 }
 
-// WPT css/css-cascade/scope-proximity.html, "Specificity wins over
-// proximity".
 #[test]
 fn wpt_scope_proximity_specificity_wins() {
     let page = Page::new(
@@ -730,8 +659,6 @@ fn wpt_scope_proximity_specificity_wins() {
     );
 }
 
-// WPT css/css-cascade/scope-proximity.html, "Identical root with further
-// proximity is not ignored".
 #[test]
 fn wpt_scope_proximity_identical_root_further() {
     let page = Page::new(
@@ -746,8 +673,6 @@ fn wpt_scope_proximity_identical_root_further() {
     );
 }
 
-// WPT css/css-cascade/scope-proximity.html, "Most proximate match wins under
-// multiple scoping roots".
 #[test]
 fn wpt_scope_proximity_most_proximate_root() {
     let page = Page::new(
@@ -765,11 +690,6 @@ fn wpt_scope_proximity_most_proximate_root() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-specificity.html
-// ---------------------------------------------------------------------------
-
-/// WPT `format_scoped_rule`.
 fn format_scoped_rule(scoped: &[&str], declarations: &str) -> String {
     let (prelude, rest) = scoped.split_first().expect("a prelude and a selector");
     let content = match rest {
@@ -779,8 +699,6 @@ fn format_scoped_rule(scoped: &[&str], declarations: &str) -> String {
     format!("{prelude} {{ {content} }}")
 }
 
-/// WPT `test_scope_specificity`: the scoped rule's specificity equals the
-/// reference selector's, and proximity breaks the tie.
 fn specificity_case(scoped: &[&str], reference: &str) {
     const TREE: &str = "<div id=a class=a><div id=b class=b></div></div>";
     let scoped_rule = format_scoped_rule(scoped, "z-index:1");
@@ -810,35 +728,21 @@ fn specificity_case(scoped: &[&str], reference: &str) {
     }
 }
 
-// WPT css/css-cascade/scope-specificity.html, every case.
 #[test]
 fn wpt_scope_specificity_all() {
-    // Implicit `:scope ` before inner selectors adds no specificity.
     specificity_case(&["@scope (#main)", ".b"], ".b");
     specificity_case(&["@scope (#main) to (.b)", ".a"], ".a");
     specificity_case(&["@scope (#main, .foo, .bar)", "#a"], "#a");
     specificity_case(&["@scope (#main)", "div.b"], "div.b");
     specificity_case(&["@scope (#main)", ":scope .b"], ".a .b");
-    // `&` behaves like `:where(:scope)`.
     specificity_case(&["@scope (#main)", "& .b"], ":where(#main) .b");
     specificity_case(&["@scope (#main)", "div .b"], "div .b");
     specificity_case(&["@scope (#main)", "@scope (.a)", ".b"], ".b");
-    // An explicit `:scope` adds specificity.
     specificity_case(&["@scope (#main)", ":scope .b"], ":scope .b");
-    // `&` behaves like `:where(:scope)` for an implicit root too. The WPT
-    // sheet sits in `main`; here the document element is the implicit root,
-    // and the unscoped `:scope` is the document element as well.
     specificity_case(&["@scope", "& .b"], ":where(:scope) .b");
-    // Relative selector syntax adds no specificity.
     specificity_case(&["@scope (#main)", "> .a"], ":where(#main) > .a");
 }
 
-// ---------------------------------------------------------------------------
-// scope-declarations.html
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-declarations.html, "Scoped declarations apply to
-// the scoping root".
 #[test]
 fn wpt_scope_declarations_apply_to_root() {
     let page = Page::new(
@@ -852,9 +756,6 @@ fn wpt_scope_declarations_apply_to_root() {
     );
 }
 
-// WPT css/css-cascade/scope-declarations.html, "Scoped declarations apply to
-// implicit scoping root". The WPT root is the owner `<style>`'s parent; a
-// document sheet's implicit root is the document element.
 #[test]
 fn wpt_scope_declarations_apply_to_implicit_root() {
     let page = Page::new(
@@ -869,8 +770,6 @@ fn wpt_scope_declarations_apply_to_implicit_root() {
     assert_eq!(page.z(".a"), "auto", "and only to the root");
 }
 
-// WPT css/css-cascade/scope-declarations.html, "Scoped declarations apply
-// with zero specificity".
 #[test]
 fn wpt_scope_declarations_zero_specificity() {
     let page = Page::new(
@@ -887,11 +786,6 @@ fn wpt_scope_declarations_zero_specificity() {
     assert_eq!(page.z(".c"), "1", ":scope outweighs bare declarations");
 }
 
-// ---------------------------------------------------------------------------
-// scope-nesting.html
-// ---------------------------------------------------------------------------
-
-/// The `a`/`b`/`below`/`outside` tree three scope-end cases share.
 const SCOPE_END_TREE: &str = "
     <div class=\"a b\"><div class=b><div id=below></div></div></div>
   </div>
@@ -905,7 +799,6 @@ fn scope_end_case(css: &str, case: &str) {
     assert_eq!(page.z("#outside"), "auto", "{case}");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Nesting-selector in <scope-end>".
 #[test]
 fn wpt_scope_nesting_nesting_selector_in_scope_end() {
     scope_end_case(
@@ -915,7 +808,6 @@ fn wpt_scope_nesting_nesting_selector_in_scope_end() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Implicit :scope in <scope-end>".
 #[test]
 fn wpt_scope_nesting_implicit_scope_in_scope_end() {
     scope_end_case(
@@ -925,8 +817,6 @@ fn wpt_scope_nesting_implicit_scope_in_scope_end() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Relative selectors in
-// <scope-end>".
 #[test]
 fn wpt_scope_nesting_relative_selectors_in_scope_end() {
     scope_end_case(
@@ -935,8 +825,6 @@ fn wpt_scope_nesting_relative_selectors_in_scope_end() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Nested nesting-selectors within
-// scope's <stylesheet> select inclusive descendants of the scope root".
 #[test]
 fn wpt_scope_nesting_nested_nesting_selectors() {
     let page = Page::new(
@@ -951,8 +839,6 @@ fn wpt_scope_nesting_nested_nesting_selectors() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Nesting-selector within :scope
-// rule".
 #[test]
 fn wpt_scope_nesting_nesting_selector_within_scope_rule() {
     let page = Page::new(
@@ -963,8 +849,6 @@ fn wpt_scope_nesting_nesting_selector_within_scope_rule() {
     assert_eq!(page.z("#div"), "2", "`&` inside `:scope {{}}` is :scope");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Nesting-selector within :scope
-// rule (double nested)".
 #[test]
 fn wpt_scope_nesting_nesting_selector_within_scope_rule_double() {
     let page = Page::new(
@@ -979,7 +863,6 @@ fn wpt_scope_nesting_nesting_selector_within_scope_rule_double() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "@scope nested within style rule".
 #[test]
 fn wpt_scope_nesting_scope_within_style_rule() {
     let page = Page::new(
@@ -994,8 +877,6 @@ fn wpt_scope_nesting_scope_within_style_rule() {
     assert_eq!(page.z("#out_of_scope"), "auto", "no .b root above it");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Parent pseudo class within
-// scope-start".
 #[test]
 fn wpt_scope_nesting_parent_pseudo_in_scope_start() {
     let page = Page::new(
@@ -1012,8 +893,6 @@ fn wpt_scope_nesting_parent_pseudo_in_scope_start() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Parent pseudo class within body of
-// nested @scope".
 #[test]
 fn wpt_scope_nesting_parent_pseudo_in_nested_scope_body() {
     let page = Page::new(
@@ -1045,8 +924,6 @@ fn wpt_scope_nesting_parent_pseudo_in_nested_scope_body() {
     }
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Implicit rule within nested
-// @scope".
 #[test]
 fn wpt_scope_nesting_implicit_rule_within_nested_scope() {
     let page = Page::new(
@@ -1067,8 +944,6 @@ fn wpt_scope_nesting_implicit_rule_within_nested_scope() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Implicit rule within nested
-// @scope (proximity)".
 #[test]
 fn wpt_scope_nesting_implicit_rule_within_nested_scope_proximity() {
     let page = Page::new(
@@ -1088,7 +963,6 @@ fn wpt_scope_nesting_implicit_rule_within_nested_scope_proximity() {
     assert_eq!(page.z(".c"), "auto", "not the root");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Nested :scope inside an :is".
 #[test]
 fn wpt_scope_nesting_nested_scope_inside_is() {
     let page = Page::new(
@@ -1114,8 +988,6 @@ fn wpt_scope_nesting_nested_scope_inside_is() {
     assert_eq!(page.z(".c"), "3", ":scope inside :is() is the scoping root");
 }
 
-// WPT css/css-cascade/scope-nesting.html, ":scope within nested and scoped
-// rule".
 #[test]
 fn wpt_scope_nesting_scope_within_nested_scoped_rule() {
     let page = Page::new(
@@ -1127,8 +999,6 @@ fn wpt_scope_nesting_scope_within_nested_scoped_rule() {
     assert_eq!(page.z(".a .b"), "1", "`.a :scope` with the .b root");
 }
 
-// WPT css/css-cascade/scope-nesting.html, ":scope within nested and scoped
-// rule (implied &)".
 #[test]
 fn wpt_scope_nesting_scope_within_nested_scoped_rule_implied() {
     let page = Page::new(
@@ -1140,8 +1010,6 @@ fn wpt_scope_nesting_scope_within_nested_scoped_rule_implied() {
     assert_eq!(page.z(".a .b"), "1", "the implied `&` makes `.a :scope`");
 }
 
-// WPT css/css-cascade/scope-nesting.html, ":scope within nested and scoped
-// rule (relative)".
 #[test]
 fn wpt_scope_nesting_scope_within_nested_scoped_rule_relative() {
     let page = Page::new(
@@ -1153,7 +1021,6 @@ fn wpt_scope_nesting_scope_within_nested_scoped_rule_relative() {
     assert_eq!(page.z(".a .b"), "1", "`.a > :scope` with the .b root");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Scoped nested group rule".
 #[test]
 fn wpt_scope_nesting_scoped_nested_group_rule() {
     let page = Page::new(
@@ -1169,8 +1036,6 @@ fn wpt_scope_nesting_scoped_nested_group_rule() {
     );
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Scoped nested within another
-// scope".
 #[test]
 fn wpt_scope_nesting_scoped_within_scoped() {
     let page = Page::new(
@@ -1191,8 +1056,6 @@ fn wpt_scope_nesting_scoped_within_scoped() {
     assert_eq!(page.z("#child"), "1", "a relative inner <scope-start>");
 }
 
-// WPT css/css-cascade/scope-nesting.html, "Implicit (prelude-less) @scope as
-// a nested group rule".
 #[test]
 fn wpt_scope_nesting_implicit_scope_as_nested_group_rule() {
     let page = Page::new(
@@ -1207,13 +1070,6 @@ fn wpt_scope_nesting_implicit_scope_as_nested_group_rule() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-implicit.html, restated against the document element
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-implicit.html, "@scope without prelude implicitly
-// scopes to parent of owner node". The root here is the document element, so
-// the `#outer` half (an element outside the root) has no counterpart.
 #[test]
 fn wpt_scope_implicit_basic() {
     let page = Page::at_root(
@@ -1227,7 +1083,6 @@ fn wpt_scope_implicit_basic() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit.html, ":scope can style implicit root".
 #[test]
 fn wpt_scope_implicit_scope_pseudo() {
     let page = Page::at_root(
@@ -1244,8 +1099,6 @@ fn wpt_scope_implicit_scope_pseudo() {
     }
 }
 
-// WPT css/css-cascade/scope-implicit.html, "@scope works with two identical
-// stylesheets".
 #[test]
 fn wpt_scope_implicit_duplicate() {
     let mut page = Page::at_root(
@@ -1258,8 +1111,6 @@ fn wpt_scope_implicit_duplicate() {
     assert_eq!(page.z("#second"), "1", "identical sheets both apply");
 }
 
-// WPT css/css-cascade/scope-implicit.html, "@scope with effectively empty
-// :is() must not match anything".
 #[test]
 fn wpt_scope_implicit_forgiving() {
     let page = Page::new(
@@ -1273,8 +1124,6 @@ fn wpt_scope_implicit_forgiving() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope has implicitly
-// added :scope descendant combinator". `#div` is the document element here.
 #[test]
 fn wpt_scope_implicit_descendant() {
     let mut page = Page::at_root("@scope { #div { z-index:1; } }", "<div id=inner></div>");
@@ -1288,8 +1137,6 @@ fn wpt_scope_implicit_descendant() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope with inner
-// relative selector".
 #[test]
 fn wpt_scope_implicit_relative() {
     let page = Page::at_root(
@@ -1309,8 +1156,6 @@ fn wpt_scope_implicit_relative() {
     assert_eq!(page.z("#inner"), "auto", "a grandchild");
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope with inner
-// nesting selector".
 #[test]
 fn wpt_scope_implicit_nesting_selector() {
     let page = Page::at_root("@scope { & { z-index:1; } }", "<div id=inner></div>");
@@ -1322,8 +1167,6 @@ fn wpt_scope_implicit_nesting_selector() {
     assert_eq!(page.z("#inner"), "auto", "only the root");
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope with limit". The
-// `#outer` half has no counterpart, as in `wpt_scope_implicit_basic`.
 #[test]
 fn wpt_scope_implicit_limit() {
     let page = Page::at_root(
@@ -1334,10 +1177,6 @@ fn wpt_scope_implicit_limit() {
     assert_eq!(page.z("#outside_limit"), "auto", "under the limit");
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Proximity calculation of
-// multiple implicit @scope". All three document sheets share the document
-// element as their root, so proximity ties and order of appearance decides;
-// the WPT's middle sheet is an owner `<style>` with a nearer root.
 #[test]
 fn wpt_scope_implicit_concurrent_proximity() {
     let mut page = Page::at_root(
@@ -1359,11 +1198,6 @@ fn wpt_scope_implicit_concurrent_proximity() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope sandwiched
-// between non-implicit scopes" and "Implicit @scope sandwiched right under an
-// explicit scope", inverted: the document element is never inside the
-// `#outer` scope, so the implicit scope under it is empty (Gecko's
-// resolution). `wpt_scope_implicit_in_explicit_shadow` has the WPT outcome.
 #[test]
 fn wpt_scope_implicit_sandwich_document_root() {
     let page = Page::new(
@@ -1388,9 +1222,6 @@ fn wpt_scope_implicit_sandwich_document_root() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit.html, "Implicit @scope sandwiched right
-// under an explicit scope", with the sheet in `#outer`'s shadow tree: its
-// implicit root is the host, which is the explicit scope's own root.
 #[test]
 fn wpt_scope_implicit_in_explicit_shadow() {
     let page = Page::new(
@@ -1406,11 +1237,6 @@ fn wpt_scope_implicit_in_explicit_shadow() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-shadow.html
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-shadow.html, "@scope can match :host".
 #[test]
 fn wpt_scope_shadow_match_host() {
     let page = Page::new(
@@ -1424,7 +1250,6 @@ fn wpt_scope_shadow_match_host() {
     assert_eq!(page.z_of(a), "1", "<scope-start> can be the host");
 }
 
-// WPT css/css-cascade/scope-shadow.html, "@scope can match :host(...)".
 #[test]
 fn wpt_scope_shadow_match_host_functional() {
     let page = Page::new(
@@ -1445,8 +1270,6 @@ fn wpt_scope_shadow_match_host_functional() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, ":scope matches host via the
-// scoping root".
 #[test]
 fn wpt_scope_shadow_scope_subject() {
     let page = Page::new(
@@ -1463,8 +1286,6 @@ fn wpt_scope_shadow_scope_subject() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, ":scope within :is() matches host
-// via the scoping root".
 #[test]
 fn wpt_scope_shadow_scope_subject_is() {
     let page = Page::new(
@@ -1495,8 +1316,6 @@ fn wpt_scope_shadow_scope_subject_is() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, "Implicit @scope as direct child of
-// shadow root".
 #[test]
 fn wpt_scope_shadow_implicit_direct_child() {
     let page = Page::new(
@@ -1522,8 +1341,6 @@ fn wpt_scope_shadow_implicit_direct_child() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, "Implicit @scope in construted
-// stylesheet". A shadow sheet here is the analogue of the adopted sheet.
 #[test]
 fn wpt_scope_shadow_implicit_constructed() {
     let mut page = Page::new(
@@ -1533,7 +1350,6 @@ fn wpt_scope_shadow_implicit_constructed() {
          </div>",
     );
     let shadow = page.shadow("#implicit_scope_constructed > .host");
-    // The WPT text leaves the `@scope` block unclosed; CSS closes it at EOF.
     page.doc.dom.add_shadow_stylesheet(
         shadow,
         "@scope {
@@ -1551,8 +1367,6 @@ fn wpt_scope_shadow_implicit_constructed() {
     assert_eq!(page.z_of(a), "2", "and its shadow tree is in scope");
 }
 
-// WPT css/css-cascade/scope-shadow.html, "Matching :host via &, :scope
-// (subject)".
 #[test]
 fn wpt_scope_shadow_parent_pseudo_subject() {
     let page = Page::new(
@@ -1570,8 +1384,6 @@ fn wpt_scope_shadow_parent_pseudo_subject() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, "Matching :host via &, :scope
-// (non-subject)".
 #[test]
 fn wpt_scope_shadow_parent_pseudo_non_subject() {
     let page = Page::new(
@@ -1594,8 +1406,6 @@ fn wpt_scope_shadow_parent_pseudo_non_subject() {
     );
 }
 
-// WPT css/css-cascade/scope-shadow.html, "Matching :host via &, :scope
-// (non-subject, >)".
 #[test]
 fn wpt_scope_shadow_parent_pseudo_non_subject_child() {
     let page = Page::new(
@@ -1618,13 +1428,6 @@ fn wpt_scope_shadow_parent_pseudo_non_subject_child() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-shadow-sharing.html (reftest), scope-ua-shadow-host.html (reftest)
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-shadow-sharing.html: two shadow trees holding
-// the same sheet text each resolve their own implicit root. The owner
-// `<style>` nested in the first div is dropped (it has no counterpart here).
 #[test]
 fn wpt_scope_shadow_sharing() {
     const SHEET: &str = "
@@ -1673,9 +1476,6 @@ fn wpt_scope_shadow_sharing() {
     }
 }
 
-// WPT css/css-cascade/scope-ua-shadow-host.html: an element with a shadow
-// root of its own (the `<input>`'s UA shadow tree) still matches scoped rules
-// from the tree it lives in.
 #[test]
 fn wpt_scope_ua_shadow_host() {
     let mut page = Page::new(
@@ -1695,10 +1495,6 @@ fn wpt_scope_ua_shadow_host() {
     assert_eq!(page.doc.value(input, "height"), "100px");
 }
 
-// ---------------------------------------------------------------------------
-// scope-invalidation.html
-// ---------------------------------------------------------------------------
-
 fn inval_page(markup: &str) -> Page {
     Page::new(MAIN_BLACK, markup)
 }
@@ -1715,8 +1511,6 @@ impl Page {
     }
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming scope
-// root".
 #[test]
 fn wpt_scope_invalidation_element_becoming_root() {
     let mut page = inval_page(
@@ -1732,8 +1526,6 @@ fn wpt_scope_invalidation_element_becoming_root() {
     page.not_green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming scope root
-// (selector list)".
 #[test]
 fn wpt_scope_invalidation_element_becoming_root_list() {
     let mut page = inval_page(
@@ -1751,8 +1543,6 @@ fn wpt_scope_invalidation_element_becoming_root_list() {
     }
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming scope root,
-// with inner :scope rule".
 #[test]
 fn wpt_scope_invalidation_becoming_root_inner_scope_rule() {
     let mut page = inval_page(
@@ -1768,8 +1558,6 @@ fn wpt_scope_invalidation_becoming_root_inner_scope_rule() {
     page.not_green_id(b, ".b", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Parent element becoming
-// scope limit".
 #[test]
 fn wpt_scope_invalidation_parent_becoming_limit() {
     let mut page = inval_page(
@@ -1785,8 +1573,6 @@ fn wpt_scope_invalidation_parent_becoming_limit() {
     page.green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Parent element becoming
-// scope limit (selector list)".
 #[test]
 fn wpt_scope_invalidation_parent_becoming_limit_list() {
     let mut page = inval_page(
@@ -1804,8 +1590,6 @@ fn wpt_scope_invalidation_parent_becoming_limit_list() {
     }
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Subject element becoming
-// scope limit".
 #[test]
 fn wpt_scope_invalidation_subject_becoming_limit() {
     let mut page = inval_page(
@@ -1821,8 +1605,6 @@ fn wpt_scope_invalidation_subject_becoming_limit() {
     page.green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Parent element affecting
-// scope limit".
 #[test]
 fn wpt_scope_invalidation_parent_affecting_limit() {
     let mut page = inval_page(
@@ -1838,8 +1620,6 @@ fn wpt_scope_invalidation_parent_affecting_limit() {
     page.green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Sibling element affecting
-// scope limit".
 #[test]
 fn wpt_scope_invalidation_sibling_affecting_limit() {
     let mut page = inval_page(
@@ -1856,8 +1636,6 @@ fn wpt_scope_invalidation_sibling_affecting_limit() {
     page.green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Toggling inner/outer scope
-// roots".
 #[test]
 fn wpt_scope_invalidation_toggling_inner_outer_roots() {
     let mut page = inval_page(
@@ -1885,8 +1663,6 @@ fn wpt_scope_invalidation_toggling_inner_outer_roots() {
     page.green_id(span, "span", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming root, with
-// :scope in subject".
 #[test]
 fn wpt_scope_invalidation_becoming_root_scope_subject() {
     let mut page =
@@ -1900,8 +1676,6 @@ fn wpt_scope_invalidation_becoming_root_scope_subject() {
     page.not_green_id(div, "div", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming root, with
-// :scope selected by ~ combinator".
 #[test]
 fn wpt_scope_invalidation_becoming_root_sibling_combinator() {
     let mut page = inval_page(
@@ -1922,8 +1696,6 @@ fn wpt_scope_invalidation_becoming_root_sibling_combinator() {
     page.not_green_id(div2, "div2", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming root via ~
-// combinator".
 #[test]
 fn wpt_scope_invalidation_becoming_root_via_subsequent_sibling() {
     let mut page = inval_page(
@@ -1939,8 +1711,6 @@ fn wpt_scope_invalidation_becoming_root_via_subsequent_sibling() {
     page.not_green_id(c, ".c", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Element becoming root via +
-// combinator".
 #[test]
 fn wpt_scope_invalidation_becoming_root_via_next_sibling() {
     let mut page = inval_page(
@@ -1956,7 +1726,6 @@ fn wpt_scope_invalidation_becoming_root_via_next_sibling() {
     page.not_green_id(c, ".c", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":not(scope) in subject".
 #[test]
 fn wpt_scope_invalidation_not_scope_in_subject() {
     let mut page = inval_page(
@@ -1988,7 +1757,6 @@ fn wpt_scope_invalidation_not_scope_in_subject() {
     check(&page, true);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":not(scope) in ancestor".
 #[test]
 fn wpt_scope_invalidation_not_scope_in_ancestor() {
     let mut page = inval_page(
@@ -2008,8 +1776,6 @@ fn wpt_scope_invalidation_not_scope_in_ancestor() {
     page.green_id(inner_a, "inner .a", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":not(scope) in limit
-// subject".
 #[test]
 fn wpt_scope_invalidation_not_scope_in_limit_subject() {
     let mut page = inval_page(
@@ -2028,8 +1794,6 @@ fn wpt_scope_invalidation_not_scope_in_limit_subject() {
     page.not_green_id(a, ".a", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":not(scope) in limit
-// ancestor".
 #[test]
 fn wpt_scope_invalidation_not_scope_in_limit_ancestor() {
     let mut page = inval_page(
@@ -2056,8 +1820,6 @@ fn wpt_scope_invalidation_not_scope_in_limit_ancestor() {
     check(&page, true);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Ancestor element affecting
-// nested scope root (Through latter selector in list)".
 #[test]
 fn wpt_scope_invalidation_ancestor_affecting_nested_root() {
     let mut page = inval_page(
@@ -2073,8 +1835,6 @@ fn wpt_scope_invalidation_ancestor_affecting_nested_root() {
     page.green_id(g, ".g", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, "Parent element of subject
-// affecting scope limit".
 #[test]
 fn wpt_scope_invalidation_parent_of_subject_affecting_limit() {
     let mut page = inval_page(
@@ -2090,8 +1850,6 @@ fn wpt_scope_invalidation_parent_of_subject_affecting_limit() {
     page.not_green_id(f, ".f", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":empty in scope root,
-// invalidated by child insertion/removal".
 #[test]
 fn wpt_scope_invalidation_empty_root() {
     let mut page = inval_page(
@@ -2110,8 +1868,6 @@ fn wpt_scope_invalidation_empty_root() {
     page.green_id(root, "root", why);
 }
 
-// WPT css/css-cascade/scope-invalidation.html, ":nth-child() in scope root,
-// invalidated by sibling insertion/removal".
 #[test]
 fn wpt_scope_invalidation_nth_child_root() {
     let mut page = inval_page(
@@ -2135,19 +1891,12 @@ fn wpt_scope_invalidation_nth_child_root() {
     page.green_id(second, ".second", why);
 }
 
-// ---------------------------------------------------------------------------
-// scope-style-sharing-001.html and -002.html
-// ---------------------------------------------------------------------------
-
-/// Two elements whose computed `z-index` must differ although the sharing
-/// cache would otherwise hand one's style to the other.
 fn sharing_case(css: &str, markup: &str, first: &str, second: &str, case: &str) {
     let page = Page::new(css, markup);
     assert_eq!(page.z("#first"), first, "{case}: #first");
     assert_eq!(page.z("#second"), second, "{case}: #second");
 }
 
-// WPT css/css-cascade/scope-style-sharing-001.html, tests 1-4, 7, 8, 11-13.
 #[test]
 fn wpt_scope_style_sharing_001_siblings() {
     let siblings =
@@ -2229,13 +1978,9 @@ fn wpt_scope_style_sharing_001_siblings() {
     }
 }
 
-/// A shadow host whose shadow sheet's implicit root is itself.
 const HOST_SCOPE: &str = "<template shadowrootmode=open>\
     <style>@scope { :scope { z-index: 1; } }</style></template>";
 
-// WPT css/css-cascade/scope-style-sharing-001.html, tests 5 and 6 ("first/
-// second sibling has implicit scope"): the owner `<style>`'s parent becomes a
-// shadow host whose shadow sheet holds the rule.
 #[test]
 fn wpt_scope_style_sharing_001_implicit_scope_host() {
     sharing_case(
@@ -2258,7 +2003,6 @@ fn wpt_scope_style_sharing_001_implicit_scope_host() {
     );
 }
 
-// WPT css/css-cascade/scope-style-sharing-002.html, tests 1-4 and 11-17.
 #[test]
 fn wpt_scope_style_sharing_002_cousins() {
     let cousins = "<div class=scope-start><div id=first class=foo></div></div>\
@@ -2362,9 +2106,6 @@ fn wpt_scope_style_sharing_002_cousins() {
     }
 }
 
-// WPT css/css-cascade/scope-style-sharing-002.html, tests 7 and 8 ("second/
-// first sibling does not have implicit scope"), with the owner `<style>`'s
-// parent as a shadow host.
 #[test]
 fn wpt_scope_style_sharing_002_implicit_scope_host() {
     sharing_case(
@@ -2389,10 +2130,6 @@ fn wpt_scope_style_sharing_002_implicit_scope_host() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-layer.html, scope-media.html, scope-supports.html
-// ---------------------------------------------------------------------------
-
 const GROUP_TREE: &str = "<div class=a><div class=b></div></div><div class=b></div>";
 
 fn group_rule_case(css: &str, case: &str) {
@@ -2406,8 +2143,6 @@ fn group_rule_case(css: &str, case: &str) {
     assert_eq!(page.bg("main > .b"), TRANSPARENT, "{case}: out of scope");
 }
 
-// WPT css/css-cascade/scope-layer.html, "Style rules within @layer are
-// scoped".
 #[test]
 fn wpt_scope_layer() {
     group_rule_case(
@@ -2426,8 +2161,6 @@ fn wpt_scope_layer() {
     );
 }
 
-// WPT css/css-cascade/scope-media.html, "Style rules within @media are
-// scoped".
 #[test]
 fn wpt_scope_media() {
     group_rule_case(
@@ -2441,8 +2174,6 @@ fn wpt_scope_media() {
     );
 }
 
-// WPT css/css-cascade/scope-supports.html, "Style rules within @supports are
-// scoped".
 #[test]
 fn wpt_scope_supports() {
     group_rule_case(
@@ -2456,12 +2187,6 @@ fn wpt_scope_supports() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-deep.html, scope-featureless.html, scope-name-defining-rules.html
-// ---------------------------------------------------------------------------
-
-/// `count` nested `@scope (.sN)` rules around `span { green }`, and the
-/// matching element chain; returns the span's background.
 fn deep_scope_background(count: usize) -> String {
     let mut css = String::from("span { background-color: green; }");
     for i in (0..count).rev() {
@@ -2477,12 +2202,6 @@ fn deep_scope_background(count: usize) -> String {
     page.bg_of(spans[0])
 }
 
-// WPT css/css-cascade/scope-deep.html, "Deep @scope nesting". The WPT nests
-// 90 rules. cssparser stops descending at 75 nested blocks
-// (`Parser::REASONABLE_NESTED_BLOCK_LIMIT`, a stack bound stylo inherits), so
-// the rules below that depth are dropped at parse time: Firefox 157 fails
-// this file the same way, Chrome 155 and Safari 27 pass it. 74 `@scope`
-// blocks plus the style rule's block is the deepest sheet that parses whole.
 #[test]
 fn wpt_scope_deep() {
     assert_eq!(
@@ -2497,8 +2216,6 @@ fn wpt_scope_deep() {
     );
 }
 
-// WPT css/css-cascade/scope-featureless.html (reftest): `:scope` outside
-// @scope is the root element, not a featureless match.
 #[test]
 fn wpt_scope_featureless() {
     let page = Page::new(
@@ -2514,15 +2231,11 @@ fn wpt_scope_featureless() {
     );
 }
 
-/// Ticks the timeline once, so the animations the flush created start, and
-/// reads `#animating`'s background.
 fn animated_background(page: &mut Page) -> String {
     page.doc.dom.advance_animations(0.0);
     page.bg("#animating")
 }
 
-// WPT css/css-cascade/scope-name-defining-rules.html, "@keyframes is
-// unaffected by @scope".
 #[test]
 fn wpt_scope_name_defining_rules_keyframes() {
     let mut page = Page::new(
@@ -2548,8 +2261,6 @@ fn wpt_scope_name_defining_rules_keyframes() {
     );
 }
 
-// WPT css/css-cascade/scope-name-defining-rules.html, "@keyframes is
-// unaffected by non-matching @scope".
 #[test]
 fn wpt_scope_name_defining_rules_keyframes_non_matching() {
     let mut page = Page::new(
@@ -2569,9 +2280,6 @@ fn wpt_scope_name_defining_rules_keyframes_non_matching() {
     );
 }
 
-// WPT css/css-cascade/scope-name-defining-rules.html, "@property is
-// unaffected by @scope". The registered initial value is read through
-// `width: var(--my-prop)`.
 #[test]
 fn wpt_scope_name_defining_rules_property() {
     let page = Page::new(
@@ -2591,8 +2299,6 @@ fn wpt_scope_name_defining_rules_property() {
     );
 }
 
-// WPT css/css-cascade/scope-name-defining-rules.html, "@property is
-// unaffected by non-matching @scope".
 #[test]
 fn wpt_scope_name_defining_rules_property_non_matching() {
     let page = Page::new(
@@ -2609,12 +2315,7 @@ fn wpt_scope_name_defining_rules_property_non_matching() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// scope-hover.html, scope-focus.html: the state bits set directly
-// ---------------------------------------------------------------------------
-
 fn state_cases(state: ElementState, pseudo: &str) {
-    // ":<state> via :scope in subject"
     let mut page = Page::new(
         "",
         &format!(
@@ -2632,7 +2333,6 @@ fn state_cases(state: ElementState, pseudo: &str) {
     page.flush();
     assert_eq!(page.z_of(a), "1", ":{pseudo} on the root makes it a root");
 
-    // ":<state> via :scope in non-subject"
     let mut page = Page::new(
         "",
         &format!(
@@ -2654,7 +2354,6 @@ fn state_cases(state: ElementState, pseudo: &str) {
         ":{pseudo} on the root restyles its descendant"
     );
 
-    // ":<state> in limit, :scope in subject"
     let mut page = Page::new(
         "",
         &format!(
@@ -2672,7 +2371,6 @@ fn state_cases(state: ElementState, pseudo: &str) {
         ":{pseudo} on the root makes it its own limit"
     );
 
-    // ":<state> in intermediate limit, :scope in subject"
     let mut page = Page::new(
         "",
         &format!(
@@ -2687,23 +2385,16 @@ fn state_cases(state: ElementState, pseudo: &str) {
     assert_eq!(page.z_of(b), "auto", ":{pseudo} turns .b into a limit");
 }
 
-// WPT css/css-cascade/scope-hover.html, all four cases.
 #[test]
 fn wpt_scope_hover() {
     state_cases(ElementState::HOVER, "hover");
 }
 
-// WPT css/css-cascade/scope-focus.html, all four cases.
 #[test]
 fn wpt_scope_focus() {
     state_cases(ElementState::FOCUS, "focus");
 }
 
-// ---------------------------------------------------------------------------
-// Crash tests: they pass if nothing panics
-// ---------------------------------------------------------------------------
-
-// WPT css/css-cascade/scope-declaration-list-crash.html.
 #[test]
 fn wpt_scope_declaration_list_crash() {
     let page = Page::new(
@@ -2714,7 +2405,6 @@ fn wpt_scope_declaration_list_crash() {
     assert_eq!(page.z("p"), "auto");
 }
 
-// WPT css/css-cascade/scope-inner-pseudo-scope-crash.html.
 #[test]
 fn wpt_scope_inner_pseudo_scope_crash() {
     let page = Page::new(
@@ -2728,7 +2418,6 @@ fn wpt_scope_inner_pseudo_scope_crash() {
     );
 }
 
-// WPT css/css-cascade/scope-implicit-crash-print.html (print media aside).
 #[test]
 fn wpt_scope_implicit_crash() {
     let page = Page::at_root("@scope { :scope { background-color: transparent; } }", "");

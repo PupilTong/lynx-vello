@@ -25,24 +25,14 @@ use bobcat_core::{
 };
 use support::{FetcherDouble, tick, wait_for_script};
 
-/// The screen these tests' views report, as a host with no screen to measure
-/// names it. None of them reads `SystemInfo`.
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(32.0, 24.0, 1.0);
 
 const STYLE_URL: &str = "app:///author.css";
 const VIEWS: usize = 3;
 
-/// Enough boxes that the style traversal is worth handing to a pool: Stylo's
-/// driver only parallelizes a level wider than one work unit.
 const BOXES: usize = 64;
 
-/// One page of identically classed boxes, so every view runs the same shape
-/// of work and only its colour differs.
-///
-/// The guard is what makes a shared realm visible. Views in one group share a
-/// `QuickJS` runtime but must not share a realm, and the second view to boot
-/// on a shared one would find the first's `renderPage` already defined.
 fn page_script() -> String {
     format!(
         r"
@@ -97,8 +87,6 @@ fn sources(entry_url: &str) -> ViewSources {
     }
 }
 
-/// What one view reports back to the test. The view itself never leaves the
-/// thread that built it — its painter is `!Send`, and so is it.
 #[derive(Debug)]
 struct ViewReport {
     painter: ThreadId,
@@ -110,13 +98,9 @@ fn run_view(color: &'static str, ready: &Barrier) -> ViewReport {
         .enable_all()
         .build()
         .expect("a per-thread runtime");
-    // Every thread arrives here with its resources already prepared, so the
-    // constructions themselves are what overlap.
     ready.wait();
     runtime.block_on(async move {
         let entry_url = "app:///main.js";
-        // A group of this thread's own: its `bobcat-main`, its runtime and its
-        // Stylo workers are shared with nothing on any other thread.
         let group = LynxGroup::new(
             Arc::new(NoWakeup),
             StyleThreads::Fixed(NonZeroUsize::new(2).expect("a positive worker count")),
@@ -188,23 +172,6 @@ fn views_in_separate_groups_boot_and_paint_concurrently() {
     );
 }
 
-/// Two views on one group's thread, sharing its runtime and its pool.
-///
-/// That this builds at all is the claim. Rayon takes a thread over as index
-/// zero of the first pool built on it and refuses a second one there forever,
-/// so a pool belonging to each view would make this configuration
-/// unrepresentable — the second view's would be refused outright. One pool
-/// per group is what makes two views on one thread possible, and their
-/// traversals cannot collide because the single thread driving them is
-/// already inside whichever one is running.
-///
-/// The two realms are separate even so, which the guard in `page_script`
-/// pins: the second view's entry would throw if it booted into a realm the
-/// first had already defined `renderPage` in.
-///
-/// Their entry URLs differ because module sources are registered on the
-/// runtime the two views share. Giving each view its own URL is the
-/// embedder's job, and this is what doing it looks like.
 #[tokio::test]
 async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page() {
     let group = LynxGroup::new(
@@ -226,8 +193,6 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
                 sources(entry_url),
             )
             .expect("the view is built on the group's thread");
-        // One painter per view: a view has at most one, and two views on one
-        // thread are two.
         let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
             .await
             .expect("each view's painter is built");
@@ -252,15 +217,6 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
     );
 }
 
-/// A job parked on one view's host holds up its sibling's frame, and the
-/// sibling's host is not blocked by it.
-///
-/// The jobs of a group are one queue. The first view's frame callback adopts
-/// a sheet, which parks that job on a request only the first view's `pump`
-/// answers, and this test withholds that turn. The second view's frame post
-/// is queued behind the parked job, so it stays outstanding too — which its
-/// host reads, without waiting, from `frame_serviced` — until the first
-/// view's turn is taken.
 #[tokio::test]
 async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocking_it() {
     const ADOPTING: &str = r"
@@ -318,8 +274,6 @@ async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocki
         unreachable!("two views were built");
     };
 
-    // The post that delivers the frame callback: its job parks on the
-    // adoption. The sibling's post lands behind it.
     let adopting_frame = adopting_painter.post_frame().expect("an offscreen post");
     let plain_frame = plain_painter.post_frame().expect("an offscreen post");
     let withheld = Instant::now() + Duration::from_millis(200);
@@ -336,8 +290,6 @@ async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocki
     }
     assert_eq!(adopting_fetcher.style_sheet_fetch_count(), 0);
 
-    // The withheld turn answers the request, the job goes on, and both
-    // frames are serviced.
     let deadline = Instant::now() + Duration::from_secs(30);
     while !(adopting_painter.frame_serviced(&adopting_frame)
         && plain_painter.frame_serviced(&plain_frame))
@@ -355,13 +307,6 @@ async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocki
         .expect("the sibling's frame draws");
 }
 
-/// A group whose views would have nowhere to restyle is a group that was
-/// never built.
-///
-/// The ceiling is Stylo's `ScopedTLS` array length, and the refusal happens on
-/// `bobcat-main` — the thread that builds the pool — so this is also the proof
-/// that a failure there is reported back as a construction error rather than
-/// as a group that hands out views with no workers behind them.
 #[tokio::test]
 async fn a_group_asking_for_more_workers_than_stylo_indexes_is_not_built() {
     let error = LynxGroup::new(

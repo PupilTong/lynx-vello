@@ -16,11 +16,6 @@ use crate::decode::NativeDecoder;
 use crate::store::FsStore;
 use crate::transport::NativeFetch;
 
-/// macOS and Linux: libcurl and the local filesystem ([`NativeFetch`]), a
-/// cache directory when one is configured ([`FsStore`]) with the code
-/// cache's own directory inside it, `ImageIO` or gdk-pixbuf
-/// ([`NativeDecoder`]), and `AVFoundation` on macOS or no video player on
-/// Linux ([`NativeMedia`]).
 #[derive(Debug)]
 pub struct NativePlatform {
     fetch: NativeFetch,
@@ -30,11 +25,6 @@ pub struct NativePlatform {
 }
 
 impl NativePlatform {
-    /// The native platform, with the byte tier in `disk` when it is given
-    /// and its directory opens, and the code cache in the `code` directory
-    /// inside it when that opens. The two are opened, and fail, separately.
-    /// The notes say what was left out: a cache directory that could not be
-    /// opened, a decoder that cannot be reached.
     #[must_use]
     pub fn new(disk: Option<&crate::DiskCacheConfig>) -> (Self, Vec<String>) {
         let mut notes = Vec::new();
@@ -70,13 +60,8 @@ impl NativePlatform {
     }
 }
 
-/// The native video player: `AVFoundation` on macOS
-/// ([`AvMedia`](crate::media::avfoundation::AvMedia)), none on Linux, where
-/// every video fails to open ([`vant::media::NoMedia`]).
 #[cfg(target_os = "macos")]
 pub type NativeMedia = crate::media::avfoundation::AvMedia;
-/// The native video player: `AVFoundation` on macOS, none on Linux, where
-/// every video fails to open ([`vant::media::NoMedia`]).
 #[cfg(not(target_os = "macos"))]
 pub type NativeMedia = vant::media::NoMedia;
 

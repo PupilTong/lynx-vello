@@ -122,58 +122,28 @@ use euclid::default::Rect;
 pub use self::geometry::{IntersectionGeometry, IntersectionMargin, MarginLength, RootGeometry};
 use crate::tree::document::{Document, NodeId};
 
-/// Names one intersection observer for as long as it exists. Ids are
-/// monotone per document and never reissued, so an id that outlived its
-/// observer names nothing rather than another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IntersectionObserverId(NonZeroU32);
 
 impl IntersectionObserverId {
-    /// The id as a number, for an embedder that hands it across a boundary.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0.get()
     }
 }
 
-/// One `IntersectionObserverEntry`: a target's geometry at the update that
-/// queued it. Every rect is in viewport CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntersectionObserverEntry {
-    /// The time the update was run with, in the host's clock.
     pub time: f64,
-    /// The root intersection rectangle. Zero when the target or an element
-    /// root is not rendered.
     pub root_bounds: Rect<f32>,
-    /// The bounding box of the target's transformed border box, dilated by
-    /// the observer's target margin. Zero when it is not rendered or not a
-    /// descendant of the root.
     pub bounding_client_rect: Rect<f32>,
-    /// What of the dilated target is visible through every clip and the
-    /// root.
     pub intersection_rect: Rect<f32>,
     pub is_intersecting: bool,
-    /// The intersection's area over the dilated target's.
     pub intersection_ratio: f64,
     pub target: NodeId,
 }
 
-/// What an observer delivers its queued entries to.
-///
-/// Every observer holds its own, as a `Box<dyn IntersectionEventHandler<T>>`,
-/// so one document holds observers of any number of handler types and
-/// [`Document::notify_intersection_observers`] calls each through one
-/// indirect call. Nothing of `T` is asked for: the handler is `'static`,
-/// and the document is lent to it for the call.
 pub trait IntersectionEventHandler<T> {
-    /// §3.2.5's call. `document` is the one the observer belongs to; the
-    /// handler may observe, unobserve, disconnect, create or drop observers
-    /// (its own included) and mutate the tree.
-    ///
-    /// `entries` are in the order the updates queued them — by update, then
-    /// by observe order within one — and never empty. While this runs, its
-    /// own observer's [`IntersectionObserver::handler`] is `None`, and a
-    /// loop run from inside it leaves that observer's new entries queued.
     fn notify(
         &mut self,
         document: &mut Document<T>,
@@ -181,33 +151,13 @@ pub trait IntersectionEventHandler<T> {
         entries: Vec<IntersectionObserverEntry>,
     );
 
-    /// The node this handler lives with: the observer is dropped when that
-    /// node is freed. `None` → it lives until
-    /// [`Document::drop_intersection_observer`]. Asked once, when the
-    /// observer is created.
     fn bound_to(&self) -> Option<NodeId> {
         None
     }
 
-    /// `node` is being freed, and the primitive has just taken it out of
-    /// this handler's observer: out of its targets and its queue. For a
-    /// handler that keeps state per target, the one place it hears of the
-    /// free; the default keeps none. Not called while the handler's own
-    /// notification runs, which is when it is out of its observer.
     fn target_freed(&mut self, _node: NodeId) {}
 }
 
-/// `terminus`'s handler for an engine component: the element's
-/// [`CustomElement::intersections_changed`] hook in one `[CEReactions]`
-/// scope, as an event dispatch wraps each handler — what the hook's
-/// mutations raise runs before the notification returns. Bound to that
-/// element, so its observer goes when the element is freed.
-///
-/// An element that is not a constructed custom element hears nothing: the
-/// entries are dropped. So are they for a freed one, which only a direct
-/// call can name, since its free dropped the observer.
-///
-/// [`CustomElement::intersections_changed`]: crate::tree::custom::CustomElement::intersections_changed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElementHandler(pub NodeId);
 
@@ -232,68 +182,36 @@ impl<T> IntersectionEventHandler<T> for ElementHandler {
     }
 }
 
-/// What [`Document::create_intersection_observer`] creates an observer
-/// with: the spec's `IntersectionObserverInit`, with a target margin added
-/// and no `scrollMargin`, `delay` or `trackVisibility`.
-///
-/// The default is the spec's: the implicit root, zero margins and the
-/// threshold list `[0]`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IntersectionObserverInit {
-    /// The intersection root: `None` for the implicit root (the viewport),
-    /// or a live element.
     pub root: Option<NodeId>,
-    /// Dilates the root intersection rectangle.
     pub root_margin: IntersectionMargin,
-    /// Dilates every target's border box, in the target's own space, before
-    /// its transform and any clip; the entry's rects and ratio are over the
-    /// dilated rect. Not in the spec — see the module doc's rulings.
     pub target_margin: IntersectionMargin,
-    /// In `[0, 1]`, in any order; an empty list is the spec's `[0]`.
     pub thresholds: Vec<f64>,
 }
 
-/// An intersection observer's root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntersectionObserverRoot {
-    /// The implicit root: the viewport.
     Implicit,
-    /// An element root.
     Element(NodeId),
-    /// An element root that was freed: every target reports not rendered.
     Freed,
 }
 
-/// One observed target.
 #[derive(Debug)]
 struct Registration {
     target: NodeId,
-    /// The spec's `previousThresholdIndex` and `previousIsIntersecting`;
-    /// `None` is its initial `-1` and `false`, which no update produces, so
-    /// the first update after observe always queues.
     previous: Option<(usize, bool)>,
 }
 
-/// The W3C object, one per [`Document::create_intersection_observer`]:
-/// named by its [`IntersectionObserverId`] and read through
-/// [`Document::intersection_observer`]. Its targets and its queue are the
-/// document's to change, through the `Document` methods the spec's calls
-/// map to.
 pub struct IntersectionObserver<T> {
     id: IntersectionObserverId,
     root: IntersectionObserverRoot,
     root_margin: IntersectionMargin,
     target_margin: IntersectionMargin,
-    /// Ascending, never empty.
     thresholds: Box<[f64]>,
-    /// In observe order.
     targets: Vec<Registration>,
     queue: Vec<IntersectionObserverEntry>,
-    /// The handler's [`IntersectionEventHandler::bound_to`], asked once at
-    /// creation, so a free finds the observers it ends without asking a
-    /// handler that may be out on a notification.
     bound_to: Option<NodeId>,
-    /// `None` only while its own notification runs.
     handler: Option<Box<dyn IntersectionEventHandler<T>>>,
 }
 
@@ -313,33 +231,26 @@ impl<T> IntersectionObserver<T> {
         &self.root_margin
     }
 
-    /// The margin every target's border box is dilated by.
     #[must_use]
     pub const fn target_margin(&self) -> &IntersectionMargin {
         &self.target_margin
     }
 
-    /// The thresholds, ascending; the spec's `[0]` for a list created empty.
     #[must_use]
     pub fn thresholds(&self) -> &[f64] {
         &self.thresholds
     }
 
-    /// The node whose free drops this observer, as its handler named it at
-    /// creation.
     #[must_use]
     pub const fn bound_to(&self) -> Option<NodeId> {
         self.bound_to
     }
 
-    /// The handler, or `None` while its own notification runs — it holds
-    /// itself then.
     #[must_use]
     pub fn handler(&self) -> Option<&dyn IntersectionEventHandler<T>> {
         self.handler.as_deref()
     }
 
-    /// The handler, mutably, or `None` while its own notification runs.
     #[must_use]
     pub fn handler_mut(&mut self) -> Option<&mut dyn IntersectionEventHandler<T>> {
         match &mut self.handler {
@@ -365,13 +276,9 @@ impl<T> std::fmt::Debug for IntersectionObserver<T> {
     }
 }
 
-/// The document's observers, in creation order — the order the spec notifies
-/// them in, and ascending by id, since ids are monotone and nothing reorders
-/// the list.
 pub(crate) struct IntersectionObservers<T> {
     observers: Vec<IntersectionObserver<T>>,
     next: NonZeroU32,
-    /// Something may have moved an observation since the last update ran.
     stale: bool,
 }
 
@@ -390,15 +297,12 @@ impl<T> IntersectionObservers<T> {
         self.observers.is_empty()
     }
 
-    /// Where a live observer is, if `id` still names one.
     fn position(&self, id: IntersectionObserverId) -> Option<usize> {
         self.observers
             .binary_search_by_key(&id, |observer| observer.id)
             .ok()
     }
 
-    /// The index of a live observer. An id that names none is a caller bug,
-    /// the way a stale `NodeId` passed to a mutation is.
     fn index(&self, id: IntersectionObserverId) -> usize {
         self.position(id)
             .unwrap_or_else(|| panic!("{id:?} names no live intersection observer"))
@@ -409,8 +313,6 @@ impl<T> IntersectionObservers<T> {
         &mut self.observers[index]
     }
 
-    /// `node` is being freed: no observer may outlive the node it is bound
-    /// to, observe it, queue an entry naming it, or keep it as a root.
     pub(crate) fn forget_node(&mut self, node: NodeId) {
         self.observers
             .retain(|observer| observer.bound_to != Some(node));
@@ -427,8 +329,6 @@ impl<T> IntersectionObservers<T> {
             }
             if observer.root == IntersectionObserverRoot::Element(node) {
                 observer.root = IntersectionObserverRoot::Freed;
-                // Its targets owe a leave entry whether or not anything
-                // renders again.
                 self.stale = true;
             }
         }
@@ -436,22 +336,6 @@ impl<T> IntersectionObservers<T> {
 }
 
 impl<T> Document<T> {
-    /// Creates an intersection observer that delivers to `handler`, and
-    /// answers its id.
-    ///
-    /// `init.root` is the intersection root: `None` for the implicit root
-    /// (the viewport), or a live element. `init.thresholds` are sorted
-    /// ascending; an empty list is the spec's `[0]`. Creating observes
-    /// nothing, so it leaves the update with nothing to do. An engine
-    /// component passes `Box::new(ElementHandler(element))`.
-    ///
-    /// # Panics
-    ///
-    /// When a threshold is not a finite number in `[0, 1]`, when the root is
-    /// not a live element, or when the node the handler is
-    /// [bound to](IntersectionEventHandler::bound_to) is not live — an
-    /// observer bound to a node already freed could never be dropped by its
-    /// free.
     pub fn create_intersection_observer(
         &mut self,
         handler: Box<dyn IntersectionEventHandler<T>>,
@@ -511,11 +395,6 @@ impl<T> Document<T> {
         id
     }
 
-    /// The observer `observer` names.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     #[must_use]
     pub fn intersection_observer(
         &self,
@@ -524,11 +403,6 @@ impl<T> Document<T> {
         &self.intersections.observers[self.intersections.index(observer)]
     }
 
-    /// The observer `observer` names, mutably — for its handler.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     #[must_use]
     pub fn intersection_observer_mut(
         &mut self,
@@ -537,14 +411,6 @@ impl<T> Document<T> {
         self.intersections.get_mut(observer)
     }
 
-    /// Starts observing `target`. A target the observer already observes is
-    /// left as it is; a new one is reported by the next update, whatever its
-    /// state.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer, or `target` is not a live
-    /// element.
     pub fn observe_intersection(&mut self, observer: IntersectionObserverId, target: NodeId) {
         assert!(
             self.get(target)
@@ -567,13 +433,6 @@ impl<T> Document<T> {
         intersections.stale = true;
     }
 
-    /// Stops observing `target`; a target it does not observe is a no-op.
-    /// Entries already queued for it stay queued, as the spec's `unobserve`
-    /// leaves them.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     pub fn unobserve_intersection(&mut self, observer: IntersectionObserverId, target: NodeId) {
         self.intersections
             .get_mut(observer)
@@ -581,17 +440,6 @@ impl<T> Document<T> {
             .retain(|registration| registration.target != target);
     }
 
-    /// Stops observing `target` and discards the entries already queued for
-    /// it: [`Self::unobserve_intersection`] plus what the target's free does
-    /// to this observer's queue. Not a spec call: for a host that observes
-    /// `target` again under state of its own that changed, so that no entry
-    /// computed before reaches it after, and the next observe reports the
-    /// target as a new observer's first update would. A target it does not
-    /// observe is a no-op.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     pub fn forget_intersection_target(&mut self, observer: IntersectionObserverId, target: NodeId) {
         let observer = self.intersections.get_mut(observer);
         observer
@@ -600,25 +448,10 @@ impl<T> Document<T> {
         observer.queue.retain(|entry| entry.target != target);
     }
 
-    /// The spec's `disconnect()`: stops observing every target. Entries
-    /// already queued stay queued, as they do after
-    /// [`Self::unobserve_intersection`] — the steps touch the targets alone —
-    /// so `takeRecords()` or the next notification still hands them out.
-    /// The observer itself lives on, and may observe again.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     pub fn disconnect_intersection_observer(&mut self, observer: IntersectionObserverId) {
         self.intersections.get_mut(observer).targets.clear();
     }
 
-    /// The spec's `takeRecords()`: the observer's queued entries, leaving its
-    /// queue empty.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     #[must_use]
     pub fn take_intersection_records(
         &mut self,
@@ -627,44 +460,15 @@ impl<T> Document<T> {
         std::mem::take(&mut self.intersections.get_mut(observer).queue)
     }
 
-    /// Drops an observer, its targets, its queue and its handler — or, when
-    /// called from inside the observer's own notification, the handler once
-    /// that returns. Its id is never reissued. An observer bound to no node
-    /// ends only here; a bound one may end here too, before its node does.
-    ///
-    /// # Panics
-    ///
-    /// When `observer` names no live observer.
     pub fn drop_intersection_observer(&mut self, observer: IntersectionObserverId) {
         let index = self.intersections.index(observer);
         self.intersections.observers.remove(index);
     }
 
-    /// Something may have moved an observation: the next
-    /// [`Self::update_intersection_observations`] runs.
     pub(crate) fn note_intersections_stale(&mut self) {
         self.intersections.stale = true;
     }
 
-    /// The spec's "run the update intersection observations steps"
-    /// (§3.2.10), for every observer in creation order, with `time` as every
-    /// queued entry's time. Answers whether any observer has entries queued
-    /// afterwards — the host's cue to post a delivery.
-    ///
-    /// Per observer, the root is resolved once; a freed root or an element
-    /// root that is not rendered leaves every target
-    /// [not rendered](IntersectionGeometry::UNRENDERED). Per target, in
-    /// observe order: its [`IntersectionGeometry`], the ratio, and the
-    /// threshold index — the index of the first threshold greater than the
-    /// ratio, or the list's length. An entry is queued when that index or
-    /// the intersecting state differs from the previous update's, and the
-    /// pair is remembered.
-    ///
-    /// Nothing runs when there are no observers, when nothing went stale
-    /// since the last update that ran, or before the first render committed
-    /// a frame — and that leaves the stale bit as it was, so the first
-    /// update after the first render still runs. Reads the last completed
-    /// layout and the live scroll offsets; runs no pass and invokes nothing.
     pub fn update_intersection_observations(&mut self, time: f64) -> bool {
         if self.intersections.observers.is_empty()
             || !self.intersections.stale
@@ -673,8 +477,6 @@ impl<T> Document<T> {
             return false;
         }
         self.intersections.stale = false;
-        // Out of the document for the pass, so the geometry can read it while
-        // the queues are written; nothing in between can reach the registry.
         let mut observers = std::mem::take(&mut self.intersections.observers);
         let mut queued = false;
         for observer in &mut observers {
@@ -723,8 +525,6 @@ impl<T> Document<T> {
         queued
     }
 
-    /// Whether any observer has entries queued — the cheap question a host
-    /// asks before it posts a delivery.
     #[must_use]
     pub fn has_pending_intersection_notifications(&self) -> bool {
         self.intersections
@@ -733,23 +533,6 @@ impl<T> Document<T> {
             .any(|observer| !observer.queue.is_empty())
     }
 
-    /// §3.2.5 "notify intersection observers", the whole loop, call
-    /// included: every observer with entries queued when the loop starts, in
-    /// creation order, has its queue taken and handed to its handler's
-    /// [`IntersectionEventHandler::notify`].
-    ///
-    /// Re-entrant. Each observer is looked up again by id when its turn
-    /// comes, and skipped when it no longer exists, when its queue is empty
-    /// by then (a handler took its records, or a loop run from inside a
-    /// notification delivered them), or when its handler is out — its own
-    /// notification is running further up, and what it queued since waits
-    /// for the next loop. The handler is taken out of its observer for the
-    /// call and put back after, unless the observer was dropped meanwhile,
-    /// in which case the handler is dropped with it.
-    ///
-    /// The loop opens no `[CEReactions]` scope of its own:
-    /// [`ElementHandler`] opens one per call, and a handler that does not
-    /// call into a custom element needs none.
     pub fn notify_intersection_observers(&mut self) {
         let notify_list: Vec<IntersectionObserverId> = self
             .intersections

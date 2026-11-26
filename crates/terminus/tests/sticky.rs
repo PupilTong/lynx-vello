@@ -244,8 +244,6 @@ fn a_sticky_scroller_moves_its_clip_with_its_box() {
 #[test]
 fn an_unscrollable_document_uses_the_viewport_as_sticky_reference() {
     let (mut doc, _, sticky) = page(".scroller { overflow: visible; }");
-    // No scrollport ancestor; bottom: 90vh leaves a viewport view rectangle
-    // ending at y=60, pulling the 20px box at y=150 up to y=40.
     doc.add_css(".spacer { height: 150px; } .sticky { top: auto; bottom: 90vh; }");
     let frame = doc.dom.commit();
     assert_eq!(
@@ -385,8 +383,6 @@ fn sticky_survives_an_initial_target_refill_and_a_retained_snap_step() {
                 "an in-window snap samples the existing sticky constraints"
             );
         }
-        // First use only the published offset; then override it with the
-        // live snap result while retaining the same committed frame.
         let offsets =
             |slot: &terminus::link::ScrollSlot| snapped.then(|| doc.dom.scroll_offset(slot.node));
         assert_eq!(
@@ -433,7 +429,6 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
             Some(sticky)
         );
     }
-    // The compositor can move the retained frame without changing document state.
     let (mut doc, scroller, sticky) = page("");
     let frame = doc.dom.commit();
     let mut scene = DisplayList::new();

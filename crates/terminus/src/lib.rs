@@ -45,7 +45,4 @@ mod svg;
 mod tree;
 mod visual;
 
-/// The 2D geometry (`kurbo`) and paint (`peniko`) vocabulary every layer of
-/// the crate draws in, at the versions the rasterizer (`vello_gpu`) is built
-/// against: through its re-exports, so the two cannot drift apart.
 use vello_gpu::{kurbo, peniko};

@@ -19,11 +19,6 @@ pub(crate) fn encode(native: WebTemplate) -> Result<Vec<u8>, ConvertError> {
     )?;
     let style_info = encode_style_info(&native.style_info.unwrap_or_default())?;
     let manifest = encode_string_map(&native.manifest, "Manifest")?;
-    // Named CSS sections travel as the `CustomSectionsStyleInfo` section and
-    // never as JSON, and the section is left out when there is none, as
-    // web-core's `webEncoder.ts` does since lynx-stack#4138. Each entry's
-    // `style_text_size_hint` stays the 0 the native decoder gave it: it only
-    // presizes web-core's stylesheet string.
     let custom_style_info = if native.custom_sections_style_info.is_empty() {
         None
     } else {

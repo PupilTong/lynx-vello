@@ -84,34 +84,18 @@ mod implementation {
 
     const HOST_INLINE_ARGS: usize = 8;
 
-    /// The arguments a host->realm [`Context::call_member`] describes on the
-    /// stack before any spill to the heap; the shim's
-    /// `QJS_CALL_INLINE_ARGS` is the same number, for the `JSValue`s it
-    /// builds from them. Wider than [`HOST_INLINE_ARGS`] because the engine's
-    /// event dispatch is one such call with two arguments per path step: a
-    /// position event over eight steps is 31.
     const CALL_INLINE_ARGS: usize = 32;
 
-    /// The highest message index a transfer host function may have: the
-    /// shim's `QJS_TRANSFER_AT_MAX`, since `QuickJS` keeps a function's
-    /// length, at least the index plus two, in eight bits.
     const MAX_TRANSFER_MESSAGE_INDEX: u32 = 253;
 
-    // Every host call moves its arguments and its answer, and a variant that
-    // widens either enum slows every call, the primitive ones included
-    // (measured with `benches/host_calls.rs`: 32-byte arguments and 40-byte
-    // values made a no-argument call take half as long again).
     #[cfg(target_pointer_width = "64")]
     const _: () =
         assert!(mem::size_of::<HostArgument<'static>>() == 24 && mem::size_of::<HostValue>() == 32);
 
-    /// `QuickJS`'s "no such atom" sentinel, returned when interning fails.
     const JS_ATOM_NULL: u32 = 0;
 
     const JS_EVAL_TYPE_GLOBAL: i32 = 0;
     const JS_EVAL_TYPE_MODULE: i32 = 1;
-    /// `quickjs.h`'s `JS_STRIP_SOURCE`, checked against the header by a
-    /// static assertion in `shim.c`.
     const JS_STRIP_SOURCE: c_int = 1;
     const JS_EVAL_FLAG_STRICT: i32 = 1 << 3;
     const JS_EVAL_FLAG_BACKTRACE_BARRIER: i32 = 1 << 6;
@@ -121,30 +105,16 @@ mod implementation {
     const QJS_PROMISE_FULFILLED: i32 = 1;
     const QJS_PROMISE_REJECTED: i32 = 2;
 
-    /// The bridge's three class IDs — host-function owner, `ShadowRealm`
-    /// instance, realm link — allocated once per process and registered in
-    /// every runtime. One initializer allocates all three: separate cells
-    /// would race `JS_NewClassID`'s counter against each other.
     static CLASS_IDS: OnceLock<[u32; 3]> = OnceLock::new();
 
-    /// Limits and timeout applied when a runtime is created.
-    ///
-    /// All of them are `QuickJS` runtime settings, so they bound every realm
-    /// on the runtime together.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct RuntimeOptions {
         pub memory_limit: Option<usize>,
         pub max_stack_size: Option<usize>,
         pub execution_timeout: Option<Duration>,
-        /// Compile functions without their source text, so
-        /// `Function.prototype.toString` answers a placeholder and the
-        /// bytecode [`Context::compile_module_bytecode`] writes carries none
-        /// of it. Line and column information is kept either way. For a
-        /// runtime that only compiles bytecode for others to run.
         pub strip_source: bool,
     }
 
-    /// JavaScript source text and diagnostic metadata.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct EvalSource<'a> {
         pub text: &'a str,
@@ -163,7 +133,6 @@ mod implementation {
         }
     }
 
-    /// Evaluation mode and `QuickJS` execution flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     #[allow(
         clippy::struct_excessive_bools,
@@ -227,7 +196,6 @@ mod implementation {
         Engine,
     }
 
-    /// Sanitized source coordinates from a JavaScript error.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct SourceLocation {
         pub source: Option<String>,
@@ -235,7 +203,6 @@ mod implementation {
         pub column: Option<u32>,
     }
 
-    /// A JavaScript or bridge failure detached from engine-owned values.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Error {
         pub kind: ErrorKind,
@@ -279,14 +246,12 @@ mod implementation {
         active: AtomicU64,
     }
 
-    /// Thread-safe handle for interrupting the currently running JavaScript task.
     #[derive(Clone, Debug)]
     pub struct InterruptHandle {
         shared: Arc<InterruptShared>,
     }
 
     impl InterruptHandle {
-        /// Requests interruption when JavaScript is currently running.
         #[must_use]
         pub fn request_interrupt_if_running(&self) -> bool {
             let active = self.shared.active.load(Ordering::Acquire);
@@ -321,10 +286,6 @@ mod implementation {
         timeout: Option<Duration>,
         next_generation: Cell<u64>,
         active_token: Cell<u64>,
-        /// How many guards are alive. Only the outermost one arms and
-        /// disarms: a host function that calls into a sibling realm runs
-        /// under the deadline of the operation that reached it, and an
-        /// interrupt raised anywhere inside fails every frame on the way out.
         depth: Cell<u32>,
         deadline: Cell<Option<Instant>>,
         reason: Cell<Option<InterruptReason>>,
@@ -483,9 +444,6 @@ mod implementation {
             .map_err(|message| Error::bridge(ErrorKind::Engine, ErrorPhase::ConvertValue, message))
     }
 
-    /// The two names one native-module export is registered under, as C
-    /// strings. Both are exact: a native module and a source module share one
-    /// namespace, and neither name is ever normalized.
     fn host_module_names(
         module_name: &str,
         export_name: &str,
@@ -512,8 +470,6 @@ mod implementation {
         ))
     }
 
-    /// What the shim answers a native-module registration with, whichever of
-    /// the two kinds of export it was.
     fn host_module_status(status: c_int) -> Result<(), Error> {
         let (kind, message) = match status {
             0 => return Ok(()),
@@ -552,9 +508,6 @@ mod implementation {
         })
     }
 
-    /// The arguments the trampoline described, lent for `'a`: the caller
-    /// chooses `'a` no longer than the dispatch, after which the trampoline
-    /// releases every string and clone they borrow.
     fn read_host_arguments<'a>(
         count: usize,
         arguments: *const ffi::QjsHostArg,
@@ -566,12 +519,6 @@ mod implementation {
         raw.iter().map(read_host_argument).collect()
     }
 
-    /// One described argument, borrowing the bytes the trampoline holds for
-    /// it: a string is `JS_ToCStringLen2`'s UTF-8 — the realm's own bytes
-    /// for an ASCII string — a structured clone `JS_WriteObject`'s stream,
-    /// and an `ArrayBuffer`'s bytes the trampoline's copy of them, so
-    /// nothing more is copied unless the host function keeps the value
-    /// ([`HostArgument::to_value`]).
     fn read_host_argument(
         argument: &ffi::QjsHostArg,
     ) -> Result<HostArgument<'_>, HostFunctionError> {
@@ -580,10 +527,6 @@ mod implementation {
             ffi::HOST_ARG_NULL => Ok(HostArgument::Null),
             ffi::HOST_ARG_BOOLEAN => Ok(HostArgument::Boolean(argument.number != 0.0)),
             ffi::HOST_ARG_NUMBER => Ok(HostArgument::Number(argument.number)),
-            // The shim asks for UTF-8 rather than CESU-8, so a surrogate pair
-            // is one four-byte sequence and the only bytes that are not UTF-8
-            // are a lone surrogate's, which is the one string UTF-8 cannot
-            // carry.
             ffi::HOST_ARG_STRING => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 std::str::from_utf8(bytes)
@@ -594,17 +537,10 @@ mod implementation {
                         )
                     })
             }
-            // `HOST_ARG_FAILED` is not among these: the trampoline returns the
-            // serializer's own exception without dispatching, so a refused
-            // value never reaches Rust. It falls into the arm below with every
-            // other kind this side does not write.
             ffi::HOST_ARG_STRUCTURED => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 Ok(HostArgument::Structured(StructuredBytes::from_bytes(bytes)))
             }
-            // A transfer trampoline's message: `JS_WriteObjectTransfer`'s
-            // stream, never empty and at most `u32::MAX` bytes (the shim
-            // refuses a longer one), and its slot count, a nonnegative `int`.
             ffi::HOST_ARG_TRANSFERRED => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 #[expect(
@@ -617,8 +553,6 @@ mod implementation {
                     .map(HostArgument::Transferred)
                     .ok_or_else(|| HostFunctionError::new("a transferred clone is too large"))
             }
-            // An empty buffer is described with no copy and a null pointer,
-            // which `from_raw_parts` may not be given.
             ffi::HOST_ARG_BYTES => Ok(HostArgument::Bytes(if argument.text_len == 0 {
                 &[]
             } else {
@@ -668,8 +602,6 @@ mod implementation {
                     };
                     handler(&values)
                 }
-                // Nothing to borrow: a call made while this one runs is
-                // the handler's own business.
                 HostSlot::Reentrant(handler) => handler(&values),
             }
         }));
@@ -708,29 +640,11 @@ mod implementation {
         }
     }
 
-    /// A structured clone of a realm value, in `QuickJS`'s own serialization.
-    ///
-    /// Opaque to the host: it is produced only by a realm and consumed only by
-    /// a realm of the same `QuickJS` build, so there is no constructor and no
-    /// accessor. What it buys is that the boundary carries an object, a
-    /// `Date`, a typed array, a `BigInt`, a cycle, or a shared reference
-    /// without the host having to name any of it — and, because it is a
-    /// `Vec<u8>`, that it is `Send`: this is what crosses threads inside a
-    /// [`HostValue`].
-    ///
-    /// The stream is self-contained — non-bytecode mode writes every atom as
-    /// a string — so a clone written in one runtime's realm reads back in
-    /// another's.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct StructuredClone {
         bytes: Vec<u8>,
     }
 
-    /// A structured clone's bytes, lent rather than owned: what a
-    /// [`HostArgument`] carries, whether the host lends a [`StructuredClone`]
-    /// it holds into a call or a host function is lent the clone the realm
-    /// wrote for its argument. As opaque as the owned form;
-    /// [`ToOwned::to_owned`] is its one copy, for a value the host keeps.
     #[derive(Debug, PartialEq, Eq)]
     #[repr(transparent)]
     pub struct StructuredBytes {
@@ -769,25 +683,6 @@ mod implementation {
         }
     }
 
-    /// A structured clone written with a transfer list, lent: what a host
-    /// function registered with
-    /// [`Context::register_host_module_function_with_transfer`] is handed for
-    /// its message when the list was not empty.
-    ///
-    /// The stream names each listed object, wherever and however often the
-    /// message holds it, as a *slot*: slot `i` is the list's entry `i`, and
-    /// there are [`Self::slots`] of them whether or not the message holds
-    /// each one. Like a [`StructuredBytes`], it is opaque, and it reads back
-    /// in any realm of this build, on any runtime, but only through a
-    /// [`Revival`]: the value each slot reads as is made in the receiving
-    /// realm. Lent into a call as it is, a stream with slots fails to read at
-    /// its first slot.
-    ///
-    /// Sixteen bytes, a pointer and two `u32`s rather than a slice and a
-    /// count, so that [`HostArgument`] stays the size it is without it: every
-    /// host call moves its arguments, and a wider enum measurably slows the
-    /// primitive ones. A stream longer than `u32::MAX` bytes is refused where
-    /// it is written.
     #[derive(Clone, Copy)]
     pub struct TransferredBytes<'a> {
         start: NonNull<u8>,
@@ -803,7 +698,6 @@ mod implementation {
     unsafe impl Sync for TransferredBytes<'_> {}
 
     impl<'a> TransferredBytes<'a> {
-        /// `None` for a stream longer than `u32::MAX` bytes.
         fn new(bytes: &'a [u8], slots: u32) -> Option<Self> {
             Some(Self {
                 start: NonNull::from(bytes).cast(),
@@ -819,14 +713,11 @@ mod implementation {
             unsafe { std::slice::from_raw_parts(self.start.as_ptr(), self.length as usize) }
         }
 
-        /// How many transfer slots the stream has: the length of the list it
-        /// was written with.
         #[must_use]
         pub const fn slots(&self) -> usize {
             self.slots as usize
         }
 
-        /// Copies the stream out of the call it was lent for.
         #[must_use]
         pub fn to_owned(self) -> TransferredClone {
             TransferredClone {
@@ -854,24 +745,18 @@ mod implementation {
 
     impl Eq for TransferredBytes<'_> {}
 
-    /// The owned form of [`TransferredBytes`]: what crosses threads inside a
-    /// [`HostValue`].
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct TransferredClone {
-        /// At most `u32::MAX` bytes: only ever copied from a
-        /// [`TransferredBytes`].
         bytes: Box<[u8]>,
         slots: u32,
     }
 
     impl TransferredClone {
-        /// How many transfer slots the stream has.
         #[must_use]
         pub const fn slots(&self) -> usize {
             self.slots as usize
         }
 
-        /// Lends the stream.
         #[must_use]
         pub fn as_bytes(&self) -> TransferredBytes<'_> {
             #[expect(
@@ -888,27 +773,8 @@ mod implementation {
         }
     }
 
-    /// A transferred clone and one descriptor per slot, lent into a call of
-    /// a realm as [`HostArgument::Revive`].
-    ///
-    /// The receiving realm builds each descriptor into a value, in slot
-    /// order, and calls its transfer reviver (the function its own code gave
-    /// the `setTransferReviver` export of
-    /// [`Context::register_host_module_transfer_members`]) with it; slot `i`
-    /// of the stream then reads as the reviver's `i`-th answer, at every
-    /// position the message holds it, so two positions that held one listed
-    /// object hold one answer. A realm with no reviver, a reviver that
-    /// throws, or a descriptor that cannot be built fails the call before
-    /// the stream is read, with that exception.
     pub struct Revival<'a> {
         raw: ffi::QjsRevival,
-        /// Where `raw.descriptors` points: a heap buffer, so moving the
-        /// `Revival` does not move it. A `Vec` rather than a `Box<[_]>`,
-        /// because moving a `Box` asserts that it is the only pointer to its
-        /// allocation, which `raw.descriptors` is not (Miri reports the
-        /// read through it as undefined behaviour). The descriptors borrow
-        /// what the arguments `new` was given borrow, for `'a`, as `message`
-        /// does.
         descriptors: Vec<ffi::QjsHostArg>,
         message: TransferredBytes<'a>,
     }
@@ -922,13 +788,6 @@ mod implementation {
     unsafe impl Sync for Revival<'_> {}
 
     impl<'a> Revival<'a> {
-        /// Pairs `message` with one descriptor per slot.
-        ///
-        /// # Errors
-        ///
-        /// [`ErrorKind::InvalidInput`] when the descriptors are not one per
-        /// slot, or when one of them is itself a
-        /// [`HostArgument::Transferred`] or [`HostArgument::Revive`].
         pub fn new(
             message: TransferredBytes<'a>,
             descriptors: &[HostArgument<'a>],
@@ -969,7 +828,6 @@ mod implementation {
             })
         }
 
-        /// The stream this revives.
         #[must_use]
         pub const fn message(&self) -> TransferredBytes<'a> {
             self.message
@@ -985,28 +843,12 @@ mod implementation {
         }
     }
 
-    /// Two revivals are equal only when they are one revival.
     impl PartialEq for Revival<'_> {
         fn eq(&self, other: &Self) -> bool {
             ptr::eq(self, other)
         }
     }
 
-    /// A value a host function returns, or one the host keeps: a primitive,
-    /// an opaque structured clone, or the bytes of an `ArrayBuffer`.
-    ///
-    /// Owned, because it outlives the call that produced it: a return value
-    /// was built by the host, and an argument kept past its call
-    /// ([`HostArgument::to_value`]) — a message posted to another thread —
-    /// was copied out of it. Text is always well-formed UTF-8, which is what
-    /// lets an outbound string take `JS_NewStringLen` directly.
-    ///
-    /// A realm value still never crosses as itself. A [`StructuredClone`] is a
-    /// copy the realm made, not a handle on anything in it.
-    ///
-    /// [`HostArgument`] is the borrowed counterpart: what a host function is
-    /// lent as its arguments, and what the host lends into a call of its own,
-    /// in both cases for the length of the call.
     #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
@@ -1016,24 +858,11 @@ mod implementation {
         Number(f64),
         String(String),
         Structured(StructuredClone),
-        /// The bytes of an `ArrayBuffer`. Returned from a host function, the
-        /// allocation itself becomes the new `ArrayBuffer`'s storage, with
-        /// nothing copied; lent into a call ([`Self::as_argument`]), it is
-        /// copied into a new `ArrayBuffer` of the realm called. Either way
-        /// the buffer is fixed-length.
         Bytes(Box<[u8]>),
-        /// A structured clone written with a transfer list
-        /// ([`TransferredBytes`]). Delivered into a realm through a
-        /// [`Revival`]; lent or returned as it is, a stream with slots fails
-        /// to read at its first slot.
         Transferred(TransferredClone),
     }
 
     impl HostValue {
-        /// Lends this value to a call into a realm.
-        ///
-        /// The one path from what a host function received, or what arrived
-        /// from another thread, back into JavaScript.
         #[must_use]
         pub fn as_argument(&self) -> HostArgument<'_> {
             match self {
@@ -1049,27 +878,6 @@ mod implementation {
         }
     }
 
-    /// A value lent across the boundary for the length of one call, borrowing
-    /// its bytes: an argument the host passes into the realm, or one a host
-    /// function is handed.
-    ///
-    /// Deliberately not [`HostValue`]. A caller of [`Context::call_member`]
-    /// already owns the strings it is passing — an event's name and its JSON
-    /// detail, held for the whole walk — and needs them only for the length
-    /// of the call, so it lends them. A host function's arguments are the
-    /// trampoline's, which holds them until the function returns, and most
-    /// are read and dropped within the call — a node id, an attribute name —
-    /// so they are lent too, and only what the function keeps is copied
-    /// ([`Self::to_value`]). Owning them here would mean a copy per argument
-    /// per call.
-    ///
-    /// The alternative was to make [`HostValue`] itself reference-counted so
-    /// both directions could share one type. Borrowing is strictly less work
-    /// than any refcount, and a refcount would ride on every argument of
-    /// every *inbound* call as well, where nothing is ever shared — a realm
-    /// is owner-thread-bound, so an atomic one buys nothing at all. Two types
-    /// is the honest shape: one direction owns what it just produced, the
-    /// other lends what it already had.
     #[derive(Clone, Copy, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostArgument<'a> {
@@ -1079,37 +887,12 @@ mod implementation {
         Number(f64),
         String(&'a str),
         Structured(&'a StructuredBytes),
-        /// The bytes of an `ArrayBuffer`.
-        ///
-        /// A host function is handed this for an argument that is itself a
-        /// fixed-length `ArrayBuffer` (a subclass instance included): not a
-        /// typed array or `DataView`, not one inside another value, and not
-        /// a resizable one, all of which stay [`Self::Structured`]. A
-        /// detached one is a `TypeError` at the call, as the structured path
-        /// makes it, and the host function is not called. The bytes are a
-        /// copy the trampoline made when it described the argument, not the
-        /// buffer's own storage: the host function can run code of the realm
-        /// while it holds them, and that code can write, detach or free the
-        /// buffer. A caller that means part of a typed array passes its
-        /// `buffer` with the offset and length as further arguments.
-        ///
-        /// Lent into a call of a realm, it becomes a new fixed-length
-        /// `ArrayBuffer` with a copy of the bytes.
         Bytes(&'a [u8]),
-        /// A message written with a non-empty transfer list: what a host
-        /// function registered with
-        /// [`Context::register_host_module_function_with_transfer`] is handed
-        /// for its message. Never made for any other host function.
         Transferred(TransferredBytes<'a>),
-        /// A transferred clone delivered with its slots' replacements: only
-        /// ever lent into a call by the host, never handed to a host
-        /// function.
         Revive(&'a Revival<'a>),
     }
 
     impl HostArgument<'_> {
-        /// Copies this value out of the call it was lent for: what a host
-        /// function keeps of an argument, or sends to another thread.
         #[must_use]
         pub fn to_value(self) -> HostValue {
             match self {
@@ -1121,13 +904,10 @@ mod implementation {
                 Self::Structured(value) => HostValue::Structured(value.to_owned()),
                 Self::Bytes(value) => HostValue::Bytes(Box::from(value)),
                 Self::Transferred(value) => HostValue::Transferred(value.to_owned()),
-                // The descriptors are the host's own, lent with the stream;
-                // what is kept is the stream.
                 Self::Revive(value) => HostValue::Transferred(value.message().to_owned()),
             }
         }
 
-        /// The C-ABI argument descriptor borrowing this value.
         fn descriptor(self) -> ffi::QjsHostArg {
             let (kind, number, text, text_len) = match self {
                 Self::Undefined => (ffi::HOST_ARG_UNDEFINED, 0.0, ptr::null(), 0),
@@ -1172,7 +952,6 @@ mod implementation {
         }
     }
 
-    /// Error returned by a Rust host function.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct HostFunctionError {
         pub message: String,
@@ -1212,41 +991,13 @@ mod implementation {
     type ReentrantHostHandler =
         Box<dyn Fn(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError>>;
 
-    /// What one host function runs, in one of two shapes.
     enum HostSlot {
-        /// An `FnMut` ([`Context::function`]), borrowed mutably for the
-        /// length of each call, so a call that reaches the same function
-        /// again while it runs — through JavaScript it calls back into — is
-        /// refused with an exception rather than aliasing its state.
         Exclusive(RefCell<HostHandler>),
-        /// An `Fn` ([`Context::function_reentrant`]), which a nested call
-        /// runs again while the outer call is still on the stack. Whatever
-        /// state it keeps is its own to borrow per use.
         Reentrant(ReentrantHostHandler),
     }
 
     struct HostTable {
         pending_release: RefCell<Vec<*mut HostSlot>>,
-        /// Keeps a returned string or structured clone alive across the ABI
-        /// return.
-        ///
-        /// The descriptor the trampoline reads borrows the host function's
-        /// return value, which would otherwise be dropped the moment
-        /// `host_dispatch` returns — so the bytes are moved here instead, and
-        /// what C reads are their own. Nothing is copied and nothing is
-        /// re-encoded; the previous return value, already consumed, is
-        /// released by the same write.
-        ///
-        /// One place serves nested calls too. A host function whose handler
-        /// calls into a realm that calls a host function again
-        /// ([`Context::function_reentrant`], or any host function another
-        /// realm's code reaches) has its inner call's answer written here
-        /// while the outer handler is still running; the trampoline turns it
-        /// into a `JSValue` (`qjs_host_build`, which copies the bytes) as soon
-        /// as `host_dispatch` returns, before any more JavaScript or Rust of
-        /// the outer call runs. The outer answer is written only once its
-        /// handler has returned, so it replaces bytes already read and never
-        /// bytes still to be read.
         return_bytes: RefCell<Option<Vec<u8>>>,
     }
 
@@ -1295,11 +1046,6 @@ mod implementation {
                     out.text = bytes.as_ptr();
                     out.text_len = bytes.len();
                 }
-                // Not parked: the allocation passes to the trampoline, whose
-                // `qjs_host_build` runs right after this returns and makes it
-                // the new `ArrayBuffer`'s storage, or frees it if that fails
-                // (`qjs_rust_bytes_free`, which takes the length back from
-                // the buffer's opaque).
                 HostValue::Bytes(bytes) => {
                     out.kind = ffi::HOST_ARG_BYTES_OWNED;
                     out.text_len = bytes.len();
@@ -1336,7 +1082,6 @@ mod implementation {
         raw: NonNull<ffi::QjsRuntime>,
         interrupt: Rc<InterruptState>,
         hosts: Box<HostTable>,
-        /// [`RuntimeOptions::strip_source`], as the runtime was built.
         strip_source: bool,
     }
 
@@ -1357,12 +1102,6 @@ mod implementation {
         }
     }
 
-    /// An owner-thread-bound `QuickJS` runtime.
-    ///
-    /// One JavaScript heap, one atom table, one promise-job queue, and one
-    /// set of execution limits — shared by every [`Context`] created on it.
-    /// Nothing here is `Send`: a runtime and everything reached through it
-    /// stay on the thread that built them.
     pub struct Runtime {
         inner: Rc<RuntimeInner>,
     }
@@ -1445,17 +1184,6 @@ mod implementation {
             }
         }
 
-        /// Creates one realm on this runtime.
-        ///
-        /// A realm has its own global object, its own instance of every
-        /// module it loads, and its own native modules. What it shares with
-        /// its sibling realms is everything the runtime owns: the heap, the
-        /// interned property names, the job queue, and the execution limits.
-        /// [`Value`]s never cross between realms — passing one to the wrong
-        /// context is [`ErrorKind::WrongRealm`] — and neither do failures: a
-        /// rejection this realm leaves unhandled is reported to this realm,
-        /// by the drain that names it (see
-        /// [`Runtime::drain_pending_jobs`]).
         pub fn create_context(&self) -> Result<Context, Error> {
             self.inner.reclaim();
             let raw = NonNull::new(unsafe { ffi::qjs_context_new(self.inner.raw.as_ptr()) })
@@ -1476,15 +1204,6 @@ mod implementation {
             }
         }
 
-        /// Adds one UTF-8 source module to this runtime's synchronous loader.
-        ///
-        /// Module names are exact after `QuickJS`'s normal normalization. A
-        /// module must be registered before any entry that imports it is
-        /// compiled, and a name cannot be replaced after registration.
-        ///
-        /// The source is registered once and compiled per realm: every
-        /// [`Context`] that imports the name gets its own module instance,
-        /// with its own bindings.
         pub fn register_module_source(&mut self, name: &str, source: &str) -> Result<(), Error> {
             self.inner.reclaim();
             if name.is_empty() {
@@ -1529,22 +1248,6 @@ mod implementation {
             }
         }
 
-        /// Adds one module to this runtime's synchronous loader as bytecode
-        /// rather than text: the bytes [`Context::compile_module_bytecode`]
-        /// wrote of it, on any runtime built from the same `QuickJS` sources.
-        ///
-        /// Everything else is as [`Self::register_module_source`]: the name
-        /// is exact, registered once, and instantiated per realm. Each realm
-        /// that imports the name reads the bytecode back (`JS_ReadObject`)
-        /// instead of parsing and compiling the text, which is the point —
-        /// reading is an order of magnitude cheaper than compiling. The bytes
-        /// are borrowed for the runtime's life, which is why they are
-        /// `'static`: the runtime copies nothing, and neither does a realm
-        /// until it reads them.
-        ///
-        /// The bytes are trusted as `QuickJS` trusts its own bytecode:
-        /// nothing verifies them beyond the format's own checks, so only
-        /// bytecode this process or its build wrote belongs here.
         pub fn register_module_bytecode(
             &mut self,
             name: &str,
@@ -1595,23 +1298,6 @@ mod implementation {
             }
         }
 
-        /// Reserves every module name that starts with `prefix` for what
-        /// this runtime and its realms already have.
-        ///
-        /// An `import` of a reserved name resolves to a source registered on
-        /// this runtime or to a native module the importing realm declared,
-        /// and a synchronous load (the export
-        /// [`Context::register_synchronous_loader`] installs) of one answers
-        /// only from a module the realm has already instantiated. Any other
-        /// reserved name fails that call with a `ReferenceError` in the
-        /// realm, and never becomes a [`Context::take_module_request`] or a
-        /// call of the realm's loader, so a name the host keeps for itself is
-        /// never fetched.
-        ///
-        /// A source the host completes on a realm itself, through
-        /// [`Context::complete_module`], is found by an `import` under any
-        /// name: the reservation decides only what a name found in none of
-        /// those tables does.
         pub fn reserve_module_prefix(&mut self, prefix: &str) -> Result<(), Error> {
             self.inner.reclaim();
             let prefix = CString::new(prefix).map_err(|_| {
@@ -1635,11 +1321,6 @@ mod implementation {
             }
         }
 
-        /// What the runtime's heap holds now: `JS_ComputeMemoryUsage`, which
-        /// walks every object, string, shape and function of every realm on
-        /// the runtime. It runs no JavaScript and collects nothing, but its
-        /// cost grows with the heap, so it is a sampler's call, not a hot
-        /// path's.
         #[must_use]
         pub fn memory_usage(&self) -> ffi::MemoryUsage {
             let mut usage = ffi::MemoryUsage::default();
@@ -1649,7 +1330,6 @@ mod implementation {
             usage
         }
 
-        /// Runs a full garbage collection and reclaims host closures.
         pub fn run_gc(&mut self) {
             unsafe { ffi::qjs_runtime_run_gc(self.inner.raw.as_ptr()) };
             self.inner.reclaim();
@@ -1660,9 +1340,6 @@ mod implementation {
             unsafe { ffi::qjs_has_pending_job(self.inner.raw.as_ptr()) != 0 }
         }
 
-        /// Runs one pending job, reporting for `realm`.
-        ///
-        /// See [`Self::drain_pending_jobs`] for what `realm` decides.
         pub fn try_execute_pending_job(&mut self, realm: &Context) -> Result<bool, Error> {
             self.inner.reclaim();
             let guard = self.inner.interrupt.begin();
@@ -1676,21 +1353,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::PendingJob)
         }
 
-        /// Runs every pending job, reporting for `realm`.
-        ///
-        /// The queue is the runtime's, so this runs whatever is queued
-        /// whichever realm queued it — a job of another realm's is still this
-        /// runtime's work, and leaving it unrun would stall that realm. It
-        /// runs to exhaustion: a job that queues another job is part of the
-        /// same drain, exactly as a browser's microtask checkpoint is.
-        ///
-        /// An *unhandled rejection* is not the runtime's. Only one `realm`
-        /// left behind is reported here; one another realm left behind stays
-        /// queued for that realm's own next drain, so a failure never arrives
-        /// at a caller that could not have caused it. A rejection handled
-        /// later in the same drain is not one: the tracker un-queues it when
-        /// a handler is attached, which is why the question is only asked
-        /// once the queue has run dry.
         pub fn drain_pending_jobs(&mut self, realm: &Context) -> Result<usize, Error> {
             self.inner.reclaim();
             let guard = self.inner.interrupt.begin();
@@ -1707,39 +1369,14 @@ mod implementation {
             guard.finish(result, ErrorPhase::PendingJob)
         }
 
-        /// Drops every rejection `realm` has left unhandled and reports how
-        /// many, without running a job.
-        ///
-        /// For a caller that has already reported this realm's failure. One
-        /// JavaScript failure can leave several rejections behind — a module
-        /// that throws rejects its own evaluation promise and whatever waits
-        /// on it — and reporting the rest one at a time turns one broken
-        /// entry into a realm that fails on every entry after it. Only this
-        /// realm's are dropped, so nothing another realm still has to hear
-        /// about is lost.
-        ///
-        /// Pending *jobs* are untouched: they are the runtime's work, still
-        /// due, and finishing them later is the drain's business.
         pub fn discard_unhandled_rejections(&mut self, realm: &Context) -> usize {
             let mut discarded = 0usize;
-            // Terminates: a taken rejection leaves the queue, the tracker's
-            // out-of-memory flag is cleared by the read that reports it, and
-            // no job runs here to queue another.
             while self.take_unhandled_rejection(realm).is_some() {
                 discarded = discarded.saturating_add(1);
             }
             discarded
         }
 
-        /// Runs one job from the shared queue, whichever realm queued it.
-        ///
-        /// A job's exception is captured in the realm it ran in, which is not
-        /// necessarily one the caller holds a handle to. Unlike a rejection,
-        /// it cannot be left for that realm to collect — an exception left
-        /// pending would poison the next operation there — so it is reported
-        /// to whoever is draining. `QuickJS` reaches this only when a job
-        /// function itself throws, which its promise jobs turn into
-        /// rejections instead; what is left is the out-of-memory class.
         fn try_execute_pending_job_inner(&mut self) -> Result<bool, Error> {
             let mut job_context = ptr::null_mut();
             let status = unsafe {
@@ -1761,10 +1398,6 @@ mod implementation {
             }
         }
 
-        /// Takes the oldest rejection `realm` left unhandled, if it left one.
-        ///
-        /// Rejections queued by this runtime's other realms are skipped, not
-        /// consumed: each waits for its own realm, and is freed with it.
         fn take_unhandled_rejection(&self, realm: &Context) -> Option<Error> {
             debug_assert!(
                 Rc::ptr_eq(&realm.inner.runtime, &self.inner),
@@ -1791,8 +1424,6 @@ mod implementation {
                 ));
             }
             let context = NonNull::new(context)?;
-            // Boxing the reason is the one step that can fail, and it leaves
-            // its own exception pending in that realm.
             let Some(reason) = NonNull::new(reason) else {
                 return Some(capture_exception(context, ErrorPhase::PendingJob));
             };
@@ -1804,35 +1435,8 @@ mod implementation {
         }
     }
 
-    /// Synchronous name resolution; source retrieval remains asynchronous.
     pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
 
-    /// Identifies everything that decides whether bytecode this build writes
-    /// can be read by it, as one stable 64-bit number: equal ids, readable
-    /// bytecode.
-    ///
-    /// It is a 64-bit FNV-1a hash, computed once per process, of
-    ///
-    /// - a digest of the engine's sources, taken by the build script: every `QuickJS` C source and
-    ///   header it compiles or includes, `QuickJS`'s `VERSION`, this crate's `shim.c`, and the
-    ///   build script itself, whose defines change what the engine compiles (its atom table, which
-    ///   bytecode indexes into, among them);
-    /// - this crate's version;
-    /// - the bytecode format version `QuickJS` writes as the first byte of every output and refuses
-    ///   any other value of (`BC_VERSION`, private to `quickjs.c`, read off a write on a scratch
-    ///   runtime);
-    /// - the target's pointer width and byte order, which the format does not record and the reader
-    ///   does not check.
-    ///
-    /// What [`RuntimeOptions::strip_source`] was is not part of it: that is a
-    /// choice per runtime, not per build, and bytecode written either way
-    /// reads on any runtime of this build. It changes what the code answers
-    /// `Function.prototype.toString` with, so a caller that keeps bytecode
-    /// keys it by [`Context::strips_source`] as well.
-    ///
-    /// Every capture this bridge hands out ([`Context::take_compiled`])
-    /// carries the id it was written under, and a cache that carries any
-    /// other is compiled from its text instead.
     #[must_use]
     pub fn bytecode_engine_id() -> u64 {
         static ID: OnceLock<u64> = OnceLock::new();
@@ -1859,13 +1463,10 @@ mod implementation {
             hash.write(&[0]);
             hash.write(&format.to_le_bytes());
             hash.write(&[pointer_width, endian]);
-            // Zero is kept for "no id", which no build answers.
             hash.finish().max(1)
         })
     }
 
-    /// 64-bit FNV-1a: stable across Rust releases and platforms, which
-    /// `std::hash` does not promise.
     struct Fnv1a(u64);
 
     impl Fnv1a {
@@ -1885,12 +1486,8 @@ mod implementation {
         }
     }
 
-    /// The bytes before the `QuickJS` bytecode in every capture: the
-    /// [`bytecode_engine_id`] it was written under and the length of what
-    /// follows, both little-endian `u64`s.
     const BYTECODE_FRAME_HEADER: usize = 16;
 
-    /// Frames bytecode this build wrote, as [`Compiled::bytecode`] carries it.
     fn frame_bytecode(payload: &[u8]) -> Vec<u8> {
         let mut framed = Vec::with_capacity(BYTECODE_FRAME_HEADER + payload.len());
         framed.extend_from_slice(&bytecode_engine_id().to_le_bytes());
@@ -1899,14 +1496,6 @@ mod implementation {
         framed
     }
 
-    /// The bytecode a frame carries, when it is this build's and whole.
-    ///
-    /// `JS_ReadObject` trusts its input: it reads what another build wrote
-    /// as if this one had. So bytes of another build and truncated bytes —
-    /// the two ways a store hands back what this build did not write — are
-    /// turned away here, before any read. Bytes damaged in place are the
-    /// caller's checksum's to catch; a read that does fail part-way through
-    /// a module frees it and leaves nothing registered under its name.
     fn unframe_bytecode(framed: &[u8]) -> Option<&[u8]> {
         let (id, rest) = framed.split_first_chunk::<8>()?;
         let (length, payload) = rest.split_first_chunk::<8>()?;
@@ -1916,89 +1505,37 @@ mod implementation {
         .then_some(payload)
     }
 
-    /// Whether `framed` is bytecode in this build's frame
-    /// ([`Compiled::bytecode`], [`Context::compile_module_framed`]): this
-    /// build's [`bytecode_engine_id`], and a length that is the payload's
-    /// own and not zero.
-    ///
-    /// The check [`ModuleCode::Bytecode`] makes before anything is read,
-    /// for a caller that wants to refuse such bytes where it is handed
-    /// them rather than at the first import. It is the frame's guard and
-    /// nothing more: bytes damaged in place inside a whole frame still
-    /// pass, and fail only when they are read.
     #[must_use]
     pub fn is_framed_bytecode(framed: &[u8]) -> bool {
         unframe_bytecode(framed).is_some()
     }
 
-    /// What the realm does about a module's compiled form.
     #[derive(Clone, Copy, Debug)]
     pub enum ModuleCode<'a> {
-        /// Compile the text when the module is first linked. What
-        /// [`Context::complete_module`] does.
         Compile,
-        /// Compile the text, and keep the bytecode of that compile for
-        /// [`Context::take_compiled`].
         Capture,
-        /// Read this bytecode — a [`Compiled::bytecode`] a compile of this
-        /// same text under this same name left — instead of compiling. If it
-        /// cannot be read as this module, compile the text instead and keep
-        /// that compile's bytecode for [`Context::take_compiled`], exactly as
-        /// [`Capture`](Self::Capture).
         Cached(&'a [u8]),
-        /// Read this bytecode — framed as [`Compiled::bytecode`] and
-        /// [`Context::compile_module_framed`] frame it, compiled under this
-        /// same name — and nothing else: the module has no text, and the
-        /// completion's text is ignored. Bytes that are not in this build's
-        /// frame fail the module at once; bytes `JS_ReadObject` refuses, a
-        /// value that is not a module, and a module compiled under another
-        /// name fail it when it is first linked. Either way every import of
-        /// the name rejects with a `TypeError` naming it, and nothing is
-        /// compiled or captured in its place.
         Bytecode(&'a [u8]),
     }
 
-    /// One compile whose bytecode a realm kept ([`Context::take_compiled`]).
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Compiled {
-        /// What was compiled.
         pub kind: CompiledKind,
-        /// The name the compile baked in: a module's name (the name it was
-        /// completed or required under), a `CommonJS` file's response URL.
         pub name: String,
-        /// What to hand back as [`ModuleCode::Cached`] or
-        /// [`RequiredCode::cached`]: the bytes `JS_WriteObject` wrote,
-        /// behind a frame naming the [`bytecode_engine_id`] they were
-        /// written under and their length. Opaque; read only by a realm of
-        /// a build with the same id.
         pub bytecode: Vec<u8>,
     }
 
-    /// What a [`Compiled`] is the bytecode of.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum CompiledKind {
-        /// An ES module, unlinked: what a realm reads it back as resolves its
-        /// imports against that realm's modules.
         Module,
-        /// A `CommonJS` wrapper, with the parameter list it was wrapped in.
         CommonJs { parameters: String },
     }
 
-    /// How a synchronously loaded source is read.
-    ///
-    /// The host decides: this bridge knows nothing about URLs, file
-    /// extensions or media types. [`Detect`](RequiredKind::Detect) is the
-    /// host declining to, which only the engine can settle — `QuickJS`'s own
-    /// syntax heuristic over the text, which never becomes a value and which
-    /// the host, having only lent its bytes, cannot run.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum RequiredKind {
         CommonJs,
         Json,
-        /// An ES module: linked and evaluated by the load, answered with its
-        /// namespace object.
         Module,
-        /// `CommonJs` or `Module`, whichever the text reads as.
         Detect,
     }
 
@@ -2013,40 +1550,17 @@ mod implementation {
         }
     }
 
-    /// One source a synchronous load produced: the URL it answered from, its
-    /// text, and how to read it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RequiredSource {
-        /// The response URL. It names the compiled source and is what the
-        /// answer reports back, so a caller that resolves against it resolves
-        /// against where the source came from rather than where it asked.
         pub url: String,
         pub text: String,
         pub kind: RequiredKind,
     }
 
-    /// As [`RequiredSource`], with a choice of code.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RequiredCode {
         pub source: RequiredSource,
-        /// Bytecode a previous load of exactly this text, URL and parameter
-        /// list left ([`Compiled::bytecode`]), to read instead of compiling:
-        /// the `CommonJS` wrapper's when the kind is
-        /// [`CommonJs`](RequiredKind::CommonJs), the module's when it is
-        /// [`Module`](RequiredKind::Module).
-        ///
-        /// A wrapper's makes the load `CommonJS` whenever the source's own
-        /// kind is `CommonJs` or `Detect`, without detection; a module's
-        /// makes it a module whenever that kind is `Module` or `Detect`.
-        /// Bytecode that cannot be read, or that the source's kind rules out,
-        /// is dropped and the text compiled as it would have been, with its
-        /// bytecode kept as [`capture`](Self::capture) keeps it. A `Json`
-        /// source is never read from bytecode.
         pub cached: Option<(RequiredKind, Vec<u8>)>,
-        /// Keep the bytecode of whatever this load compiles for
-        /// [`Context::take_compiled`]: a `CommonJS` wrapper's under its
-        /// response URL, a module's under the URL it was asked for. A `Json`
-        /// source compiles nothing and keeps nothing.
         pub capture: bool,
     }
 
@@ -2062,16 +1576,10 @@ mod implementation {
 
     type RequireLoader = dyn FnMut(&str, &str) -> Result<RequiredCode, String>;
 
-    /// What the last load produced, kept alive for the shim to read out of.
-    ///
-    /// One load at a time: the shim copies the URL and compiles, reads or
-    /// parses the text and bytecode before it evaluates the compiled script,
-    /// which is the first thing that can start another load.
     #[derive(Default)]
     struct ParkedRequire {
         url: CString,
         text: String,
-        /// Framed, as the host handed it in: the shim reads past the frame.
         cached: Vec<u8>,
         error: CString,
     }
@@ -2084,17 +1592,11 @@ mod implementation {
         require_loader: RefCell<Option<Box<RequireLoader>>>,
         required: RefCell<ParkedRequire>,
         shadow_hook: RefCell<Option<Box<ShadowRealmHook>>>,
-        /// What the last refused `new ShadowRealm()` says, kept alive for the
-        /// shim to read until the next construction.
         shadow_error: RefCell<CString>,
     }
 
     type ShadowRealmHook = dyn FnMut(Context) -> Result<(), String>;
 
-    /// The shim's `QjsShadowRealmInit`: hands the fresh child to the parent's
-    /// hook as a [`Context`] of its own, which is what makes the host its
-    /// owner — from here on `qjs_context_free` runs when the last handle to
-    /// it drops, whatever the hook answers.
     unsafe extern "C" fn shadow_realm_init(
         opaque: *mut c_void,
         child: *mut ffi::QjsContext,
@@ -2138,9 +1640,6 @@ mod implementation {
             .filter(|&character| character != '\0')
             .collect();
         let text = CString::new(text).unwrap_or_default();
-        // Our own count is the last one only when the hook dropped every
-        // handle on the parent, which frees what `shadow_error` lives in as
-        // this returns; a static message outlives that.
         let parked = if Rc::strong_count(&parent) > 1 {
             parent.shadow_error.try_borrow_mut().ok().map(|mut parked| {
                 *parked = text;
@@ -2240,9 +1739,6 @@ mod implementation {
             Ok((url, text, kind, cached, capture)) => {
                 parked.url = url;
                 parked.text = text;
-                // Bytecode that is not this build's, or not whole, is no
-                // cache at all: the text compiles, and keeps what it compiled
-                // to, as unreadable bytecode does in the shim.
                 let had_cache = cached.is_some();
                 let (cached_kind, bytes) = cached.unwrap_or((RequiredKind::CommonJs, Vec::new()));
                 parked.cached = bytes;
@@ -2266,8 +1762,6 @@ mod implementation {
                 }
                 0
             }
-            // The message the `require` throws, worded here because this is
-            // where the URL asked for and the host's reason are both in hand.
             Err(message) => {
                 parked.error = CString::new(format!("cannot load '{url}': {message}"))
                     .unwrap_or_else(|_| c"the require loader failed".to_owned());
@@ -2287,8 +1781,6 @@ mod implementation {
         }
     }
 
-    /// One realm on a [`Runtime`]: a global object, the values reachable from
-    /// it, and the modules loaded into it.
     pub struct Context {
         inner: Rc<ContextInner>,
     }
@@ -2306,8 +1798,6 @@ mod implementation {
     }
 
     impl Context {
-        /// Takes ownership of one C realm of `runtime`'s: from here on
-        /// `qjs_context_free` runs when the last handle to it drops.
         fn adopt(raw: NonNull<ffi::QjsContext>, runtime: &Rc<RuntimeInner>) -> Self {
             Self {
                 inner: Rc::new(ContextInner {
@@ -2335,11 +1825,6 @@ mod implementation {
             self.inner.runtime.interrupt.begin()
         }
 
-        /// Enables host-driven loading for dynamic imports and their static
-        /// dependencies. Start an external entry with `import()`, rather than
-        /// evaluating its source directly. Take requests after each job checkpoint, complete them
-        /// on this thread, then resume loads and drain the runtime's jobs.
-        /// The normalizer must not enter JavaScript.
         pub fn enable_module_loading(&mut self, normalize: ModuleNormalizer) {
             *self.inner.module_normalizer.borrow_mut() = Some(normalize);
             // SAFETY: the stable allocation outlives its C context; the shim
@@ -2353,36 +1838,6 @@ mod implementation {
             }
         }
 
-        /// Installs the TC39 `ShadowRealm` constructor on this realm's global
-        /// object, with `hook` as its `HostInitializeShadowRealm`.
-        ///
-        /// `new ShadowRealm()` makes a fresh child realm on this realm's
-        /// runtime — its own global object and intrinsics, no module loading,
-        /// no native modules, no `ShadowRealm` of its own — and calls `hook`
-        /// with it, synchronously, inside the construction. The child is the
-        /// hook's: it is what installs whatever the child should have, and it
-        /// must keep the [`Context`] for as long as the realm should live,
-        /// because the host owns every child and dropping the last handle
-        /// releases it. `Err(message)` refuses the construction with a
-        /// `TypeError(message)` in this realm. The hook runs in the middle of
-        /// a JavaScript call, so it must not need `&mut Runtime`; a nested
-        /// `new ShadowRealm()` of this realm from inside it is refused.
-        ///
-        /// JavaScript holds a child only weakly. The `ShadowRealm` object,
-        /// the wrapped functions crossing its boundary and a pending
-        /// `importValue` keep tokens rather than references, so a realm the
-        /// host has released is a `TypeError` at every crossing from then on
-        /// rather than a realm kept alive behind its back.
-        /// [`Self::is_referenced_across_realms`] is how the host learns that
-        /// nothing needs a child any more.
-        ///
-        /// Values still never cross in Rust: the callable boundary is the
-        /// engine's, and a child's [`Value`] passed to this realm's methods is
-        /// [`ErrorKind::WrongRealm`]. Everything a child runs during one of
-        /// this realm's entries runs under that entry's execution limits.
-        ///
-        /// A realm takes one hook; a second install is
-        /// [`ErrorKind::InvalidInput`].
         pub fn install_shadow_realm<F>(&mut self, hook: F) -> Result<(), Error>
         where
             F: FnMut(Context) -> Result<(), String> + 'static,
@@ -2412,21 +1867,12 @@ mod implementation {
             }
         }
 
-        /// Whether anything of another realm still needs this one: a
-        /// `ShadowRealm` whose child it is, a wrapped function whose target
-        /// lives in it, or an `importValue` still loading in it.
-        ///
-        /// Those objects say so from their finalizers, so one that is only
-        /// cyclic garbage still counts until [`Runtime::run_gc`] has
-        /// collected it.
         #[must_use]
         pub fn is_referenced_across_realms(&self) -> bool {
             // SAFETY: a read of a count the shim keeps on this live context.
             unsafe { ffi::qjs_context_shadow_holders(self.raw().as_ptr()) > 0 }
         }
 
-        /// Takes one not-yet-dispatched module name. Repeated imports share
-        /// one request and one module instance within this realm.
         #[must_use]
         pub fn take_module_request(&self) -> Option<String> {
             // SAFETY: C returns a borrowed, terminated name owned by this
@@ -2437,8 +1883,6 @@ mod implementation {
             }
         }
 
-        /// Supplies a realm-local module, or records its load failure. `url`
-        /// is the response URL used as the base for its own imports.
         pub fn complete_module(
             &self,
             name: &str,
@@ -2474,11 +1918,6 @@ mod implementation {
 
         fn completion_status(&self, status: c_int) -> Result<(), Error> {
             match status {
-                // -5 is this name having been answered already, which a
-                // synchronous `require` linking an import of it inline does
-                // out of band of the request this completion answers. The
-                // source is the same file from the same host, so the load
-                // that was in flight has nothing left to supply.
                 0 | -5 => Ok(()),
                 -2 => Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -2489,19 +1928,6 @@ mod implementation {
             }
         }
 
-        /// [`Self::complete_module`] with a successful answer and a choice of
-        /// [`ModuleCode`]: the module's text and response URL, and what the
-        /// realm does about its compiled form.
-        ///
-        /// The code is a choice about how the text becomes a module and
-        /// nothing else: the module is the text's either way, named `name`,
-        /// with `url` as its `import.meta.url` and its imports' base, which
-        /// is why one bytecode serves realms that answered the same text
-        /// from different URLs. Bytecode is copied here and read the first
-        /// time the module is linked; bytecode that cannot be read as this
-        /// module then falls back to the text, as [`ModuleCode::Cached`]
-        /// says. A name already answered stands as it was answered, code and
-        /// all (`Ok`, as with `complete_module`).
         pub fn complete_module_with(
             &self,
             name: &str,
@@ -2558,17 +1984,6 @@ mod implementation {
             self.completion_status(status)
         }
 
-        /// One compile whose bytecode this realm kept, oldest first; `None`
-        /// when there is none.
-        ///
-        /// A compile is kept when it was asked for — [`ModuleCode::Capture`],
-        /// [`RequiredCode::capture`] — or when bytecode handed in could not
-        /// be read and the text compiled instead. It is kept once the text
-        /// has compiled and before anything of it has run, so a module or
-        /// file whose evaluation then throws is kept too; a text that does
-        /// not compile keeps nothing. Bytecode that was read keeps nothing,
-        /// and neither does JSON. What is kept stays until it is taken or the
-        /// realm is dropped.
         #[must_use]
         pub fn take_compiled(&self) -> Option<Compiled> {
             // SAFETY: the shim hands over one entry it no longer links to;
@@ -2598,31 +2013,11 @@ mod implementation {
             Some(compiled)
         }
 
-        /// Whether this realm's runtime was built with
-        /// [`RuntimeOptions::strip_source`]. Bytecode a stripping runtime
-        /// wrote answers `Function.prototype.toString` without the source
-        /// text, so a cache of bytecode keys by this as well as by
-        /// [`bytecode_engine_id`].
         #[must_use]
         pub fn strips_source(&self) -> bool {
             self.inner.runtime.strip_source
         }
 
-        /// Compiles module source text to bytecode, for
-        /// [`Runtime::register_module_bytecode`] on any runtime built from
-        /// the same `QuickJS` sources, this one included.
-        ///
-        /// `name` is what the module is known by: the specifier an import of
-        /// it normalizes to, which is what its errors and stack frames name
-        /// and what it is registered under. The module is compiled unlinked —
-        /// its imports are resolved by whichever realm reads it, against
-        /// that realm's modules — and never evaluated here. It stays loaded
-        /// in this realm under `name`, so a realm compiles each name once; a
-        /// compiler that sees the same name again uses a fresh realm.
-        ///
-        /// What the bytecode carries of the source is the runtime's
-        /// [`RuntimeOptions::strip_source`] choice. A syntax error is this
-        /// call's `Err`, with [`ErrorKind::Syntax`].
         pub fn compile_module_bytecode(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
             self.reclaim();
             let name = CString::new(name).map_err(|_| {
@@ -2632,8 +2027,6 @@ mod implementation {
                     "module name contains a NUL byte",
                 )
             })?;
-            // `JS_Eval` reads one byte past the length it is given, which
-            // must be a NUL: the parser's lookahead ends on it.
             let mut terminated = Vec::with_capacity(source.len() + 1);
             terminated.extend_from_slice(source.as_bytes());
             terminated.push(0);
@@ -2664,16 +2057,11 @@ mod implementation {
             Ok(bytecode)
         }
 
-        /// [`Self::compile_module_bytecode`], framed as [`Compiled::bytecode`]
-        /// is: what [`ModuleCode::Bytecode`] and [`ModuleCode::Cached`] read,
-        /// in a realm of any runtime of this build.
         pub fn compile_module_framed(&self, name: &str, source: &str) -> Result<Vec<u8>, Error> {
             self.compile_module_bytecode(name, source)
                 .map(|payload| frame_bytecode(&payload))
         }
 
-        /// Retries suspended imports after completing their sources. This
-        /// does not drain promise jobs. Further dependencies may be requested.
         pub fn resume_module_loads(&self) -> Result<(), Error> {
             let guard = self.begin();
             // SAFETY: continuations and their values belong to this context.
@@ -2683,27 +2071,6 @@ mod implementation {
             guard.finish(Ok(()), ErrorPhase::Evaluate)
         }
 
-        /// Loads the module `name` as the root of a module graph, the way
-        /// `import(name)` loads one, and answers the promise that load
-        /// settles: fulfilled with the module's namespace once its graph has
-        /// evaluated, rejected with whatever failed to load, link or
-        /// evaluate.
-        ///
-        /// `name` is its own base, so it normalizes from itself: an absolute
-        /// URL, or a name the normalizer passes through, names itself. A
-        /// graph whose every source this realm already has — a registered
-        /// module, a completed one — is linked and evaluated during this
-        /// call. What happens to a graph missing a source depends on
-        /// [`Self::enable_module_loading`]. With loading enabled the load
-        /// waits as an `import` does: each source the realm lacks, the
-        /// root's own included, becomes a [`Self::take_module_request`], and
-        /// the load goes on once [`Self::complete_module`] has answered it
-        /// and [`Self::resume_module_loads`] has run. Without it the loader
-        /// refuses the missing source at once with a `ReferenceError` (`module
-        /// '<name>' is not preloaded`), which rejects the load. Nothing here
-        /// drains the job queue, and nothing handles the promise: a rejection
-        /// nothing awaits is reported by the next drain, as a rejected module
-        /// evaluation is.
         pub fn load_module(&self, name: &str) -> Result<Value, Error> {
             self.reclaim();
             let name = CString::new(name).map_err(|_| {
@@ -2727,14 +2094,6 @@ mod implementation {
             })
         }
 
-        /// Adds one Rust-backed named export to a native ESM module in this
-        /// realm.
-        ///
-        /// The module and all of its exports must be registered before the
-        /// graph first loads that specifier. Native modules are per-realm, so
-        /// a sibling realm sees this specifier only if it registers its own;
-        /// source modules and native modules share one exact-name namespace
-        /// and neither kind can replace the other.
         pub fn register_host_module_function<F>(
             &self,
             module_name: &str,
@@ -2751,9 +2110,6 @@ mod implementation {
             self.add_host_module_function(&names, function)
         }
 
-        /// [`Self::register_host_module_function`] for an `Fn` closure, made
-        /// by [`Self::function_reentrant`]: one that may be called again
-        /// while a call of it is running.
         pub fn register_host_module_function_reentrant<F>(
             &self,
             module_name: &str,
@@ -2770,39 +2126,6 @@ mod implementation {
             self.add_host_module_function(&names, function)
         }
 
-        /// [`Self::register_host_module_function`] for a function whose
-        /// argument `message_index` is a message and whose argument
-        /// `message_index + 1` is that message's transfer list, as
-        /// `postMessage(message, transfer)` has them.
-        ///
-        /// The list is `undefined` or an array; anything else is a
-        /// `TypeError` at the call. With `undefined` or an empty array, the
-        /// message is described as any argument is, so the handler sees what
-        /// [`Self::register_host_module_function`] would show it. With a
-        /// non-empty list, each entry must be an object marked transferable
-        /// (`markUncloneable(object, true)`, from
-        /// [`Self::register_host_module_transfer_members`]) and listed once,
-        /// and the message is written with each entry as its slot, by list
-        /// index, wherever it appears: the handler is handed
-        /// [`HostArgument::Transferred`] with as many slots as the list has
-        /// entries, whatever the message is. The list's own argument is
-        /// handed as [`HostArgument::Number`], its length. Every other
-        /// argument is described as usual.
-        ///
-        /// Everything the serializer refuses throws at the call and the
-        /// handler is not called, so nothing has been sent and nothing in
-        /// the realm has changed: an entry that is not a transferable object
-        /// or is listed twice (`TypeError: value is not transferable`,
-        /// `TypeError: duplicate transferable`), a marked object the message
-        /// holds that is not listed (`TypeError: uncloneable object`), and
-        /// every refusal [`Self::register_host_module_function`] makes. The
-        /// handler learns which slot is which object from the realm's own
-        /// code, which passes whatever names the objects (ids of its own
-        /// tables) as further primitive arguments, in list order.
-        ///
-        /// `message_index` is at most 253: `QuickJS` keeps a function's
-        /// length in eight bits, and the function's length is at least
-        /// `message_index + 2`.
         pub fn register_host_module_function_with_transfer<F>(
             &self,
             module_name: &str,
@@ -2820,23 +2143,6 @@ mod implementation {
             self.add_host_module_function(&names, function)
         }
 
-        /// Adds the two members a realm's own code uses to take part in a
-        /// transfer, as the exports `mark_export` and `reviver_export` of the
-        /// native ESM module `module_name` in this realm. Neither crosses
-        /// into Rust:
-        ///
-        /// - `mark_export(object, transferable)` marks `object` uncloneable: a structured clone
-        ///   that meets it throws `TypeError: uncloneable object` unless it is in the clone's
-        ///   transfer list, and it may be in one only while the latest mark said `transferable`.
-        ///   Marking it again with `false` (an object whose payload has moved out) keeps it
-        ///   uncloneable and makes it untransferable. A non-object is a `TypeError`.
-        /// - `reviver_export(reviver)` sets the function a [`Revival`] delivered into this realm
-        ///   calls once per slot with that slot's descriptor, to make the value the slot reads as.
-        ///   Once per realm: a second call is a `TypeError`, so the realm's engine code, which runs
-        ///   first, is the code every delivery calls.
-        ///
-        /// Registered under the rules of
-        /// [`Self::register_host_module_function`].
         pub fn register_host_module_transfer_members(
             &self,
             module_name: &str,
@@ -2861,8 +2167,6 @@ mod implementation {
             Ok(())
         }
 
-        /// Adds a host function just made as the export the two names
-        /// [`host_module_names`] checked name.
         fn add_host_module_function(
             &self,
             (module_name_c, export_name_c): &(CString, CString),
@@ -2883,21 +2187,6 @@ mod implementation {
             host_module_status(status)
         }
 
-        /// Adds the runtime's shared object as the named export
-        /// `export_name` of the native ESM module `module_name` in this
-        /// realm.
-        ///
-        /// One object with a null prototype, and the same reference in every
-        /// realm of this runtime it is added to: what one realm stores on it,
-        /// another reads as itself, functions included, with no host
-        /// function between them. It is the one value that is not a copy
-        /// when it reaches another realm; everything a host function passes
-        /// still is. The runtime keeps it while any realm it was added to is
-        /// alive, and the next realm it is added to after the last of those
-        /// is freed gets a new, empty one.
-        ///
-        /// Registered under the rules of
-        /// [`Self::register_host_module_function`].
         pub fn register_host_module_shared_object(
             &mut self,
             module_name: &str,
@@ -2916,63 +2205,6 @@ mod implementation {
             host_module_status(status)
         }
 
-        /// Registers `export_name` on the native module `module_name` as a
-        /// synchronous source loader, backed by `load`.
-        ///
-        /// The export it installs is
-        ///
-        /// ```ts
-        /// loadModuleSync(url: string, parameters: string):
-        ///     { url: string; kind: "commonjs" | "json" | "module"; value: unknown }
-        /// ```
-        ///
-        /// `url` is asked of `load` as it stands: this entry resolves
-        /// nothing, caches nothing and builds no module object, so a realm's
-        /// `require` algorithm is JavaScript written over it. The four kinds
-        /// a `load` may answer with are three answers:
-        ///
-        /// - [`CommonJs`](RequiredKind::CommonJs): the wrapper function, compiled inside the
-        ///   parameter list `parameters` names, verbatim — `"exports, require, module"` answers a
-        ///   function of those three, whose body starts on line 1 of the file so its line numbers
-        ///   are the file's own. `kind` is `"commonjs"`.
-        /// - [`Json`](RequiredKind::Json): the parsed value. `parameters` is unread. `kind` is
-        ///   `"json"`.
-        /// - [`Module`](RequiredKind::Module): the namespace object of the ES module, linked and
-        ///   evaluated. `parameters` is unread, and `kind` is `"module"`.
-        /// - [`Detect`](RequiredKind::Detect): whichever of the first and the third `QuickJS`'s
-        ///   syntax heuristic reads the text as, answered as that one.
-        ///
-        /// Either way the source text never becomes a JavaScript value, and
-        /// the compile or parse names [`RequiredSource::url`] — the URL the
-        /// load answered from — so a `SyntaxError` and every frame beneath it
-        /// name the file.
-        ///
-        /// A module is **linked inline**: every `import` in it, and in what
-        /// it imports, is resolved during its compile by asking `load` for
-        /// that URL too, recursively, before any body runs. A specifier that
-        /// names a native module of this realm links to it instead, and one
-        /// whose source `load` refuses is a `ReferenceError`. Evaluation is
-        /// synchronous and runs no promise jobs, so two things a `require`
-        /// cannot do throw `Error("cannot require '<url>': …")`: a graph that
-        /// awaits at its top level, which only the job queue could settle
-        /// (Node's `ERR_REQUIRE_ASYNC_MODULE`), and a module of a graph that
-        /// is still evaluating (Node's `ERR_REQUIRE_CYCLE_MODULE`, and,
-        /// because `JSModuleDef` keeps its status private, also a module of
-        /// that graph whose own body has already finished). A module this
-        /// realm already has — from an earlier `require`, or from an
-        /// `import` — is answered from it, evaluated at most once.
-        ///
-        /// A `load` that fails throws `Error("cannot load '<url>': <reason>")`.
-        ///
-        /// `load` is entered only from this export and from an import being
-        /// linked inline for it, is never borrowed while JavaScript runs, and
-        /// must not enter JavaScript itself. It is re-entrant in the sense
-        /// that matters: each call returns before the compile that starts the
-        /// next one. A realm has one loader, and a second registration is
-        /// refused whatever name it asks for — the export is what carries the
-        /// loader, so a second one would answer the first export from the
-        /// second `load`. The same name on the same module is refused before
-        /// that, as any other duplicate export is.
         pub fn register_synchronous_loader<F>(
             &mut self,
             module_name: &str,
@@ -2989,19 +2221,6 @@ mod implementation {
             )
         }
 
-        /// As [`Self::register_synchronous_loader`], except that `load` is
-        /// also told the parameter list the load was asked with, and may
-        /// answer with code: bytecode to read instead of compiling, and
-        /// whether to keep the bytecode of what it compiles
-        /// ([`RequiredCode`]).
-        ///
-        /// The parameter list is the second argument of `loadModuleSync`,
-        /// verbatim. An import being linked inline was asked with none, and
-        /// is told `""`; it is linked as a module whatever `load` answers, so
-        /// only a module's bytecode is of use to it. Bytecode is lent on the
-        /// same terms as the text, and read or copied before anything of the
-        /// file runs. What a load keeps is taken with
-        /// [`Self::take_compiled`].
         pub fn register_synchronous_loader_with_code<F>(
             &mut self,
             module_name: &str,
@@ -3025,15 +2244,10 @@ mod implementation {
                 )
             };
             host_module_status(status)?;
-            // After the registration that took it, and only then: a refused
-            // one leaves whatever loader this realm already had. The shim
-            // retains the trampoline and this allocation rather than the
-            // closure, and no JavaScript runs in between.
             *self.inner.require_loader.borrow_mut() = Some(Box::new(load));
             Ok(())
         }
 
-        /// Returns the namespace object of a module this realm has linked.
         pub fn module_namespace(&self, name: &str) -> Result<Value, Error> {
             self.reclaim();
             if name.is_empty() {
@@ -3056,7 +2270,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
-        /// Replaces a named property while enforcing realm affinity and interrupts.
         pub fn set_property(
             &mut self,
             target: &Value,
@@ -3084,11 +2297,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
-        /// Reads a named property, enforcing realm affinity and interrupts.
-        ///
-        /// An absent property is `undefined`, not an error: a host looking for
-        /// a callback the realm may not have installed asks for it and checks
-        /// what came back.
         pub fn property(&mut self, target: &Value, name: &str) -> Result<Value, Error> {
             self.reclaim();
             self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
@@ -3105,13 +2313,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
-        /// Creates a JavaScript callable backed by a Rust closure.
-        ///
-        /// The closure is borrowed mutably for the length of each call, so a
-        /// call that reaches this same function again while it runs is
-        /// refused with an exception ("this host function cannot be called
-        /// while it is already running"). [`Self::function_reentrant`] is
-        /// the shape that allows one.
         pub fn function<F>(&self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
         where
             F: FnMut(&[HostArgument<'_>]) -> Result<HostValue, HostFunctionError> + 'static,
@@ -3124,9 +2325,6 @@ mod implementation {
             )
         }
 
-        /// [`Self::function`] for a function whose argument `message_index`
-        /// is a message and `message_index + 1` its transfer list: see
-        /// [`Self::register_host_module_function_with_transfer`].
         pub fn function_with_transfer<F>(
             &self,
             name: &str,
@@ -3152,15 +2350,6 @@ mod implementation {
             )
         }
 
-        /// [`Self::function`] for an `Fn` closure, which may be called again
-        /// while a call of it is running: a handler that calls into a realm
-        /// whose code calls this same function back runs both calls, the
-        /// inner one to its end inside the outer.
-        ///
-        /// Nothing is borrowed for the call, so every piece of state the
-        /// handler touches must be borrowed per use and released before it
-        /// enters JavaScript. The arguments each call is lent and the answer
-        /// it returns are its own, nested or not (see `HostTable`).
         pub fn function_reentrant<F>(
             &self,
             name: &str,
@@ -3206,7 +2395,6 @@ mod implementation {
             }
         }
 
-        /// Installs a Rust-backed callable on the global object.
         pub fn define_global_function<F>(
             &mut self,
             name: &str,
@@ -3291,24 +2479,12 @@ mod implementation {
             })
         }
 
-        /// Constructs a JavaScript string from well-formed text.
-        ///
-        /// A Rust `str` is always well-formed UTF-8, so this hands the bytes
-        /// straight to `QuickJS`'s own decoder — one pass, no host-side
-        /// allocation, and a `memcpy` for the ASCII case.
         pub fn string(&self, value: &str) -> Result<Value, Error> {
             self.construct(ErrorPhase::ConstructValue, |context| unsafe {
                 ffi::qjs_new_string_utf8(context, value.as_ptr(), value.len())
             })
         }
 
-        /// Constructs a JavaScript string from UTF-16 code units, including
-        /// ill-formed ones.
-        ///
-        /// Well-formed units transcode to UTF-8 and take the same path as
-        /// [`Self::string`]. Only an unpaired surrogate — which has no UTF-8
-        /// spelling at all — falls back to the escape-and-parse path that
-        /// preserves it.
         pub fn string_utf16(&self, units: &[u16]) -> Result<Value, Error> {
             match String::from_utf16(units) {
                 Ok(text) => self.string(&text),
@@ -3408,9 +2584,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::Evaluate)
         }
 
-        /// Returns a settled promise's result, or `None` while it is pending.
-        ///
-        /// A rejected promise is returned as a sanitized JavaScript error.
         pub fn settled_promise_result(&self, promise: &Value) -> Result<Option<Value>, Error> {
             self.reclaim();
             self.ensure_affinity(promise, ErrorPhase::Evaluate)?;
@@ -3492,15 +2665,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::Call)
         }
 
-        /// Interns a property name so repeated lookups cost no string work.
-        ///
-        /// `QuickJS` resolves a property by atom; a name-keyed lookup hashes
-        /// and interns the name on every call. A host that calls the same
-        /// member every event interns it once instead.
-        ///
-        /// Atoms belong to the runtime, so the returned [`Member`] resolves a
-        /// property in every realm on this context's runtime — intern the
-        /// name once, call it in as many realms as there are.
         pub fn member(&self, name: &str) -> Result<Member, Error> {
             self.reclaim();
             let atom = unsafe { ffi::qjs_atom_new(self.raw().as_ptr(), name.as_ptr(), name.len()) };
@@ -3513,20 +2677,6 @@ mod implementation {
             })
         }
 
-        /// Calls `target[member]` with primitive arguments, in one crossing.
-        ///
-        /// The arguments become `JSValue`s in a stack array inside the ABI,
-        /// so a call allocates nothing per argument — no rooted [`Value`], no
-        /// boxed `QuickJS` value, no UTF-16 buffer, and no copy of text the
-        /// caller already holds.
-        ///
-        /// A target with no callable under that name is
-        /// [`CallOutcome::MemberAbsent`], not an error: a realm that
-        /// published no such member is a realm that has nothing to say.
-        ///
-        /// The member runs with `this` undefined, as [`Self::call`] with no
-        /// receiver does — the target names where to look the callable up,
-        /// not what to bind it to.
         pub fn call_member(
             &self,
             target: &Value,
@@ -3542,10 +2692,6 @@ mod implementation {
                     "member name belongs to a different QuickJS runtime",
                 ));
             }
-            // The descriptors are written where they stay: in an array on
-            // this frame, or for a longer call in a vector's spare capacity.
-            // Not a `SmallVec`, which `with_capacity` builds and then moves,
-            // a copy of all `CALL_INLINE_ARGS` slots on every call.
             let count = arguments.len();
             let mut inline = [const { MaybeUninit::<ffi::QjsHostArg>::uninit() }; CALL_INLINE_ARGS];
             let mut spilled: Vec<ffi::QjsHostArg> = Vec::new();
@@ -3558,7 +2704,6 @@ mod implementation {
             for (slot, argument) in slots.iter_mut().zip(arguments) {
                 slot.write(argument.descriptor());
             }
-            // Every one of the `count` slots is written above.
             let described = slots.as_ptr().cast::<ffi::QjsHostArg>();
 
             let guard = self.begin();
@@ -3573,7 +2718,6 @@ mod implementation {
                     &raw mut raw,
                 )
             };
-            // The descriptors borrow `arguments`, which outlives the call.
             drop(spilled);
             let result = match status {
                 0 => self
@@ -3617,10 +2761,6 @@ mod implementation {
         }
     }
 
-    /// An interned property name, owned by the runtime that interned it.
-    ///
-    /// `QuickJS` interns atoms into the runtime, not the context, so one
-    /// [`Member`] serves every realm on that runtime.
     pub struct Member {
         atom: u32,
         owner: Rc<RuntimeInner>,
@@ -3638,23 +2778,12 @@ mod implementation {
         }
     }
 
-    /// What [`Context::call_member`] found where it looked.
-    ///
-    /// Deliberately closed: a lookup either found a callable and ran it or it
-    /// did not, and a caller that has to handle both has handled everything.
     #[derive(Debug)]
     pub enum CallOutcome {
-        /// The member ran and returned this value.
         Called(Value),
-        /// The target has no callable under that name.
         MemberAbsent,
     }
 
-    /// A `QuickJS` value and the realm pointer it takes to read one.
-    ///
-    /// Reading a value needs nothing but these two pointers, which is what
-    /// lets an exception be sanitized straight out of a realm the host holds
-    /// no [`Context`] for — the realm a failed promise job ran in.
     struct RawValue {
         context: NonNull<ffi::QjsContext>,
         raw: NonNull<ffi::QjsValue>,
@@ -3749,13 +2878,10 @@ mod implementation {
     }
 
     struct ValueInner {
-        // Declared before `owner` so the value is released while its realm is
-        // still alive: fields drop in declaration order.
         value: RawValue,
         owner: Rc<ContextInner>,
     }
 
-    /// Rooted JavaScript value tied to its owning realm.
     #[derive(Clone)]
     pub struct Value {
         inner: Rc<ValueInner>,
@@ -4002,7 +3128,6 @@ mod implementation {
         const TEST_EXECUTION_TIMEOUT: Duration = Duration::from_millis(20);
         const TEST_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
 
-        /// A realm whose runtime nothing else in the test needs to name.
         fn single_realm() -> Context {
             Runtime::new()
                 .expect("runtime should initialize")
@@ -4229,7 +3354,6 @@ mod implementation {
                 )
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            // one attempt reports the whole missing frontier
             let mut frontier = [realm.take_module_request(), realm.take_module_request()];
             frontier.sort();
             assert_eq!(frontier, [Some("b".to_owned()), Some("c".to_owned())]);
@@ -4270,8 +3394,6 @@ mod implementation {
             realm
                 .complete_module("b", Ok(("b", "import 'a'; export const b = 1;")))
                 .unwrap();
-            // A static import cannot wait for c: the attempt fails, and b, which
-            // completed early inside the a <-> b cycle, must not stay resolved.
             let error = realm
                 .evaluate(
                     EvalSource {
@@ -4409,10 +3531,6 @@ mod implementation {
             );
         }
 
-        /// A name under a reserved prefix resolves to a source the runtime
-        /// registered or a native module the realm declared. Any other one
-        /// fails the import in the realm and is never left for the host to
-        /// take as a request.
         #[test]
         fn a_reserved_name_nothing_answers_fails_without_becoming_a_request() {
             let (mut runtime, mut realm) = import_test_realm();
@@ -4450,12 +3568,6 @@ mod implementation {
             );
         }
 
-        /// The runtime's shared object is one null-prototype object, the same
-        /// reference in every realm it is added to: a function one realm
-        /// stores runs when another calls it, and a mutation either makes is
-        /// the other's to read. It lives while a realm it was added to does,
-        /// so a realm it is added to after both are freed gets a new, empty
-        /// one.
         #[test]
         fn the_shared_object_is_one_reference_while_a_realm_given_it_lives() {
             fn open(runtime: &Runtime) -> Context {
@@ -4512,16 +3624,10 @@ mod implementation {
             assert_eq!(string_of(&import_eval(&mut third, "answer")), "0");
         }
 
-        /// The text of a string value, for the root-load tests.
         fn string_of(value: &Value) -> String {
             String::from_utf16(&value.to_utf16().unwrap()).unwrap()
         }
 
-        /// A root whose every source the realm already has is loaded during
-        /// the call: its body has run by the time the call returns, nothing
-        /// is requested, and the load settles with its namespace once the
-        /// jobs have drained. A registered module knows the name it was
-        /// registered under as its `import.meta.url`.
         #[test]
         fn a_registered_root_evaluates_during_its_load() {
             let (mut runtime, mut realm) = import_test_realm();
@@ -4546,10 +3652,6 @@ mod implementation {
             assert_eq!(string_of(&url), "bobcat:root");
         }
 
-        /// A root the realm has no source for waits as an `import` of it
-        /// would: its own name is the request, and completing it — from a
-        /// response URL of its own — and resuming the loads evaluates it. The
-        /// response URL is its `import.meta.url`.
         #[test]
         fn a_root_without_a_source_is_requested_and_resumed_by_its_completion() {
             let (mut runtime, mut realm) = import_test_realm();
@@ -4583,9 +3685,6 @@ mod implementation {
             assert_eq!(string_of(&url), "https://cdn.test/worker.js");
         }
 
-        /// Without module loading enabled, a root the realm has no source for
-        /// is refused at once rather than requested: the loader rejects the
-        /// load as not preloaded, and the drain after it reports that.
         #[test]
         fn a_root_without_a_source_is_refused_where_module_loading_is_not_enabled() {
             let mut runtime = Runtime::new().unwrap();
@@ -4606,9 +3705,6 @@ mod implementation {
             assert!(realm.settled_promise_result(&load).is_err());
         }
 
-        /// A root that throws at its top level rejects its load, and nothing
-        /// awaits that promise, so the drain after it reports the throw — at
-        /// the line it is on, under the name the root was loaded by.
         #[test]
         fn a_root_that_throws_rejects_its_load_and_the_drain_reports_it() {
             let (mut runtime, realm) = import_test_realm();
@@ -4635,9 +3731,6 @@ mod implementation {
             assert_eq!(rejected.message, "boom");
         }
 
-        /// The graph a load evaluates is on the stack while it runs, as a
-        /// resumed import's is, so a `require` of the root from its own body
-        /// is refused rather than re-entering the body that asked.
         #[test]
         fn a_root_that_requires_itself_while_it_loads_is_refused() {
             let source = "import { loadModuleSync } from 'bobcat:module';\n\
@@ -4660,13 +3753,8 @@ mod implementation {
             assert!(realm.settled_promise_result(&load).is_err());
         }
 
-        /// The specifier these tests register the synchronous loader under.
-        /// Only a name here: what Bobcat puts behind it is a source module of
-        /// its own, and this crate knows nothing about it.
         const REQUIRE_MODULE: &str = "bobcat:module";
 
-        /// The host half of one load: what each URL answers with, and the log
-        /// of every URL the realm asked for.
         #[derive(Default)]
         struct RequireHost {
             files: HashMap<String, RequiredSource>,
@@ -4674,7 +3762,6 @@ mod implementation {
         }
 
         impl RequireHost {
-            /// One `CommonJS` file, answered from the URL it was asked for.
             fn commonjs(mut self, url: &str, text: &str) -> Self {
                 self.files.insert(
                     url.to_owned(),
@@ -4687,8 +3774,6 @@ mod implementation {
                 self
             }
 
-            /// One `CommonJS` file answered from somewhere other than where it
-            /// was asked for, as a redirect leaves it.
             fn redirected(mut self, url: &str, response: &str, text: &str) -> Self {
                 self.files.insert(
                     url.to_owned(),
@@ -4713,7 +3798,6 @@ mod implementation {
                 self
             }
 
-            /// One ES module, answered from the URL it was asked for.
             fn module(mut self, url: &str, text: &str) -> Self {
                 self.files.insert(
                     url.to_owned(),
@@ -4726,7 +3810,6 @@ mod implementation {
                 self
             }
 
-            /// The same, answered from somewhere else.
             fn redirected_module(mut self, url: &str, response: &str, text: &str) -> Self {
                 self.files.insert(
                     url.to_owned(),
@@ -4739,7 +3822,6 @@ mod implementation {
                 self
             }
 
-            /// One file the host will not say the shape of: the text decides.
             fn detected(mut self, url: &str, text: &str) -> Self {
                 self.files.insert(
                     url.to_owned(),
@@ -4770,8 +3852,6 @@ mod implementation {
                 .expect("the realm takes the loader");
         }
 
-        /// A realm with a loader and *no* module normalizer: this entry
-        /// resolves nothing, so it needs none.
         fn loader_realm(host: RequireHost) -> (Runtime, Context, Rc<RefCell<RequireHost>>) {
             let runtime = Runtime::new().unwrap();
             let mut realm = runtime.create_context().unwrap();
@@ -4780,7 +3860,6 @@ mod implementation {
             (runtime, realm, host)
         }
 
-        /// Evaluates one module to settlement, reporting what it threw.
         fn run_module(
             runtime: &mut Runtime,
             realm: &mut Context,
@@ -4806,8 +3885,6 @@ mod implementation {
                     assert!(settled.is_some(), "the module never settled");
                     Ok(())
                 }
-                // One failure leaves a rejection per promise awaiting it, and
-                // the next module evaluated here would be handed the rest.
                 Err(error) => {
                     runtime.discard_unhandled_rejections(realm);
                     Err(error)
@@ -4815,8 +3892,6 @@ mod implementation {
             }
         }
 
-        /// The same, for a body that is only about what the loader answers:
-        /// the import is prepended.
         fn run_loader(
             runtime: &mut Runtime,
             realm: &mut Context,
@@ -4830,12 +3905,6 @@ mod implementation {
             run_module(runtime, realm, name, &source)
         }
 
-        /// The same body, run as a plain script instead of a module body.
-        ///
-        /// What that changes is the one thing a realm can tell about a
-        /// module's evaluation status: with no module body on the stack,
-        /// every module this realm has is one a `require` may answer from.
-        /// The export is reached through the global the module entry left.
         fn run_script(runtime: &mut Runtime, realm: &mut Context, body: &str) -> Result<(), Error> {
             run_module(
                 runtime,
@@ -4973,13 +4042,6 @@ mod implementation {
             assert_eq!(location.line, Some(4));
         }
 
-        /// Pins the use-after-free a compile that also evaluated would open:
-        /// this file's text closes the wrapper early, so the statements after
-        /// it are the enclosing script's and run inside `JS_EvalFunction` —
-        /// where author code could not otherwise reach, and where a load of
-        /// its own replaces the buffers the outer load lent. The outer answer
-        /// is still the first file's, which is what says the URL was copied
-        /// and the text compiled before any of that ran.
         #[test]
         fn a_file_that_closes_the_wrapper_early_runs_after_its_load_is_read() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5017,9 +4079,6 @@ mod implementation {
             );
         }
 
-        /// The shim retains the trampoline and the context's own allocation
-        /// rather than the closure, so what a loaded file left in the realm
-        /// keeps neither the loader nor its host alive past the realm.
         #[test]
         fn a_realm_releases_its_loader_when_it_is_dropped() {
             let live = Rc::new(());
@@ -5046,10 +4105,6 @@ mod implementation {
             assert_eq!(Rc::strong_count(&host), 1);
         }
 
-        /// The export is what carries the loader, so a realm takes exactly
-        /// one: a second registration is refused whatever name it asks for,
-        /// and the export already installed goes on answering from the host
-        /// that came with it.
         #[test]
         fn a_realm_takes_one_synchronous_loader() {
             let (mut runtime, mut realm, host) =
@@ -5091,8 +4146,6 @@ mod implementation {
             assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
         }
 
-        /// The parameter list is a `CommonJS` wrapper's, and a module has no
-        /// wrapper: a list that would not even parse as one is unread.
         #[test]
         fn a_module_load_reads_no_parameter_list() {
             let (mut runtime, mut realm, _host) = loader_realm(
@@ -5108,10 +4161,6 @@ mod implementation {
             .unwrap();
         }
 
-        /// Every import in the graph is resolved during the compile of the
-        /// module that asked for it, through the same loader, before any body
-        /// runs: the load order is the order the imports were met in, each
-        /// URL once, and the deepest body runs first.
         #[test]
         fn an_import_chain_loads_each_module_once_through_the_loader() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5151,10 +4200,6 @@ mod implementation {
             );
         }
 
-        /// The loader is entered again for an import, from inside the
-        /// compile of the module that imports it, and its own state is
-        /// there: each call returns before the compile that starts the next
-        /// one, so nothing of the host's is borrowed across a nested load.
         #[test]
         fn a_loader_is_entered_again_while_the_module_it_answered_compiles() {
             let runtime = Runtime::new().unwrap();
@@ -5188,9 +4233,6 @@ mod implementation {
             .unwrap();
         }
 
-        /// A specifier is the host's to resolve, as it is for an import this
-        /// realm defers: the normalizer runs first, and the loader is asked
-        /// for what it answered.
         #[test]
         fn an_inline_import_resolves_through_this_realms_normalizer() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5198,8 +4240,6 @@ mod implementation {
                     .module("app:///deep/a.mjs", "export { b } from './b.mjs';")
                     .module("app:///deep/b.mjs", "export const b = 42;"),
             );
-            // Enough of a resolver to say that one ran: a relative
-            // specifier is taken from the importer's own directory.
             realm.enable_module_loading(|base, name| match name.strip_prefix("./") {
                 Some(relative) => match base.rfind('/') {
                     Some(slash) => Ok(format!("{}{relative}", &base[..=slash])),
@@ -5221,9 +4261,6 @@ mod implementation {
             );
         }
 
-        /// A native module of this realm is what a specifier naming it links
-        /// to: the loader is not asked for it, and its exports are the ones
-        /// the host registered.
         #[test]
         fn a_required_module_links_a_native_module_of_this_realm() {
             let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().module(
@@ -5246,8 +4283,6 @@ mod implementation {
             assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
         }
 
-        /// An import the host will not answer is unresolvable, which is what
-        /// its reason reaches the `require` as.
         #[test]
         fn an_import_the_host_refuses_fails_the_require_that_linked_it() {
             let (mut runtime, mut realm, _host) = loader_realm(
@@ -5269,9 +4304,6 @@ mod implementation {
             );
         }
 
-        /// An inline link asks the loader for each import it cannot find,
-        /// except a reserved name: that fails the `require` in the realm, and
-        /// the loader never hears of it.
         #[test]
         fn a_required_module_that_imports_an_unanswered_reserved_name_fails_locally() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5294,8 +4326,6 @@ mod implementation {
             assert_eq!(host.borrow().loads, ["app:///a.mjs"]);
         }
 
-        /// A synchronous load of a reserved name answers only from a module
-        /// the realm already has, and otherwise never reaches the loader.
         #[test]
         fn a_synchronous_load_of_a_reserved_name_never_reaches_the_loader() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5339,9 +4369,6 @@ mod implementation {
             .unwrap();
         }
 
-        /// The host that answers `Detect` has only lent its bytes, so the
-        /// engine reads them: `import` or `export` at the top is a module,
-        /// and anything else is a wrapper.
         #[test]
         fn detection_reads_the_text_the_host_would_not_name() {
             let (mut runtime, mut realm, _host) = loader_realm(
@@ -5372,8 +4399,6 @@ mod implementation {
             .unwrap();
         }
 
-        /// Nothing settles a top-level await but the job queue, and a
-        /// `require` is a call inside whatever job is already running.
         #[test]
         fn a_module_that_awaits_at_its_top_level_is_refused() {
             let (mut runtime, mut realm, _host) = loader_realm(
@@ -5406,9 +4431,6 @@ mod implementation {
                 error.message
             );
 
-            // The same of a graph that awaits one level down. Its own
-            // module is left suspended, which is what `import` is for: the
-            // jobs that would settle it are still the realm's to run.
             let error = run_loader(
                 &mut runtime,
                 &mut realm,
@@ -5423,11 +4445,6 @@ mod implementation {
             );
         }
 
-        /// A module whose body throws fails its `require` with that throw and
-        /// leaves no rejection behind, so a caller that catches it has
-        /// handled it: not the evaluation promise, not the promise `QuickJS`
-        /// runs each module body as, and not those of the modules on the
-        /// failing path of its graph.
         #[test]
         fn a_caught_module_throw_leaves_no_rejection_behind() {
             for (name, text) in [
@@ -5444,8 +4461,6 @@ mod implementation {
                         .module("app:///inner.mjs", "export {};")
                         .module("app:///throws.mjs", "throw Error('deep');"),
                 );
-                // The oldest rejection left is what the checkpoint reports:
-                // the unrelated one, only if the throw left none before it.
                 let error = run_loader(
                     &mut runtime,
                     &mut realm,
@@ -5461,9 +4476,6 @@ mod implementation {
             }
         }
 
-        /// A module that threw is kept as the failure it is: `QuickJS` answers
-        /// a second evaluation from the first one's exception rather than
-        /// running the body again, and the realm hears about it once.
         #[test]
         fn a_module_that_throws_rethrows_without_running_again() {
             let (mut runtime, mut realm, host) = loader_realm(RequireHost::default().module(
@@ -5502,11 +4514,6 @@ mod implementation {
             assert_eq!(runs.as_number(), Some(1.0));
         }
 
-        /// One URL is one module, whichever of an import and a `require`
-        /// reached it first. The `require` here is a plain script's, because
-        /// a realm cannot tell a module whose body has finished from one
-        /// whose body is still running while any module body is on the
-        /// stack — see the next test.
         #[test]
         fn a_module_an_import_already_loaded_is_answered_from_its_instance() {
             let host = Rc::new(RefCell::new(RequireHost::default()));
@@ -5550,11 +4557,6 @@ mod implementation {
             );
         }
 
-        /// An import whose source the host is still fetching is answered by
-        /// the link that needs it: an inline link cannot wait for a fetch,
-        /// so it asks the same loader, and the fetch that was already running
-        /// finds its answer standing and resolves to the module that link
-        /// made.
         #[test]
         fn an_import_still_being_fetched_is_answered_by_the_link_that_needs_it() {
             let host = Rc::new(RefCell::new(
@@ -5625,9 +4627,6 @@ mod implementation {
             );
         }
 
-        /// A URL an import already failed on is a load this realm recorded,
-        /// and a recorded source is never replaced: the `require` fails the
-        /// way the import did rather than quietly loading the file again.
         #[test]
         fn a_url_recorded_as_a_failed_load_fails_the_require_with_it() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5651,9 +4650,6 @@ mod implementation {
             assert_eq!(host.borrow().loads, ["app:///gone.mjs"]);
         }
 
-        /// Completing a name an inline link has already answered is the
-        /// host's own fetch of it landing second, which is nothing wrong:
-        /// the source it was going to supply is the source that stands.
         #[test]
         fn completing_a_name_twice_leaves_the_first_source_standing() {
             let (_runtime, realm, _host) = loader_realm(RequireHost::default());
@@ -5670,10 +4666,6 @@ mod implementation {
             assert!(refused.is_none(), "a late failure is not one either");
         }
 
-        /// A `require` of a module that is still evaluating is refused: the
-        /// body it would re-enter is the one that asked. Node names the case
-        /// it can tell apart `ERR_REQUIRE_CYCLE_MODULE`; this realm cannot
-        /// read a module's status, so it refuses the whole graph.
         #[test]
         fn a_module_that_requires_itself_while_it_evaluates_is_refused() {
             let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().module(
@@ -5697,8 +4689,6 @@ mod implementation {
             );
         }
 
-        /// An import cycle is `QuickJS`'s own business and stays that way: the
-        /// `require` is of one module, and the two link into each other.
         #[test]
         fn an_import_cycle_inside_one_require_links_as_it_always_does() {
             let (mut runtime, mut realm, host) = loader_realm(
@@ -5725,9 +4715,6 @@ mod implementation {
             assert_eq!(host.borrow().loads, ["app:///a.mjs", "app:///b.mjs"]);
         }
 
-        /// The namespace is answered as it stands, odd export names and all:
-        /// what a `module.exports` export means is Node's rule, and the
-        /// realm's `require` is where that rule lives.
         #[test]
         fn a_namespace_carries_an_export_named_module_exports() {
             let (mut runtime, mut realm, _host) = loader_realm(RequireHost::default().module(
@@ -5832,13 +4819,6 @@ mod implementation {
             );
         }
 
-        /// Registers `test:root`, whose source is `root`, and the modules it
-        /// forms an import cycle with. `root` imports `test:peer` first,
-        /// which imports `test:root` back, so `test:peer` resolves its
-        /// imports — one of them the `export * as` of `test:ns` — and
-        /// records its exports, then stays on the linking stack until
-        /// `test:root` completes. Whatever `root` imports after `test:peer`
-        /// is where the link can fail.
         fn register_link_cycle(runtime: &mut Runtime, root: &str) {
             for (name, source) in [
                 ("test:root", root),
@@ -5856,14 +4836,6 @@ mod implementation {
             }
         }
 
-        /// A link that fails puts every module still on its stack back to
-        /// unlinked, so a second import links them again — including
-        /// `test:peer`, which had finished its own bindings, and
-        /// `test:root`, which had resolved its import of `test:peer`
-        /// before the one that fails. Linking again releases what the
-        /// failed link left in each binding; overwriting it would leave
-        /// those references held, and `JS_FreeRuntime` aborts on the
-        /// objects it then finds uncollected.
         #[test]
         fn a_cycle_that_fails_to_link_is_linked_again_and_freed() {
             let (mut runtime, mut realm) = runtime_and_realm();
@@ -5887,12 +4859,9 @@ mod implementation {
             )
             .unwrap();
             drop(realm);
-            // `JS_FreeRuntime` asserts that every object was collected.
             drop(runtime);
         }
 
-        /// Uses at least `depth` KiB of this thread's stack, then calls
-        /// `operation`.
         #[cfg(not(target_arch = "wasm32"))]
         #[inline(never)]
         fn with_stack_used(depth: usize, operation: &mut dyn FnMut()) {
@@ -5905,17 +4874,6 @@ mod implementation {
             std::hint::black_box(&frame);
         }
 
-        /// The same cycle, failing to link for want of stack rather than
-        /// for good: `test:root` also imports a chain of modules each
-        /// importing the next, which linking walks one native frame per
-        /// module. Retried from shallower and shallower in this thread's
-        /// stack, the import first fails before anything is linked, then
-        /// in the chain — after `test:peer` finished its bindings, so each
-        /// of these attempts links it again — and then succeeds, with every
-        /// binding of the cycle in place and every reference the failed
-        /// attempts took released.
-        ///
-        /// Native only: the depth is measured against the native stack.
         #[cfg(not(target_arch = "wasm32"))]
         #[test]
         fn a_cycle_that_failed_to_link_links_once_the_stack_allows() {
@@ -5957,15 +4915,11 @@ mod implementation {
                 )
                 .unwrap();
             let mut outcomes = Vec::new();
-            // 300 KiB is past the 256 KiB this runtime may use: the
-            // deepest attempts overflow before the import job starts.
             for depth in (0..=300).rev() {
                 realm
                     .evaluate(EvalSource::new("attempt();"), EvalOptions::default())
                     .unwrap();
                 with_stack_used(depth, &mut || {
-                    // An import job that overflows reports itself here and
-                    // leaves `outcome` pending.
                     let _ = runtime.drain_pending_jobs(&realm);
                 });
                 let outcome = realm
@@ -5990,7 +4944,6 @@ mod implementation {
                 "{outcomes:?}"
             );
             drop(realm);
-            // `JS_FreeRuntime` asserts that every object was collected.
             drop(runtime);
         }
 
@@ -6430,8 +5383,6 @@ mod implementation {
             let sibling = second.number(1.0).unwrap();
             let stranger = single_realm().number(1.0).unwrap();
 
-            // Sharing a runtime is not sharing a realm: a `JSValue` belongs to
-            // the context that made it either way.
             assert_eq!(
                 first.call(&function, None, &[sibling]).unwrap_err().kind,
                 ErrorKind::WrongRealm
@@ -6507,8 +5458,6 @@ mod implementation {
                         .expect("module evaluation should fulfill")
                         .is_some()
                 );
-                // One registered source, but each realm counts from zero: the
-                // text is shared, the module instance is not.
                 let namespace = realm.module_namespace("app:///entry.js").unwrap();
                 assert_eq!(
                     realm.property(&namespace, "first").unwrap().as_number(),
@@ -6521,10 +5470,6 @@ mod implementation {
             }
         }
 
-        /// Compiles `source` as the module `name` on a scratch runtime that
-        /// keeps no source text, the way a build compiles the engine's
-        /// built-ins, and leaks the bytes so a runtime can borrow them for
-        /// its life.
         fn compiled_module(name: &str, source: &str) -> &'static [u8] {
             let compiler = Runtime::with_options(RuntimeOptions {
                 strip_source: true,
@@ -6592,8 +5537,6 @@ mod implementation {
                         .expect("module evaluation should fulfill")
                         .is_some()
                 );
-                // One registered bytecode, but each realm counts from zero,
-                // as it does from a registered source.
                 let namespace = realm.module_namespace("app:///entry.js").unwrap();
                 assert_eq!(
                     realm.property(&namespace, "first").unwrap().as_number(),
@@ -6603,8 +5546,6 @@ mod implementation {
                     realm.property(&namespace, "second").unwrap().as_number(),
                     Some(2.0)
                 );
-                // The module is known by its registered name, as a source
-                // module is, and its source text was stripped at compile.
                 let mut text = |name: &str| {
                     let value = realm.property(&namespace, name).unwrap();
                     String::from_utf16(&value.to_utf16().unwrap()).unwrap()
@@ -6643,8 +5584,6 @@ mod implementation {
                     },
                 )
                 .expect("boot module should start");
-            // The throw rejects the boot module's evaluation, which nothing
-            // handles: the drain that runs it reports it.
             let error = match runtime.drain_pending_jobs(&realm) {
                 Err(error) => error,
                 Ok(_) => realm
@@ -6693,7 +5632,6 @@ mod implementation {
                     .expect_err("unreadable bytecode rejects the import"),
             };
             assert_eq!(error.name.as_deref(), Some("SyntaxError"), "{error:?}");
-            // The realm is still usable afterwards.
             let value = realm
                 .evaluate(EvalSource::new("1 + 1"), EvalOptions::default())
                 .unwrap();
@@ -6724,8 +5662,6 @@ mod implementation {
             assert!(stripping.create_context().unwrap().strips_source());
         }
 
-        /// Settles a root load of `name`, answering its namespace or what
-        /// the load failed with.
         fn settle_load(runtime: &mut Runtime, realm: &Context, name: &str) -> Result<Value, Error> {
             let load = realm.load_module(name)?;
             match runtime.drain_pending_jobs(realm) {
@@ -6751,8 +5687,6 @@ mod implementation {
             )
         }
 
-        /// A two-module cycle with a live binding, a function whose text is
-        /// read back, a throw whose stack is kept, and `import.meta.url`.
         const CODE_LIB: &str = "import { tick } from 'app:///main.mjs';\n\
              globalThis.libRuns = (globalThis.libRuns ?? 0) + 1;\n\
              export let count = 0;\n\
@@ -6772,7 +5706,6 @@ mod implementation {
              export { stack };\n\
              export const url = import.meta.url;\n";
 
-        /// What one realm made of `CODE_MAIN`, as text, in export order.
         fn code_main_exports(realm: &mut Context, namespace: &Value) -> Vec<String> {
             let mut exports: Vec<String> = ["before", "ticked", "after", "source", "stack", "url"]
                 .into_iter()
@@ -6791,8 +5724,6 @@ mod implementation {
             exports
         }
 
-        /// Completes `CODE_LIB` and `CODE_MAIN` in a fresh realm, the main
-        /// module answered from `main_url`, and loads the main module.
         fn run_code_modules(
             lib: ModuleCode<'_>,
             main: ModuleCode<'_>,
@@ -6807,7 +5738,6 @@ mod implementation {
                 .unwrap();
             let namespace = settle_load(&mut runtime, &realm, "app:///main.mjs").unwrap();
             let exports = code_main_exports(&mut realm, &namespace);
-            // A second load is answered from the one instance.
             let again = settle_load(&mut runtime, &realm, "app:///main.mjs").unwrap();
             assert_eq!(code_main_exports(&mut realm, &again), exports);
             (runtime, realm, exports)
@@ -6826,7 +5756,6 @@ mod implementation {
             assert_eq!(from_text[5], "app:///main.mjs");
             assert_eq!(from_text[6], "1/1", "each module evaluates once");
 
-            // The root compiles first, and its import as the root resolves.
             let compiled = take_all_compiled(&text_realm);
             let names: Vec<_> = compiled.iter().map(|c| c.name.as_str()).collect();
             assert_eq!(names, ["app:///main.mjs", "app:///lib.mjs"]);
@@ -6890,10 +5819,6 @@ mod implementation {
             assert_eq!(failures[0], failures[1]);
         }
 
-        /// The bytecode `JS_WriteObject` writes of a module does not depend
-        /// on whether its compile resolved its imports: a capture made by an
-        /// inline link (a `require`) is byte for byte the one an unlinked
-        /// compile (an `import`) makes of the same text under the same name.
         #[test]
         fn a_linked_capture_is_the_bytes_of_an_unlinked_one() {
             let dep = "export const answer = 42;";
@@ -6928,10 +5853,6 @@ mod implementation {
             assert_eq!(linked_m[0], &unlinked[0]);
         }
 
-        /// Bytecode that cannot be read as the module it was handed in for
-        /// is dropped: the text compiles instead, its bytecode is kept, and
-        /// the module is the text's — once, under its own name, for every
-        /// import of it.
         #[test]
         fn unusable_module_bytecode_falls_back_to_the_text_and_captures_it() {
             let (_runtime, realm, _) =
@@ -6951,8 +5872,6 @@ mod implementation {
                 realm.take_compiled().unwrap().bytecode
             };
             let commonjs = capture_commonjs("app:///lib.mjs", "exports", "exports.count = 7;");
-            // Whole by its frame, so it reaches the read, which fails
-            // inside the module: after its name, before its function.
             let payload = &good[BYTECODE_FRAME_HEADER..];
             let cut_inside = frame_bytecode(&payload[..payload.len() / 2]);
             let cases: [(&str, Vec<u8>); 7] = [
@@ -7018,11 +5937,6 @@ mod implementation {
             }
         }
 
-        /// A module completed from bytecode alone is the module that bytecode
-        /// was compiled from, under the name it was compiled under: its
-        /// `import.meta.url` is the URL it was completed with, its imports
-        /// resolve in the realm that reads it, the completion's text is never
-        /// compiled, and nothing is captured.
         #[test]
         fn bytecode_alone_is_the_module_it_was_compiled_from() {
             let compiler = Runtime::with_options(RuntimeOptions {
@@ -7074,10 +5988,6 @@ mod implementation {
             assert!(realm.take_compiled().is_none(), "a read keeps nothing");
         }
 
-        /// Bytecode alone that cannot be read as the module it was handed in
-        /// for fails that module, at every import of it, with a `TypeError`
-        /// naming it — never a compile of the text in its place and never an
-        /// empty module.
         #[test]
         fn unreadable_bytecode_alone_fails_every_import_of_its_module() {
             let compile = |name: &str| {
@@ -7136,10 +6046,6 @@ mod implementation {
             }
         }
 
-        /// An import that cannot be loaded fails a module read from bytecode
-        /// exactly as it fails the module compiled from its text, through an
-        /// asynchronous import and through a `require` alike, and leaves the
-        /// realm as usable.
         #[test]
         fn an_unloadable_import_fails_the_same_from_bytecode_as_from_text() {
             let text = "import { gone } from 'app:///gone.mjs';\nexport const value = gone;";
@@ -7184,7 +6090,6 @@ mod implementation {
                 .unwrap_err();
                 assert!(realm.take_compiled().is_none());
                 synchronous.push((error.name, error.message));
-                // A second try fails the same way again.
                 let again =
                     run_code_script_again(&mut realm, "loadModuleSync('app:///wants.mjs', '');")
                         .unwrap_err();
@@ -7248,9 +6153,6 @@ mod implementation {
             assert!(refusals[0].contains("top-level await"), "{refusals:?}");
         }
 
-        /// A module an asynchronous import already instantiated from its
-        /// bytecode is what a later `require` of it answers from: nothing is
-        /// loaded again or compiled.
         #[test]
         fn a_require_after_an_import_answers_from_the_module_read_from_bytecode() {
             let text = "globalThis.runs = (globalThis.runs ?? 0) + 1;\nexport const answer = 42;";
@@ -7284,23 +6186,14 @@ mod implementation {
             assert!(realm.take_compiled().is_none());
         }
 
-        /// A source the host's own fetch completed with bytecode, which no
-        /// import has instantiated yet, is the source a `require` of its URL
-        /// links: the load's answer finds it standing (`-5`), and the
-        /// bytecode it was completed with is what is read, exactly as the
-        /// text it was completed with would have been compiled.
         #[test]
         fn a_require_of_a_source_completed_with_bytecode_reads_that_bytecode() {
             let text = "globalThis.runs = (globalThis.runs ?? 0) + 1;\n\
                         export const answer = 42;\n\
                         export const hasText = String(() => 'body').includes('body');";
-            // Written by a runtime that strips source, so what the realm
-            // ran tells the read from a compile of the text.
             let bytecode = frame_bytecode(compiled_module("app:///shared.mjs", text));
             let mut reports = Vec::new();
             for code in [ModuleCode::Compile, ModuleCode::Cached(&bytecode)] {
-                // The load's own answer asks for nothing: the source that
-                // stands decides.
                 let host = CodeHost::default().module("app:///shared.mjs", text);
                 let (mut runtime, mut realm, host) = code_loader_realm(host);
                 realm
@@ -7321,9 +6214,6 @@ mod implementation {
             assert_eq!(reports, ["module|42|1|true", "module|42|1|false"]);
         }
 
-        /// The host half of a load with code: files, the bytecode it holds
-        /// per URL, whether it asks for captures, and every `(url,
-        /// parameters)` it was asked for.
         #[derive(Default)]
         struct CodeHost {
             files: HashMap<String, RequiredSource>,
@@ -7386,8 +6276,6 @@ mod implementation {
             (runtime, realm, host)
         }
 
-        /// `run_script`, for a realm that has not had the export installed
-        /// as a global yet.
         fn run_code_script(
             runtime: &mut Runtime,
             realm: &mut Context,
@@ -7396,15 +6284,12 @@ mod implementation {
             run_script(runtime, realm, body)
         }
 
-        /// A further script in a realm `run_code_script` already set up.
         fn run_code_script_again(realm: &mut Context, body: &str) -> Result<(), Error> {
             realm
                 .evaluate(EvalSource::new(body), EvalOptions::default())
                 .map(|_| ())
         }
 
-        /// The wrapper a `CommonJS` load of `text` under `parameters`
-        /// compiles to, captured.
         fn capture_commonjs(url: &str, parameters: &str, text: &str) -> Vec<u8> {
             let (mut runtime, mut realm, _host) =
                 code_loader_realm(CodeHost::capturing().file(url, text, RequiredKind::CommonJs));
@@ -7431,8 +6316,6 @@ mod implementation {
              };\n\
              globalThis.cjsRuns = (globalThis.cjsRuns ?? 0) + 1;\n";
 
-        /// Loads and runs `CODE_COMMONJS` through the wrapper the load
-        /// answers, reporting what it made of it, as text.
         const RUN_COMMONJS: &str = "const loaded = loadModuleSync('app:///lib.cjs', 'exports, require, module');\n\
              const module = { exports: {} };\n\
              loaded.value.call(module.exports, module.exports, () => 21, module);\n\
@@ -7485,8 +6368,6 @@ mod implementation {
                 }
             );
 
-            // Read back whether the host names the file CommonJS or leaves
-            // it to detection, which the bytecode makes unnecessary.
             for kind in [RequiredKind::CommonJs, RequiredKind::Detect] {
                 let mut host = CodeHost::capturing().file("app:///lib.cjs", CODE_COMMONJS, kind);
                 host.cached.insert(
@@ -7573,10 +6454,6 @@ mod implementation {
             assert!(realm.take_compiled().is_none());
         }
 
-        /// A `require` of an ES module captures every module its inline link
-        /// compiles, imports included, each under the URL it is stored
-        /// under; a fresh realm handed those back reads the whole graph and
-        /// compiles nothing.
         #[test]
         fn a_required_module_graph_captures_and_reads_back_through_the_loader() {
             const SCRIPT: &str = "const loaded = loadModuleSync('app:///main.mjs', 'exports');\n\
@@ -7642,7 +6519,6 @@ mod implementation {
                 )
                 .unwrap();
 
-            // Atoms live on the runtime, so one interning serves both realms.
             assert_eq!(
                 called_number(first.call_member(&here, &answer, &[])),
                 Some(20.0)
@@ -7708,7 +6584,6 @@ mod implementation {
                 );
             }
 
-            // Both realms claim the specifier, so no source module may take it.
             let collision = runtime
                 .register_module_source("bobcat-internal:host", "export {};")
                 .expect_err("a native specifier is reserved runtime-wide");
@@ -7759,8 +6634,6 @@ mod implementation {
                 })
                 .unwrap();
 
-            // The sibling call runs inside this one, so its execution guard
-            // nests inside the outer realm's.
             let result = first
                 .evaluate(EvalSource::new("askSibling()"), EvalOptions::default())
                 .expect("a host function may reach a sibling realm");
@@ -7928,8 +6801,6 @@ mod implementation {
 
         #[test]
         fn a_rejection_is_reported_only_to_the_realm_that_left_it() {
-            // One runtime, two realms — a group's views, or a page and its
-            // workers. They share a job queue; they must not share a failure.
             let (mut runtime, first) = runtime_and_realm();
             let second = runtime.create_context().expect("a second realm");
             first
@@ -7959,9 +6830,6 @@ mod implementation {
 
         #[test]
         fn a_realm_reports_its_own_rejection_past_a_siblings() {
-            // Queue order is the runtime's, so the sibling's rejection sits
-            // in front of this realm's. Skipping it must not skip past the
-            // realm's own.
             let (mut runtime, first) = runtime_and_realm();
             let second = runtime.create_context().expect("a second realm");
             first
@@ -7996,8 +6864,6 @@ mod implementation {
                 )
                 .unwrap();
 
-            // With nothing queued a drain runs no job and hands back the
-            // realm's next unhandled rejection, one per call.
             let first = runtime.drain_pending_jobs(&realm).unwrap_err();
             let second = runtime.drain_pending_jobs(&realm).unwrap_err();
             assert_eq!(first.message, "first");
@@ -8092,8 +6958,6 @@ mod implementation {
             realm
                 .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
                 .unwrap();
-            // The serializer's own refusal reaches the JS caller: this is the
-            // first version, which does not extend `QuickJS`'s writer.
             for (call, fragment) in [
                 ("take(function f() {})", "unsupported object class"),
                 ("take(new Map())", "unsupported object class"),
@@ -8104,8 +6968,6 @@ mod implementation {
                     .expect_err(call);
                 assert!(error.message.contains(fragment), "{call}: {error:?}");
             }
-            // An ordinary object is not refused at all: it crosses as an
-            // opaque structured clone.
             realm
                 .evaluate(EvalSource::new("take({ a: 1 })"), EvalOptions::default())
                 .unwrap();
@@ -8279,7 +7141,6 @@ mod implementation {
                 )
                 .unwrap();
             let sum = realm.member("sum").unwrap();
-            // Past the descriptors' inline array and the shim's inline argv.
             let count = u32::try_from(CALL_INLINE_ARGS).unwrap() + 8;
             let arguments: Vec<HostArgument<'_>> = (0..count)
                 .map(|i| HostArgument::Number(f64::from(i)))
@@ -8369,13 +7230,8 @@ mod implementation {
             assert_eq!(error.kind, ErrorKind::InvalidInput);
         }
 
-        /// The children every `new ShadowRealm()` of a test made, in order.
         type Realms = Rc<RefCell<Vec<Context>>>;
 
-        /// A hook that keeps every child in `realms` and installs itself on
-        /// each, so a child can make `ShadowRealm`s of its own. It holds the
-        /// list weakly: a child's own hook lives in the child, and a strong
-        /// list there would be a cycle no drop ends.
         fn keep_realms(realms: &Realms) -> Box<ShadowRealmHook> {
             let realms = Rc::downgrade(realms);
             Box::new(move |mut child| {
@@ -8388,9 +7244,6 @@ mod implementation {
             })
         }
 
-        /// `thrown(f)` names what `f` threw by the constructor of *this*
-        /// realm it is an instance of, so an error object that leaked from a
-        /// child reads as foreign.
         const SHADOW_PRELUDE: &str = "globalThis.thrown = (f) => {
             try { f(); return 'no throw'; } catch (e) {
                 const name = e === null || typeof e !== 'object' ? 'primitive'
@@ -8461,7 +7314,6 @@ mod implementation {
             ] {
                 assert_js(&mut parent, check);
             }
-            // The hook's handle is the child realm itself.
             let marker = run_text(&mut realms.borrow_mut()[0], "marker");
             assert_eq!(marker, "child");
         }
@@ -8693,8 +7545,6 @@ mod implementation {
                 run_text(&mut parent, "results.join()"),
                 "1,2,child,function"
             );
-            // The instance is the child's: the parent has none until it
-            // imports the module itself, and then it has its own.
             assert!(parent.module_namespace("app:counter").is_err());
             assert!(
                 realms.borrow_mut()[0]
@@ -8751,8 +7601,6 @@ mod implementation {
                 let thrown = run_text(&mut parent, source);
                 assert!(thrown.starts_with("TypeError: "), "{source}: {thrown}");
             }
-            // The specifier's own conversion is the caller's code, and what
-            // it throws is the caller's own error.
             assert_eq!(
                 run_text(
                     &mut parent,
@@ -8760,7 +7608,6 @@ mod implementation {
                 ),
                 "Error: own"
             );
-            // A rejection nothing handles is the caller's to report.
             run(
                 &mut parent,
                 "r.importValue('app:none', 'answer'); undefined",
@@ -8798,7 +7645,6 @@ mod implementation {
                     r.importValue('app:///late.js', 'value').then((v) => { globalThis.late = v; });
                  })();",
             );
-            // Only the pending load still needs the child.
             runtime.run_gc();
             assert!(realms.borrow()[0].is_referenced_across_realms());
             assert_eq!(parent.take_module_request(), None);
@@ -8888,7 +7734,6 @@ mod implementation {
                     run_text(&mut parent, "thrown(() => new ShadowRealm())"),
                     expected
                 );
-                // The realm is still usable afterwards.
                 assert_eq!(
                     run_text(&mut parent, "thrown(() => new ShadowRealm())"),
                     expected
@@ -8941,8 +7786,6 @@ mod implementation {
                     child
                         .define_global_function("release", 0, move |_| {
                             if let Some(realms) = releasing.upgrade() {
-                                // Dropped after the borrow ends: the drop
-                                // runs the collector.
                                 let released = mem::take(&mut *realms.borrow_mut());
                                 drop(released);
                             }
@@ -9010,7 +7853,6 @@ mod implementation {
             let mut parent = runtime.create_context().unwrap();
             let realms = Realms::default();
             let watcher = Rc::downgrade(&realms);
-            // The parent's hook is the only owner of its children here.
             parent
                 .install_shadow_realm(move |child| {
                     realms.borrow_mut().push(child);
@@ -9026,7 +7868,6 @@ mod implementation {
             assert!(parent.is_referenced_across_realms());
             drop(parent);
             assert!(watcher.upgrade().is_none(), "the children go with the hook");
-            // `JS_FreeRuntime` asserts that every object was collected.
             drop(runtime);
         }
 
@@ -9141,9 +7982,6 @@ mod implementation {
         }
     }
 
-    /// The Rust half of a transfer, with no realm: what the shim is handed
-    /// for a [`HostArgument::Transferred`] and a [`HostArgument::Revive`].
-    /// No `QuickJS` call is made, so these also run under Miri.
     #[cfg(test)]
     mod transfer_tests {
         use super::*;

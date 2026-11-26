@@ -41,8 +41,6 @@ pub(super) fn initialize_tracks(
     set.collapsed_line_positions = None;
 }
 
-/// §12.4: one track's sizing-function kinds and initial used state against
-/// one percentage basis.
 fn plan_track(spec: &AxisTrackSpec<'_>, percentage_basis: Option<f32>) -> Track {
     let minimum = min_breadth(spec.sizing);
     let maximum = max_breadth(spec.sizing);
@@ -178,13 +176,6 @@ where
         .or_else(|| cross_stretches.then_some(cross_area).flatten())
         .map(|value| clamp(value, cross.size(item.min_size), cross.size(item.max_size)));
     cross.set_size(&mut known, resolved_cross);
-    // css-grid-1 §11.5 with css-sizing-4 §5: an item with a preferred aspect
-    // ratio contributes the size that ratio *transfers*, so the transfer needs
-    // a size in the other axis. A definite one — an authored size, or a track
-    // the item is stretched into — is the whole answer. Failing that, replaced
-    // content still has its natural size in that axis to transfer from, which
-    // is what an image carrying its own `aspect-ratio` property contributes to
-    // an `auto` track.
     let transferred_cross = resolved_cross.or_else(|| {
         item.aspect_ratio?;
         cross
@@ -202,8 +193,6 @@ where
         Axis::Horizontal => crate::geometry::Size::new(None, cross_area),
         Axis::Vertical => crate::geometry::Size::new(cross_area, None),
     };
-    // A row's last-baseline group reads the item's last baseline, its §11.5
-    // shim included: ask for it exactly.
     let reads_last_baseline =
         axis == Axis::Vertical && item.baseline_participation() == Some(BaselineSet::Last);
     let reads_first_baseline = axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE;
@@ -214,8 +203,6 @@ where
     let output = tree.compute_layout(state, item.key.node, input);
     let size = output.size;
     if axis == Axis::Vertical {
-        // A box with no baseline set is aligned by one synthesized from its
-        // border box's bottom edge (css-align-3 §9.1).
         if item.align_self == AlignFlags::BASELINE {
             item.measured_baseline = Some(output.first_baseline.unwrap_or(size.height));
         } else if item.align_self == AlignFlags::LAST_BASELINE {
@@ -244,9 +231,6 @@ where
         } else {
             sizing_axis
         };
-        // The transferred size *is* the contribution — it does not merely
-        // floor the measured one. A ratio flatter than the content's own is
-        // meant to cut the box down and let the content overflow.
         measured = ratio_size;
     }
     match kind {
@@ -448,8 +432,6 @@ where
     contribution
 }
 
-/// The clamp every contribution ends with: the item's own min/max sizes (both
-/// margin-box values), a floor at zero, and a row's baseline shim.
 #[inline]
 fn finish_contribution(
     contribution: f32,
@@ -465,10 +447,6 @@ fn finish_contribution(
     contribution
 }
 
-/// Whether the item's minimum contribution is its automatic minimum wherever
-/// the tracks it spans allow one (css-grid-2 §6.6): it has no definite
-/// minimum size, its minimum size is `auto`, and it is not a scroll
-/// container.
 #[inline]
 fn minimum_may_be_automatic<N>(item: &GridItem<N>, axis: Axis) -> bool {
     axis.size(item.min_size).is_none()
@@ -476,9 +454,6 @@ fn minimum_may_be_automatic<N>(item: &GridItem<N>, axis: Axis) -> bool {
         && !axis.point(item.overflow).is_scrollable()
 }
 
-/// Whether the tracks in `range` give an item spanning `span` of them its
-/// automatic minimum (§6.6): one of them has an `auto` (or flexible) minimum,
-/// and a spanning item crosses no flexible track.
 #[inline]
 fn automatic_minimum_applies(
     tracks: &TrackSet,
@@ -491,12 +466,6 @@ fn automatic_minimum_applies(
         && (span == 1 || !tracks.tracks[range].iter().any(Track::is_flexible))
 }
 
-/// §6.6's content-based minimum size as a margin-box value, before the
-/// fixed-maximum clamp of the tracks it spans: the specified size suggestion
-/// — a definite preferred size, whatever the content measures — and
-/// otherwise the content size suggestion, the min-content size. Unlike
-/// flexbox's (css-flexbox-1 §4.5), grid's specified suggestion is not capped
-/// by the content one.
 fn automatic_minimum_suggestion<T>(
     tree: &T,
     state: &mut T::State,
@@ -523,8 +492,6 @@ where
     ) + margin
 }
 
-/// The minimum contribution of an item with no definite minimum size where
-/// its automatic minimum does not apply, before the final clamp.
 fn minimum_fallback<T>(
     tree: &T,
     state: &mut T::State,
@@ -560,10 +527,6 @@ fn span_gap(tracks: &TrackSet, range: core::ops::Range<usize>) -> f32 {
     tracks.gap * visible.saturating_sub(1) as f32
 }
 
-/// §6.6's fixed-maximum clamp of an automatic minimum across the tracks in
-/// `range`: their fixed maximums (each floored by its fixed minimum,
-/// [`MaxKind::Fixed`]) and the gutters between them, or `None` when a track
-/// that is not collapsed has no fixed maximum.
 fn fixed_max_span_limit(tracks: &TrackSet, range: core::ops::Range<usize>) -> Option<f32> {
     let mut limit = span_gap(tracks, range.clone());
     for track in &tracks.tracks[range] {
@@ -618,12 +581,6 @@ where
     contribution.min(limit).max(minimum)
 }
 
-/// css-grid-1 §11.5 step 1: shims baseline-aligned items so their intrinsic
-/// row contributions reflect their alignment. A `baseline` item is shimmed
-/// on its start side, against the other members of its startmost row's
-/// first-baseline group; a `last baseline` item on its end side, against its
-/// endmost row's last-baseline group (css-align-3 §9.2: a spanning item
-/// joins the startmost or endmost shared alignment context).
 fn prepare_baseline_shims<T>(
     tree: &T,
     state: &mut T::State,
@@ -652,9 +609,6 @@ fn prepare_baseline_shims<T>(
         candidates.push((set, line, index));
     }
     candidates.sort_unstable_by_key(|&(set, line, _)| (set, line));
-    // The distance a group aligns: from a member's outer start edge down to
-    // its first baseline, or from its last baseline down to its outer end
-    // edge.
     let extent = |item: &GridItem<T::NodeId>, set: BaselineSet| match set {
         BaselineSet::First => item
             .measured_baseline
@@ -743,8 +697,6 @@ fn record_planned(index: usize, increase: f32, planned: &mut [f32], touched: &mu
     planned[index] = increase;
 }
 
-/// Grid §12.5.1's freeze-and-redistribute operation. Scratch is reused
-/// across every item, avoiding an allocation per spanned contribution.
 #[derive(Debug, Clone, Copy)]
 struct DistributionEntry {
     index: usize,
@@ -760,7 +712,6 @@ struct DistributionScratch {
     non_affected: Vec<DistributionEntry>,
 }
 
-/// Reusable buffers for one recursive Grid layout frame.
 #[derive(Default)]
 pub(super) struct IntrinsicSizingScratch {
     single_growth_limits: Vec<Option<f32>>,
@@ -1306,11 +1257,6 @@ fn resolve_intrinsic_sizes<T, I>(
             } else {
                 spanning_minimum_kind
             };
-        // §12.5 step 4 repeats step 3 "distributing space only to flexible
-        // tracks", and step 3's first part feeds only "tracks with an
-        // intrinsic min track sizing function": a `minmax(0, 0.4fr)` row
-        // keeps its fixed 0 base (WPT
-        // `css/css-grid/layout-algorithm/flex-sizing-rows-indefinite-height-002.html`).
         run_spanning_base_phase(
             tree,
             state,
@@ -1538,16 +1484,6 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
     }
 }
 
-/// Whether track sizing consults the items placed in this set at all: some
-/// track's used size depends on the contributions it collects, rather than
-/// standing on its own sizing function. A caller that has to assemble the item
-/// list before calling [`size_tracks`] can skip assembling it when this is
-/// false — the same condition `size_tracks` itself fast-paths on, named once so
-/// the two cannot drift.
-///
-/// A flexible track counts: §12.5's "increase sizes to accommodate spanning
-/// items crossing flexible tracks" step runs under every available space, not
-/// only under a max-content constraint.
 pub(super) fn track_sizing_reads_items(tracks: &TrackSet) -> bool {
     tracks
         .tracks
@@ -1606,20 +1542,13 @@ pub(super) fn size_tracks<T, I>(
     tracks.rebuild_positions();
 }
 
-/// What one §12 track-sizing run reads from the items it sizes the tracks
-/// for, addressed by entry index: Grid's own items (a `[GridItem]`), or the
-/// entries grid-lanes sizes its grid axis from ([`LaneSizingItems`]), where
-/// one entry stands for every span-1 item that may sit in one track.
 pub(super) trait SizingItems<N> {
     fn entry_count(&self) -> usize;
 
     fn entry_span(&self, index: usize, axis: Axis) -> TrackSpan;
 
-    /// The number of tracks the entry spans, at least 1.
     fn entry_span_len(&self, index: usize, axis: Axis) -> usize;
 
-    /// Resolves intrinsic-keyword sizes and a row's baseline shims before
-    /// any contribution is read.
     fn prepare<T>(
         &mut self,
         tree: &T,
@@ -1659,8 +1588,6 @@ pub(super) trait SizingItems<N> {
     where
         T: LayoutTree<NodeId = N>;
 
-    /// The flex factors of the flexible tracks each of `crosses_flexible`'s
-    /// entries spans, summed in entry order.
     fn spanned_flex_sum(&self, crosses_flexible: &[usize], tracks: &TrackSet, axis: Axis) -> f32;
 }
 
@@ -1761,8 +1688,6 @@ impl<N> SizingItems<N> for [GridItem<N>] {
     }
 }
 
-/// A maximum over a group of items, computed when first asked for: `None`
-/// for a group with no member it covers.
 #[derive(Debug, Clone, Copy, Default)]
 enum LazyMaximum {
     #[default]
@@ -1799,24 +1724,6 @@ fn max_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
     }
 }
 
-/// The parts of a group of span-1 items' contributions that do not depend on
-/// which track the group sits in, each the maximum over the members it
-/// covers. Every track-sizing step that reads a span-1 contribution takes
-/// the maximum of the items' contributions to the track (§12.5 steps 2 and
-/// 4 through `record_planned`, a growth limit, an fr size), and every step
-/// from a member's parts to its contribution is monotone, so the maximum of
-/// the members' contributions is the contribution of their maxima.
-///
-/// A minimum contribution depends on the track only through whether the
-/// automatic minimum applies there and the fixed maximum it is clamped by,
-/// so it is kept in three parts: `fixed_min` for the members it never
-/// applies to (a definite minimum size, a non-`auto` one, a scroll
-/// container), and for the rest `auto_min_candidate` — the content-based
-/// minimum already capped by the member's own maximum size, the clamp the
-/// track's fixed maximum then joins — and `auto_min_fallback`, their
-/// contribution where it does not apply.
-/// Whether a track gives a span-1 item its automatic minimum (§6.6), and the
-/// track's fixed maximum (`fixed_max_span_limit`) clamping it when it does.
 #[derive(Debug, Clone, Copy)]
 enum AutomaticMinimum {
     Applies { limit: Option<f32> },
@@ -1859,9 +1766,6 @@ impl GroupMaxima {
         })
     }
 
-    /// The group's minimum contribution in a span-1 track: whether the
-    /// automatic minimum applies there, and the fixed maximum it is then
-    /// clamped by.
     fn minimum<T>(
         &mut self,
         tree: &T,
@@ -1904,8 +1808,6 @@ impl GroupMaxima {
                         if !minimum_may_be_automatic(item, axis) {
                             return None;
                         }
-                        // The track's fixed maximum joins the member's own
-                        // maximum below, a clamp the shim would follow.
                         debug_assert_eq!(item.baseline_shim, 0.0);
                         let explicit_max = axis
                             .size(item.max_size)
@@ -1945,19 +1847,13 @@ impl GroupMaxima {
     }
 }
 
-/// One grid-lanes grid-axis sizing entry (css-grid-3 §3.4).
 #[derive(Debug)]
 #[allow(
     clippy::large_enum_variant,
     reason = "the clones sit inline as Grid's own item list holds them; the aggregates number at most one per track"
 )]
 pub(super) enum LaneEntry<N> {
-    /// An item spanning several tracks at one candidate position: a clone
-    /// at that position, sized as Grid sizes an item.
     Item(GridItem<N>),
-    /// Every span-1 item that may sit in one track: the definite-position
-    /// items placed there (`members`, a range of `LaneSizingItems::members`)
-    /// and, when `pooled`, every auto-placed one.
     Aggregate {
         span: TrackSpan,
         members: core::ops::Range<usize>,
@@ -1966,32 +1862,17 @@ pub(super) enum LaneEntry<N> {
     },
 }
 
-/// Grid-lanes' grid-axis sizing entries: §3.4 has a definite-position item
-/// contribute at its own span and an auto-placed item at every start
-/// position its span fits. A spanning item is cloned per position
-/// ([`LaneEntry::Item`]); the span-1 items, measured once each in place in
-/// `items`, contribute through one aggregate per track
-/// ([`LaneEntry::Aggregate`]), whose contributions are the maxima of its
-/// members' ([`GroupMaxima`]) — the same numbers the per-position clones
-/// give the tracks, which a debug build checks after every sizing run.
 #[derive(Debug)]
 pub(super) struct LaneSizingItems<'a, N> {
-    /// Every in-flow item, in item order.
     pub(super) items: &'a mut [GridItem<N>],
-    /// The `items` indices of the auto-placed span-1 items.
     pub(super) pooled: Vec<usize>,
     pub(super) pool: GroupMaxima,
-    /// The `items` indices of the definite-position span-1 items, grouped
-    /// by track; each aggregate names its range.
     pub(super) members: Vec<usize>,
     pub(super) entries: Vec<LaneEntry<N>>,
-    /// The per-position clones' flex sum (`SizingItems::spanned_flex_sum`),
-    /// summed in their order.
     pub(super) spanned_flex_sum: f32,
 }
 
 impl<'a, N> LaneSizingItems<'a, N> {
-    /// No entry yet over `items`.
     pub(super) fn new(items: &'a mut [GridItem<N>]) -> Self {
         Self {
             items,
@@ -2095,15 +1976,11 @@ impl<N> SizingItems<N> for LaneSizingItems<'_, N> {
     {
         let mut prepare = |item: &mut GridItem<N>| {
             resolve_item_intrinsic_dimensions(tree, state, item, axis, cross_tracks, inner_size);
-            // Grid lanes takes the fallback alignment for every baseline
-            // value, so no item joins a baseline-sharing group and every
-            // shim is zero, as `prepare_baseline_shims` would leave it.
             debug_assert!(item.baseline_participation().is_none());
             if axis == Axis::Vertical {
                 item.baseline_shim = 0.0;
             }
         };
-        // Every span-1 item is pooled or a member, once.
         for &index in self.pooled.iter().chain(&self.members) {
             prepare(&mut self.items[index]);
         }
@@ -2157,10 +2034,6 @@ impl<N> SizingItems<N> for LaneSizingItems<'_, N> {
                 cross_tracks,
             );
         }
-        // `measure_limited_contribution` for one track: each member's
-        // `min(contribution, limit).max(minimum)` is monotone in both, so
-        // the maximum over the members is the same expression of the group
-        // maxima.
         debug_assert!(matches!(
             kind,
             ContributionKind::MinContent | ContributionKind::MaxContent
@@ -2280,8 +2153,6 @@ mod tests {
         }
     }
 
-    /// Minimal tree/state test fixture with no children, canned intrinsic
-    /// measurements, and an interior-mutable call log.
     #[derive(Debug)]
     struct TestTree {
         style: TestStyle,
@@ -2420,8 +2291,6 @@ mod tests {
         }
     }
 
-    /// A track sized by its own function alone: `growth_limit` as both its
-    /// fixed minimum and maximum.
     fn fixed_track(base: f32, growth_limit: f32) -> Track {
         Track {
             min: MinKind::Fixed,

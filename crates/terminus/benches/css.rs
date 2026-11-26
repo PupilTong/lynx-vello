@@ -379,13 +379,6 @@ fn media_viewport_flip(bencher: divan::Bencher) {
 const STRUCTURAL_ROWS: usize = 512;
 const RESIZE_BATCH: usize = 2;
 
-/// Appending to a list whose parent carries a structural selector flag.
-///
-/// `:nth-last-child` sets `HAS_SLOW_SELECTOR`, which asks for every child to be
-/// restyled on every child-list change — the arm that materialized the whole
-/// child list per insertion. The parent only carries the flag after a flush
-/// that had children to match, so the seed rows and the flush before the timed
-/// loop are load-bearing: without them the structural arm is never entered.
 fn structural_list(css: &str) -> (Document<()>, NodeId) {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0), "page", ());
     doc.add_stylesheet(css, StylesheetOrigin::Author);
@@ -443,10 +436,6 @@ fn append_rows_empty_selector(bencher: divan::Bencher) {
         });
 }
 
-/// A resize that no media query answers differently. Nothing can start or stop
-/// matching, so the tree only has to be cascaded again — the case
-/// `media_viewport_flip` deliberately does not cover, since it crosses its own
-/// breakpoint on every iteration.
 #[divan::bench]
 fn resize_without_media_change(bencher: divan::Bencher) {
     let (mut doc, _) = unflushed();
@@ -464,17 +453,12 @@ fn resize_without_media_change(bencher: divan::Bencher) {
             for _ in 0..RESIZE_BATCH {
                 let doc = &mut *state.borrow_mut();
                 wide = !wide;
-                // Both sizes are above the 300px breakpoint, so the media
-                // query answers `true` throughout.
                 doc.set_viewport(if wide { 800.0 } else { 700.0 }, 600.0);
                 doc.layout();
             }
         });
 }
 
-/// Writing an attribute no rule mentions, which is the shape every text update
-/// takes: `raw-text` carries its whole run in a `text` attribute, and no
-/// selector matches on it. The commit that follows has nothing to restyle.
 #[divan::bench]
 fn attribute_write_without_dependency(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
@@ -495,8 +479,6 @@ fn attribute_write_without_dependency(bencher: divan::Bencher) {
         });
 }
 
-/// The paired case: an attribute the author sheet does select on
-/// (`[data-row]`), which must keep its snapshot and its restyle.
 #[divan::bench]
 fn attribute_write_with_dependency(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
@@ -517,8 +499,6 @@ fn attribute_write_with_dependency(bencher: divan::Bencher) {
         });
 }
 
-/// An element-state flip no rule selects on. `incremental_state_flip` covers
-/// the `:hover` case a rule does select on.
 #[divan::bench]
 fn element_state_flip_without_dependency(bencher: divan::Bencher) {
     let (mut doc, probe) = unflushed();

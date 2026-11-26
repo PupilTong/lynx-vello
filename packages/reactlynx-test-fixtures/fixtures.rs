@@ -8,6 +8,4 @@ pub struct Fixture {
     pub public_path: Option<&'static str>,
 }
 
-// The compiler determines chunk names and development asset URLs. Embed the
-// generated index so Wasm tests need neither a filesystem nor a dev server.
 include!("dist/index.rs");

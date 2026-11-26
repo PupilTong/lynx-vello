@@ -121,14 +121,6 @@ style_protocol! {
                 Size::new(&position.max_width, &position.max_height)
             },
             aspect_ratio -> AspectRatio = *style.computed_values().get_aspect_ratio(),
-            // The natural size of replaced content, as the *host* reports it
-            // — the same `NaturalSize` `compute_leaf_layout` receives, seen
-            // from the container above rather than from inside the leaf. A
-            // container needs it because css-grid-1 §6.2 decides `normal`
-            // self-alignment on whether an item is a replaced box with a
-            // natural size in the axis, and alignment is settled before the
-            // item is ever measured. Every non-replaced box answers `NONE`,
-            // which is the default here.
             natural_size -> Size<Option<f32>> = Size::NONE,
             margin -> Edges<&Margin> = {
                 let margin = style.computed_values().get_margin();
@@ -166,9 +158,6 @@ style_protocol! {
             ),
             box_sizing -> box_sizing::T = *style.computed_values().get_box_sizing(),
             direction -> direction::T = *style.inherited_values().get_direction(),
-            // css-contain-3 §2.1: a size query container is a contained
-            // box, so the `container-type` fold lives with the rest of
-            // containment rather than beside the units that read it.
             container_type -> ContainerType =
                 *style.computed_values().get_box().get_container_type(),
             containment -> Contain = {
@@ -208,57 +197,26 @@ style_protocol! {
                 style.computed_values().get_position().justify_content,
             align_self -> SelfAlignment =
                 style.computed_values().get_position().align_self,
-            // Grid items read it, and so does every algorithm's absolute
-            // pass: css-align-3 §6.1.2 aligns an absolutely positioned box's
-            // margin box in the inline axis of its containing block.
             justify_self -> SelfAlignment =
                 style.computed_values().get_position().justify_self,
-            // css-anchor-position-1 §3.1. An accepted `@position-try`
-            // property, so the absolute pass reads it from the position
-            // option being laid out, like the insets, sizes and margins.
             position_area -> PositionArea =
                 style.computed_values().get_position().position_area,
-            // §6.2, read from the box's own style: the order the fallback
-            // loop tries its options in is not itself an option's property.
             position_try_order -> PositionTryOrder =
                 style.computed_values().get_position().position_try_order,
-            // §2.4: whether `position-anchor` names an element — a
-            // `<anchor-name>` or `match-parent` — rather than `normal`,
-            // `none` or `auto`. `normal` and `auto` name the implicit anchor
-            // element, which only a host language defines; `normal` with a
-            // `position-area` is already on the anchored path through that
-            // property. A box whose only anchor-positioning property is
-            // `position-anchor` still has a default anchor, and so its
-            // scrollable containing block (css-position-4), which only the
-            // anchored path asks the host for.
             names_position_anchor -> bool = !matches!(
                 style.computed_values().get_position().position_anchor.value,
                 PositionAnchorKeyword::Normal
                     | PositionAnchorKeyword::None
                     | PositionAnchorKeyword::Auto
             ),
-            // §6.1: whether `position-try-fallbacks` lists anything. Only a
-            // box that does can have position options, so only it costs the
-            // absolute pass a host call to count them.
             has_position_try_fallbacks -> bool =
                 !style.computed_values().get_position().position_try_fallbacks.value.is_none(),
             order -> i32 = style.computed_values().get_position().order,
-            // Whether this box's own layout reads `LayoutInput::parent_size`
-            // at all. One that does not is laid out — and cached — against
-            // no basis, so an entry answers every basis its parent hands it.
-            // A host must answer `true` for a box its own dispatch lays out
-            // by reading the basis for anything besides the box model
-            // ([`box_model_reads_percentage_basis`]).
             reads_percentage_basis -> bool = box_model_reads_percentage_basis(style),
         }
     }
 }
 
-/// Whether laying a box out reads the percentage basis its parent hands it
-/// ([`crate::tree::LayoutInput::parent_size`]) through its own box model: a
-/// percentage (or anchor-relative) size, min or max size, margin or padding.
-/// The default of [`CoreStyle::reads_percentage_basis`], which a host extends
-/// for a box whose layout reads the basis some other way.
 #[inline]
 pub fn box_model_reads_percentage_basis(style: &impl CoreStyle) -> bool {
     let size = style.size();
@@ -273,16 +231,11 @@ pub fn box_model_reads_percentage_basis(style: &impl CoreStyle) -> bool {
         || edges_depend_on_inline_basis(&style.margin(), &style.padding())
 }
 
-/// Whether the sizing value resolves against a percentage basis, making it
-/// track the basis rather than stand on its own.
 #[inline]
 pub(crate) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
     match value {
         StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
         StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
@@ -293,16 +246,11 @@ pub(crate) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
     match value {
         MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
         MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
-        // Conservatively yes: the answer only withholds a stability claim or
-        // asks for a re-resolution, and a precise one would put a call on
-        // every box's path for a value no in-flow box carries in practice.
         MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => true,
         _ => false,
     }
 }
 
-/// Whether any margin or padding percentage resolves against the container's
-/// inline size.
 #[inline]
 pub(crate) fn edges_depend_on_inline_basis(
     margin: &Edges<&Margin>,
@@ -311,7 +259,6 @@ pub(crate) fn edges_depend_on_inline_basis(
     let margin_depends = |value: &Margin| match value {
         Margin::LengthPercentage(lp) => lp.has_percentage(),
         Margin::Auto => false,
-        // Conservatively yes, as in `style_size_depends_on_basis`.
         Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => true,
     };
     margin_depends(margin.left)

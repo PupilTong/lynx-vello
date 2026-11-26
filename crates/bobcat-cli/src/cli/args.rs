@@ -14,8 +14,6 @@ pub(crate) const DEFAULT_VSYNC_HZ: NonZeroU32 =
     NonZeroU32::new(60).expect("the default frame rate is non-zero");
 pub(crate) const DEFAULT_DEVICE_PIXEL_RATIO: f32 = 1.0;
 const MAX_VSYNC_HZ: u32 = 1_000;
-/// The locale of a run that names none and runs in no POSIX locale
-/// environment that names a language.
 pub(crate) const DEFAULT_LOCALE: &str = "en-US";
 
 #[derive(Clone, Debug)]
@@ -26,13 +24,7 @@ pub(crate) struct Options {
     pub(crate) viewport_width: f32,
     pub(crate) viewport_height: f32,
     pub(crate) device_pixel_ratio: f32,
-    /// The language of the page's text, as a BCP-47 tag: `--locale`, else
-    /// the POSIX locale environment (`LC_ALL`, `LC_CTYPE`, `LANG`) as a tag,
-    /// else [`DEFAULT_LOCALE`]. Every view names one.
     pub(crate) locale: String,
-    /// The scripts whose platform font fallback is asked for before the view
-    /// is built, in the locale's language: `--preload-scripts`, ISO 15924
-    /// codes such as `Hani`; none by default.
     pub(crate) preload_scripts: Vec<String>,
 }
 
@@ -204,9 +196,6 @@ fn finish(
     }))
 }
 
-/// Stores `--preload-scripts`' value, once: comma-separated ISO 15924 codes,
-/// checked here only for shape (four ASCII letters each); the engine refuses
-/// a code the platform cannot be asked for when the group preloads.
 fn set_preload_scripts(scripts: &mut Option<Vec<String>>, value: &str) -> Result<(), CliError> {
     if scripts.is_some() {
         return Err(CliError::arguments(
@@ -229,7 +218,6 @@ fn set_preload_scripts(scripts: &mut Option<Vec<String>>, value: &str) -> Result
     Ok(())
 }
 
-/// Stores `--locale`'s value, once.
 fn set_locale(locale: &mut Option<String>, value: &str) -> Result<(), CliError> {
     if locale.is_some() {
         return Err(CliError::arguments("`--locale` was provided twice"));
@@ -238,9 +226,6 @@ fn set_locale(locale: &mut Option<String>, value: &str) -> Result<(), CliError> 
     Ok(())
 }
 
-/// `--locale`'s value: a BCP-47 tag, checked here only for shape (no
-/// whitespace, nothing but letters, digits and hyphens); the engine refuses
-/// one that is not a language when the view is built.
 fn parse_locale(value: &str) -> Result<String, CliError> {
     let value = value.trim();
     if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -251,11 +236,6 @@ fn parse_locale(value: &str) -> Result<String, CliError> {
     Ok(value.to_owned())
 }
 
-/// The POSIX locale environment as a BCP-47 tag, what Lynx's `LynxEnv`
-/// defaults its locale from on the platforms that have one: the first of
-/// `LC_ALL`, `LC_CTYPE` and `LANG` that is set, with its encoding and
-/// modifier dropped and `_` read as `-` (`zh_CN.UTF-8` is `zh-CN`). `C` and
-/// `POSIX` name no language.
 fn environment_locale() -> Option<String> {
     ["LC_ALL", "LC_CTYPE", "LANG"]
         .iter()

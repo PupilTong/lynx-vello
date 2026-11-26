@@ -6,11 +6,6 @@
 use crate::geometry::Size;
 use crate::style::{Contain, ContainIntrinsicSize, ContainerType, ContentVisibility, CoreStyle};
 
-/// The containment a box actually has: its `contain` value plus everything
-/// `content-visibility` and `container-type` imply.
-///
-/// `skipped_contents` is the `content-visibility: auto` relevance answer,
-/// which only a rendering update can establish — seldon never decides it.
 #[must_use]
 pub fn effective_containment(
     contain: Contain,
@@ -31,16 +26,6 @@ pub fn effective_containment(
             contain.insert(Contain::LAYOUT | Contain::PAINT | Contain::SIZE | Contain::STYLE);
         }
     }
-    // css-contain-3 §2.1: `container-type: inline-size` "applies layout
-    // containment, style containment, and inline-size containment to the
-    // principal box", and `size` the same with size containment. The two
-    // keywords are mutually exclusive in the grammar, so the branch order only
-    // settles a value the parser cannot produce.
-    //
-    // Gecko's `StyleAdjuster::adjust_for_contain` inserts `STYLE` and the size
-    // bit but not `LAYOUT`; it reaches layout containment for a query container
-    // by another road. This engine has only the one bit, so it inserts what the
-    // spec text says.
     if container_type.intersects(ContainerType::INLINE_SIZE) {
         contain.insert(Contain::LAYOUT | Contain::STYLE | Contain::INLINE_SIZE);
     } else if container_type.intersects(ContainerType::SIZE) {
@@ -59,21 +44,10 @@ pub(crate) fn contain_intrinsic_length(value: &ContainIntrinsicSize) -> Option<f
     }
 }
 
-/// The per-axis projection of size containment: the axes whose extent may not
-/// come from the box's contents, each carrying the content-box extent that
-/// stands in for those contents (`contain-intrinsic-*`, or zero where that is
-/// `none`).
-///
-/// An axis reading `None` measures its contents the ordinary way. `contain:
-/// size` contains both axes, `contain: inline-size` — and `container-type:
-/// inline-size`, which implies it — only the width: this engine is
-/// horizontal-writing-mode only, so inline is width and block is height.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct ContainedAxes(Size<Option<f32>>);
 
 impl ContainedAxes {
-    /// The two axes as a `Size`, for the algorithms that project through an
-    /// `Axis` rather than naming width and height.
     #[inline]
     pub(crate) const fn extents(self) -> Size<Option<f32>> {
         self.0
@@ -89,14 +63,11 @@ impl ContainedAxes {
         self.0.height
     }
 
-    /// Whether either axis is contained.
     #[inline]
     pub(crate) const fn any(self) -> bool {
         self.0.width.is_some() || self.0.height.is_some()
     }
 
-    /// The whole box's substituted size, `Some` only when *both* axes are
-    /// contained — the one case in which the contents never have to run.
     #[inline]
     pub(crate) const fn all(self) -> Option<Size<f32>> {
         match self.0 {
@@ -109,10 +80,6 @@ impl ContainedAxes {
     }
 }
 
-/// The size-contained axes of a box whose effective containment is
-/// `containment` (its [`CoreStyle::containment`], which the caller derives
-/// once and reads for layout containment too), each with its
-/// `contain-intrinsic-size` substitute from `style`.
 #[must_use]
 pub(crate) fn contained_axes<S: CoreStyle>(containment: Contain, style: &S) -> ContainedAxes {
     ContainedAxes(Size::new(
@@ -214,8 +181,6 @@ mod tests {
         assert!(size.contains(Contain::SIZE));
         assert!(!size.contains(Contain::PAINT));
 
-        // `scroll-state` alone is not a size query container, so it contains
-        // nothing.
         let scroll_state = effective_containment(
             Contain::empty(),
             ContentVisibility::Visible,
@@ -224,7 +189,6 @@ mod tests {
         );
         assert_eq!(scroll_state, Contain::empty());
 
-        // The fold only ever adds: an authored `contain` keeps its own bits.
         let with_paint = effective_containment(
             Contain::PAINT,
             ContentVisibility::Visible,
@@ -301,9 +265,6 @@ mod tests {
         assert_eq!(none.all(), None);
         assert!(!none.any());
 
-        // Only the width is contained, and the *height*'s
-        // `contain-intrinsic-*` is not consulted for an axis that measures its
-        // contents.
         let inline = contained_axes(InlineSizeOnly.containment(), &InlineSizeOnly);
         assert_eq!(inline.width(), Some(0.0));
         assert_eq!(inline.height(), None);

@@ -65,9 +65,6 @@ style_protocol! {
         defaults(style) {
             fit_tolerance -> &FitTolerance =
                 &style.computed_values().get_position().fit_tolerance,
-            // css-grid-3 §4.2: `fit-tolerance: normal` is `1em`, so the
-            // algorithm needs the element's own computed font size to resolve
-            // it. No other length in layout is font-relative.
             font_size -> f32 =
                 style.computed_values().get_font().slow_clone_font_size().computed_size().px(),
         }

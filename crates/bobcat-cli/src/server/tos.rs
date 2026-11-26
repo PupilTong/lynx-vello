@@ -39,19 +39,14 @@ const SCREENSHOT_FILE: &str = "screenshot.bmp";
 const PARAMETERS_FILE: &str = "screenshot.json";
 const PARAMETERS_CONTENT_TYPE: &str = "application/json";
 const SCREENSHOT_CONTENT_TYPE: &str = "image/bmp";
-// Matches `GenUI` Server's uploadTosObject cache policy.
 const OBJECT_CACHE_CONTROL: &str = "public, max-age=1800";
 const CONNECT_TIMEOUT_MS: isize = 10_000;
 const REQUEST_TIMEOUT_MS: isize = 30_000;
-// Retries cover transient TOS and network failures. Together with the request
-// timeout they stay inside UPLOAD_DEADLINE, which is the hard bound.
 const MAX_RETRIES: isize = 2;
 const UPLOAD_DEADLINE: Duration = Duration::from_secs(100);
-// One signature covers the entire bounded SDK retry sequence.
 const SIGNATURE_LIFETIME_SECONDS: i64 = 600;
 const MAX_ERROR_DETAIL_CHARS: usize = 512;
 
-/// Environment variables that must all be set for screenshots to be stored.
 const REQUIRED_VARIABLES: [&str; 4] = [
     "TOS_ACCESS_KEY",
     "TOS_SECRET_KEY",
@@ -81,7 +76,6 @@ pub(crate) enum TosUploadError {
     Rejected { status: u16, detail: String },
 }
 
-/// Credentials and addressing for one TOS bucket.
 #[derive(Clone)]
 pub(crate) struct TosConfig {
     access_key: String,
@@ -91,9 +85,7 @@ pub(crate) struct TosConfig {
     bucket: String,
     region: String,
     secure: bool,
-    /// `host` or `host:port`, exactly as `URL.host` renders it in `GenUI` Server.
     endpoint_host: String,
-    /// Slash-trimmed key prefix; empty stores objects at the bucket root.
     prefix: String,
 }
 
@@ -110,9 +102,6 @@ impl fmt::Debug for TosConfig {
 }
 
 impl TosConfig {
-    /// Reads the configuration with the variable names, trimming, and endpoint
-    /// rules of `GenUI` Server's `resolveTosStorageConfig`, except that missing
-    /// credentials are an error instead of silently disabling storage.
     pub(crate) fn from_env() -> Result<Self, TosConfigError> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -156,8 +145,6 @@ impl TosConfig {
             endpoint_host,
             prefix,
         };
-        // Reject bucket names or endpoints that cannot form a request URL now,
-        // instead of failing every upload later.
         reqwest::Url::parse(&config.object_url("/probe"))
             .map_err(|_| TosConfigError::InvalidEndpoint)?;
         Ok(config)
@@ -175,8 +162,6 @@ impl TosConfig {
         }
     }
 
-    /// Unsigned public object URL with a virtual-hosted-style bucket host. Reads
-    /// are governed by the bucket policy.
     fn object_url(&self, path: &str) -> String {
         format!(
             "{}://{}.{}{path}",
@@ -186,8 +171,6 @@ impl TosConfig {
         )
     }
 
-    /// Internal TOS V1 signature for a plain object PUT with no query parameters
-    /// or signed headers. Sign the raw object key, before URL percent-encoding.
     fn put_request_headers(&self, key: &str, now: DateTime<Utc>) -> HashMap<String, String> {
         let expiration = now.timestamp() + SIGNATURE_LIFETIME_SECONDS;
         let canonical = format!("PUT\n/{}/{key}\n\n{expiration}", self.bucket);
@@ -215,8 +198,6 @@ impl TosConfig {
     }
 }
 
-/// Mirrors `parseTosEndpoint`: a bare host means HTTPS, and only a plain
-/// `scheme://host[:port]` origin is accepted.
 fn parse_endpoint(endpoint: &str) -> Result<(bool, String), TosConfigError> {
     let has_scheme = endpoint.split_once("://").is_some_and(|(scheme, _)| {
         scheme.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -247,9 +228,6 @@ fn parse_endpoint(endpoint: &str) -> Result<(bool, String), TosConfigError> {
     Ok((url.scheme() == "https", endpoint_host))
 }
 
-/// Trims surrounding slashes like `trimSlashes`, then rejects segments that
-/// URL normalization would rewrite, which would make the public URL name a
-/// different object than the one that was uploaded.
 fn normalize_prefix(prefix: &str) -> Result<String, TosConfigError> {
     let prefix = prefix.trim_matches('/');
     if prefix.is_empty() {
@@ -264,8 +242,6 @@ fn normalize_prefix(prefix: &str) -> Result<String, TosConfigError> {
     Ok(prefix.to_string())
 }
 
-/// Percent-encodes every key segment with only RFC 3986 unreserved characters
-/// left literal, for the public URL.
 fn object_path(key: &str) -> String {
     let mut path = String::with_capacity(key.len() + 1);
     for segment in key.split('/') {
@@ -281,7 +257,6 @@ fn object_path(key: &str) -> String {
     path
 }
 
-/// Adapts the SDK's executor hooks to the Tokio runtime the server already runs.
 #[derive(Debug, Default)]
 struct TokioRuntime;
 
@@ -322,26 +297,17 @@ impl TosUploader {
         Self::build(config, false)
     }
 
-    /// `custom_domain` addresses the endpoint host itself instead of
-    /// `<bucket>.<endpoint>`. Only tests set it, to reach a local stand-in
-    /// without DNS.
     fn build(config: TosConfig, custom_domain: bool) -> Result<Self, TosConfigError> {
         let endpoint = format!("{}://{}", config.scheme(), config.endpoint_host);
         let mut builder = tos::builder::<TokioRuntime>()
             .region(config.region.clone())
             .endpoint(endpoint.clone())
-            // Only object uploads are used, but the SDK insists that the control
-            // endpoint share the endpoint's port and otherwise defaults it to a port
-            // of its own, which would reject any `TOS_ENDPOINT` with an explicit port.
             .control_endpoint(endpoint)
             .connection_timeout(CONNECT_TIMEOUT_MS)
             .request_timeout(REQUEST_TIMEOUT_MS)
             .max_retry_count(MAX_RETRIES)
-            // A redirect would resend the request to a host the caller never named.
             .follow_redirect_times(0)
             .is_custom_domain(custom_domain);
-        // In override mode authentication comes exclusively from the per-upload
-        // V1 header. Supplying SDK credentials would also add a V4 Authorization.
         if !config.override_request_header {
             builder = builder
                 .ak(config.access_key.clone())
@@ -411,8 +377,6 @@ fn bounded(text: &str) -> String {
     text.chars().take(MAX_ERROR_DETAIL_CHARS).collect()
 }
 
-/// Where finished screenshots go. Production always uses TOS; unit tests swap
-/// in an in-memory store so route behavior needs no network.
 #[derive(Clone)]
 pub(crate) struct ScreenshotStore {
     backend: Arc<Backend>,
@@ -435,7 +399,6 @@ impl ScreenshotStore {
         })
     }
 
-    /// Stores the input JSON and BMP together and returns the BMP public URL.
     pub(crate) async fn put_bmp(
         &self,
         bmp: Vec<u8>,
@@ -515,7 +478,6 @@ mod memory {
             }
         }
 
-        /// Every stored `(url, bytes)` pair, oldest capture first.
         pub(crate) fn stored_objects(&self) -> Vec<(String, Vec<u8>)> {
             match self.backend.as_ref() {
                 Backend::Memory(store) => store.objects.lock().unwrap().clone(),
@@ -609,7 +571,6 @@ mod tests {
     fn v1_signature_matches_fixed_vectors_for_raw_object_keys() {
         let config = config(&BASE).unwrap();
         let now = DateTime::from_timestamp(1_735_689_600, 0).unwrap();
-        // Expected digests were calculated independently with Python hmac/hashlib.
         for (key, signature) in [
             (
                 "shots/example/screenshot.bmp",
@@ -720,8 +681,6 @@ mod tests {
 
     #[test]
     fn the_sdk_rejects_s3_endpoints_at_startup() {
-        // TOS exposes an S3-compatible host with different signing rules; fail fast
-        // instead of producing uploads TOS refuses.
         let config = config(&with(&[("TOS_ENDPOINT", "tos-s3-cn-beijing.volces.com")])).unwrap();
         match TosUploader::new(config) {
             Err(TosConfigError::Client(message)) => assert!(message.contains("S3"), "{message}"),
@@ -738,8 +697,6 @@ mod tests {
 
     type Log = Arc<Mutex<Vec<Received>>>;
 
-    /// A one-route stand-in for TOS that records requests and answers `status`.
-    /// Like TOS, it echoes the CRC64 of a stored object, which the SDK verifies.
     async fn fake_tos(status: StatusCode, reply: String) -> (SocketAddr, Log) {
         fake_tos_for_file(status, reply, None).await
     }
@@ -798,8 +755,6 @@ mod tests {
         (address, log)
     }
 
-    /// Points the SDK straight at the stand-in, bypassing `<bucket>.<endpoint>`
-    /// DNS, while the config still describes the public bucket URL.
     fn uploader_for(address: SocketAddr, extra: &[(&str, &str)]) -> TosUploader {
         let endpoint = format!("http://localhost:{}", address.port());
         let mut variables = with(extra);
@@ -990,7 +945,6 @@ mod tests {
             }
             other @ TosUploadError::Client(_) => panic!("unexpected error: {other}"),
         }
-        // A client error is not retried.
         assert_eq!(log.lock().unwrap().len(), 1);
     }
 
@@ -1048,7 +1002,6 @@ mod tests {
 
     #[tokio::test]
     async fn upload_reports_unreachable_endpoints_as_client_errors() {
-        // A port that was just released, so nothing is listening on it.
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let dead = closed.local_addr().unwrap();
         drop(closed);

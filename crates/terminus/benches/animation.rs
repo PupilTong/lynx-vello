@@ -45,19 +45,12 @@ fn main() {
     divan::main();
 }
 
-/// Elements on the page. Fixed, so the `args` axis is purely "how many of them
-/// animate" rather than "how big is the document".
 const CARDS: usize = 120;
 
-/// Rows in the shimmering list: far more than its scrollport shows.
 const SHIMMER_ROWS: usize = 200;
 
-/// Ahem: one filled em box per glyph, so the labels shape the same on every
-/// runner.
 const AHEM: &[u8] = include_bytes!("../../seldon/tests/fixtures/Ahem.ttf");
 
-/// A frame's worth of timeline at 60Hz. Every animation here is `infinite` and
-/// runs for far longer than any benchmark, so no iteration ever ends one.
 const FRAME_STEP: f64 = 1.0 / 60.0;
 
 #[derive(Debug)]
@@ -96,9 +89,6 @@ fn device() -> terminus::link::Device {
     )
 }
 
-/// The paint benchmark's card page plus one `@keyframes` rule per animatable
-/// tier, so every case here paints the same document and differs only in what
-/// is animating.
 const PAGE_CSS: &str = "
 page { display: flex; position: relative; width: 800px; height: 600px; }
 .card { display: flex; position: absolute; width: 180px; height: 80px;
@@ -118,10 +108,6 @@ page { display: flex; position: relative; width: 800px; height: 600px; }
 .grow { animation: bench-grow 600s linear infinite; }
 ";
 
-/// A laid-out, rendered page whose first `animating` cards carry `animation`.
-///
-/// Rendered once up front so the benchmark measures steady-state frames rather
-/// than the first scene build.
 fn animated_page(animating: usize, animation: &str) -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(PAGE_CSS, StylesheetOrigin::Author);
@@ -151,8 +137,6 @@ fn animated_page(animating: usize, animation: &str) -> Document<()> {
     dom
 }
 
-/// One whole presenting-thread frame: advance the timeline, then produce the
-/// scene. This is the number an embedder pays per animated frame.
 fn bench_frame(bencher: divan::Bencher<'_, '_>, animating: usize, animation: &str) {
     let page = RefCell::new(animated_page(animating, animation));
     let now = Cell::new(0.0_f64);
@@ -164,10 +148,6 @@ fn bench_frame(bencher: divan::Bencher<'_, '_>, animating: usize, animation: &st
     });
 }
 
-/// The animation half of a frame on its own: the timeline step plus the cascade
-/// over the animating elements. No scene is produced and no layout runs — a
-/// tick only *marks* layout dirty, so a reflow shows up in `frame_width` rather
-/// than in `tick_width`.
 fn bench_tick(bencher: divan::Bencher<'_, '_>, animating: usize, animation: &str) {
     let page = RefCell::new(animated_page(animating, animation));
     let now = Cell::new(0.0_f64);
@@ -178,30 +158,21 @@ fn bench_tick(bencher: divan::Bencher<'_, '_>, animating: usize, animation: &str
     });
 }
 
-/// A frame of a `transform` animation: cannot move a box, so it never reaches
-/// layout.
 #[divan::bench(args = [1, 8, 32, 120])]
 fn frame_transform(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_frame(bencher, animating, "spin");
 }
 
-/// A frame of an `opacity` animation: paint-only like `transform`, but it also
-/// opens a render layer for the walker to composite.
 #[divan::bench(args = [1, 8, 32, 120])]
 fn frame_opacity(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_frame(bencher, animating, "fade");
 }
 
-/// A frame of a `width` animation: the same work plus the reflow the two above
-/// avoid.
 #[divan::bench(args = [1, 8, 32, 120])]
 fn frame_width(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_frame(bencher, animating, "grow");
 }
 
-/// The frame this page costs when nothing animates — the floor the three cases
-/// above are measured against. `render` produces nothing without a visual
-/// mutation, so this is what an idle animated page pays.
 #[divan::bench]
 fn frame_idle(bencher: divan::Bencher<'_, '_>) {
     let page = RefCell::new(animated_page(0, "spin"));
@@ -224,16 +195,8 @@ fn tick_width(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_tick(bencher, animating, "grow");
 }
 
-/// The Lynx UA rule a `<text>` brings into every card: its `overflow: clip`
-/// gives each card's animated subtree a clip node. The clip only has to
-/// exist — the export used to refuse any subtree holding one — and no op
-/// pushes it: an in-flow `<text>` that is no stacking context records its
-/// run under its parent's clip. The `<text>` itself is a Lynx text element by
-/// its definition ([`TextKind`]).
 const TEXT_UA_CSS: &str = "text { overflow: clip; }";
 
-/// The definition `crates/bobcat-core` gives `<text>`, minus its method: a
-/// Lynx text element, which lays out as a Lynx paragraph.
 struct TextKind;
 
 impl terminus::link::CustomElement<()> for TextKind {
@@ -242,13 +205,9 @@ impl terminus::link::CustomElement<()> for TextKind {
     }
 }
 
-/// Each card's label: narrower than its run. Only a `.clip` card's own
-/// `overflow: hidden` cuts the glyphs.
 const LABEL_CSS: &str =
     ".label { width: 120px; height: 20px; font-family: Ahem; font-size: 16px; }";
 
-/// A list scrolling 200 rows through a 600 px scrollport, each row running
-/// its own sideways shimmer.
 const SHIMMER_CSS: &str = "
 page { display: flex; position: relative; width: 800px; height: 600px; }
 .list { display: flex; flex-direction: column; overflow: scroll; width: 300px; height: 600px; }
@@ -259,9 +218,6 @@ page { display: flex; position: relative; width: 800px; height: 600px; }
                            to { transform: translateX(10px); } }
 ";
 
-/// A header over a list of [`SHIMMER_ROWS`] rows: each row fades and rises
-/// in over its `view()` entry range, and the header moves by the list's
-/// named scroll timeline with `header_animation`.
 fn scroll_driven_css(header_animation: &str) -> String {
     format!(
         "page {{ display: flex; flex-direction: column; position: relative;
@@ -283,7 +239,6 @@ fn scroll_driven_css(header_animation: &str) -> String {
     )
 }
 
-/// The page of [`scroll_driven_css`], and its list.
 fn scroll_driven_page(header_animation: &str) -> (Document<()>, terminus::link::NodeId) {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(
@@ -305,8 +260,6 @@ fn scroll_driven_page(header_animation: &str) -> (Document<()>, terminus::link::
     (dom, list)
 }
 
-/// The list offset of frame `frame`: sweeping 0 to 480 px and back, inside
-/// the committed encode window.
 fn swept_offset(frame: u32) -> f32 {
     let phase = frame % 96;
     #[expect(clippy::cast_precision_loss, reason = "a small frame index")]
@@ -314,8 +267,6 @@ fn swept_offset(frame: u32) -> f32 {
     step * 10.0
 }
 
-/// A production frame of a list scrolling under scroll-driven rows and
-/// header: composition at a moving offset, with no tick and no commit.
 #[divan::bench]
 fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
     let (mut page, list) = scroll_driven_page("bench-lift");
@@ -344,9 +295,6 @@ fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-/// A frame of the same page whose header tints by the list's timeline: a
-/// `background-color` animation never exports, so each adopted offset
-/// re-samples and re-cascades it on the main thread and commits.
 #[divan::bench]
 fn frame_scroll_driven_main(bencher: divan::Bencher<'_, '_>) {
     let (mut page, list) = scroll_driven_page("bench-tint");
@@ -368,8 +316,6 @@ fn frame_scroll_driven_main(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
-/// Starts every armed animation and commits it running: the first
-/// `advance_animations` resolves the start times, the second runs them.
 fn commit_running(dom: &mut Document<()>) -> std::sync::Arc<CommittedFrame> {
     dom.render();
     dom.advance_animations(0.0);
@@ -379,9 +325,6 @@ fn commit_running(dom: &mut Document<()>) -> std::sync::Arc<CommittedFrame> {
         .expect("render always leaves a committed frame retained")
 }
 
-/// [`animated_page`] with a `<text>` label in place of each card's chip,
-/// the first `animating` cards carrying `animation`; [`commit_running`]
-/// commits it running.
 fn card_text_page(animating: usize, animation: &str) -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
     dom.define("text", Box::new(TextKind));
@@ -416,7 +359,6 @@ fn card_text_page(animating: usize, animation: &str) -> Document<()> {
     dom
 }
 
-/// A page holding one list of [`SHIMMER_ROWS`] shimmering rows.
 fn shimmer_page() -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(SHIMMER_CSS, StylesheetOrigin::Author);
@@ -432,13 +374,6 @@ fn shimmer_page() -> Document<()> {
     dom
 }
 
-/// One production frame, the way the painter runs it: the main thread ticks
-/// and recommits only when the committed frame asks for it, then the frame
-/// composes at the instant, sampling its curves when the program draws any.
-///
-/// `exported` is how many curves the page must export: a page where one
-/// fell back to main-thread ticks is refused rather than timed as a
-/// different path under the same name.
 fn bench_production_frame(
     bencher: divan::Bencher<'_, '_>,
     mut page: Document<()>,
@@ -478,23 +413,16 @@ fn bench_production_frame(
     });
 }
 
-/// A production frame of cards spinning with a `<text>` inside each: the
-/// label's clip rides the card's curve instead of refusing it.
 #[divan::bench(args = [1, 8, 32, 120])]
 fn frame_card_text_transform(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_production_frame(bencher, card_text_page(animating, "spin"), animating);
 }
 
-/// A production frame of cards fading with a `<text>` inside each.
 #[divan::bench(args = [1, 8, 32, 120])]
 fn frame_card_text_opacity(bencher: divan::Bencher<'_, '_>, animating: usize) {
     bench_production_frame(bencher, card_text_page(animating, "fade"), animating);
 }
 
-/// A production frame of a list whose every row runs its own transform
-/// shimmer. Each row's curve reach is its box ± 10 px, so culling keeps the
-/// rows that can meet the list's encode window and the frame samples only
-/// theirs: the cost tracks the window, not the 200 rows.
 #[divan::bench]
 fn frame_shimmer_rows(bencher: divan::Bencher<'_, '_>) {
     bench_production_frame(bencher, shimmer_page(), SHIMMER_ROWS);

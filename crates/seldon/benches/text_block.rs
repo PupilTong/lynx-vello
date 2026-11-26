@@ -42,7 +42,6 @@ fn main() {
     divan::main();
 }
 
-/// One flattened item, spelled as data so scenarios stay `'static`.
 enum ItemSpec {
     Run {
         text: &'static str,
@@ -84,8 +83,6 @@ const fn aligned_box(width: f32, height: f32, vertical_align: VerticalAlign) -> 
     }
 }
 
-/// One benchmark scenario: content, optional truncation content, block
-/// parameters, and the two widths the rebreak tier alternates between.
 struct Spec {
     items: &'static [ItemSpec],
     truncation: Option<&'static [ItemSpec]>,
@@ -114,12 +111,8 @@ impl Spec {
     }
 }
 
-/// `performance/x-text-large.html`: the unit content each of its 3000 nodes
-/// carries.
 const LABEL: &[ItemSpec] = &[run("hello lynx", 16.0)];
 
-/// `basic-element-text-maxline`: the plain 245-character paragraph the e2e
-/// suite clamps at 1, 2, and 200.
 const PLAIN_PARAGRAPH: &[ItemSpec] = &[run(
     "The layout of the text component is different from that of the view component. It does not \
      support setting display and related properties for layout, and has its own text layout \
@@ -127,9 +120,6 @@ const PLAIN_PARAGRAPH: &[ItemSpec] = &[run(
     16.0,
 )];
 
-/// `text-maxline-basic.html`: one root run and three nested inline-text runs,
-/// one at 3em and one with 7px letter-spacing, laid out at 300px with
-/// `word-break: break-all`.
 const STYLED_MULTI_RUN: &[ItemSpec] = &[
     run(
         "Nhello world, this is a long enough text without any limitation.",
@@ -140,9 +130,6 @@ const STYLED_MULTI_RUN: &[ItemSpec] = &[
     spaced_run("additionally, letter-space could be different", 16.0, 7.0),
 ];
 
-/// `basic-element-text-word-break`: the six 100px-wide siblings isolating
-/// {unbreakable, spaced} × {digits, Latin, CJK}. One benchmark item lays all
-/// six out as separate blocks.
 const WORD_BREAK_MATRIX: &[&[ItemSpec]] = &[
     &[run("12345678901234567890", 16.0)],
     &[run("12345 67890 12345 67890", 16.0)],
@@ -152,16 +139,11 @@ const WORD_BREAK_MATRIX: &[&[ItemSpec]] = &[
     &[run("你好世界 你好世界 你好世界 你好世界", 16.0)],
 ];
 
-/// `inline-truncation-with-inline-image.html` / `text-maxline-just-fit-…`:
-/// the 60-character CJK announcement whose maxline 1 vs 2 is the fit
-/// boundary.
 const CJK_ANNOUNCEMENT: &[ItemSpec] = &[run(
     "活动规则：在04.17-05.17期间，带话题#暑假科普手抄报 发布优质原创图文作品，图片数量≥3张，上榜作者能赢取周边",
     13.0,
 )];
 
-/// `truncation-first-element-is-image.html`: a leading 32×18 image box, then
-/// 110 dense CJK characters with no spaces, clamped to 3 lines at 300px.
 const DENSE_CJK_LEADING_IMAGE: &[ItemSpec] = &[
     boxed(32.0, 18.0),
     run("大学大学大学大学大学", 24.0),
@@ -172,8 +154,6 @@ const DENSE_CJK_LEADING_IMAGE: &[ItemSpec] = &[
     ),
 ];
 
-/// `text-maxline-with-inline-view-and-custom-truncation.html`: a leading
-/// avatar view, the 44-character quote, and a trailing image at 375px.
 const AVATAR_QUOTE: &[ItemSpec] = &[
     boxed(25.0, 18.0),
     run(
@@ -183,12 +163,8 @@ const AVATAR_QUOTE: &[ItemSpec] = &[
     boxed(17.0, 17.0),
 ];
 
-/// The same fixture's custom truncation content: an inline-text plus a 12×12
-/// image.
 const AVATAR_QUOTE_TRUNCATION: &[ItemSpec] = &[run("更多", 15.0), boxed(12.0, 12.0)];
 
-/// `text-maxlength.html` case e flattened — `1<x-text>2<x-text>3</x-text>4
-/// </x-text>5` — followed by the CJK split, cut in source units.
 const NESTED_MAXLENGTH: &[ItemSpec] = &[
     run("1", 16.0),
     run("2", 16.0),
@@ -200,9 +176,6 @@ const NESTED_MAXLENGTH: &[ItemSpec] = &[
     run("中文", 16.0),
 ];
 
-/// `text-maxline-with-custom-truncation-innertext-change.html`: 96 words of
-/// "long long longlong…" at 300px `break-all`, maxline 2, with a plain-text
-/// truncation child.
 const LONG_WORD_STRESS: &[ItemSpec] = &[run(
     "long long longlong long long longlong long long longlong long long longlong long long \
      longlong long long longlong long long longlong long long longlong long long longlong long \
@@ -288,8 +261,6 @@ const BREAK_ALL_TRUNCATION: Spec = Spec {
     alternate_width: 240.0,
 };
 
-/// libtxt `LongLayout`: its leading sentence plus two lorem-ipsum bodies,
-/// ~1080 characters in one run, wrapped at 300.
 const LONG_LATIN: &[ItemSpec] = &[run(
     concat!(
         "This is a very long sentence to test if the text will properly wrap around and go to the ",
@@ -311,8 +282,6 @@ const LONG_LATIN: &[ItemSpec] = &[run(
     16.0,
 )];
 
-/// Upstream `ChineseParagraph`, reshaped from its opening glyphs: ~220
-/// no-space CJK characters justified with 2px letter-spacing.
 const CJK_NO_SPACE: &[ItemSpec] = &[spaced_run(
     concat!(
         "左線読設重説切後碁給能上目秘使約。",
@@ -333,9 +302,6 @@ const CJK_NO_SPACE: &[ItemSpec] = &[spaced_run(
     2.0,
 )];
 
-/// The upstream `InlinePlaceholder` family condensed: `"012 34"` runs
-/// interleaved with fifteen placeholders of the two upstream sizes across
-/// the vertical-align values the module implements with distinct tables.
 const PLACEHOLDER_HEAVY: &[ItemSpec] = &[
     run("012 34", 16.0),
     aligned_box(50.0, 50.0, VerticalAlign::Baseline),
@@ -370,7 +336,6 @@ const PLACEHOLDER_HEAVY: &[ItemSpec] = &[
     run("012 34", 16.0),
 ];
 
-/// One `Spec` per word-break-matrix row, all at the fixture's fixed 100px.
 static WORD_BREAK_SPECS: [Spec; 6] = [
     Spec::plain(WORD_BREAK_MATRIX[0], 100.0, 100.0),
     Spec::plain(WORD_BREAK_MATRIX[1], 100.0, 100.0),
@@ -482,9 +447,6 @@ fn inline_items<'case>(
         .collect()
 }
 
-/// One scenario's per-block state: the owned styles the borrowed items
-/// reference, rebuilt into a fresh [`TextBlock`] per cold iteration or
-/// retained across warm ones.
 struct Case {
     spec: &'static Spec,
     styles: Vec<RunStyle>,
@@ -515,8 +477,6 @@ impl Case {
     }
 }
 
-/// A batch of independent blocks sharing one session text context, the way a
-/// document shares one context across its text nodes.
 struct Batch {
     context: TextContext,
     cases: Vec<Case>,
@@ -566,7 +526,6 @@ impl Batch {
     }
 }
 
-/// Flatten + normalize + source map + shape + break + assemble, per block.
 fn cold(bencher: divan::Bencher<'_, '_>, spec: &'static Spec, batch_size: usize) {
     bencher
         .counter(ItemsCount::new(batch_size))
@@ -576,8 +535,6 @@ fn cold(bencher: divan::Bencher<'_, '_>, spec: &'static Spec, batch_size: usize)
         });
 }
 
-/// Re-break of the retained shaped layout at an alternating width — plus the
-/// bounded display re-shape whenever the scenario cuts.
 fn rebreak(bencher: divan::Bencher<'_, '_>, spec: &'static Spec, batch_size: usize) {
     bencher
         .counter(ItemsCount::new(batch_size))
@@ -598,7 +555,6 @@ fn rebreak(bencher: divan::Bencher<'_, '_>, spec: &'static Spec, batch_size: usi
         });
 }
 
-/// The repeated-layout no-op the width memo turns every unchanged frame into.
 fn steady(bencher: divan::Bencher<'_, '_>, spec: &'static Spec, batch_size: usize) {
     bencher
         .counter(ItemsCount::new(batch_size))
@@ -719,10 +675,6 @@ block_benchmarks!(
     512
 );
 
-/// libtxt `ManyStylesLayout` reshaped for the block input model: one
-/// thousand single-character runs, each carrying its own style instance, so
-/// flattening, the source map, and the shaper's style table scale with run
-/// count instead of glyph count.
 #[divan::bench]
 fn cold_thousand_style_runs(bencher: divan::Bencher<'_, '_>) {
     const RUNS: usize = 1_000;
@@ -771,8 +723,6 @@ fn steady_inline_truncation_fit(bencher: divan::Bencher<'_, '_>) {
     steady(bencher, &INLINE_TRUNCATION_FIT, 1_024);
 }
 
-/// The Lynx measure→align round trip: the host resizes the avatar box and the
-/// block re-breaks in place without re-shaping.
 #[divan::bench]
 fn resize_avatar_box(bencher: divan::Bencher<'_, '_>) {
     const BATCH: usize = 256;
@@ -792,8 +742,6 @@ fn resize_avatar_box(bencher: divan::Bencher<'_, '_>) {
         });
 }
 
-/// The six-way word-break matrix from `basic-element-text-word-break`, laid
-/// out as six independent blocks at 100px per item.
 #[divan::bench]
 fn cold_word_break_matrix(bencher: divan::Bencher<'_, '_>) {
     const BATCH: usize = 64;

@@ -137,7 +137,6 @@ fn page(kind: &str) -> Document<()> {
     dom
 }
 
-/// One full commit of a `kind` page; see the module doc.
 #[divan::bench(args = ["still", "rotor", "nested", "rows"])]
 fn commit(bencher: divan::Bencher<'_, '_>, kind: &str) {
     let dom = RefCell::new(page(kind));

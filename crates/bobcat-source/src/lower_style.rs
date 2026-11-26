@@ -69,15 +69,10 @@ use crate::web::style_info::{
     SimpleSelectorKind, StyleInfoRead, StyleSheetRead,
 };
 
-/// The attribute `__SetCSSId` writes; web-core's `CSS_ID_ATTRIBUTE`
-/// (`packages/web-platform/web-core/src/constants.rs:9`).
 const CSS_ID_ATTRIBUTE: &str = "l-css-id";
 
-/// A fragment's rule type.
 type RuleOf<S> = <<S as StyleInfoRead>::Sheet as StyleSheetRead>::Rule;
 
-/// Lowers every fragment of a decoded `StyleInfo`, owned or still archived,
-/// into one pre-parsed sheet.
 #[must_use]
 pub(crate) fn to_preparsed_style_sheet(style_info: &impl StyleInfoRead) -> PreparsedStyleSheet {
     let mut importers = imported_by(style_info);
@@ -97,20 +92,10 @@ pub(crate) fn to_preparsed_style_sheet(style_info: &impl StyleInfoRead) -> Prepa
     PreparsedStyleSheet { rules }
 }
 
-/// Orders fragments so an imported fragment precedes every fragment importing
-/// it, breaking ties by ascending `css_id` so the result never depends on hash
-/// iteration order.
-///
-/// Fragments left in an import cycle are emitted last, in id order, rather
-/// than dropped: web-core's Kahn pass silently loses them, and losing author
-/// CSS is worse than an arbitrary but deterministic position.
 fn fragment_order(style_info: &impl StyleInfoRead) -> Vec<i32> {
     let mut ids: Vec<i32> = style_info.sheets().map(|(id, _)| id).collect();
     ids.sort_unstable();
 
-    // What each fragment is still waiting on. Edges live in a set, so a
-    // duplicated `@import` cannot strand its target the way web-core's
-    // in-degree counter does.
     let mut blocking: HashMap<i32, BTreeSet<i32>> = ids
         .iter()
         .map(|id| (*id, live_imports(style_info, *id).collect()))
@@ -133,13 +118,6 @@ fn fragment_order(style_info: &impl StyleInfoRead) -> Vec<i32> {
     ordered
 }
 
-/// Every fragment's importers: the fragments that import it, directly or
-/// through other fragments, and the fragment itself — web-core's
-/// `imported_by` (`flattened_style_info.rs:66-78`). Ascending, so 0 first.
-///
-/// Built by walking down from each fragment rather than by web-core's
-/// topological pass, so a fragment in an import cycle is not lost: the
-/// members of a cycle each count the others as importers.
 fn imported_by(style_info: &impl StyleInfoRead) -> HashMap<i32, BTreeSet<i32>> {
     let mut importers: HashMap<i32, BTreeSet<i32>> = HashMap::new();
     for (importer, _) in style_info.sheets() {
@@ -155,17 +133,6 @@ fn imported_by(style_info: &impl StyleInfoRead) -> HashMap<i32, BTreeSet<i32>> {
     importers
 }
 
-/// One fragment's importers as the components its selectors get: the
-/// `:where([l-css-id="N"])` guard for each importing fragment `N`, or — when
-/// fragment 0 is an importer — only `None`, the selector unchanged.
-///
-/// The unchanged selector matches every element, marked or not, so each
-/// guarded copy beside it would match a strict subset of the same elements
-/// with the same specificity (`:where()` adds none) in the same rule. Leaving
-/// them out changes no match and no cascade outcome. It is a deliberate
-/// string-level deviation from web-core, whose decoder emits those copies
-/// (`style_info_decoder.rs:193-221`): for fragment 0 that is one copy per
-/// scoped component, for every global selector.
 fn scopes(importers: BTreeSet<i32>) -> Vec<Option<SimpleSelector>> {
     if importers.contains(&0) {
         return vec![None];
@@ -181,11 +148,6 @@ fn scopes(importers: BTreeSet<i32>) -> Vec<Option<SimpleSelector>> {
         .collect()
 }
 
-/// A named fragment includes only its reachable imports, in the same cascade
-/// order as the ordinary bundle stylesheet. Other named sections stay separate.
-///
-/// Its rules stay unscoped: a named section is loaded as a stylesheet of its
-/// own, not mounted as the `css_id` fragment an element's `l-css-id` names.
 pub(crate) fn fragment_rules<S: StyleInfoRead>(
     style_info: &S,
     root: i32,
@@ -204,7 +166,6 @@ pub(crate) fn fragment_rules<S: StyleInfoRead>(
         .flat_map(|sheet| sheet.rules().iter())
 }
 
-/// The imports of `id` that name a fragment this bundle actually carries.
 fn live_imports(style_info: &impl StyleInfoRead, id: i32) -> impl Iterator<Item = i32> + '_ {
     style_info
         .sheet(id)
@@ -213,7 +174,6 @@ fn live_imports(style_info: &impl StyleInfoRead, id: i32) -> impl Iterator<Item 
         .filter(move |import| *import != id && style_info.sheet(*import).is_some())
 }
 
-/// `scopes` are the rule's fragment's [`scopes`]; only a style rule uses them.
 fn convert_rule(rule: &impl RuleRead, scopes: &[Option<SimpleSelector>]) -> Option<PreparsedRule> {
     match rule.kind() {
         RuleKind::Style => Some(PreparsedRule::Style {
@@ -221,8 +181,6 @@ fn convert_rule(rule: &impl RuleRead, scopes: &[Option<SimpleSelector>]) -> Opti
             declarations: declarations(rule.declarations()),
         }),
         RuleKind::Keyframes => Some(PreparsedRule::Keyframes {
-            // A keyframes prelude is a single `UnknownText` component holding
-            // the animation name.
             name: selector_text(rule.selectors())?,
             keyframes: rule
                 .children()
@@ -235,22 +193,16 @@ fn convert_rule(rule: &impl RuleRead, scopes: &[Option<SimpleSelector>]) -> Opti
                 })
                 .collect(),
         }),
-        // A font-face rule has an empty prelude by construction, and its
-        // descriptors are not CSS properties.
         RuleKind::FontFace => Some(PreparsedRule::FontFace {
             descriptors: descriptor_text(rule.declarations()),
         }),
     }
 }
 
-/// The rule's selector list as CSS text, or `None` when it has no selectors.
 fn selector_text(selectors: &[impl SelectorRead]) -> Option<String> {
     scoped_selector_text(selectors, &[None])
 }
 
-/// The rule's selector list with every selector repeated once per scope, in
-/// web-core's order — each selector's copies together, in `scopes` order —
-/// or `None` when it has no selectors.
 fn scoped_selector_text(
     selectors: &[impl SelectorRead],
     scopes: &[Option<SimpleSelector>],
@@ -258,9 +210,6 @@ fn scoped_selector_text(
     if selectors.is_empty() {
         return None;
     }
-    // Each component writes its value — a type selector's as its document
-    // tag — plus at most two characters of punctuation, and each copy adds a
-    // comma.
     let len = |component: &dyn ComponentRead| match component.kind() {
         SimpleSelectorKind::Type => document_tag(component.value()).len(),
         _ => component.value().len() + 2,
@@ -296,13 +245,6 @@ fn scoped_selector_text(
     Some(text)
 }
 
-/// Appends one component's CSS text, with a type selector naming the
-/// document tag of its Lynx tag (`bobcat_core::document_tag`: `svg` is the
-/// document's `lynx-svg`, `input` its `x-input`, `textarea` its
-/// `x-textarea`), as web-core's decoder maps a `TypeSelector`
-/// through its tag map (`style_info_decoder.rs:148-156`). Only a `Type`
-/// component is a tag: a class, an id, an attribute and a pseudo-class's
-/// argument text (`:not(svg)`) are written as they are, as in web-core.
 fn write_component(component: &impl ComponentRead, text: &mut String) {
     if component.kind() == SimpleSelectorKind::Type {
         text.push_str(document_tag(component.value()));
@@ -311,19 +253,6 @@ fn write_component(component: &impl ComponentRead, text: &mut String) {
     }
 }
 
-/// Where a scope guard goes: just after the last component that is compound
-/// content — class, id, attribute, type, universal or pseudo-class — which
-/// puts it at the end of the subject compound and before a trailing
-/// pseudo-element (`.a:hover:where(…)::after`). web-core's own index
-/// (`style_info_decoder.rs:157-167`), with its quirk: a subject compound that
-/// is nothing but a pseudo-element (`.a > ::placeholder`) has no content of
-/// its own, so the guard lands on the compound before it, as it does there.
-///
-/// `UnknownText` does not move the index, as in web-core. Neither encoder
-/// puts it in a style rule's selector — web-core's `encodeCSS.ts` pushes only
-/// csstree node types there, and the native decoder emits it only for a
-/// keyframes name or key (`native/style.rs`) — so what such text would hold is
-/// unknown; it is not known to be compound content.
 fn guard_index(selector: &impl SelectorRead) -> usize {
     selector
         .components()
@@ -347,10 +276,6 @@ fn declarations(block: &[impl DeclarationRead]) -> Vec<PreparsedDeclaration> {
         .iter()
         .filter(|declaration| !declaration.name().is_empty())
         .map(|declaration| {
-            // The wire leaves `is_important` false and appends the marker to
-            // the value instead, so the decoder splits it back out at token
-            // level; handing the raw value to a CSS value parser would drop
-            // the whole declaration.
             let (value, important) = declaration.value_and_importance();
             PreparsedDeclaration {
                 property: match declaration.property_id() {
@@ -373,9 +298,6 @@ fn descriptor_text(block: &[impl DeclarationRead]) -> String {
         }
         text.push_str(name);
         text.push(':');
-        // Descriptors are wire-faithful: `!important` is invalid in a
-        // font-face block, so leaving it in the text makes stylo reject that
-        // descriptor, which is what a browser does with the same input.
         declaration.write_value_text(&mut text);
         text.push(';');
     }
@@ -607,10 +529,6 @@ mod tests {
         );
     }
 
-    /// web-core's encoder stores a keyframe block's selector as one
-    /// `UnknownText` component holding the authored text, so a
-    /// scroll-animations-1 range selector (`entry 0%`) reaches the engine's
-    /// keyframe-selector parser as written.
     #[test]
     fn a_range_keyframe_selector_is_lowered_verbatim() {
         let info = style_info(vec![(
@@ -708,9 +626,6 @@ mod tests {
         assert_eq!(declarations[0].property, "color");
     }
 
-    /// The scroll-animations-1 properties have no wire id, so a bundle names
-    /// them as unknown properties; lowering hands their names and values to
-    /// stylo as written.
     #[test]
     fn scroll_timeline_declarations_lower_unchanged() {
         let token = |token_type, value: &str| ValueToken {
@@ -789,8 +704,6 @@ mod tests {
         );
     }
 
-    /// The wire leaves `is_important` false and puts the marker in the value,
-    /// so lowering must recover it.
     #[test]
     fn an_important_declaration_survives_lowering() {
         let mut marked = declaration(CssPropertyId::Color, "");
@@ -827,8 +740,6 @@ mod tests {
         assert_eq!(declarations[0], important("color", "red"));
     }
 
-    /// An importing fragment's own rules must land after the ones it imports,
-    /// so they win a specificity tie.
     #[test]
     fn fragments_emit_imported_before_importing() {
         let fragment = |imports: Vec<i32>, class: &str| StyleSheet {
@@ -852,12 +763,9 @@ mod tests {
                 _ => panic!("style rules only"),
             })
             .collect();
-        // Fragment 0 imports 1 imports 2, so 0 reaches every rule and each
-        // stays unguarded: a guarded copy would match a subset of it.
         assert_eq!(selectors, [".base", ".middle", ".importer"]);
     }
 
-    /// Fragment order must not depend on `HashMap` iteration order.
     #[test]
     fn independent_fragments_emit_in_id_order() {
         let fragment = |class: &str| StyleSheet {
@@ -891,8 +799,6 @@ mod tests {
         );
     }
 
-    /// A fragment that only carries `@import` edges is normal in scoped
-    /// bundles and contributes nothing itself.
     #[test]
     fn an_import_only_fragment_contributes_no_rules() {
         let info = style_info(vec![
@@ -918,8 +824,6 @@ mod tests {
         assert_eq!(to_preparsed_style_sheet(&info).rules.len(), 1);
     }
 
-    /// web-core's flattening drops every fragment in a cycle; keeping them is
-    /// strictly better and must still terminate.
     #[test]
     fn an_import_cycle_still_emits_every_fragment() {
         let fragment = |imports: Vec<i32>, class: &str| StyleSheet {
@@ -937,8 +841,6 @@ mod tests {
         assert_eq!(to_preparsed_style_sheet(&info).rules.len(), 2);
     }
 
-    /// A duplicated import edge must not strand its target, the way web-core's
-    /// in-degree counter does.
     #[test]
     fn a_duplicated_import_edge_does_not_strand_a_fragment() {
         let info = style_info(vec![
@@ -975,10 +877,6 @@ mod tests {
         assert_eq!(selectors, [".base", ".importer"]);
     }
 
-    // -----------------------------------------------------------------------
-    // `css_id` scoping
-    // -----------------------------------------------------------------------
-
     fn selector(components: &[(SimpleSelectorKind, &str)]) -> Selector {
         Selector {
             components: components
@@ -999,8 +897,6 @@ mod tests {
         style_rule(selectors, vec![declaration(CssPropertyId::Color, "red")])
     }
 
-    /// Every lowered rule's selector text, keyframes and font-face included
-    /// under a marker so a test can see they carry no guard.
     fn lowered(info: &StyleInfo) -> Vec<String> {
         to_preparsed_style_sheet(info)
             .rules
@@ -1021,7 +917,6 @@ mod tests {
             .collect()
     }
 
-    /// One selector in fragment 1, which nothing else imports.
     fn scoped_once(components: &[(SimpleSelectorKind, &str)]) -> String {
         let info = style_info(vec![(
             1,
@@ -1030,11 +925,6 @@ mod tests {
         lowered(&info).remove(0)
     }
 
-    /// `imported_by` is transitive and includes the fragment itself: 1
-    /// imports 2 imports 3, so 3's rule is copied for 1, 2 and 3 — and for no
-    /// unscoped element, because fragment 0 does not reach it. Fragment 0,
-    /// imported by 1, stays unguarded alone: its importers include 0, and a
-    /// copy guarded for 1 would match a subset of the unguarded selector.
     #[test]
     fn importers_are_the_transitive_closure_plus_the_fragment_itself() {
         use SimpleSelectorKind::Class;
@@ -1053,8 +943,6 @@ mod tests {
         );
     }
 
-    /// Only the subject compound is guarded; the ancestors a combinator
-    /// reaches are left alone, whatever the combinator.
     #[test]
     fn the_guard_ends_the_subject_compound() {
         use SimpleSelectorKind::{Class, Combinator, Type};
@@ -1096,8 +984,6 @@ mod tests {
         );
     }
 
-    /// web-core's index counts only compound content, so a subject that is a
-    /// bare pseudo-element puts the guard on the compound before it.
     #[test]
     fn a_bare_pseudo_element_subject_guards_the_compound_before_it() {
         use SimpleSelectorKind::{Class, Combinator, PseudoElement};
@@ -1114,7 +1000,6 @@ mod tests {
     #[test]
     fn universal_and_attribute_subjects_take_the_guard() {
         use SimpleSelectorKind::{Attribute, Type, Universal};
-        // The native decoder's universal component carries no text.
         assert_eq!(
             scoped_once(&[(Universal, "")]),
             r#"*:where([l-css-id="1"])"#
@@ -1129,8 +1014,6 @@ mod tests {
         );
     }
 
-    /// Each selector of a list keeps its copies together, in importer order,
-    /// all in the one rule.
     #[test]
     fn a_selector_list_repeats_each_selector_per_importer() {
         use SimpleSelectorKind::Class;
@@ -1156,8 +1039,6 @@ mod tests {
         );
     }
 
-    /// The members of an import cycle count each other as importers; no
-    /// fragment is dropped.
     #[test]
     fn an_import_cycle_scopes_each_member_for_both() {
         use SimpleSelectorKind::Class;
@@ -1180,8 +1061,6 @@ mod tests {
         );
     }
 
-    /// The compiler's usual shape: a component fragment whose only import is
-    /// the global fragment 0.
     #[test]
     fn a_fragment_importing_only_the_global_one() {
         use SimpleSelectorKind::Class;
@@ -1195,8 +1074,6 @@ mod tests {
         assert_eq!(lowered(&info), [".g", r#".x:where([l-css-id="5"])"#]);
     }
 
-    /// `@keyframes` and `@font-face` are emitted verbatim, as web-core emits
-    /// them, whatever fragment they are in.
     #[test]
     fn keyframes_and_font_faces_stay_global() {
         let keyframes = Rule {
@@ -1230,11 +1107,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // The Lynx `svg`, `input` and `textarea` type selectors
-    // -----------------------------------------------------------------------
-
-    /// One unscoped selector, in fragment 0.
     fn unscoped(components: &[(SimpleSelectorKind, &str)]) -> String {
         let info = style_info(vec![(
             0,
@@ -1243,10 +1115,6 @@ mod tests {
         lowered(&info).remove(0)
     }
 
-    /// A `Type` component `svg` names the document's `lynx-svg`
-    /// (`bobcat_core::document_tag`), as web-core's decoder maps a
-    /// `TypeSelector` to `x-svg`, alone, in a compound, across a combinator
-    /// and before a scope guard.
     #[test]
     fn the_type_selector_svg_is_written_as_lynx_svg() {
         use SimpleSelectorKind::{Class, Combinator, PseudoClass, Type};
@@ -1265,10 +1133,6 @@ mod tests {
         );
     }
 
-    /// The `Type` components `input` and `textarea` name the document's
-    /// `x-input` and `x-textarea` (`bobcat_core::document_tag`, user ruling
-    /// 2026-11-26), as web-core's decoder maps them; the `-ng` aliases are
-    /// not renamed, and a class or a pseudo-class's argument keeps the name.
     #[test]
     fn the_type_selectors_input_and_textarea_are_written_as_the_fields() {
         use SimpleSelectorKind::{Class, Combinator, PseudoClass, Type};
@@ -1291,9 +1155,6 @@ mod tests {
         );
     }
 
-    /// Only a `Type` component is a tag: a class, an id, an attribute and a
-    /// pseudo-class's argument text keep `svg`, as in web-core; and no other
-    /// tag is renamed.
     #[test]
     fn nothing_but_the_type_selector_svg_is_renamed() {
         use SimpleSelectorKind::{Attribute, Class, Id, PseudoClass, Type};

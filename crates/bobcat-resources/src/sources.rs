@@ -19,35 +19,17 @@ use crate::{CachePolicy, Registered, Resources, SharedHandle, preprocess_fetched
 type SourceResult = Result<LoadedSource, LynxViewError>;
 type CachedStyle = watch::Receiver<Option<SourceResult>>;
 
-/// Owned by one Resources scope on the resource host's thread. A watch holds
-/// the pending or completed response, shared by preloads and ordinary reads.
 pub(crate) type StyleCache = FxHashMap<Url, CachedStyle>;
 
-/// What a loaded source is turned into, which is the only way the three kinds
-/// differ once the bytes are in: text is validated as UTF-8 and a font is not.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     StyleSheet,
     Script,
-    /// An `@font-face` source. Font files are binary, so the bytes are handed
-    /// over as they arrived — no charset decode, no UTF-8 check.
     Font,
-    /// A plain fetch, the way an image source is fetched: the bytes are
-    /// offered to the [`ContainerInstaller`](crate::ContainerInstaller) if
-    /// this host has one and go nowhere else, so nothing is decoded as text
-    /// and nothing comes back but the fact that the fetch is over — and,
-    /// when `timed`, the [`FetchOutcome`] this fetcher measured: the body's
-    /// length, when it arrived and the installer's span.
-    Fetch {
-        timed: bool,
-    },
+    Fetch { timed: bool },
 }
 
 impl SourceKind {
-    /// How a file this source is read from is handed over: a font is
-    /// retained for its view's lifetime, so it is mapped and shared rather
-    /// than copied; text is decoded on arrival and fetched bytes go no
-    /// further than the installer, so those are read.
     #[cfg(not(target_arch = "wasm32"))]
     fn body(self) -> crate::file_body::Body {
         match self {
@@ -80,8 +62,6 @@ impl Destination {
     }
 }
 
-/// Preloading is a best-effort hint. Only stylesheet caching is needed here;
-/// other source kinds are loaded when they are requested.
 pub(crate) fn preload<P: Platform>(resources: &Resources<P>, request: SourceRequest) {
     if let SourceRequest::StyleSheet(specifier) = request
         && let Ok(url) = resources
@@ -114,8 +94,6 @@ fn cached_style<P: Platform>(resources: &Resources<P>, url: Url) -> CachedStyle 
 }
 
 async fn answer_cached_style(mut response: CachedStyle, completion: SourceCompletion) {
-    // A closed pending entry means the loader task ended without an answer;
-    // dropping the completion reports the existing resource protocol failure.
     let result = response.wait_for(Option::is_some).await.map(|value| {
         value
             .as_ref()
@@ -189,14 +167,6 @@ fn start<P: Platform>(
     ));
 }
 
-/// One source load: two blocking hops with the cancellation check before
-/// each, and the completion answered from the task itself.
-///
-/// The destination never enters a blocking closure: a panic becomes a failure
-/// response, including for cache readers. Executor shutdown drops the
-/// destination, so unanswered requests fail through the existing protocol.
-/// A cache load stops when no scope or reader holds its response; an ordinary
-/// request stops when its completion reports cancellation.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn<P: Platform>(
     resources: &Resources<P>,
@@ -247,7 +217,6 @@ fn spawn<P: Platform>(
     });
 }
 
-/// A source load answered with what a blocking closure's panic left.
 #[cfg(not(target_arch = "wasm32"))]
 fn panicked(message: &str, url: &Url) -> LynxViewError {
     vant::error::Failure::new(
@@ -285,10 +254,6 @@ async fn run<P: Platform>(
     completion.complete(preloaded(&shared, prepared).await);
 }
 
-/// A prepared module's text, once the code cache's asynchronous store has
-/// preloaded the bytecode stored for it ([`crate::CodeCache::preload_async`]),
-/// so that bytecode is resident before the realm is handed the text. Over a
-/// synchronous store, or without one, [`prepare`] already did all there is.
 async fn preloaded<P: Platform>(shared: &SharedHandle<P>, prepared: SourceResult) -> SourceResult {
     let text = match &prepared {
         Ok(LoadedSource::Module { source, .. }) => Some(source.as_str()),
@@ -300,19 +265,10 @@ async fn preloaded<P: Platform>(shared: &SharedHandle<P>, prepared: SourceResult
     prepared
 }
 
-/// When a load's bytes arrived, read only for a timed fetch: every other
-/// load reads no clock.
 fn arrival(kind: SourceKind) -> Option<Instant> {
     matches!(kind, SourceKind::Fetch { timed: true }).then(Instant::now)
 }
 
-/// Waits out the background install that will register `url`, if one is
-/// running ([`crate::Resources::register_in_background`]); its failure is
-/// this load's answer. A stylesheet registered pre-parsed, which has no bytes
-/// to fetch, is this load's answer too, whether the install was still running
-/// or had already ended when the load looked: an install releases its hold
-/// only after everything is registered. Otherwise the load goes on, and finds
-/// what the install registered.
 async fn after_install<P: Platform>(
     shared: &SharedHandle<P>,
     url: &Url,
@@ -348,16 +304,6 @@ async fn after_install<P: Platform>(
     None
 }
 
-/// The CPU half of a source load: preprocessing, the UTF-8 check the
-/// engine's strict validation depends on and, for a script over a
-/// synchronous code store, the code cache's preload of the bytecode stored
-/// for its text (an asynchronous store's preload is [`preloaded`]).
-///
-/// A font takes neither: its bytes go to the font backend as they arrived,
-/// without a copy — `Bytes` is already a shared, thread-safe buffer, which is
-/// what a [`FontBlob`] retains. Read from a file, they are that file's shared
-/// mapping, so every view loading the font is handed the same memory and
-/// [`FontBlob::new`] answers each with the one blob.
 fn prepare<P: Platform>(
     fetched: Result<crate::Fetched, vant::error::Failure>,
     url: &Url,
@@ -365,39 +311,21 @@ fn prepare<P: Platform>(
     received: Option<Instant>,
     shared: &SharedHandle<P>,
 ) -> Result<LoadedSource, LynxViewError> {
-    // A plain fetch takes neither preprocessing nor a UTF-8 check: the bytes
-    // are whatever they are. The only thing done with them is the offer to
-    // the container installer, and the URL an install is based on is the
-    // **resolved request URL** rather than the response's: a realm builds a
-    // container's section URLs from the string it passed, which this fetcher
-    // resolves the same way, so a redirect — the transport's business — must
-    // not move where the sections were registered.
     if let SourceKind::Fetch { timed } = kind {
         let bytes = fetched
             .map_err(|failure| {
                 LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str()))))
             })?
             .bytes;
-        // The installer's span, for a timed fetch alone: Lynx's
-        // `decodeStart`/`decodeEnd`.
         let install_start = timed.then(Instant::now);
         return shared
             .install_container(url, &bytes)
-            // Registered or not, the fetch is over; only a container that
-            // would not decode fails it.
             .map(|installed| {
-                // Remembered only now, after the installer ran: a repeat
-                // fetch of this URL answers `true` through the probe, and so
-                // settles in the realm's own job — which is what a cached
-                // fetch is to a card. A failed fetch or a failed install
-                // never reaches here and so is never remembered.
                 shared.fetches.remember(url);
                 LoadedSource::Fetched(if timed {
                     FetchOutcome {
                         size_bytes: u64::try_from(bytes.len()).ok(),
                         received,
-                        // Only a body something was installed from was
-                        // decoded.
                         installed: install_start
                             .filter(|_| installed)
                             .map(|start| start..Instant::now()),
@@ -443,9 +371,6 @@ fn prepare<P: Platform>(
             if style_sheet {
                 return Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(source)));
             }
-            // The text is final: what is hashed here is exactly what the
-            // realm is handed, so the bytecode a compile of it left is
-            // resident before the realm looks it up.
             if let Some(code) = &shared.code {
                 code.preload(&source);
             }

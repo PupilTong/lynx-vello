@@ -8,36 +8,18 @@ use crate::paint::display_list::{ImagePaint, ImageRef, Paint, Texture};
 use crate::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat, ImageSampler};
 use crate::render::canvas::{MAX_SURFACE_SIDE, SurfaceImage};
 
-/// An image a draw samples: what `drawImage` and a pattern draw, what
-/// `transferToImageBitmap` hands out, and what an `ImageBitmap` holds.
-/// Cloning shares it. `Send` and `Sync` natively.
-///
-/// Either side is at most [`MAX_SURFACE_SIDE`] pixels, the longest texture
-/// the device makes.
 #[derive(Clone, Debug)]
 pub struct Image(pub(crate) Source);
 
 #[derive(Clone, Debug)]
 pub(crate) enum Source {
-    /// Pixels, uploaded at the replay of the first draw that samples
-    /// them.
     Pixels(ImageData),
-    /// A texture of its own, which lives as long as a clone does.
     Texture(SurfaceImage),
-    /// A canvas's texture as it is when the list drawing it is replayed
-    /// ([`OffscreenCanvas::image`](crate::html::canvas::OffscreenCanvas::image)): drawn at once,
-    /// never kept.
     Live(Texture),
-    /// No pixels: a canvas with no bitmap.
     Empty,
 }
 
 impl Image {
-    /// An image of `pixels`, already premultiplied: every color channel at
-    /// most its alpha.
-    ///
-    /// `InvalidState` when `pixels` is not `width * height * 4` bytes or a
-    /// side exceeds [`MAX_SURFACE_SIDE`].
     pub fn from_premultiplied(
         width: u32,
         height: u32,
@@ -46,10 +28,6 @@ impl Image {
         Self::from_rgba8(width, height, pixels, ImageAlphaType::AlphaPremultiplied)
     }
 
-    /// An image of straight-alpha `pixels`, premultiplied when uploaded.
-    ///
-    /// `InvalidState` when `pixels` is not `width * height * 4` bytes or a
-    /// side exceeds [`MAX_SURFACE_SIDE`].
     pub fn from_unpremultiplied(
         width: u32,
         height: u32,
@@ -58,10 +36,6 @@ impl Image {
         Self::from_rgba8(width, height, pixels, ImageAlphaType::Alpha)
     }
 
-    /// An image of `data`'s pixels, shared.
-    ///
-    /// `InvalidState` for a size `from_premultiplied` refuses or a pixel
-    /// format other than RGBA8 and BGRA8.
     pub fn from_image_data(data: &ImageData) -> Result<Self, CanvasError> {
         if !matches!(data.format, ImageFormat::Rgba8 | ImageFormat::Bgra8)
             || !fits(data.width, data.height)
@@ -118,18 +92,6 @@ impl Image {
         self.width() == 0 || self.height() == 0
     }
 
-    /// What `createImageBitmap` makes of this image: the image itself, or
-    /// with `crop` the `width` × `height` rectangle at `(x, y)` in it, the
-    /// part outside it transparent black. A canvas's current texture is
-    /// copied, as of every draw issued so far.
-    ///
-    /// # Errors
-    ///
-    /// For any image, before anything is allocated: `Range` for a crop
-    /// with a zero width or height (HTML `createImageBitmap`: an `sw` or
-    /// `sh` of 0 is a `RangeError`), then `InvalidState` for a crop with a
-    /// side over [`MAX_SURFACE_SIDE`], as for an image made from pixels
-    /// that do not fit.
     pub fn crop(&self, crop: Option<(i64, i64, u32, u32)>) -> Result<Self, CanvasError> {
         if let Some((_, _, width, height)) = crop {
             if width == 0 || height == 0 {
@@ -154,8 +116,6 @@ impl Image {
         }))
     }
 
-    /// The image as one that stays as it is: a canvas's current texture is
-    /// copied.
     pub(crate) fn stable(self) -> Self {
         match self.0 {
             Source::Live(texture) => {
@@ -168,8 +128,6 @@ impl Image {
         }
     }
 
-    /// Reads the pixels, premultiplied RGBA8, row-major, tightly packed,
-    /// waiting for a texture's. `InvalidState` when the readback failed.
     pub fn read(&self) -> Result<Vec<u8>, CanvasError> {
         match &self.clone().stable().0 {
             Source::Pixels(data) => Ok(premultiplied(data)),
@@ -178,9 +136,6 @@ impl Image {
         }
     }
 
-    /// The paint drawing this image through `sampler`, the texture a draw of
-    /// it keeps alive until it is replayed, and the canvas texture it reads
-    /// as it is at replay.
     pub(crate) fn paint(
         &self,
         sampler: ImageSampler,
@@ -209,7 +164,6 @@ fn fits(width: u32, height: u32) -> bool {
     width <= MAX_SURFACE_SIDE && height <= MAX_SURFACE_SIDE
 }
 
-/// `data`'s pixels as premultiplied RGBA8.
 fn premultiplied(data: &ImageData) -> Vec<u8> {
     let mut pixels = data.data.data().to_vec();
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -226,9 +180,6 @@ fn premultiplied(data: &ImageData) -> Vec<u8> {
     pixels
 }
 
-/// The `width` × `height` rectangle at `(x, y)` in `data`, premultiplied,
-/// transparent black outside it; both sides are at most
-/// [`MAX_SURFACE_SIDE`].
 fn crop_pixels(
     data: &ImageData,
     x: i64,
@@ -241,8 +192,6 @@ fn crop_pixels(
     let mut pixels = vec![0; len];
     let source = premultiplied(data);
     let (iw, ih) = (i64::from(data.width), i64::from(data.height));
-    // Rows and columns are copied only where the crop overlaps the image,
-    // so `x` and `y` are then within one crop side of it.
     let (cx0, cx1) = (x.max(0), x.saturating_add(w).min(iw));
     if cx0 < cx1 {
         let span = usize::try_from((cx1 - cx0) * 4).map_err(|_| CanvasError::Range)?;

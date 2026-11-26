@@ -16,27 +16,12 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use bytes::Bytes;
 use memmap2::Mmap;
 
-/// How a file's contents are handed over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Body {
-    /// Read into a buffer of their own, for bytes consumed on arrival.
     Read,
-    /// Mapped read-only, for bytes retained as long as their consumer lives.
-    ///
-    /// One unchanged file is one mapping, process-wide: a second read while
-    /// any handle to the first is alive answers with the same memory, which
-    /// is what lets a [`FontBlob`](bobcat_core::FontBlob) made from it be the
-    /// one every view already registered.
-    ///
-    /// The bytes are the file's for as long as they are held, under the
-    /// contract the platform's own font files are mapped with: a file
-    /// rewritten in place changes under its readers, and one truncated
-    /// faults them. A file replaced by a rename — every write `FsStore`
-    /// makes — leaves the mapping on the old contents.
     Mapped,
 }
 
-/// The contents of the file at `path`, handed over as `body` says.
 pub fn read(path: &Path, body: Body) -> io::Result<Bytes> {
     match body {
         Body::Read => std::fs::read(path).map(Bytes::from),
@@ -44,9 +29,6 @@ pub fn read(path: &Path, body: Body) -> io::Result<Bytes> {
     }
 }
 
-/// What a file is told apart by: which file it is and which contents it has.
-/// A file whose length or modification time moved is another key, and so
-/// another mapping, beside any still held on the old contents.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileKey {
     device: u64,
@@ -56,8 +38,6 @@ struct FileKey {
 }
 
 impl FileKey {
-    /// `None` where the platform gives no file identity to key on: every
-    /// read there is its own mapping.
     #[cfg_attr(
         unix,
         expect(
@@ -85,13 +65,8 @@ impl FileKey {
     }
 }
 
-/// Every live mapping [`map`] made, weakly: the table never keeps a file
-/// mapped, and an entry whose mapping is gone is dropped by the next miss.
-/// Only retained resources are mapped — tens per process — so a scan is all
-/// a lookup needs.
 static MAPPINGS: Mutex<Vec<(FileKey, Weak<Mmap>)>> = Mutex::new(Vec::new());
 
-/// A shared mapping as the owner of [`Bytes`].
 struct Mapping(Arc<Mmap>);
 
 impl AsRef<[u8]> for Mapping {
@@ -108,7 +83,6 @@ fn map(path: &Path) -> io::Result<Bytes> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() == 0 {
-        // Nothing to map, and some platforms refuse an empty mapping.
         return Ok(Bytes::new());
     }
     let key = FileKey::of(&metadata);
@@ -167,12 +141,9 @@ mod tests {
         let second = read(&path, Body::Mapped).expect("map");
         assert_eq!(first.as_ptr(), second.as_ptr());
 
-        // A heap read is a buffer of its own.
         let copied = read(&path, Body::Read).expect("read");
         assert_ne!(copied.as_ptr(), first.as_ptr());
 
-        // Replaced by a rename, the path names another file: a new mapping,
-        // while the held one keeps the old contents.
         let replacement = path.with_extension("tmp");
         std::fs::write(&replacement, b"two faces").expect("write");
         std::fs::rename(&replacement, &path).expect("rename");

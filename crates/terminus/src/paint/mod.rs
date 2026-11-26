@@ -32,10 +32,8 @@ use crate::layout::{Edges, Layout, TextBrush};
 use crate::paint::shape::ReferenceBoxes;
 use crate::visual::CornerRadii;
 
-/// Descendant glyph silhouettes used by `background-clip: text`.
 #[derive(Debug, Default)]
 pub(crate) struct TextClip<'doc> {
-    /// Each paragraph's offset and glyph runs.
     pub runs: Vec<(Vec2, &'doc parley::Layout<TextBrush>)>,
 }
 
@@ -45,18 +43,12 @@ impl TextClip<'_> {
     }
 }
 
-/// Reusable paths for border and shadow painting.
 #[derive(Debug, Default)]
 pub(crate) struct PathScratch {
-    /// Ring (outer minus inner) fill/clip paths.
     pub ring: BezPath,
-    /// Border side miter clip polygons.
     pub quad: BezPath,
 }
 
-/// One element box's paint-ready geometry, in item-local space: the border
-/// box has origin `(0, 0)`; `transform` maps item-local CSS px all the way
-/// to device px (root scale included).
 #[derive(Debug, Clone)]
 pub(crate) struct BoxFragment {
     pub transform: Affine,

@@ -4,43 +4,20 @@ use svgtypes::{PathParser, PathSegment, PointsParser};
 
 use crate::kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Vec2};
 
-/// The tolerance arcs (elliptical arcs, circles, rounded corners) are
-/// turned into cubic Béziers at, in user units. Small: a 24-unit icon is
-/// routinely drawn at ten times its size.
 pub(crate) const ARC_TOLERANCE: f64 = 0.01;
 
-/// The smallest tolerance an arc is turned into cubics at, as a fraction
-/// of its larger radius. `kurbo::Arc::append_iter` makes
-/// (1.1163 · radius / tolerance)^(1/6) cubics per turn, so this bounds a
-/// turn to 33 cubics whatever the radius or the scale it is drawn at; an
-/// arc whose radius is under 1e9 times the tolerance asked for keeps that
-/// tolerance.
 const MIN_ARC_TOLERANCE_PER_RADIUS: f64 = 1e-9;
 
-/// `tolerance`, or the tolerance that bounds `arc`'s cubics when it is
-/// larger.
 pub(crate) fn arc_tolerance(arc: &Arc, tolerance: f64) -> f64 {
     tolerance.max(arc.radii.x.max(arc.radii.y) * MIN_ARC_TOLERANCE_PER_RADIUS)
 }
 
-/// Path data as a kurbo path. A malformed segment ends the path there,
-/// keeping everything before it, as the SVG specification asks.
-///
-/// Two rules shape the output: a segment after `Z` that is not a `MoveTo`
-/// starts at the closed subpath's first point, so the conversion moves
-/// there first (`BezPath` has no implicit current point after a close);
-/// and `S`/`T` reflect the previous control point only after a segment of
-/// their own kind, as the specification says.
-///
-/// Also what `new Path2D(d)` parses `d` with (HTML defers to SVG's
-/// path data grammar and error handling).
 #[expect(clippy::too_many_lines, reason = "one arm per SVG path command")]
 pub(crate) fn path_data(data: &str) -> BezPath {
     let mut path = BezPath::new();
     let mut current = Point::ZERO;
     let mut start = Point::ZERO;
     let mut closed = false;
-    // The last cubic and quadratic control points, for `S` and `T`.
     let mut last_cubic: Option<Point> = None;
     let mut last_quad: Option<Point> = None;
     for segment in PathParser::from(data) {
@@ -148,14 +125,10 @@ pub(crate) fn path_data(data: &str) -> BezPath {
     path
 }
 
-/// `control` mirrored through `through`.
 fn reflect(control: Point, through: Point) -> Point {
     Point::new(2.0 * through.x - control.x, 2.0 * through.y - control.y)
 }
 
-/// Appends an SVG arc as cubic Béziers, or as the straight line the
-/// specification substitutes when the arc is degenerate (coincident
-/// endpoints draw nothing, a zero radius a line).
 fn append_arc(path: &mut BezPath, arc: SvgArc) {
     if arc.from == arc.to {
         return;
@@ -170,8 +143,6 @@ fn append_arc(path: &mut BezPath, arc: SvgArc) {
     }
 }
 
-/// A `rect`: `rx`/`ry` complete each other when one is missing and are
-/// clamped to half the side. Nothing for a non-positive side.
 pub(crate) fn rect(
     x: f64,
     y: f64,
@@ -195,8 +166,6 @@ pub(crate) fn rect(
     if !(rx > 0.0 && ry > 0.0) {
         return Some(rect.to_path(ARC_TOLERANCE));
     }
-    // Four elliptical corner arcs, clockwise from the top edge's start, so
-    // an `rx` unequal to `ry` is drawn exactly.
     let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
     let corner = |path: &mut BezPath, from: Point, to: Point| {
         append_arc(
@@ -225,13 +194,10 @@ pub(crate) fn rect(
     Some(path)
 }
 
-/// A `circle`; nothing for a non-positive radius.
 pub(crate) fn circle(cx: f64, cy: f64, r: f64) -> Option<BezPath> {
     (r > 0.0).then(|| Circle::new((cx, cy), r).to_path(ARC_TOLERANCE))
 }
 
-/// An `ellipse`; a missing radius takes the other (SVG 2 `auto`), and a
-/// non-positive one draws nothing.
 pub(crate) fn ellipse(cx: f64, cy: f64, rx: Option<f64>, ry: Option<f64>) -> Option<BezPath> {
     let (rx, ry) = match (rx, ry) {
         (Some(rx), Some(ry)) => (rx, ry),
@@ -241,7 +207,6 @@ pub(crate) fn ellipse(cx: f64, cy: f64, rx: Option<f64>, ry: Option<f64>) -> Opt
     (rx > 0.0 && ry > 0.0).then(|| Ellipse::new((cx, cy), (rx, ry), 0.0).to_path(ARC_TOLERANCE))
 }
 
-/// A `line`.
 pub(crate) fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> BezPath {
     let mut path = BezPath::new();
     path.move_to((x1, y1));
@@ -249,8 +214,6 @@ pub(crate) fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> BezPath {
     path
 }
 
-/// A `polyline`, or a `polygon` when `close`. An odd coordinate count
-/// drops the last number, as the specification's error handling says.
 pub(crate) fn polyline(points: &str, close: bool) -> BezPath {
     let mut path = BezPath::new();
     for (index, (x, y)) in PointsParser::from(points).enumerate() {

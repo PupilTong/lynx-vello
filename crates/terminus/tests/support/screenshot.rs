@@ -17,11 +17,6 @@ use crate::html;
 pub(super) const ROBOTO: &[u8] =
     include_bytes!("../../../seldon/tests/fixtures/Roboto-Regular.ttf");
 
-/// The vendored Ahem face, for the rare golden whose subject is *geometry* —
-/// solid em squares make a cut point, a retreat and a clamp visible at a
-/// glance, where a proportional face only shows that some glyphs are there.
-/// It is vendored too, so a golden drawn with it is as reproducible as a
-/// Roboto one; it is simply the wrong face for a picture about rendering.
 pub(super) const AHEM: &[u8] = include_bytes!("../../../seldon/tests/fixtures/Ahem.ttf");
 
 pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Image {

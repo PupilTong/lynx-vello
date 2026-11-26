@@ -26,20 +26,6 @@ use vello_common::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as Pixel
 pub mod animation;
 pub mod residency;
 
-/// How large a frame draws an image, in device pixels.
-///
-/// Per axis, the largest extent of one copy of the source across every draw
-/// in the frame that names it — a tiled background counts one tile, a
-/// `cover`-fitted replaced element the fitted rect — under the draw's own
-/// transform, so a scaled or high-DPR draw asks for more pixels than its CSS
-/// size says. It is the one fact a host needs to size a decode: a bitmap
-/// larger than the draw is resampled down at composition and pays its memory
-/// for nothing, while one smaller than the draw is upsampled and blurs. The
-/// engine composes correctly against either, so the hint is advisory — a
-/// host may decode at it, below it, or ignore it.
-///
-/// [`ImageSizeHint::UNBOUNDED`] names a draw with no frame behind it, where
-/// the only right answer is the image's own size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImageSizeHint {
     pub width: u32,
@@ -47,7 +33,6 @@ pub struct ImageSizeHint {
 }
 
 impl ImageSizeHint {
-    /// No bound on either axis.
     pub const UNBOUNDED: Self = Self {
         width: u32::MAX,
         height: u32::MAX,
@@ -58,14 +43,11 @@ impl ImageSizeHint {
         Self { width, height }
     }
 
-    /// Whether this hint bounds nothing.
     #[must_use]
     pub const fn is_unbounded(self) -> bool {
         self.width == u32::MAX && self.height == u32::MAX
     }
 
-    /// The hint covering both this one and `other`: per-axis maximum, so a
-    /// source drawn at two sizes in one frame is decoded for the larger.
     #[must_use]
     pub fn union(self, other: Self) -> Self {
         Self {
@@ -74,12 +56,6 @@ impl ImageSizeHint {
         }
     }
 
-    /// The size to decode a `width`x`height` image to under this hint: the
-    /// largest size inside the hint that keeps the image's ratio, never
-    /// larger than the image itself, never smaller than one pixel.
-    ///
-    /// This is the whole downsampling decision, kept beside the type so every
-    /// host makes it the same way.
     #[must_use]
     pub fn fit(self, width: u32, height: u32) -> (u32, u32) {
         if self.is_unbounded() || (width <= self.width && height <= self.height) {
@@ -97,31 +73,22 @@ impl ImageSizeHint {
     }
 }
 
-/// Decoded pixels: tightly packed RGBA8, at most the size that was asked
-/// for, with the image's own size beside them.
 #[derive(Clone, Debug)]
 pub struct Bitmap {
     pub width: u32,
     pub height: u32,
-    /// The image's intrinsic size — what layout is told — which the bitmap
-    /// is a downsampled rendition of when the two differ.
     pub source_width: u32,
     pub source_height: u32,
-    /// Whether the colour channels are premultiplied by alpha. `ImageIO`
-    /// produces premultiplied pixels and gdk-pixbuf straight ones; the rasterizer
-    /// composes either correctly as long as it is told which.
     pub premultiplied: bool,
     pub rgba: Vec<u8>,
 }
 
 impl Bitmap {
-    /// The bytes the pixels occupy.
     #[must_use]
     pub fn byte_len(&self) -> usize {
         self.rgba.len()
     }
 
-    /// The pixels as the image the compose path draws.
     #[must_use]
     pub fn into_image_data(self) -> ImageData {
         ImageData {
@@ -138,20 +105,15 @@ impl Bitmap {
     }
 }
 
-/// A frame a platform decoder answered in its own form, with the sizes a
-/// [`Bitmap`] carries beside its pixels.
 #[derive(Clone, Debug)]
 pub struct PlatformBitmap<F> {
-    /// The frame, in the decoder's own type.
     pub frame: F,
     pub width: u32,
     pub height: u32,
-    /// The image's intrinsic size, as [`Bitmap::source_width`] is.
     pub source_width: u32,
     pub source_height: u32,
 }
 
-/// What a decoder answers: CPU pixels, or a frame of its own type.
 #[derive(Clone, Debug)]
 pub enum DecodedImage<F = Infallible> {
     Pixels(Bitmap),
@@ -165,7 +127,6 @@ impl<F> From<Bitmap> for DecodedImage<F> {
 }
 
 impl<F> DecodedImage<F> {
-    /// The decoded size.
     #[must_use]
     pub fn size(&self) -> (u32, u32) {
         match self {
@@ -174,7 +135,6 @@ impl<F> DecodedImage<F> {
         }
     }
 
-    /// The image's intrinsic size, which the decoded one is a rendition of.
     #[must_use]
     pub fn source_size(&self) -> (u32, u32) {
         match self {
@@ -183,8 +143,6 @@ impl<F> DecodedImage<F> {
         }
     }
 
-    /// The bytes it is counted as: the pixels' own length, or four bytes per
-    /// pixel of a platform frame, which is what its texture holds.
     #[must_use]
     pub fn byte_len(&self) -> usize {
         match self {
@@ -193,8 +151,6 @@ impl<F> DecodedImage<F> {
         }
     }
 
-    /// The frame a picture draws, and the descriptor that names it: the
-    /// pixels' own, or one minted for a platform frame.
     #[must_use]
     pub fn into_frame(self) -> (PictureFrame<F>, ImageDescriptor) {
         match self {
@@ -211,7 +167,6 @@ impl<F> DecodedImage<F> {
     }
 }
 
-/// The bytes a `width` × `height` frame of four bytes a pixel holds.
 #[must_use]
 pub fn frame_bytes(width: u32, height: u32) -> usize {
     (width as usize)
@@ -219,19 +174,13 @@ pub fn frame_bytes(width: u32, height: u32) -> usize {
         .saturating_mul(4)
 }
 
-/// One frame of a picture: CPU pixels, or a frame in the platform's own
-/// form ([`PlatformBitmap`]), which only the platform's writer can copy into
-/// a texture.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureFrame<P = Infallible> {
-    /// CPU pixels, which the rasterizer converts and writes into a texture.
     Pixels(ImageData),
-    /// A frame in the embedder's own form.
     Platform(P),
 }
 
 impl<P> PictureFrame<P> {
-    /// The CPU pixels, for a [`Self::Pixels`] frame.
     #[must_use]
     pub const fn pixels(&self) -> Option<&ImageData> {
         match self {
@@ -242,7 +191,6 @@ impl<P> PictureFrame<P> {
 }
 
 impl PictureFrame {
-    /// The CPU pixels of a frame of a store that has no platform frames.
     #[must_use]
     pub fn into_pixels(self) -> ImageData {
         match self {
@@ -252,15 +200,8 @@ impl PictureFrame {
     }
 }
 
-/// What a decoded bitmap is, without its pixels: everything a rasterizer
-/// keys an upload of it on — the blob's identity, its size and its layout.
-///
-/// A descriptor names one bitmap for as long as its blob id is unique,
-/// which is the process's life: a bitmap decoded again is a new blob and so
-/// a new descriptor, even at the same size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageDescriptor {
-    /// The pixels' [`Blob::id`].
     pub blob: u64,
     pub width: u32,
     pub height: u32,
@@ -270,7 +211,6 @@ pub struct ImageDescriptor {
 
 impl std::hash::Hash for ImageDescriptor {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // `peniko`'s two layout enums are fieldless and derive no `Hash`.
         (
             self.blob,
             self.width,
@@ -283,7 +223,6 @@ impl std::hash::Hash for ImageDescriptor {
 }
 
 impl ImageDescriptor {
-    /// What `image` is.
     #[must_use]
     pub fn of(image: &ImageData) -> Self {
         Self {
@@ -295,11 +234,6 @@ impl ImageDescriptor {
         }
     }
 
-    /// A descriptor for a `width` × `height` platform frame, which has no
-    /// blob: its identity is a blob id no pixels have, taken from the same
-    /// counter every [`Blob`] takes its id from, so it never names another
-    /// bitmap. The layout is what the frame's writer produces, premultiplied
-    /// RGBA8.
     #[must_use]
     pub fn platform(width: u32, height: u32) -> Self {
         Self {
@@ -311,9 +245,6 @@ impl ImageDescriptor {
         }
     }
 
-    /// The image this descriptor names, with `data` its pixels: the blob
-    /// the descriptor was taken of, or one upgraded from a weak handle to
-    /// it.
     #[must_use]
     pub fn with_pixels(self, data: Blob<u8>) -> ImageData {
         debug_assert_eq!(data.id(), self.blob, "the pixels this descriptor names");
@@ -329,35 +260,24 @@ impl ImageDescriptor {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum DecodeError {
-    /// This platform has no decoder the host knows how to reach.
     #[error("no platform image decoder is available: {0}")]
     Unavailable(String),
-    /// The platform decoder does not decode this container.
     #[error("the platform decoder does not support this image: {0}")]
     Unsupported(String),
-    /// The bytes are not a decodable image.
     #[error("the image could not be decoded: {0}")]
     Malformed(String),
 }
 
-/// The size a `source_width`x`source_height` image is decoded to under
-/// `max`: inside the bound, the image's own ratio kept, never upsampled.
 #[must_use]
 pub fn target_size(source_width: u32, source_height: u32, max: (u32, u32)) -> (u32, u32) {
     ImageSizeHint::new(max.0, max.1).fit(source_width, source_height)
 }
 
-/// Never ask a decoder for more than the rasterizer can draw:
-/// `max_renderable` is the largest axis it accepts, which the caller knows
-/// and this crate does not.
 #[must_use]
 pub fn bounded(target: (u32, u32), max_renderable: u32) -> (u32, u32) {
     ImageSizeHint::new(max_renderable, max_renderable).fit(target.0, target.1)
 }
 
-/// Whether a resident bitmap of `resident` should be replaced by one decoded
-/// for `target`: it is at least `ratio` times too large on both axes, or it
-/// is smaller than the draw while the image itself has more pixels to give.
 #[must_use]
 pub fn wants_refinement(
     resident: (u32, u32),
@@ -380,8 +300,6 @@ pub fn wants_refinement(
 mod tests {
     use super::*;
 
-    /// The downsampling decision every host shares: inside the hint, keep
-    /// the ratio, never grow, never vanish.
     #[test]
     fn a_hint_fits_an_image_without_growing_it_or_breaking_its_ratio() {
         assert_eq!(
@@ -453,8 +371,6 @@ mod tests {
         assert_eq!(ImageDescriptor::of(&rebuilt), descriptor);
     }
 
-    /// A platform frame is counted at four bytes a pixel and named by a
-    /// descriptor no pixels share.
     #[test]
     fn a_platform_frame_gets_a_descriptor_of_its_own_and_counts_its_size() {
         let decoded: DecodedImage<u8> = DecodedImage::Platform(PlatformBitmap {
@@ -501,25 +417,20 @@ mod tests {
 
     #[test]
     fn refinement_triggers_on_a_bitmap_far_too_large_or_too_small() {
-        // A 2048-wide initial decode drawn at 200px: twice too large.
         assert!(wants_refinement(
             (2048, 1536),
             (200, 150),
             (4000, 3000),
             2.0
         ));
-        // Drawn at 1100px: under the ratio, kept as is.
         assert!(!wants_refinement(
             (2048, 1536),
             (1100, 825),
             (4000, 3000),
             2.0
         ));
-        // Drawn larger than the resident bitmap while the image has more.
         assert!(wants_refinement((200, 150), (400, 300), (4000, 3000), 2.0));
-        // Drawn larger than the resident bitmap, which is already everything.
         assert!(!wants_refinement((200, 150), (400, 300), (200, 150), 2.0));
-        // Exactly the drawn size.
         assert!(!wants_refinement((200, 150), (200, 150), (4000, 3000), 2.0));
     }
 }

@@ -12,7 +12,6 @@
 
 use crate::mime::ImageFormat;
 
-/// What a container header says about its image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageHeader {
     pub format: ImageFormat,
@@ -20,12 +19,6 @@ pub struct ImageHeader {
     pub height: u32,
 }
 
-/// The container `bytes` start with, by magic, or `None` for anything this
-/// crate does not recognise.
-///
-/// SVG is the one text container: it is recognised by an `<svg` root
-/// element after any BOM, whitespace, XML declaration, comments and doctype,
-/// scanned within the first few kilobytes only.
 #[must_use]
 pub fn detect_format(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -45,9 +38,6 @@ pub fn detect_format(bytes: &[u8]) -> Option<ImageFormat> {
     }
 }
 
-/// Reads the dimensions the header declares, or `None` when the bytes are
-/// not a container this crate knows, are truncated before the size, or
-/// declare a zero axis. Never panics, whatever the input.
 #[must_use]
 pub fn probe(bytes: &[u8]) -> Option<ImageHeader> {
     let format = detect_format(bytes)?;
@@ -94,40 +84,31 @@ fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
-/// PNG: the IHDR chunk is required to come first, at a fixed offset.
 fn probe_png(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.get(12..16)? != b"IHDR" {
         return None;
     }
     let width = be_u32(bytes, 16)?;
     let height = be_u32(bytes, 20)?;
-    // The PNG spec caps both at 2^31 - 1.
     if width > i32::MAX as u32 || height > i32::MAX as u32 {
         return None;
     }
     Some((width, height))
 }
 
-/// JPEG: walk the marker segments to the first start-of-frame, which carries
-/// the size; `APPn`, `COM` and table segments before it are skipped by length.
 fn probe_jpeg(bytes: &[u8]) -> Option<(u32, u32)> {
     let mut position = 2;
     loop {
-        // Fill bytes: any run of 0xFF before a marker code.
         while *bytes.get(position)? == 0xFF {
             position += 1;
         }
         if position < 3 || bytes[position - 1] != 0xFF {
-            // The byte after the previous segment is not a marker prefix: not
-            // a well-formed marker stream.
             return None;
         }
         let marker = bytes[position];
         position += 1;
         match marker {
-            // Standalone markers carry no length.
             0x01 | 0xD0..=0xD7 | 0xD8 => {}
-            // End of image or start of scan without a frame header: no size.
             0xD9 | 0xDA => return None,
             0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
                 let length = be_u16(bytes, position)?;
@@ -149,17 +130,13 @@ fn probe_jpeg(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// GIF: the logical screen descriptor follows the six-byte signature.
 fn probe_gif(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((le_u16(bytes, 6)?, le_u16(bytes, 8)?))
 }
 
-/// WebP: three container flavours, each with its own size encoding.
 fn probe_webp(bytes: &[u8]) -> Option<(u32, u32)> {
     match bytes.get(12..16)? {
         b"VP8 " => {
-            // A key frame starts with the 3-byte start code 9D 01 2A, then
-            // 14-bit width and height (the top two bits are scale flags).
             if bytes.get(23..26)? != [0x9D, 0x01, 0x2A] {
                 return None;
             }
@@ -177,8 +154,6 @@ fn probe_webp(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// BMP: the DIB header's own size selects the OS/2 core layout (16-bit
-/// axes) or the Windows layout (signed 32-bit axes, negative for top-down).
 fn probe_bmp(bytes: &[u8]) -> Option<(u32, u32)> {
     let header_size = le_u32(bytes, 14)?;
     if header_size == 12 {
@@ -192,8 +167,6 @@ fn probe_bmp(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width.unsigned_abs(), height.unsigned_abs()))
 }
 
-/// Whether the bytes open with an `<svg` root element, past a BOM, ASCII
-/// whitespace, an XML declaration, comments and a doctype.
 fn looks_like_svg(bytes: &[u8]) -> bool {
     const SCAN_LIMIT: usize = 4096;
     let mut rest = bytes.get(..bytes.len().min(SCAN_LIMIT)).unwrap_or(bytes);
@@ -266,7 +239,6 @@ mod tests {
             bytes.extend_from_slice(&length.to_be_bytes());
             bytes.extend_from_slice(payload);
         }
-        // Fill bytes are legal before a marker.
         bytes.extend_from_slice(&[0xFF, 0xFF, sof]);
         bytes.extend_from_slice(&17_u16.to_be_bytes());
         bytes.push(8);
@@ -321,18 +293,15 @@ mod tests {
             None,
             "truncated inside the frame header"
         );
-        // A start-of-scan before any frame header means no size is coming.
         let mut sos_first = vec![0xFF, 0xD8, 0xFF, 0xDA, 0, 2];
         sos_first.extend_from_slice(&[0; 8]);
         assert_eq!(probe(&sos_first), None);
-        // A restart marker is standalone and skipped without a length.
         let mut with_restart = vec![0xFF, 0xD8, 0xFF, 0xD0];
         with_restart.extend_from_slice(&jpeg_with_segments(&[], 0xC0, 7, 9)[2..]);
         assert_eq!(
             probe(&with_restart).map(|header| (header.width, header.height)),
             Some((7, 9))
         );
-        // A segment length that lies about itself cannot walk anywhere.
         assert_eq!(probe(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01]), None);
         assert_eq!(probe(&[0xFF, 0xD8, 0xFF]), None);
     }

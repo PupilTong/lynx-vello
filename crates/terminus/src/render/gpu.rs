@@ -42,11 +42,6 @@ use super::vector_textures::VectorTextures;
 use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::visual::{CommittedFrame, ScrollSlot};
 
-/// Headless GPU renderer for tests, benchmarks, and windowless embedders.
-///
-/// Its device and renderer are the process's [`SharedGpu`]; the render
-/// target, the readback buffer, the bake caches and its [`Raster`] are its
-/// own.
 pub struct Headless {
     gpu: Arc<SharedGpu>,
     raster: Raster,
@@ -56,9 +51,6 @@ pub struct Headless {
     readback: Option<ReadbackBuffer>,
 }
 
-/// A wgpu instance over the backends and flags the environment selects
-/// (`WGPU_BACKEND` and wgpu's other variables), every compiled-in backend
-/// otherwise.
 pub(crate) fn instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor {
         display: None,
@@ -69,21 +61,13 @@ pub(crate) fn instance() -> wgpu::Instance {
     })
 }
 
-/// One adapter's device and queue, and the rasterizer state every target
-/// on them shares. See the [module documentation](self).
 pub(crate) struct SharedGpu {
-    /// Kept so a window's surface is created on the instance its adapter
-    /// is checked against.
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     pub(crate) device: wgpu::Device,
-    /// Written to by any target; submitted to only through
-    /// [`Self::submit`].
     pub(crate) queue: wgpu::Queue,
     pub(crate) raster: SharedRaster,
     pub(super) canvases: super::canvas::Textures,
-    /// Held across every submit and every surface configuration; see
-    /// [`Self::configure`].
     submits: Mutex<()>,
 }
 
@@ -95,20 +79,15 @@ impl fmt::Debug for SharedGpu {
     }
 }
 
-/// The process's live [`SharedGpu`], held weakly so it goes with the last
-/// target that uses it.
 #[cfg(not(target_arch = "wasm32"))]
 static SHARED_GPU: Mutex<Weak<SharedGpu>> = Mutex::new(Weak::new());
 
-// A browser build keeps one per thread: a WebGPU device belongs to the
-// Worker that requested it, and wgpu's handles are not `Send` there.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static SHARED_GPU: std::cell::RefCell<Weak<SharedGpu>> =
         const { std::cell::RefCell::new(Weak::new()) };
 }
 
-/// Runs `f` on the live-stack slot, locked.
 fn with_shared_slot<R>(f: impl FnOnce(&mut Weak<SharedGpu>) -> R) -> R {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -120,13 +99,10 @@ fn with_shared_slot<R>(f: impl FnOnce(&mut Weak<SharedGpu>) -> R) -> R {
     }
 }
 
-/// The live stack of this process (natively) or thread (wasm32), if any.
 pub(crate) fn live() -> Option<Arc<SharedGpu>> {
     with_shared_slot(|slot| slot.upgrade())
 }
 
-/// The stack `slot` holds if it is live, else one `make` builds, which
-/// `slot` then holds.
 #[cfg_attr(
     target_arch = "wasm32",
     expect(
@@ -148,22 +124,9 @@ fn upgrade_or_build(
 }
 
 impl SharedGpu {
-    /// The limits every device is created with: wgpu's defaults, which wgpu
-    /// guarantees on every modern backend and in WebGPU.
-    /// [`crate::render::image::MAX_RENDERABLE_DIMENSION`] is their
-    /// `max_texture_dimension_2d`.
     pub(crate) const LIMITS: wgpu::Limits = wgpu::Limits::defaults();
 
-    /// The live shared stack, or a new one on the adapter the environment
-    /// selects if none is live. Blocks on the adapter and device requests.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::NoAdapter`] when no adapter qualifies or it refuses the
-    /// device.
     pub(crate) fn offscreen() -> Result<Arc<Self>, GpuError> {
-        // The slot stays locked through the build, so two targets built at
-        // once get one stack rather than racing to two.
         with_shared_slot(|slot| {
             upgrade_or_build(slot, || {
                 pollster::block_on(Self::build(instance(), None)).ok_or(GpuError::NoAdapter)
@@ -171,19 +134,6 @@ impl SharedGpu {
         })
     }
 
-    /// A surface for `target` and the stack it is drawn with: the live
-    /// shared stack when its adapter can present to the surface, otherwise
-    /// a stack on an adapter that can.
-    ///
-    /// The second case is a machine with several adapters where the shared
-    /// one cannot present to this window; that window then has a device and
-    /// a renderer of its own. A stack built when none is live becomes the
-    /// shared one.
-    ///
-    /// # Errors
-    ///
-    /// The surface's creation error, or the message that no adapter can
-    /// present to it.
     pub(crate) async fn for_surface(
         target: wgpu::SurfaceTarget<'static>,
     ) -> Result<(Arc<Self>, wgpu::Surface<'static>), String> {
@@ -198,11 +148,6 @@ impl SharedGpu {
         Ok((gpu, surface))
     }
 
-    /// The stack a `surface` created on `instance` is drawn with: `live`
-    /// when its adapter can present to it, else a new one. Not locked across
-    /// the device request: a browser build has no other thread to contend
-    /// with, and a native race at worst leaves one window on a stack of its
-    /// own.
     #[cfg_attr(
         target_arch = "wasm32",
         expect(
@@ -234,13 +179,6 @@ impl SharedGpu {
         Ok(built)
     }
 
-    /// Requests a device on the adapter the environment selects
-    /// (`WGPU_ADAPTER_NAME`, else the default one), able to present to
-    /// `compatible_surface` if one is given, and builds the rasterizer on
-    /// it. No optional feature is requested: the rasterizer and the bakes
-    /// need none.
-    ///
-    /// `None` when no adapter qualifies or it refuses the device.
     pub(crate) async fn build(
         instance: wgpu::Instance,
         compatible_surface: Option<&wgpu::Surface<'_>>,
@@ -248,7 +186,6 @@ impl SharedGpu {
         Self::build_with(instance, compatible_surface, SharedRaster::new).await
     }
 
-    /// [`Self::build`], with `raster` building the rasterizer on the device.
     async fn build_with(
         instance: wgpu::Instance,
         compatible_surface: Option<&wgpu::Surface<'_>>,
@@ -279,8 +216,6 @@ impl SharedGpu {
         })
     }
 
-    /// Submits `buffers` to the queue. Every submit of every target goes
-    /// through here.
     pub(crate) fn submit(
         &self,
         buffers: impl IntoIterator<Item = wgpu::CommandBuffer>,
@@ -289,14 +224,6 @@ impl SharedGpu {
         self.queue.submit(buffers)
     }
 
-    /// Configures `surface`, which the stack's adapter presents to, with
-    /// `config`.
-    ///
-    /// wgpu waits for the device to go idle before it configures a surface,
-    /// and fails the configuration if the queue is not empty once the wait
-    /// returns — which a submit by another target's thread in the meantime
-    /// makes it. So no submit runs during a configuration: both hold the
-    /// same lock.
     pub(crate) fn configure(
         &self,
         surface: &wgpu::Surface<'_>,
@@ -306,8 +233,6 @@ impl SharedGpu {
         surface.configure(&self.device, config);
     }
 
-    /// A stack no other target shares, its rasterizer built by `raster`:
-    /// for a test that watches the shared state.
     #[cfg(test)]
     pub(crate) fn private(
         raster: impl FnOnce(&wgpu::Device, &wgpu::Queue) -> SharedRaster,
@@ -318,13 +243,10 @@ impl SharedGpu {
         )
     }
 
-    /// The adapter the device was created on.
     pub(crate) fn adapter(&self) -> &wgpu::Adapter {
         &self.adapter
     }
 
-    /// The instance the adapter was enumerated on, which a surface it is
-    /// checked against must be created on.
     #[cfg_attr(
         not(all(test, target_os = "macos")),
         expect(dead_code, reason = "read by the window stack's test alone")
@@ -373,12 +295,6 @@ impl fmt::Display for GpuError {
 impl std::error::Error for GpuError {}
 
 impl Headless {
-    /// Creates a headless renderer on the process's [`SharedGpu`], building
-    /// it on the platform's default adapter if no target holds one.
-    ///
-    /// Returns [`GpuError::NoAdapter`] when the platform has no usable adapter
-    /// rather than panicking: an embedder can surface that and fall back, while
-    /// tests treat it as a hard environment failure.
     pub fn new() -> Result<Self, GpuError> {
         let gpu = SharedGpu::offscreen()?;
         let raster = Raster::new(&gpu);
@@ -392,46 +308,16 @@ impl Headless {
         })
     }
 
-    /// Drops the render target this renderer retained, and the readback
-    /// buffer sized for it.
-    ///
-    /// For a target that changes documents. The target is given up rather than
-    /// kept because it *is* the last frame here — there is no surface in front
-    /// of it, so a reader would otherwise be handed the previous document's
-    /// pixels as this one's. [`Self::render_frame`] builds a new one, and
-    /// [`Self::read_pixels`] has nothing to read until it does.
-    ///
-    /// The filter bakes keep their textures but forget which frame they were
-    /// baked for, since commit ids restart at one per document. The vector
-    /// textures are untouched: their key is a process-unique image identity,
-    /// which no document change can alias.
     pub fn forget(&mut self) {
         self.target = None;
         self.readback = None;
         self.filters.forget();
     }
 
-    /// Forgets which frame the offscreen bakes belong to, keeping the
-    /// render target.
-    ///
-    /// Every consumer that points this renderer at a *second document* owes
-    /// this call: the bake cache is keyed by commit id, and commit ids
-    /// restart at one per document. [`Self::forget`] includes it.
     pub fn forget_filters(&mut self) {
         self.filters.forget();
     }
 
-    /// Bakes the textures of `frame`'s vector image draws that are not
-    /// already resident, if it has any, and answers the table
-    /// [`crate::visual::CommittedFrame::compose_into`] takes for them.
-    ///
-    /// Call before [`Self::prepare_filters`] and before composing: a filter
-    /// bake replays ops that may draw these textures. A frame with no
-    /// vector draw answers an empty slice and touches no GPU resource.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Render`] if a bake render fails.
     pub fn prepare_vectors(
         &mut self,
         frame: &CommittedFrame,
@@ -445,21 +331,6 @@ impl Headless {
         vectors.prepare(frame, raster, gpu)
     }
 
-    /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
-    /// elements, if it has any, and answers the table
-    /// [`crate::visual::CommittedFrame::compose_into`] takes.
-    ///
-    /// Call before composing, at the same `animation_now` the composition
-    /// will use, with the `vectors` table [`Self::prepare_vectors`] answered
-    /// for this frame, and with the `base_color` [`Self::render_frame`] will
-    /// be given for it: a `backdrop-filter` element at the document's root
-    /// filters the canvas along with what the page painted over it. A frame
-    /// with no filter entry answers an empty slice and touches no GPU
-    /// resource.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError::Render`] if a bake render fails.
     #[expect(
         clippy::too_many_arguments,
         reason = "one bake pre-step's full inputs: the frame, its two pixel tables, the three \
@@ -494,17 +365,14 @@ impl Headless {
         )
     }
 
-    /// The stack this target draws through.
     pub(crate) fn gpu(&self) -> &Arc<SharedGpu> {
         &self.gpu
     }
 
-    /// See [`Raster::lost_pixels`].
     pub(crate) fn lost_pixels(&self) -> u64 {
         self.raster.lost_pixels()
     }
 
-    /// A target on `gpu` rather than on the process's stack.
     #[cfg(test)]
     pub(crate) fn on(gpu: Arc<SharedGpu>) -> Self {
         Self {
@@ -517,20 +385,16 @@ impl Headless {
         }
     }
 
-    /// Replaces the vector raster cache with one bounded by `bytes`, so a
-    /// test can watch eviction without drawing 64 MiB of pictures.
     #[cfg(test)]
     pub(crate) fn set_vector_budget(&mut self, bytes: u64) {
         self.vectors = VectorTextures::with_budget(bytes);
     }
 
-    /// The vector raster cache, for a test's assertions on residency.
     #[cfg(test)]
     pub(crate) fn vector_textures(&self) -> &VectorTextures {
         &self.vectors
     }
 
-    /// Renders a scene into the retained headless texture.
     pub fn render_frame(
         &mut self,
         scene: &DisplayList,
@@ -557,8 +421,6 @@ impl Headless {
         Ok(())
     }
 
-    /// Waits for all submitted GPU work, every target's on the shared
-    /// device included.
     pub fn wait_idle(&self) -> Result<(), GpuError> {
         self.gpu
             .device
@@ -567,7 +429,6 @@ impl Headless {
         Ok(())
     }
 
-    /// Reads the last frame as tightly packed row-major RGBA8 pixels.
     pub fn read_pixels(&mut self) -> Result<Vec<u8>, GpuError> {
         let (width, height) = self
             .target
@@ -650,7 +511,6 @@ impl Headless {
         Err(error)
     }
 
-    /// Renders a frame and reads it back as tightly-packed RGBA8 pixels.
     pub fn render(
         &mut self,
         scene: &DisplayList,
@@ -718,7 +578,6 @@ impl Headless {
     }
 }
 
-/// Reads an RGBA8 texture into tightly packed row-major pixels.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_texture(
     gpu: &SharedGpu,
@@ -797,8 +656,6 @@ mod tests {
     use crate::peniko::{Color, Fill};
     use crate::render::sparse::SharedRaster;
 
-    /// A target built while another is live draws through that one's device
-    /// and renderer rather than building its own.
     #[test]
     fn a_target_built_while_another_is_live_shares_its_stack() {
         let first = Headless::new().expect("a usable GPU adapter is mandatory");
@@ -806,8 +663,6 @@ mod tests {
         assert!(Arc::ptr_eq(first.gpu(), second.gpu()));
     }
 
-    /// The slot hands out the live stack while a holder keeps it, builds
-    /// none then, and holds nothing once the last holder is gone.
     #[test]
     fn the_shared_slot_keeps_no_stack_alive() {
         let build = || {
@@ -822,8 +677,6 @@ mod tests {
         assert!(slot.upgrade().is_none(), "the slot kept the stack alive");
     }
 
-    /// Targets hold their stack and nothing else does: once the last of
-    /// them has rendered and gone, so has the stack.
     #[test]
     fn the_stack_goes_with_the_last_target() {
         let gpu = SharedGpu::private(SharedRaster::new);

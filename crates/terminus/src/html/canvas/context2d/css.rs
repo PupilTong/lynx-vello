@@ -33,25 +33,12 @@ use crate::peniko::Color;
 use crate::style::engine::author_parser_context;
 use crate::tree::document::about_blank_url_data;
 
-/// The base a relative font size resolves against: the default canvas
-/// font's 10px, HTML's base for an `OffscreenCanvas`, whose font style
-/// source object is not an element.
 const BASE_FONT_SIZE: f32 = 10.0;
-/// `medium`, the size the absolute-size keywords are scaled from.
 const MEDIUM_FONT_SIZE: f32 = 16.0;
-/// CSS Fonts' ratio between adjacent sizes, for `larger` and `smaller`.
 const RELATIVE_SIZE_RATIO: f32 = 1.2;
 
-/// The base URL every canvas string parses against, built once.
 static URL_DATA: LazyLock<UrlExtraData> = LazyLock::new(about_blank_url_data);
 
-/// A CSS `<color>` as sRGB, each channel clamped to 0..=1 (NaN as 0),
-/// `currentcolor` as opaque black; `None` when `text` is not one, or names
-/// a system color, which needs a device.
-///
-/// The parser is the fork's `lynx` grammar, which leaves out `currentcolor`
-/// (and `color-mix()`, `light-dark()`, `contrast-color()`): the keyword is
-/// matched here, first.
 pub(super) fn parse_color(text: &str) -> Option<Color> {
     let current =
         Parser::new(text).parse_entirely(|parser| -> Result<(), cssparser::ParseError<()>> {
@@ -74,9 +61,6 @@ pub(super) fn parse_color(text: &str) -> Option<Color> {
     Some(Color::new(srgb.components.map(channel)))
 }
 
-/// HTML's serialization of a canvas color: `#rrggbb` when it is opaque,
-/// `rgba(r, g, b, a)` otherwise, `a` in the fewest decimals that keep its
-/// 8-bit value.
 pub(super) fn serialize_color(color: Color) -> String {
     let [r, g, b, a] = color.to_rgba8().to_u8_array();
     if a == 255 {
@@ -93,20 +77,12 @@ pub(super) fn serialize_color(color: Color) -> String {
     format!("rgba({r}, {g}, {b}, {shortest})")
 }
 
-/// A `font` value: what the canvas draws with, and the serialization the
-/// `font` getter answers.
 #[derive(Debug)]
 pub(super) struct ParsedFont {
     pub(super) font: ResolvedFont,
     pub(super) css: String,
 }
 
-/// The CSS `font` shorthand, as HTML's `font` setter takes it: `None` for
-/// text that does not parse as the shorthand — a CSS-wide keyword included —
-/// and for a size this engine cannot resolve without a document (viewport
-/// and container units, `rpx`, `calc()` other than of absolute lengths).
-/// `line-height` is parsed and dropped. The serialization is the shorthand's
-/// own, with the size in px and no line height.
 pub(super) fn parse_font(text: &str) -> Option<ParsedFont> {
     let context = author_parser_context(&URL_DATA, CssRuleType::Style);
     let mut parser = Parser::new(text);
@@ -151,8 +127,6 @@ pub(super) fn parse_font(text: &str) -> Option<ParsedFont> {
     Some(ParsedFont { font, css })
 }
 
-/// A specified `font-size` in px, relative sizes against
-/// [`BASE_FONT_SIZE`].
 fn font_size_px(size: &FontSize) -> Option<f32> {
     match size {
         FontSize::Length(LengthPercentage::Length(length)) => length_px(*length),
@@ -174,8 +148,6 @@ fn font_size_px(size: &FontSize) -> Option<f32> {
     }
 }
 
-/// An absolute or font-relative length in px. The font-relative units take
-/// stylo's ratios for a font with no metrics.
 fn length_px(length: NoCalcLength) -> Option<f32> {
     if let Some(px) = length.to_px_if_absolute() {
         return Some(px);
@@ -189,7 +161,6 @@ fn length_px(length: NoCalcLength) -> Option<f32> {
     Some(length.unitless_value() * em * BASE_FONT_SIZE)
 }
 
-/// The family list; `None` for a system font.
 fn families(family: &FontFamily) -> Option<Vec<ResolvedFamily>> {
     let FontFamily::Values(list) = family else {
         return None;
@@ -197,8 +168,6 @@ fn families(family: &FontFamily) -> Option<Vec<ResolvedFamily>> {
     Some(list.iter().map(ResolvedFamily::from).collect())
 }
 
-/// The weight; `bolder` and `lighter` relative to the default font's
-/// `normal`.
 fn weight(weight: &SpecifiedFontWeight) -> Option<f32> {
     let value = match weight {
         SpecifiedFontWeight::Absolute(absolute) => absolute.compute()?,
@@ -209,15 +178,12 @@ fn weight(weight: &SpecifiedFontWeight) -> Option<f32> {
     Some(value.value())
 }
 
-/// The style, through its computed value; `oblique 0deg`, which is
-/// `normal`, computes to `FontStyle::NORMAL`.
 fn style(style: &SpecifiedFontStyle) -> Option<ResolvedFontStyle> {
     let computed = match style {
         SpecifiedFontStyle::Specified(specified::font::SpecifiedFontStyle::Italic) => {
             ComputedFontStyle::ITALIC
         }
         SpecifiedFontStyle::Specified(specified::font::SpecifiedFontStyle::Oblique(angle)) => {
-            // A `calc()` angle needs a computed-value context.
             ComputedFontStyle::oblique(angle.degrees()?)
         }
         SpecifiedFontStyle::System(_) => return None,
@@ -225,7 +191,6 @@ fn style(style: &SpecifiedFontStyle) -> Option<ResolvedFontStyle> {
     Some(ResolvedFontStyle::from(computed))
 }
 
-/// `font-stretch`'s keyword as a width ratio (CSS Fonts 4, "font-width").
 fn width(width: &SpecifiedFontWidth) -> Option<f32> {
     let SpecifiedFontWidth::Keyword(keyword) = width else {
         return None;
@@ -260,7 +225,6 @@ mod tests {
         assert_eq!(rgba("#0f08"), Some([0, 255, 0, 136]));
         assert_eq!(rgba("hsl(240 100% 50%)"), Some([0, 0, 255, 255]));
         assert_eq!(rgba("rgb(0 0 0 / 30%)"), Some([0, 0, 0, 77]));
-        // No element to inherit from: `currentcolor` is opaque black.
         assert_eq!(rgba("currentcolor"), Some([0, 0, 0, 255]));
         assert_eq!(rgba(" CurrentColor "), Some([0, 0, 0, 255]));
         assert_eq!(rgba("transparent"), Some([0, 0, 0, 0]));
@@ -287,7 +251,6 @@ mod tests {
 
     #[test]
     fn the_font_shorthand_parses_with_stylo() {
-        // Stylo serializes a family name of plain identifiers without quotes.
         let parsed = parse_font("italic bold 20px \"Times New Roman\", serif").unwrap();
         assert_eq!(parsed.css, "italic bold 20px Times New Roman, serif");
         assert!((parsed.font.size - 20.0).abs() < f32::EPSILON);
@@ -300,7 +263,6 @@ mod tests {
                 ResolvedFamily::Generic(GenericFamily::Serif)
             ]
         );
-        // Relative sizes resolve against 10px; the line height is dropped.
         let size = |text: &str| parse_font(text).map(|parsed| (parsed.font.size, parsed.css));
         assert_eq!(size("2em serif"), Some((20.0, "20px serif".to_owned())));
         assert_eq!(size("150% serif"), Some((15.0, "15px serif".to_owned())));
@@ -324,14 +286,11 @@ mod tests {
             style("oblique 20deg 10px serif"),
             Some(ResolvedFontStyle::Oblique(Some(20.0)))
         );
-        // Not a shorthand, a CSS-wide keyword, or a size that needs a viewport.
         for refused in ["inherit", "initial", "20px", "bold", "10vw serif", ""] {
             assert!(parse_font(refused).is_none(), "{refused}");
         }
     }
 
-    /// `bolder`/`lighter` against the default font's weight, and the
-    /// `font-stretch` keywords as ratios.
     #[test]
     fn relative_weights_and_width_keywords_resolve() {
         let font = |text: &str| parse_font(text).unwrap().font;
@@ -367,7 +326,6 @@ mod tests {
         );
     }
 
-    /// Neither parser reads a document or anything of the thread it runs on.
     #[test]
     fn colors_and_fonts_parse_on_a_thread_with_no_document() {
         std::thread::spawn(|| {
@@ -440,7 +398,6 @@ mod tests {
         }
     }
 
-    /// HTML checks the offset before the color.
     #[test]
     fn add_color_stop_checks_the_offset_then_the_color() {
         let gradient = Gradient::linear(0.0, 0.0, 1.0, 0.0).unwrap();

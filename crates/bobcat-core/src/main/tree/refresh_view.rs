@@ -237,17 +237,10 @@ use super::scroll_container::{
 use super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
 use super::{ComponentDetail, ComponentEvents, Field, LynxDocument, SLOT_CHANGE};
 
-/// The container tag, web-core's registered spelling.
 pub(super) const REFRESH_VIEW_TAG: &str = "x-refresh-view";
-/// The header tag.
 pub(super) const REFRESH_HEADER_TAG: &str = "x-refresh-header";
-/// The footer tag.
 pub(super) const REFRESH_FOOTER_TAG: &str = "x-refresh-footer";
 
-/// The light-DOM policy, in `x-refresh-view.css`'s order; see the module
-/// documentation. The host's box defaults are that file's. Each important
-/// declaration sits on a line of its own, because [`super::ua_sheet`]'s
-/// pinned test reads the sheet line by line.
 pub(super) const UA_RULES: &str = r#"
 x-refresh-view > x-refresh-header:not(:first-of-type), x-refresh-view > x-refresh-footer:not(:first-of-type),
 :not(x-refresh-view) > x-refresh-header, :not(x-refresh-view) > x-refresh-footer,
@@ -278,8 +271,6 @@ x-refresh-view > :not(x-refresh-header, x-refresh-footer) { overscroll-behavior-
 }
 "#;
 
-/// The shadow sheet, added to each instance's shadow root: see the module
-/// documentation.
 const SHADOW_RULES: &str = r#"
 slot { display: contents; }
 #container {
@@ -296,36 +287,16 @@ slot { display: contents; }
 :host([enable-loadmore="false"]) #placeholder-bot { display: none; }
 "#;
 
-/// The event a `scroll` of `#container` fires while the header shows.
 pub(super) const HEADER_SHOW_EVENT: &str = "headershow";
-/// The event a `scroll` of `#container` fires while the header shows, the
-/// same detail as [`HEADER_SHOW_EVENT`]'s, after it.
 pub(super) const HEADER_OFFSET_EVENT: &str = "headeroffset";
-/// The event a `scroll` of `#container` fires while the footer shows.
 pub(super) const FOOTER_OFFSET_EVENT: &str = "footeroffset";
-/// The event a finger lifting fires with the header pulled fully in.
 pub(super) const HEADER_RELEASED_EVENT: &str = "headerreleased";
-/// The event a finger lifting fires with the footer pushed fully in.
 pub(super) const FOOTER_RELEASED_EVENT: &str = "footerreleased";
-/// The event a refresh starting fires: `#container` coming to rest on the
-/// header, or `autoStartRefresh`.
 pub(super) const START_REFRESH_EVENT: &str = "startrefresh";
-/// The event a load starting fires: `#container` coming to rest on the
-/// footer, or, under `enable-auto-loadmore="true"`, a finger lifting with
-/// the footer showing.
 pub(super) const START_LOAD_MORE_EVENT: &str = "startloadmore";
 
-/// How far, in CSS px, a rest offset may stand short of the header's (the
-/// footer's) snap position and still count as resting on it. The painter
-/// settles a release onto a snap position the document computed from the
-/// same rounded layout the header's rectangle is read from, so a settled
-/// rest normally equals the position exactly; the pixel is a margin for an
-/// offset rounded anywhere between the painter's post and the document.
 const LANDING_TOLERANCE: f64 = 1.0;
 
-/// Installs the `x-refresh-view` component, which queues its events on
-/// `events`. Must run before any element could carry the tag,
-/// [`Document::define`](terminus::link::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     document.define(
         REFRESH_VIEW_TAG,
@@ -338,42 +309,17 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     );
 }
 
-/// The `x-refresh-view` component: builds the shadow tree when the element
-/// is constructed, moves the header and the footer into their named slots,
-/// answers the three UI methods and fires the view's events from
-/// `#container`'s `scroll` and `scrollend` and the touches on the view (the
-/// module documentation's "Events").
-///
-/// The shadow tree is built in `constructed`, as the swiper's is: the
-/// element is new and detached then, so every child arrives as a
-/// `slotchange` at the default slot.
 struct RefreshView {
     events: ComponentEvents,
-    /// The fingers down on each view, which `isDragging` reports.
     touch_count: TouchCount,
-    /// What each view's events remember, dropped when it is freed.
     states: RefCell<FxHashMap<NodeId, RefreshState>>,
-    /// [`SHADOW_RULES`], parsed by the first view of the document and
-    /// mounted on every view's shadow tree.
     shadow_sheet: OnceCell<ShadowSheet>,
 }
 
-/// What a refresh view's events remember between two deliveries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RefreshState {
-    /// The `isManual` the next `startrefresh` reports: iOS's
-    /// `manualRefresh` and web-core's `_nextRefreshIsManual`. `true` but
-    /// for the length of an `autoStartRefresh` call, which clears it, sends
-    /// its `startrefresh` and sets it again, as iOS's `startRefresh` does
-    /// after sending (`LynxUIRefresh.m:247-262`).
     manual: bool,
-    /// Whether a refresh started — `#container` came to rest on the header,
-    /// or `autoStartRefresh` ran — and has not ended: a rest anywhere else
-    /// and `finishRefresh` end it. No second `startrefresh` fires meanwhile.
     refreshing: bool,
-    /// The same for a load: a rest on the footer, or a release under
-    /// `enable-auto-loadmore`, starts it; a rest anywhere else and
-    /// `finishLoadMore` end it.
     loading: bool,
 }
 
@@ -387,68 +333,39 @@ impl Default for RefreshState {
     }
 }
 
-/// How far `#container`'s scrollport shows the header and the footer, from
-/// the last completed layout and the document's offset. An end that
-/// generates no box — none assigned, a later one, or the view's
-/// `enable-refresh` / `enable-loadmore` is `"false"` — or whose height is
-/// zero is `None`, and fires nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Pull {
     header: Option<Shown>,
     footer: Option<Shown>,
 }
 
-/// How far one end shows: native's `pullingPercent` (`MJRefresh`), the
-/// length of the end inside the scrollport over its height, measured from
-/// the scrollport's start for the header and from its end for the footer.
-///
-/// For the header, 1 with its start on the scrollport's start, 0 with its
-/// end there (scrolled out, the view at rest on `#content`), and above 1
-/// while the top placeholder shows above it; the footer's the same from the
-/// scrollport's end.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Shown {
-    /// The `offsetPercent` reported: the CSS px lengths divided in `f64`.
     percent: f64,
-    /// The end's height in CSS px, never zero.
     height: f64,
 }
 
 impl Shown {
-    /// Whether any of the end shows.
     fn showing(self) -> bool {
         self.percent > 0.0
     }
 
-    /// Whether all of the end shows: pulled at least its height.
     fn fully(self) -> bool {
         self.percent >= 1.0
     }
 
-    /// Whether all of the end shows to within [`LANDING_TOLERANCE`]: a
-    /// `scrollend` here rests on the end's snap position.
     fn rests_on(self) -> bool {
         self.percent >= 1.0 - LANDING_TOLERANCE / self.height
     }
 }
 
 impl Pull {
-    /// The pull of `view`, or `None` when `#container` has no box (the view
-    /// or an ancestor is `display: none`, or the view is detached).
-    ///
-    /// The header and the footer are each in a `display: contents` slot
-    /// that is a child of `#container`, so `#container` is the parent of
-    /// their boxes, and their layout locations are relative to its border
-    /// box, as [`rect_in_scroller`] requires.
     fn read(document: &LynxDocument, view: NodeId) -> Option<Self> {
         let container = container(document, view)?;
         let scroll_box = rendered_scroll_box(document, container)?;
         let top = f64::from(scroll_box.offset.y);
         let bottom = top + f64::from(scroll_box.scrollport.height);
         let rect = |end: Option<NodeId>| {
-            // The end's box parent is `#container`, whose box
-            // `rendered_scroll_box` found rendered, so whether the end has a
-            // rendered box is whether it generates one.
             let end = end.filter(|&end| generates_box(document, end))?;
             rect_in_scroller(document, container, end).filter(|rect| rect.height() > 0.0)
         };
@@ -471,7 +388,6 @@ impl Pull {
     }
 }
 
-/// `{isDragging, offsetPercent}`, the detail of the three offset events.
 fn offset_detail(dragging: bool, percent: f64) -> ComponentDetail {
     ComponentDetail::Fields(smallvec![
         ("isDragging", Field::Bool(dragging)),
@@ -480,9 +396,6 @@ fn offset_detail(dragging: bool, percent: f64) -> ComponentDetail {
 }
 
 impl RefreshView {
-    /// `#container`'s `scroll`: `headershow` then `headeroffset` while the
-    /// header shows, `footeroffset` while the footer shows, each only for a
-    /// listener on the view.
     fn scrolled(&self, document: &LynxDocument, view: NodeId) {
         let show = document.has_listener(view, HEADER_SHOW_EVENT);
         let header_offset = document.has_listener(view, HEADER_OFFSET_EVENT);
@@ -513,10 +426,6 @@ impl RefreshView {
         }
     }
 
-    /// `#container`'s `scrollend`: a rest on the header starts a refresh,
-    /// one on the footer a load, and a rest anywhere else ends whichever
-    /// the other place started. The latches are recorded whether or not
-    /// anything listens; each event is queued only for a listener.
     fn scroll_ended(&self, document: &LynxDocument, view: NodeId) {
         let Some(pull) = Pull::read(document, view) else {
             return;
@@ -544,10 +453,6 @@ impl RefreshView {
         }
     }
 
-    /// The `touchend` the view's touch count took: `headerreleased` with the
-    /// header pulled fully in, `footerreleased` with the footer pushed fully
-    /// in, and under `enable-auto-loadmore="true"` a load with the footer
-    /// showing at all, which latches as a rest on the footer does.
     fn released(&self, document: &LynxDocument, view: NodeId) {
         let Some(pull) = Pull::read(document, view) else {
             return;
@@ -577,12 +482,6 @@ impl RefreshView {
         }
     }
 
-    /// `autoStartRefresh()`: the instant scroll onto the header
-    /// ([`auto_start_refresh`]), then, for a header that generates a box,
-    /// `startrefresh` `{isManual: false}` at once, as iOS's `beginRefreshing`
-    /// sends it (`LynxUIRefresh.m:380-386`), unless a refresh already
-    /// started. The refresh latches, so the `scrollend` the scroll may bring
-    /// on the header adds nothing.
     fn auto_start_refresh(&self, document: &mut LynxDocument, view: NodeId) {
         auto_start_refresh(document, view);
         if Pull::read(document, view).is_none_or(|pull| pull.header.is_none()) {
@@ -607,10 +506,6 @@ impl RefreshView {
         }
     }
 
-    /// `finishRefresh()` (`loading == false`) or `finishLoadMore()`: the
-    /// smooth scroll back to `#content` ([`finish`]), and the refresh (the
-    /// load) ends, so the next rest on the header (the footer) starts one
-    /// again.
     fn finish(&self, document: &mut LynxDocument, view: NodeId, loading: bool) {
         finish(document, view);
         if let Some(state) = self.states.borrow_mut().get_mut(&view) {
@@ -624,10 +519,6 @@ impl RefreshView {
 }
 
 impl CustomElement<()> for RefreshView {
-    /// Its own shadow tree's `slotchange`, which is how it learns that its
-    /// assigned children changed; `#container`'s `scroll` and `scrollend`,
-    /// which its events are decided on; and the touches on it, which
-    /// `isDragging` counts and whose `touchend` releases a pull.
     fn observed_events(&self) -> &'static [&'static str] {
         &[
             SLOT_CHANGE,
@@ -668,16 +559,6 @@ impl CustomElement<()> for RefreshView {
         document.append_child(shadow, container);
     }
 
-    /// `slotchange` at the default slot — the one slot with no `name` —
-    /// delivered at the shadow root once per pass: the capture delivery is
-    /// skipped, the bubble one acts. The named slots' own are ignored.
-    ///
-    /// `scroll` and `scrollend` whose target is `#container`, delivered at
-    /// the shadow root too, in the capture pass alone, since neither
-    /// bubbles; the same names aimed anywhere else — a scroller inside the
-    /// content, whose capture pass crosses the view — are not its own.
-    /// Every touch event goes to its count, and the `touchend` the count
-    /// takes releases the pull.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
@@ -708,9 +589,6 @@ impl CustomElement<()> for RefreshView {
         }
     }
 
-    /// `finishRefresh`, `finishLoadMore` and `autoStartRefresh`; see the
-    /// module documentation. None reads `params`, and each answers
-    /// [`MethodOutcome::Done`], including when it has nothing to scroll.
     fn invoke(
         &self,
         document: &mut LynxDocument,
@@ -727,9 +605,6 @@ impl CustomElement<()> for RefreshView {
     }
 }
 
-/// The default slot's `slotchange` (`slot` being the event's target): every
-/// `x-refresh-header` assigned there gets `slot="header"` and every
-/// `x-refresh-footer` `slot="footer"`. A named slot's own changes nothing.
 fn slot_ends(document: &mut LynxDocument, slot: NodeId) {
     if document
         .get(slot)
@@ -751,10 +626,6 @@ fn slot_ends(document: &mut LynxDocument, slot: NodeId) {
     }
 }
 
-/// `finishRefresh()` and `finishLoadMore()` on `view`: a smooth scroll of
-/// `#container` that puts `#content` back at its snap position, the
-/// scrollport's center. Nothing is recorded when `#container` already rests
-/// there, or when the view has no box.
 fn finish(document: &mut LynxDocument, view: NodeId) {
     if let Some(content) = content(document, view) {
         scroll_into_view(
@@ -766,16 +637,6 @@ fn finish(document: &mut LynxDocument, view: NodeId) {
     }
 }
 
-/// `autoStartRefresh()` on `view`: an instant scroll of `#container` that
-/// puts the header's start on the scrollport's start, the header's own snap
-/// position once it is shown. Nothing is recorded when the view has no
-/// header or the header generates no box (`enable-refresh="false"`).
-///
-/// Instant rather than web-core's smooth: from rest the header is no snap
-/// position, and the painter settles a smooth request's target onto the
-/// frame's snap positions when it receives it, which would turn it back to
-/// `#content`; see the module documentation. The `startrefresh` it brings
-/// is the component's ([`RefreshView::auto_start_refresh`]).
 fn auto_start_refresh(document: &mut LynxDocument, view: NodeId) {
     if let Some(header) = header(document, view) {
         scroll_into_view(
@@ -787,11 +648,6 @@ fn auto_start_refresh(document: &mut LynxDocument, view: NodeId) {
     }
 }
 
-/// Scrolls `target` into view with `behavior`, at `block` on y and
-/// `nearest` on x, in its nearest scroll container: `#container`, the
-/// flat-tree scroll container of the header, the footer and `#content`. Its
-/// `overflow` is a shadow-sheet declaration no author rule reaches, so no
-/// ancestor of the view can be scrolled instead.
 fn scroll_into_view(
     document: &mut LynxDocument,
     target: NodeId,
@@ -809,22 +665,18 @@ fn scroll_into_view(
     );
 }
 
-/// A `div` with `id`.
 fn div(document: &mut LynxDocument, id: &str) -> NodeId {
     let div = document.create_element("div", ());
     document.set_id_attribute(div, Some(id));
     div
 }
 
-/// A `<slot>` named `name`.
 fn named_slot(document: &mut LynxDocument, name: &str) -> NodeId {
     let slot = document.create_element("slot", ());
     document.set_attribute(slot, "name", name);
     slot
 }
 
-/// The refresh view's scroll container, `#container`, the one element of
-/// its shadow tree.
 pub(crate) fn container(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(view)?;
     document
@@ -834,8 +686,6 @@ pub(crate) fn container(document: &LynxDocument, view: NodeId) -> Option<NodeId>
         .map(Node::id)
 }
 
-/// The child of `#container` that is `#content`, the box holding the
-/// default slot.
 fn content(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     let container = container(document, view)?;
     document
@@ -845,21 +695,14 @@ fn content(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
         .map(Node::id)
 }
 
-/// The header: the first element assigned to `#container`'s `header`
-/// slot, which is the view's first `x-refresh-header` child once the
-/// component has set its `slot`.
 fn header(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     slotted(document, view, "header")
 }
 
-/// The footer: the first element assigned to `#container`'s `footer`
-/// slot, which is the view's first `x-refresh-footer` child once the
-/// component has set its `slot`.
 fn footer(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     slotted(document, view, "footer")
 }
 
-/// The first element assigned to the slot of `#container` named `name`.
 fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> {
     let container = container(document, view)?;
     let slot = document
@@ -878,7 +721,7 @@ fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> 
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
+    #![allow(clippy::float_cmp)]
 
     use terminus::link::scroll::ScrollBehavior;
     use terminus::link::stylo::properties::PropertyId;
@@ -891,7 +734,6 @@ mod tests {
     use super::super::{ComponentEvents, LynxDocument, PageConfig};
     use super::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG, REFRESH_VIEW_TAG};
 
-    /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
         let id = PropertyId::parse_enabled_for_all_content(property)
             .unwrap_or_else(|()| panic!("unknown property `{property}`"));
@@ -906,11 +748,8 @@ mod tests {
         style_of(document, element).slow_clone_display()
     }
 
-    /// A 393px x 800px refresh view with `attributes`, a 50px header, one
-    /// content `view` of the view's full height, and a 50px footer.
     struct Built {
         document: LynxDocument,
-        /// What the document's components queued for script.
         events: ComponentEvents,
         view: NodeId,
         header: NodeId,
@@ -946,13 +785,10 @@ mod tests {
             }
         }
 
-        /// `#container`, the shadow scroll container.
         fn container(&self) -> NodeId {
             super::container(&self.document, self.view).expect("every refresh view has one")
         }
 
-        /// `#container`'s shadow children: the two placeholders, the two
-        /// named slots and `#content`, in tree order.
         fn parts(&self) -> Vec<NodeId> {
             self.document
                 .get(self.container())
@@ -961,7 +797,6 @@ mod tests {
                 .to_vec()
         }
 
-        /// `#container`'s snap positions on y, as single offsets.
         fn snap_points(&self) -> Vec<f32> {
             let positions = self
                 .document
@@ -979,8 +814,6 @@ mod tests {
                 .collect()
         }
 
-        /// Scrolls `#container` to `y` as an adopted painter post does,
-        /// and re-samples what follows the scroll.
         fn scroll_to(&mut self, y: f32) {
             let container = self.container();
             self.document.scroll_to(container, Vector2D::new(0.0, y));
@@ -988,9 +821,6 @@ mod tests {
             self.document.commit();
         }
 
-        /// Commits, and acknowledges the request the first commit's initial
-        /// scroll target left pending, as the painter's first post for
-        /// `#container` does: the view at rest on what it opened on.
         fn at_rest(&mut self) {
             self.document.commit();
             let container = self.container();
@@ -999,21 +829,15 @@ mod tests {
             }
         }
 
-        /// Runs the UI method `name` on the view.
         fn invoke(&mut self, name: &str, params: &str) -> MethodOutcome {
             self.document
                 .invoke_element_method(self.view, MethodCall { name, params })
         }
 
-        /// `#container`'s offset in the document.
         fn offset(&self) -> Vector2D<f32> {
             self.document.scroll_offset(self.container())
         }
 
-        /// The scroll request the next commit carries to the painter for
-        /// `#container`. With none pending, a commit of an unchanged
-        /// document hands back the last frame, which still names the
-        /// request it carried; so the pending state is read first.
         fn pending(&mut self) -> Option<(Vector2D<f32>, ScrollBehavior)> {
             let container = self.container();
             self.document.pending_scroll_request(container)?;
@@ -1027,13 +851,6 @@ mod tests {
         }
     }
 
-    // --- the shadow tree ----------------------------------------------------
-
-    /// `#container` holds the top placeholder, the header slot, `#content`
-    /// with the default slot, the footer slot and the bottom placeholder.
-    /// The header and the footer get their `slot` attributes from the
-    /// component and land in the named slots; the content child stays in
-    /// the default one. The light DOM is untouched otherwise.
     #[test]
     fn the_header_and_footer_are_slotted_around_the_content() {
         let mut built = Built::new(&[], "view");
@@ -1085,9 +902,6 @@ mod tests {
         );
     }
 
-    /// A second header or footer is slotted too, but only the first of each
-    /// generates a box (`:first-of-type`), and a header outside a refresh
-    /// view generates none.
     #[test]
     fn only_the_first_header_and_footer_generate_a_box() {
         let mut built = Built::new(&[], "view");
@@ -1111,9 +925,6 @@ mod tests {
         }
     }
 
-    /// A shown header and footer take the engine's display policy:
-    /// `linear` under `defaultDisplayLinear`, the engine default (`flex`)
-    /// without it.
     #[test]
     fn the_header_and_footer_follow_the_display_switch() {
         for (linear, expected) in [(true, Display::Linear), (false, Display::Flex)] {
@@ -1129,10 +940,6 @@ mod tests {
         }
     }
 
-    // --- the attributes -----------------------------------------------------
-
-    /// `"false"` hides the header (footer) and the placeholder above
-    /// (below) it; `"true"`, any other value and no attribute show them.
     #[test]
     fn enable_refresh_and_enable_loadmore_false_hide_their_ends() {
         for (attribute, shown) in [
@@ -1166,11 +973,6 @@ mod tests {
         }
     }
 
-    // --- the geometry -------------------------------------------------------
-
-    /// The scroll range is the two 240px placeholders (30% of 800), the
-    /// header, `#content` (800) and the footer: 1380. The first commit
-    /// opens on `#content` at 290. Without the top end, it opens at 0.
     #[test]
     fn the_view_opens_on_its_content_with_the_ends_out_of_view() {
         for (attributes, height, offset) in [
@@ -1204,9 +1006,6 @@ mod tests {
         }
     }
 
-    /// An author `position: absolute` on the header, as web-core's demo card
-    /// writes it, loses to the UA's `!important`: the header stays in the
-    /// column and the range keeps its 50px.
     #[test]
     fn an_author_absolute_header_stays_in_the_column() {
         let mut built = Built::new(&[], "view");
@@ -1229,11 +1028,6 @@ mod tests {
         );
     }
 
-    // --- the snap alignment -------------------------------------------------
-
-    /// At rest only `#content` snaps (290). A header at least 90% visible
-    /// snaps at its start (240) and a footer at least 90% visible at its
-    /// end (340); one less visible snaps nowhere.
     #[test]
     fn a_header_or_footer_pulled_nine_tenths_in_becomes_a_snap_position() {
         let mut built = Built::new(&[], "view");
@@ -1252,7 +1046,6 @@ mod tests {
             "none"
         );
 
-        // Fully in view, then 92% (header top 4px above the scrollport).
         for y in [190.0, 0.0, 244.0] {
             built.scroll_to(y);
             assert_eq!(
@@ -1262,7 +1055,6 @@ mod tests {
             );
             assert_eq!(built.snap_points(), [240.0, 290.0], "at {y}");
         }
-        // 80% in view: `exit 20%`.
         built.scroll_to(250.0);
         assert_eq!(
             value(&built.document, built.header, "scroll-snap-align"),
@@ -1287,8 +1079,6 @@ mod tests {
         assert_eq!(built.snap_points(), [290.0]);
     }
 
-    /// The alignment animations export nothing to the painter and need no
-    /// main-thread tick: they re-sample when a scroll is adopted.
     #[test]
     fn the_snap_alignment_needs_no_ticks() {
         let mut built = Built::new(&[], "view");
@@ -1297,11 +1087,6 @@ mod tests {
         assert!(!frame.needs_main_ticks() && !frame.has_live_curves());
     }
 
-    // --- the scroll chain ---------------------------------------------------
-
-    /// `#container` contains its chain; the content child, a scroller or
-    /// not, chains on y whatever an author declares on it, and keeps its
-    /// own x.
     #[test]
     fn the_content_child_chains_on_y_into_the_container() {
         let mut built = Built::new(&[], "scroll-view");
@@ -1340,9 +1125,6 @@ mod tests {
         }
     }
 
-    /// The scroll chain from the slotted content child runs over the flat
-    /// tree into `#container`: a pull past the inner scroller's top moves
-    /// `#container`, and a push past its end moves it the other way.
     #[test]
     fn a_pull_on_the_content_scrolls_the_container() {
         let mut built = Built::new(&[], "scroll-view");
@@ -1383,13 +1165,6 @@ mod tests {
         );
     }
 
-    // --- the UI methods -----------------------------------------------------
-
-    /// `autoStartRefresh` moves `#container` at once to the header's start
-    /// snap position, 240, and records the instant request the painter
-    /// follows. The commit that carries it publishes the header's `start`
-    /// alignment, so 240 is a snap position the painter's at-rest rule
-    /// leaves alone.
     #[test]
     fn auto_start_refresh_moves_the_header_to_its_snap_position_at_once() {
         let mut built = Built::new(&[], "view");
@@ -1407,8 +1182,6 @@ mod tests {
         assert_eq!(built.snap_points(), [240.0, 290.0]);
     }
 
-    /// With the header (240) or the footer (340) shown, either finishing
-    /// method records a smooth request back to `#content` at 290.
     #[test]
     fn finish_refresh_and_finish_load_more_scroll_the_content_back() {
         for (y, shown) in [(240.0, "header"), (340.0, "footer")] {
@@ -1431,8 +1204,6 @@ mod tests {
         }
     }
 
-    /// A view resting on `#content` records nothing for either finishing
-    /// method.
     #[test]
     fn finishing_at_the_content_records_nothing() {
         let mut built = Built::new(&[], "view");
@@ -1444,8 +1215,6 @@ mod tests {
         }
     }
 
-    /// `enable-refresh="false"` gives the header no box: `autoStartRefresh`
-    /// answers `Done` and records nothing.
     #[test]
     fn auto_start_refresh_without_a_header_box_records_nothing() {
         let mut built = Built::new(&[("enable-refresh", "false")], "view");
@@ -1455,8 +1224,6 @@ mod tests {
         assert_eq!(built.pending(), None);
     }
 
-    /// A view with no header child: `autoStartRefresh` answers `Done` and
-    /// records nothing.
     #[test]
     fn auto_start_refresh_without_a_header_records_nothing() {
         let mut document = document();
@@ -1492,9 +1259,6 @@ mod tests {
         assert_eq!(document.pending_scroll_request(container), None);
     }
 
-    /// `invoke` answers the three names with `Done` whatever `params` is,
-    /// on a laid-out view and on a `display: none` one, and `NotFound` for
-    /// every other name, which leaves it to the base set.
     #[test]
     fn invoke_answers_the_three_methods_and_nothing_else() {
         for style in ["", "display: none"] {
@@ -1532,8 +1296,6 @@ mod tests {
         }
     }
 
-    // --- the events ---------------------------------------------------------
-
     use terminus::link::event::EventDetail;
 
     use super::super::scroll_container::tests::{listen, scrolled};
@@ -1545,7 +1307,6 @@ mod tests {
         HEADER_SHOW_EVENT, Pull, START_LOAD_MORE_EVENT, START_REFRESH_EVENT, Shown,
     };
 
-    /// Every event the view fires.
     const EVERY_EVENT: [&str; 7] = [
         HEADER_SHOW_EVENT,
         HEADER_OFFSET_EVENT,
@@ -1556,12 +1317,9 @@ mod tests {
         START_LOAD_MORE_EVENT,
     ];
 
-    /// One queued event as `(name, detail pairs)`; a `{}` detail has none.
     type Heard = (&'static str, Vec<(&'static str, Field)>);
 
     impl Built {
-        /// The view at rest on `#content` (290), with listeners on the view
-        /// for `names`.
         fn listening(attributes: &[(&str, &str)], names: &[&str]) -> Self {
             let mut built = Self::new(attributes, "view");
             built.at_rest();
@@ -1571,16 +1329,11 @@ mod tests {
             built
         }
 
-        /// Moves `#container` to `y` and delivers its `scroll`, as the
-        /// runtime delivers the kernel's: at `#container`, which ends at the
-        /// shadow root.
         fn pulled(&mut self, y: f32) {
             let container = self.container();
             scrolled(&mut self.document, container, Vector2D::new(0.0, y));
         }
 
-        /// Moves `#container` to `y` and delivers its `scrollend` there: a
-        /// rest at `y`.
         fn rests(&mut self, y: f32) {
             let container = self.container();
             self.document.scroll_to(container, Vector2D::new(0.0, y));
@@ -1594,13 +1347,10 @@ mod tests {
             );
         }
 
-        /// A finger going down (`touchstart`) or lifting (`touchend`) on
-        /// the content child, as the runtime dispatches a routed touch.
         fn touch(&mut self, name: &'static str) {
             touched(&mut self.document, self.content, name);
         }
 
-        /// What the view queued since the last call, in order.
         fn heard(&self) -> Vec<Heard> {
             self.events
                 .take()
@@ -1642,11 +1392,6 @@ mod tests {
         (name, Vec::new())
     }
 
-    /// The header and the footer are boxes of `#container` through their
-    /// `display: contents` slots, so their rectangles in its scroll
-    /// coordinates are their layout locations: the header after the 240px
-    /// top placeholder, the footer after the header and the 800px
-    /// `#content`. The view at rest shows neither.
     #[test]
     fn the_header_and_footer_are_measured_in_the_containers_coordinates() {
         let mut built = Built::new(&[], "view");
@@ -1675,8 +1420,6 @@ mod tests {
         );
     }
 
-    /// With no listener on the view, nothing is queued: not on a pull, a
-    /// release, a rest on either end, nor `autoStartRefresh`.
     #[test]
     fn nothing_is_queued_without_a_listener() {
         let mut built = Built::listening(&[], &[]);
@@ -1694,11 +1437,6 @@ mod tests {
         assert_eq!(built.heard(), []);
     }
 
-    /// `headershow` then `headeroffset` on each `scroll` that leaves the
-    /// header showing, with native's `pullingPercent`: 0.5 halfway in, 1
-    /// with its start on the scrollport's start, 5.8 with the whole 240px
-    /// top placeholder showing above it. A `scroll` leaving it out, at rest
-    /// on `#content` or past it, fires nothing.
     #[test]
     fn header_show_and_offset_report_how_far_the_header_is_pulled() {
         let mut built = Built::listening(&[], &[HEADER_SHOW_EVENT, HEADER_OFFSET_EVENT]);
@@ -1719,9 +1457,6 @@ mod tests {
         }
     }
 
-    /// `isDragging` is whether a finger is down on the view, as each
-    /// `scroll` is delivered; each event is queued only for its own
-    /// listener.
     #[test]
     fn is_dragging_is_whether_a_finger_is_down() {
         let mut built = Built::listening(&[], &[HEADER_OFFSET_EVENT]);
@@ -1737,8 +1472,6 @@ mod tests {
         assert_eq!(built.heard(), [offset(HEADER_OFFSET_EVENT, false, 0.4)]);
     }
 
-    /// A `scroll` of a scroller inside the view crosses it in the capture
-    /// pass, and is not `#container`'s: nothing.
     #[test]
     fn an_inner_scrollers_scroll_is_not_the_containers() {
         let mut built = Built::new(&[], "scroll-view");
@@ -1760,9 +1493,6 @@ mod tests {
         assert_eq!(built.heard(), [offset(HEADER_OFFSET_EVENT, false, 0.5)]);
     }
 
-    /// `headerreleased` comes with the lift that leaves the header pulled
-    /// at least its height (native's rule; web-core's 90% is not), and
-    /// with no other lift.
     #[test]
     fn headerreleased_fires_at_a_lift_with_the_header_fully_pulled() {
         let mut built = Built::listening(&[], &[HEADER_RELEASED_EVENT]);
@@ -1779,10 +1509,6 @@ mod tests {
         }
     }
 
-    /// `startrefresh` `{isManual: true}` comes with the `scrollend` that
-    /// rests `#container` on the header's snap position (240, or within a
-    /// pixel of it), once: another rest there adds nothing until a rest on
-    /// `#content` ends the refresh and a new pull starts one.
     #[test]
     fn startrefresh_fires_once_per_rest_on_the_header() {
         let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
@@ -1806,10 +1532,6 @@ mod tests {
         assert_eq!(built.heard(), [], "outside the pixel");
     }
 
-    /// `autoStartRefresh` queues `startrefresh` `{isManual: false}` at once,
-    /// and the rest on the header that follows adds nothing. A second call
-    /// while the refresh runs fires nothing, and the next manual pull,
-    /// after a rest on `#content`, is manual again.
     #[test]
     fn auto_start_refresh_fires_startrefresh_at_once_not_manual() {
         let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
@@ -1824,9 +1546,6 @@ mod tests {
         assert_eq!(built.heard(), [start_refresh(true)], "manual again");
     }
 
-    /// `finishRefresh` ends the refresh at once: the next rest on the
-    /// header starts one, even with no rest on `#content` between, and so
-    /// does `autoStartRefresh`. `finishLoadMore` does not end it.
     #[test]
     fn finish_refresh_ends_the_refresh() {
         let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
@@ -1843,10 +1562,6 @@ mod tests {
         assert_eq!(built.heard(), [start_refresh(false)]);
     }
 
-    /// `footeroffset` on each `scroll` that leaves the footer showing,
-    /// measured from the scrollport's end: 0.5 halfway in, 1 with its end
-    /// on the scrollport's end (340), 5.8 at the range's end with the whole
-    /// bottom placeholder showing.
     #[test]
     fn footeroffset_reports_how_far_the_footer_is_pushed() {
         let mut built = Built::listening(&[], &[FOOTER_OFFSET_EVENT]);
@@ -1866,9 +1581,6 @@ mod tests {
         assert_eq!(built.heard(), [offset(FOOTER_OFFSET_EVENT, false, 0.8)]);
     }
 
-    /// `footerreleased` at a lift with the footer pushed at least its
-    /// height; `startloadmore` at the rest on the footer's snap position
-    /// (340), once until a rest elsewhere or `finishLoadMore` ends the load.
     #[test]
     fn footerreleased_at_the_lift_and_startloadmore_at_the_rest() {
         let mut built = Built::listening(&[], &[FOOTER_RELEASED_EVENT, START_LOAD_MORE_EVENT]);
@@ -1896,10 +1608,6 @@ mod tests {
         assert_eq!(built.heard(), [plain(START_LOAD_MORE_EVENT)]);
     }
 
-    /// Under `enable-auto-loadmore="true"` a lift with any of the footer
-    /// showing starts the load, and the rest on the footer that may follow
-    /// adds nothing; the rest on `#content` a short push glides back to
-    /// ends it. Any other value waits for the rest.
     #[test]
     fn enable_auto_loadmore_starts_the_load_at_the_lift() {
         let mut built = Built::listening(
@@ -1934,10 +1642,6 @@ mod tests {
         }
     }
 
-    /// `enable-refresh="false"` gives the header no box: no header event
-    /// fires, whatever moves, and `autoStartRefresh` fires nothing either,
-    /// while the footer, 10px into the scrollport, still reports.
-    /// `enable-loadmore="false"` does the same for the footer.
     #[test]
     fn an_end_turned_off_fires_nothing() {
         let mut built = Built::listening(&[("enable-refresh", "false")], &EVERY_EVENT);

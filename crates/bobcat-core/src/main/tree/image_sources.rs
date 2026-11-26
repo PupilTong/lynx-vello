@@ -88,55 +88,40 @@ use terminus::link::{
 
 use super::LynxDocument;
 
-/// The `image` attribute giving how many times an animated `src` plays.
 pub(crate) const LOOP_COUNT_ATTRIBUTE: &str = "loop-count";
-/// The `image` attribute saying whether an animated `src` plays as it loads.
 pub(crate) const AUTOPLAY_ATTRIBUTE: &str = "autoplay";
 
-/// The events an `image` playing an animated `src` fires, each with an empty
-/// detail.
 pub(crate) const START_PLAY_EVENT: &str = "startplay";
 pub(crate) const CURRENT_LOOP_COMPLETE_EVENT: &str = "currentloopcomplete";
 pub(crate) const FINAL_LOOP_COMPLETE_EVENT: &str = "finalloopcomplete";
 
-/// Which of an element's two sources a value is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageRole {
-    /// The picture the element is for: `src`, or an `svg`'s `content`.
     Source,
-    /// The picture it shows until [`ImageRole::Source`] has pixels.
     Placeholder,
 }
 
-/// One element's own source settling or playing, for the runtime to turn
-/// into an event.
-///
-/// A placeholder produces none: that asymmetry is the type's, which has no
-/// variant naming one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageOutcome {
-    /// The element's source has loaded, as pixels or as a parsed vector
-    /// document, with this intrinsic size.
     Loaded {
         node: NodeId,
         width: u32,
         height: u32,
     },
-    /// The element's source will never produce pixels.
-    Failed { node: NodeId },
-    /// The element's animated source loaded and plays into `picture`: a
-    /// `startplay` when that picture plays from the start, which the policy
-    /// read at the end of the entry says ([`ImageSources::autoplays`]).
-    StartPlay { node: NodeId, picture: PictureId },
-    /// The element's animated source completed a loop
-    /// (`currentloopcomplete`) or its final loop (`finalloopcomplete`): an
-    /// event with an empty detail.
-    Played { node: NodeId, name: &'static str },
+    Failed {
+        node: NodeId,
+    },
+    StartPlay {
+        node: NodeId,
+        picture: PictureId,
+    },
+    Played {
+        node: NodeId,
+        name: &'static str,
+    },
 }
 
 impl ImageOutcome {
-    /// The outcome `status` owes `node`'s own source, or `None` while it is
-    /// pending.
     fn of(node: NodeId, status: ImageStatus) -> Option<Self> {
         match status {
             ImageStatus::Pending => None,
@@ -152,15 +137,8 @@ impl ImageOutcome {
     }
 }
 
-/// What an element's outcomes for one write or one report are: a `load` or
-/// an `error`, after a `startplay` when one is owed.
 pub(crate) type ImageOutcomes = SmallVec<[ImageOutcome; 2]>;
 
-/// The policy an `image`'s `loop-count` and `autoplay` give an animated
-/// `src`, as native reads them: a `loop-count` that is absent, not a number,
-/// zero or negative plays forever, and a positive one plays that many times,
-/// a fraction truncated; the file's own count is not read. `autoplay` is on
-/// unless it is `"false"`, the string `__SetAttribute` writes for `false`.
 pub(crate) fn play_policy(loop_count: Option<&str>, autoplay: Option<&str>) -> PlayPolicy {
     let plays = loop_count
         .and_then(|value| value.trim().parse::<f64>().ok())
@@ -180,23 +158,16 @@ pub(crate) fn play_policy(loop_count: Option<&str>, autoplay: Option<&str>) -> P
     }
 }
 
-/// The sources one element names, and the picture it plays its `src` into.
 #[derive(Debug, Default)]
 struct Named {
     source: Option<Arc<str>>,
     placeholder: Option<Arc<str>>,
-    /// An `image`: an animated `src` plays into a picture of its own.
     playable: bool,
-    /// The picture an animated `src` plays into, while the element names it
-    /// loaded.
     playing: Option<PictureId>,
 }
 
-/// A playback request queued for the host.
 #[derive(Debug)]
 enum Queued {
-    /// `picture` starts playing `source` for `element`, under the policy the
-    /// element's attributes give when the request is taken.
     Start {
         element: NodeId,
         picture: PictureId,
@@ -223,17 +194,10 @@ impl Named {
 
 #[derive(Debug, Default)]
 struct State {
-    /// What each element names. An element naming nothing has no entry.
     elements: FxHashMap<NodeId, Named>,
-    /// The elements naming each source, in the order they named it, and in
-    /// which role: a settling source owes its events in that order. One
-    /// element naming one URL in both roles is two entries.
     holders: FxHashMap<Arc<str>, SmallVec<[(NodeId, ImageRole); 1]>>,
-    /// The element each playing picture belongs to.
     players: FxHashMap<PictureId, NodeId>,
-    /// The playback requests not handed to the host yet, in order.
     playback: Vec<Queued>,
-    /// The playing pictures whose policy plays from the start.
     autoplaying: rustc_hash::FxHashSet<PictureId>,
 }
 
@@ -247,7 +211,6 @@ impl State {
         }
     }
 
-    /// Ends the picture `element` plays its `src` into, if it plays one.
     fn stop_playing(&mut self, element: NodeId) {
         let Some(picture) = self
             .elements
@@ -263,23 +226,10 @@ impl State {
     }
 }
 
-/// The sources of one document's `image` and `svg` elements.
-///
-/// A handle: the two components and the runtime's report path each hold a
-/// clone of one state, as they each hold one [`super::ComponentEvents`].
-/// Every method takes the document as an argument and borrows the state
-/// only between calls into it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ImageSources(Rc<RefCell<State>>);
 
 impl ImageSources {
-    /// Names `value` as `element`'s source in `role`, or none, and presents
-    /// what the element now shows. Answers the outcome a `src` that had
-    /// already settled owes at once.
-    ///
-    /// Writing the value a role already holds does nothing at all: it asks
-    /// for nothing and owes nothing, since a picture that never moved owes
-    /// no second `load`.
     pub(crate) fn set(
         &self,
         document: &mut LynxDocument,
@@ -292,9 +242,6 @@ impl ImageSources {
             .next()
     }
 
-    /// [`Self::set`] for an `image`, whose animated `src` plays into a
-    /// picture of its own: answers a `startplay` before the `load` when such
-    /// a `src` had already settled and plays from the start.
     pub(crate) fn set_playable(
         &self,
         document: &mut LynxDocument,
@@ -360,9 +307,6 @@ impl ImageSources {
         outcomes
     }
 
-    /// Names a document handed over as `bytes` — an `svg`'s `content` — as
-    /// `element`'s source: [`Self::set`] with the synthetic source the
-    /// document files the bytes under.
     pub(crate) fn set_document(
         &self,
         document: &mut LynxDocument,
@@ -374,12 +318,6 @@ impl ImageSources {
         self.set(document, element, ImageRole::Source, Some(&source))
     }
 
-    /// What `settled` — the sources a batch of reports settled, as the
-    /// document answered them — moves: every element naming one presents
-    /// what it now shows, and each one whose own source it is owes an
-    /// outcome, in report order and, within one source, in the order the
-    /// elements named it; a `startplay` before the `load` of an animated
-    /// `src` that plays from the start.
     pub(crate) fn settle(
         &self,
         document: &mut LynxDocument,
@@ -409,10 +347,6 @@ impl ImageSources {
         outcomes
     }
 
-    /// The events the host's playback reports owe, in report order: a
-    /// `currentloopcomplete` per loop and a `finalloopcomplete` after the
-    /// last of a finite count, at the element whose picture played. A report
-    /// for a picture that has ended since is dropped.
     fn played(&self, events: &[ImageEvent]) -> Vec<ImageOutcome> {
         let state = self.0.borrow();
         events
@@ -423,8 +357,6 @@ impl ImageSources {
                     let name = match report {
                         PlaybackReport::LoopComplete => CURRENT_LOOP_COMPLETE_EVENT,
                         PlaybackReport::FinalLoopComplete => FINAL_LOOP_COMPLETE_EVENT,
-                        // A media player's, whose picture is a `video`'s
-                        // ([`super::video`]), never one of these.
                         PlaybackReport::Media(_) => return None,
                     };
                     Some(ImageOutcome::Played { node, name })
@@ -436,11 +368,6 @@ impl ImageSources {
             .collect()
     }
 
-    /// Starts the playback of `element`'s `src`, which settled at `status`,
-    /// when the element is an `image`, the source animates and nothing plays
-    /// it yet: a picture of the element's own, whose request is queued for
-    /// the end of the entry, when its policy is read
-    /// ([`Self::take_playback`]). Answers the picture.
     fn start_playing(&self, element: NodeId, status: ImageStatus) -> Option<PictureId> {
         if !matches!(status, ImageStatus::Bitmap { animated: true, .. }) {
             return None;
@@ -462,15 +389,10 @@ impl ImageSources {
         Some(picture)
     }
 
-    /// Whether `picture` was played from the start: the `startplay` an
-    /// [`ImageOutcome::StartPlay`] for it owes. Asked after the entry that
-    /// queued the outcome has handed its requests to the host.
     pub(crate) fn autoplays(&self, picture: PictureId) -> bool {
         self.0.borrow().autoplaying.contains(&picture)
     }
 
-    /// Sends `control` to the picture `element` plays its `src` into, if it
-    /// plays one. Answers whether it does.
     pub(crate) fn control(&self, element: NodeId, control: PlaybackControl) -> bool {
         let mut state = self.0.borrow_mut();
         let Some(picture) = state.elements.get(&element).and_then(|named| named.playing) else {
@@ -485,10 +407,6 @@ impl ImageSources {
         true
     }
 
-    /// Takes the playback requests made since the last call, for the host,
-    /// in the order they were made. A picture that starts playing is played
-    /// under the policy its element's `loop-count` and `autoplay` give now
-    /// ([`play_policy`]).
     pub(crate) fn take_playback(&self, document: &LynxDocument) -> Vec<PlaybackRequest> {
         let mut state = self.0.borrow_mut();
         if state.playback.is_empty() {
@@ -523,8 +441,6 @@ impl ImageSources {
             .collect()
     }
 
-    /// Drops everything kept for `element`, which is being freed, and ends
-    /// the picture it played.
     pub(crate) fn forget(&self, element: NodeId) {
         let mut state = self.0.borrow_mut();
         state.stop_playing(element);
@@ -538,7 +454,6 @@ impl ImageSources {
         }
     }
 
-    /// The source `element` names in `role`.
     #[cfg(test)]
     pub(crate) fn source(&self, element: NodeId, role: ImageRole) -> Option<Arc<str>> {
         self.0
@@ -548,7 +463,6 @@ impl ImageSources {
             .and_then(|named| named.get(role).cloned())
     }
 
-    /// The picture `element` plays its `src` into.
     #[cfg(test)]
     pub(crate) fn playing(&self, element: NodeId) -> Option<PictureId> {
         self.0
@@ -558,12 +472,6 @@ impl ImageSources {
             .and_then(|named| named.playing)
     }
 
-    /// Puts on `element`'s box the picture it shows: its `src` while that is
-    /// loaded — the picture it plays an animated `src` into, when it plays
-    /// one — its `placeholder` while that is loaded and `src` is not,
-    /// otherwise whichever it names; with that picture's natural size, or
-    /// none while it has none. An element naming nothing presents nothing,
-    /// and is not replaced.
     fn present(&self, document: &mut LynxDocument, element: NodeId) {
         let (source, placeholder, playing) = {
             let state = self.0.borrow();
@@ -594,9 +502,6 @@ impl ImageSources {
     }
 }
 
-/// Applies the painting side's image reports to `document`, and answers the
-/// outcomes they owe the elements of `sources`: what the runtime queues for
-/// its epilogue. The playback reports' events follow the settled sources'.
 pub(crate) fn apply_image_events(
     document: &mut LynxDocument,
     sources: &ImageSources,
@@ -610,7 +515,6 @@ pub(crate) fn apply_image_events(
 
 #[cfg(test)]
 mod tests {
-    // Every size asserted here is a reported pixel count, so no tolerance.
     #![allow(clippy::float_cmp)]
 
     use std::sync::Arc;
@@ -621,8 +525,6 @@ mod tests {
     use super::super::{LynxDocument, PageConfig};
     use super::{ImageOutcome, ImageRole, ImageSources, apply_image_events};
 
-    // `SRC` is the picture the element is for; `PLACEHOLDER` is what it
-    // draws until `SRC` has pixels.
     const SRC: &str = "app:///a.png";
     const OTHER_SRC: &str = "app:///b.png";
     const PLACEHOLDER: &str = "app:///p.png";
@@ -632,8 +534,6 @@ mod tests {
         (document, sources)
     }
 
-    /// An element the record's sources are set on directly: absolutely
-    /// positioned and unsized, so its box is its natural size once replaced.
     fn element(document: &mut LynxDocument) -> NodeId {
         child(document, "view", "position: absolute")
     }
@@ -653,7 +553,6 @@ mod tests {
         }
     }
 
-    /// The URL `element` presents.
     fn presented(document: &LynxDocument, element: NodeId) -> Option<String> {
         document
             .picture(element)
@@ -661,16 +560,12 @@ mod tests {
             .map(str::to_owned)
     }
 
-    /// The size `element`'s box lays out at: its natural size, being
-    /// unsized, or nothing while it has none.
     fn natural(document: &mut LynxDocument, element: NodeId) -> (f32, f32) {
         document.layout();
         let layout = document.rounded_layout(element).expect("laid out");
         (layout.size.width, layout.size.height)
     }
 
-    /// The natural size is the drawn bitmap's, whichever source that is —
-    /// `object-fit` fits one against the other at paint.
     #[test]
     fn a_loaded_source_suppresses_the_placeholder() {
         let (mut document, sources) = images();
@@ -701,8 +596,6 @@ mod tests {
         );
     }
 
-    /// And the suppression is permanent: a placeholder whose load lands after
-    /// the source's changes nothing visible.
     #[test]
     fn a_placeholder_arriving_after_the_source_changes_nothing() {
         let (mut document, sources) = images();
@@ -721,8 +614,6 @@ mod tests {
         assert_eq!(natural(&mut document, image), (40.0, 20.0));
     }
 
-    /// A failed source is not a failed element: the placeholder it was
-    /// covering stays drawn, and one that loads afterwards still appears.
     #[test]
     fn a_failed_source_leaves_the_placeholder_showing() {
         let (mut document, sources) = images();
@@ -743,8 +634,6 @@ mod tests {
         assert_eq!(natural(&mut document, image), (4.0, 4.0));
     }
 
-    /// A placeholder is a bitmap in the content box like any other, so an
-    /// element that has only one is replaced content and sizes from it.
     #[test]
     fn a_placeholder_alone_makes_an_element_replaced() {
         let (mut document, sources) = images();
@@ -761,8 +650,6 @@ mod tests {
         assert_eq!(natural(&mut document, image), (4.0, 4.0));
     }
 
-    /// Swapping one source for another blanks the element until the new one
-    /// loads, rather than fitting the new bitmap to the departed one's size.
     #[test]
     fn swapping_the_source_drops_the_departed_bitmaps_size() {
         let (mut document, sources) = images();
@@ -779,7 +666,6 @@ mod tests {
         );
         assert_eq!(presented(&document, image).as_deref(), Some(OTHER_SRC));
 
-        // With a placeholder ready, that is what the blanked element shows.
         sources.set(
             &mut document,
             image,
@@ -790,9 +676,6 @@ mod tests {
         assert_eq!(natural(&mut document, image), (4.0, 4.0));
     }
 
-    /// A source that settled before this element named it is reported by
-    /// nothing else ever again — one URL is reported once — so the write is
-    /// where its outcome and its size both arrive.
     #[test]
     fn naming_a_settled_source_reports_its_outcome_and_sizes_the_element() {
         let (mut document, sources) = images();
@@ -831,8 +714,6 @@ mod tests {
         assert_eq!(natural(&mut document, third), (0.0, 0.0));
     }
 
-    /// Rewriting the source that is already there changes nothing, and
-    /// reports nothing — a second `load` for a picture that never moved.
     #[test]
     fn rewriting_the_same_source_reports_nothing() {
         let (mut document, sources) = images();
@@ -846,8 +727,6 @@ mod tests {
         );
     }
 
-    /// Only the elements the source belongs to are reported: a placeholder is
-    /// an interim picture the page did not ask about.
     #[test]
     fn a_report_names_only_the_elements_whose_own_source_settled() {
         let (mut document, sources) = images();
@@ -883,9 +762,6 @@ mod tests {
             "a placeholder failing is nobody's event either"
         );
 
-        // Nor at the write, which is the other place an outcome is produced:
-        // the role decides, so a settled URL named as a placeholder answers
-        // with nothing.
         let second = element(&mut document);
         assert_eq!(
             sources.set(
@@ -899,8 +775,6 @@ mod tests {
         );
     }
 
-    /// A failure names its elements: an `error` is owed to exactly the
-    /// elements the source belongs to, once.
     #[test]
     fn a_failed_source_reports_its_elements() {
         let (mut document, sources) = images();
@@ -917,8 +791,6 @@ mod tests {
         );
     }
 
-    /// A zero axis is a failure, and is owed as one rather than as the load
-    /// the host wrote.
     #[test]
     fn a_zero_axis_load_is_owed_as_a_failure() {
         let (mut document, sources) = images();
@@ -930,9 +802,6 @@ mod tests {
         );
     }
 
-    /// One element may name one URL in both roles, so a holder is the pair
-    /// and not the element: clearing one role must leave the other standing,
-    /// and only the source role owes an outcome.
     #[test]
     fn one_url_in_both_roles_is_two_holders() {
         let (mut document, sources) = images();
@@ -954,9 +823,6 @@ mod tests {
         assert_eq!(natural(&mut document, image), (40.0, 20.0));
     }
 
-    /// Taking the last source off an element makes it an ordinary one again,
-    /// natural size and all: there is no bitmap left for the box to be
-    /// sized from or to hide its children for.
     #[test]
     fn taking_the_last_source_off_an_element_unreplaces_it() {
         let (mut document, sources) = images();
@@ -988,9 +854,6 @@ mod tests {
         assert_eq!(sources.source(image, ImageRole::Placeholder), None);
     }
 
-    /// Regression: a load completing after its element was freed must not
-    /// reach the freed id. A free drops the element's record, both of its
-    /// sources included, so the report owes it nothing and sizes nothing.
     #[test]
     fn a_freed_element_owes_nothing() {
         let (mut document, sources) = images();
@@ -1015,9 +878,6 @@ mod tests {
         );
     }
 
-    /// And the record is per element, not per source: one element going
-    /// away leaves the others naming the same URL, so the load still sizes
-    /// them and still owes them their `load`.
     #[test]
     fn freeing_one_element_leaves_a_sibling_on_the_same_source() {
         let (mut document, sources) = images();

@@ -21,53 +21,30 @@ use crate::style::TextBrush;
 use crate::text::paragraph::content::{BoxAt, SourceMap, StyledRange};
 use crate::text::paragraph::shape::{self, NaturalLine, Objects};
 
-/// How many units the dots-form ellipsis backs the maxline cut off, and how
-/// many dots it appends.
 const ELLIPSIS_UNITS: u32 = 3;
 
-/// A cut decided from the line's own overflow rather than from a clamp.
-///
-/// css-ui `text-overflow` in its own right: a `white-space: nowrap` line
-/// wider than its measure is cut at the clip edge. Its width arithmetic needs
-/// a shaper — the marker's advance is not known until it is shaped — so the
-/// decision is taken in [`super::TextBlock`] and handed here as a third
-/// candidate beside the two clamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text::block) struct OverflowCut {
     pub(in crate::text::block) unit: u32,
-    /// Whether the inline-truncation content is laid in at this cut.
     pub(in crate::text::block) truncation_visible: bool,
 }
 
-/// One decided truncation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text::block) struct CutPlan {
     pub(in crate::text::block) cut_byte: u32,
     pub(in crate::text::block) cut_unit: u32,
-    /// Index of the line the cut falls in; lines past it are dropped.
     pub(in crate::text::block) cut_line: u32,
     pub(in crate::text::block) tail: Tail,
     pub(in crate::text::block) truncation_visible: bool,
 }
 
-/// What follows the cut in the rebuilt display layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::text::block) enum Tail {
     None,
-    /// A literal run of `count` U+002E dots styled as run item `item`.
-    Dots {
-        count: u32,
-        item: u32,
-    },
-    /// The inline-truncation content.
+    Dots { count: u32, item: u32 },
     Truncation,
 }
 
-/// Decides whether and where to cut. `truncation_width` is present exactly
-/// when maxline overflowed and truncation content exists; `has_truncation`
-/// says whether truncation content exists at all (it suppresses the dots
-/// marker even on a pure maxlength cut). `overflow_cut` is the clip-edge
-/// candidate a nowrap line already decided.
 #[allow(clippy::too_many_arguments, reason = "one decision reads both spaces")]
 pub(in crate::text::block) fn plan(
     natural: &Layout<TextBrush>,
@@ -92,9 +69,6 @@ pub(in crate::text::block) fn plan(
         let line_index = natural_lines.len() - 1;
         Some(if let Some(truncation_width) = truncation_width {
             if width.is_some_and(|container| truncation_width >= container) {
-                // Too wide for the container: hide the truncation content and
-                // cut at line start. No dots either — the web's clipped
-                // marker is suppressed whenever inline-truncation exists.
                 last.start_unit
             } else {
                 truncation_visible = true;
@@ -118,7 +92,6 @@ pub(in crate::text::block) fn plan(
                 last.end_unit - ELLIPSIS_UNITS
             }
         } else {
-            // Clip: cut at the line end, nothing backed off, nothing appended.
             last.end_unit
         })
     } else {
@@ -146,15 +119,8 @@ pub(in crate::text::block) fn plan(
     let tail = if truncation_visible {
         Tail::Truncation
     } else if has_truncation {
-        // Truncation content suppresses the dots marker whether or not it is
-        // shown: the web disables its clipped-marker pseudo-element whenever
-        // an inline-truncation child exists, and the in-place dots path
-        // requires that none does.
         Tail::None
     } else if style.overflow == TextOverflow::Ellipsis {
-        // The dot count the maxline branch decided applies to whichever
-        // candidate wins — the web computes ellipsisLength before taking the
-        // minimum and appends it regardless.
         let count = maxline_dots.unwrap_or(ELLIPSIS_UNITS);
         match (count, dots_item(ranges, cut_byte)) {
             (0, _) | (_, None) => Tail::None,
@@ -167,10 +133,6 @@ pub(in crate::text::block) fn plan(
     let cut_line = natural_lines
         .iter()
         .position(|line| {
-            // A markerless maxlength cut at a line boundary ends the
-            // preceding line, without reserving an empty next line. Keep the
-            // maxline branch's line when it hides an oversized custom tail;
-            // that branch deliberately retains the cut line's geometry.
             if tail == Tail::None && maxchars_cut == Some(cut_unit) {
                 line.consumed_end >= cut_unit
             } else {
@@ -188,14 +150,6 @@ pub(in crate::text::block) fn plan(
     })
 }
 
-/// Backs the cut off from the line's visible end until the removed atoms free
-/// at least `needed` width — the web's fitting loop, at cluster granularity.
-/// Trailing collapsed whitespace is outside the visible range and never
-/// counts as freed width. The web's loop starts from an empty measurement at
-/// the line end and decrements before its first width check, so a cut one
-/// unit before the end is never considered; at least two atoms are removed
-/// before the width can stop the walk. Lands on the line start when even the
-/// whole line does not free enough.
 pub(in crate::text::block) fn retreat_for_width(
     natural: &Layout<TextBrush>,
     line_index: usize,
@@ -219,8 +173,6 @@ pub(in crate::text::block) fn retreat_for_width(
     cut
 }
 
-/// One line's units and their advances, in source order — text clusters and
-/// inline boxes alike, bounded above by the line's visible end.
 fn line_atoms(
     natural: &Layout<TextBrush>,
     line_index: usize,
@@ -235,7 +187,6 @@ fn line_atoms(
     for run in parley_line.runs() {
         for cluster in run.clusters() {
             let start = cluster.text_range().start;
-            // A box's object is a cluster too; its box is read below.
             if objects.slot_at(start).is_some() {
                 continue;
             }
@@ -245,7 +196,6 @@ fn line_atoms(
             }
         }
     }
-    // The lines before it are read for which boxes they hold, not walked.
     let mut line_boxes = shape::line_boxes(natural);
     for earlier in natural.lines().take(line_index) {
         let _ = line_boxes.on(&earlier);
@@ -261,11 +211,6 @@ fn line_atoms(
     atoms
 }
 
-/// The first unit of the line that does not fit within `limit`, measured from
-/// the line's start — the exclusive end of the widest prefix that does fit.
-///
-/// The line's visible end when everything fits, which is the caller's signal
-/// that there is nothing to cut.
 pub(in crate::text::block) fn clip_boundary(
     natural: &Layout<TextBrush>,
     line_index: usize,
@@ -286,9 +231,6 @@ pub(in crate::text::block) fn clip_boundary(
     line.end_unit
 }
 
-/// The run whose style the dots inherit: the one containing the last visible
-/// byte, with the first run as the fallback for a cut at the very start.
-/// `None` — a paragraph with no text runs at all — suppresses the dots.
 pub(in crate::text::block) fn dots_item(ranges: &[StyledRange], cut_byte: u32) -> Option<u32> {
     if cut_byte > 0
         && let Some(range) = ranges
