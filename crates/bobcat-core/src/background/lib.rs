@@ -142,7 +142,12 @@ pub(crate) enum WorkerMessage {
         enqueued: Option<ClockInstant>,
     },
     Terminate,
+    #[cfg(feature = "devtools")]
+    Devtools(Box<crate::devtools::worker::WorkerDevtools>),
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<WorkerMessage>() <= 56);
 
 impl WorkerMessage {
     #[cfg(test)]

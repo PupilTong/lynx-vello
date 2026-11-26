@@ -250,3 +250,17 @@ CI splits its two longest jobs across runners, and
 Walltime benchmarks stay one job on the self-hosted runner. Formatting, clippy,
 the stylo fork's Lynx tests and doctests run in the `checks` job, which builds
 without coverage instrumentation.
+
+No workspace member enables the `devtools` features of `bobcat-core`,
+`terminus` and `quickjs-rust-bridge`, so neither shard builds them. The
+`checks` job lints the three crates with those features in one `cargo clippy`
+invocation, and runs only the feature's own tests in two `cargo test`
+invocations that select the same packages and features, so the second builds
+nothing the first did not. The first, `--lib --test gpu_pixels -- devtools
+highlight`, runs the unit tests whose path contains `devtools` or `highlight`
+(`bobcat-core`'s `devtools::` modules, `terminus`'s `paint::highlight` tests)
+and the highlight case of `terminus`'s `tests/gpu_pixels.rs`; the second,
+`--test devtools --test matched_styles`, runs `quickjs-rust-bridge`'s
+`tests/devtools.rs` and `terminus`'s `tests/matched_styles.rs` in full. Locally:
+`cargo test -p bobcat-core --features devtools devtools` runs `bobcat-core`'s
+devtools tests alone.

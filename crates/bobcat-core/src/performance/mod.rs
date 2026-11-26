@@ -780,6 +780,8 @@ const fn lynx_task_type(kind: JobKind, thread: JsThreadName) -> Option<&'static 
         JobKind::Command | JobKind::Future | JobKind::FontFace | JobKind::Memory => {
             "native_func_task"
         }
+        #[cfg(feature = "devtools")]
+        JobKind::Devtools => "native_func_task",
         JobKind::WorkerEvent => "update_data_by_js_task",
         JobKind::AnimationFrame => "animation_task",
         JobKind::Settle | JobKind::Release => return None,

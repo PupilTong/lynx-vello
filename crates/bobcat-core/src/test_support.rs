@@ -264,6 +264,8 @@ pub(crate) struct TestViewSpec {
     target: TestTarget,
     width: f32,
     height: f32,
+    #[cfg(feature = "devtools")]
+    devtools: bool,
 }
 
 struct EchoModule(&'static str, Option<crate::native_module::NativeModuleEsm>);
@@ -307,7 +309,15 @@ impl TestViewSpec {
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
+            #[cfg(feature = "devtools")]
+            devtools: false,
         }
+    }
+
+    #[cfg(feature = "devtools")]
+    pub(crate) const fn with_devtools(mut self) -> Self {
+        self.devtools = true;
+        self
     }
 
     pub(crate) fn with_background_entry(mut self, source: &str) -> Self {
@@ -450,6 +460,8 @@ impl TestViewSpec {
             target,
             width,
             height,
+            #[cfg(feature = "devtools")]
+            devtools,
         } = self;
         let (default_font_family, registered) = default_font
             .map_or((None, Vec::new()), |(family, blob)| {
@@ -462,6 +474,8 @@ impl TestViewSpec {
             locale,
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             background_entry: background.as_ref().map(|_| BACKGROUND_ENTRY.to_owned()),
+            #[cfg(feature = "devtools")]
+            devtools,
             ..ViewSources::new(
                 BASE,
                 ENTRY,

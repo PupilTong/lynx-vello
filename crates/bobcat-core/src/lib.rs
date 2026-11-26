@@ -44,6 +44,8 @@ pub mod bench_support;
 mod canvas;
 mod clock;
 mod code_cache;
+#[cfg(feature = "devtools")]
+mod devtools;
 mod esm;
 mod fetch;
 mod future;
@@ -91,6 +93,8 @@ pub mod editing {
 }
 
 pub use code_cache::{MIN_CACHED_SOURCE_BYTES, script_engine_id};
+#[cfg(feature = "devtools")]
+pub use devtools::{DevtoolsSession, DevtoolsSink};
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::{PageConfig, document_tag};
 pub use native_module::{

@@ -218,6 +218,8 @@ fn report_thread_trap(
 }
 
 struct WorkerRealm {
+    #[cfg(feature = "devtools")]
+    devtools: Option<crate::devtools::worker::WorkerSession>,
     core: RealmCore,
     scope_installed: Rc<Cell<bool>>,
     closing: Rc<Cell<bool>>,
@@ -309,6 +311,8 @@ impl Worker {
                     },
                 )
                 .map(|(core, (flags, performance_observed))| WorkerRealm {
+                    #[cfg(feature = "devtools")]
+                    devtools: None,
                     core,
                     scope_installed: flags.scope_installed,
                     closing: flags.closing,
@@ -513,11 +517,17 @@ async fn consume_messages(
 ) {
     let mut held: Option<Vec<(HostValue, Option<ClockInstant>)>> = Some(Vec::new());
     let mut performance_held: Option<Option<ClockInstant>> = None;
+    #[cfg(feature = "devtools")]
+    let mut devtools_held = Vec::new();
     let mut ready = worker.boot_finished.subscribe();
     loop {
         if let Some(queued) = held.take_if(|_| *ready.borrow_and_update()) {
             for (data, enqueued) in queued {
                 deliver_post(&worker, data, enqueued);
+            }
+            #[cfg(feature = "devtools")]
+            for message in devtools_held.drain(..) {
+                deliver_devtools(&worker, message);
             }
             if let Some(enqueued) = performance_held.take() {
                 deliver_performance(&worker, enqueued);
@@ -545,6 +555,12 @@ async fn consume_messages(
                 Some(WorkerMessage::ModuleCallback { call, index, arguments, enqueued }) => {
                     deliver_module_callback(&worker, call, index, arguments, enqueued);
                 }
+                #[cfg(feature = "devtools")]
+                Some(WorkerMessage::Devtools(message)) => if held.is_some() {
+                    devtools_held.push(message);
+                } else {
+                    deliver_devtools(&worker, message);
+                },
             },
             changed = ready.changed(), if held.is_some() => if changed.is_err() { return; },
         }
@@ -583,6 +599,13 @@ fn deliver_memory_sample(worker: &Rc<Worker>, enqueued: Option<ClockInstant>) {
         }
         Some(())
     }));
+}
+
+#[cfg(feature = "devtools")]
+fn deliver_devtools(worker: &Rc<Worker>, message: Box<crate::devtools::worker::WorkerDevtools>) {
+    owner::queue(worker, JobKind::Devtools, move |realm, _| {
+        crate::devtools::worker::handle(&mut realm.devtools, *message);
+    });
 }
 
 fn deliver_post(worker: &Rc<Worker>, data: HostValue, enqueued: Option<ClockInstant>) {

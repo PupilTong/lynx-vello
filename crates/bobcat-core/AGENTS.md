@@ -87,6 +87,10 @@ the main-thread flush binding — and
   (`tree/lynx_svg.rs`, `tree/text_field.rs`, `tree/tag_map.rs`) and the `video`
   element (`tree/video.rs`), which `bobcat-core` owns and `terminus` does
   not.
+- [Devtools](docs/devtools.md) — the `devtools` cargo feature's CDP backend
+  (`devtools/`, `main/runtime/devtools.rs`): the session and sink, message
+  routing to `bobcat-main` and to workers, the `Target` domain, the hook sites
+  and their cost, the lifetime rules, and what is not done.
 - [The Canvas 2D API](docs/canvas.md) — the canvas members of
   `bobcat-internal:host` in every realm kind, called by the built-in
   modules and an embedder's native-module ES module (`lynx:<name>`); the
