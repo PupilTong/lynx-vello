@@ -149,7 +149,7 @@ impl<T: Sync> Document<T> {
         })
     }
 
-    fn quirks_mode(&self) -> QuirksMode {
+    pub(crate) fn quirks_mode(&self) -> QuirksMode {
         TDocument::quirks_mode(&self.root_node())
     }
 

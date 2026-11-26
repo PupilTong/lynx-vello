@@ -92,7 +92,7 @@ impl RuleGuards<'_> {
         }
     }
 
-    fn for_origin(&self, origin: Origin) -> &SharedRwLockReadGuard<'_> {
+    pub(crate) fn for_origin(&self, origin: Origin) -> &SharedRwLockReadGuard<'_> {
         match origin {
             Origin::UserAgent | Origin::User => &self.user_agent,
             Origin::Author => &self.author,

@@ -98,6 +98,10 @@ fn accepts_position_try(physical: LonghandId) -> bool {
     )
 }
 
+pub(crate) fn is_author_facing(longhand: LonghandId) -> bool {
+    PropertyId::parse_enabled_for_all_content(longhand.name()).is_ok()
+}
+
 impl<T> Document<T> {
     #[must_use]
     pub fn computed_style_text(
@@ -140,10 +144,7 @@ impl<T> Document<T> {
 
         let mut longhands: Vec<(String, String)> = NonCustomPropertyId::iter()
             .filter_map(NonCustomPropertyId::as_longhand)
-            .filter(|longhand| {
-                let name = longhand.name();
-                PropertyId::parse_enabled_for_all_content(name).is_ok()
-            })
+            .filter(|longhand| is_author_facing(*longhand))
             .map(|longhand| {
                 (
                     longhand.name().to_owned(),

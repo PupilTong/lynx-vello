@@ -815,6 +815,17 @@ fn walk_within<T>(
         close_scope(sink, scratch, painting);
     }
     pop_clips_to(sink, scratch, 0);
+    #[cfg(feature = "devtools")]
+    if let Some(highlight) = &document.node_highlight {
+        crate::paint::highlight::paint(
+            sink,
+            &mut scratch.paths,
+            document,
+            frame,
+            painting.scale,
+            highlight,
+        );
+    }
 }
 
 fn cull_rect(viewport: euclid::Size2D<f32, stylo_traits::CSSPixel>, ratio: f64) -> Rect {
