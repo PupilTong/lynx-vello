@@ -9,8 +9,9 @@
 //! mutation preconditions before entering `terminus`, returning misuse as a
 //! JavaScript error.
 //!
-//! A Lynx tag is the document element's tag, with one exception: the Lynx
-//! `svg` is the document element `lynx-svg`, mapped at creation, at the tag
+//! A Lynx tag is the document element's tag, with three exceptions: the
+//! Lynx `svg` is the document element `lynx-svg`, and the Lynx `input` and
+//! `textarea` are `x-input` and `x-textarea`, mapped at creation, at the tag
 //! read and in a `StyleInfo` type selector ([`tag_map`]).
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes

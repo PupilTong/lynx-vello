@@ -172,9 +172,10 @@ box block, `is_frame`, `nested_page`, `reset_frame` and `frame_depth`; `src`, `d
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
 since a blur view is a container and nothing else), and `tree::text_field`
-(`x-input`/`x-textarea` and their `-ng` aliases, the four Lynx tags only —
-the HTML names `input`/`textarea` are not defined, an HTML-named element
-following HTML (user ruling 2026-10-19) — `docs/editable-text-design.md`
+(`x-input`/`x-textarea` and their `-ng` aliases; the Lynx tags
+`input`/`textarea` reach `x-input`/`x-textarea` through `tree::tag_map` (user
+ruling 2026-11-26), and the document tags `input`/`textarea` define no
+field — `docs/editable-text-design.md`
 E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
 `x-input` an engine-sheet `display: block` `div`, its own inline formatting
 context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
@@ -275,7 +276,9 @@ sheet's (`video { object-fit: contain }` and two attribute rules), and
 (`docs/svg-lynx-component-design.md`): one picture, never a subtree, as
 web-core's `x-svg` and native draw it. Its document tag is `lynx-svg`, not
 `svg`, which is left for the SVG element (ruled 2026-11-23). `tree::tag_map`
-holds the one mapping, `svg` to `lynx-svg`, read where web-core reads its tag
+holds the mappings — `svg` to `lynx-svg`, and `input` and `textarea` to the
+`tree::text_field` fields `x-input` and `x-textarea` (user ruling
+2026-11-26) — read where web-core reads its tag
 map (`web-core/src/constants.rs:25-55`): the host member `createElement`
 (every `__Create*`) creates `document_tag(tag)`; the host member `tagName`
 (`__GetTag`, a `SelectorQuery`'s `tag` field) answers `lynx_tag(tag)`; and
@@ -293,7 +296,10 @@ supplied as text (a fetched `.css`); a legacy JSON custom section's
 (`:not(svg)`), which both encoders carry as the pseudo-class's text. The
 table is in `bobcat-core`, not `bobcat-source`, because `bobcat-source`
 depends on `bobcat-core` and not the reverse. A page that creates `lynx-svg`
-itself gets the same component, and `__GetTag` answers `svg` for it. The UA
+itself gets the same component, and `__GetTag` answers `svg` for it; one
+that creates `x-input` or `x-textarea` reads `input` or `textarea` (web-core
+answers `x-input-ng` for an `x-input`, `docs/tracking/deviations.md`), and
+`x-input-ng`/`x-textarea-ng` are not mapped and read themselves. The UA
 rules, `raw_text`'s list of Lynx tags and `tree::is_svg` name `lynx-svg`. `src` is its one source (the host
 fetches the document and reports its bytes); `content` goes to
 `Document::insert_image_document` as its bytes, filed under a synthetic

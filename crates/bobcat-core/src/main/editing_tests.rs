@@ -932,10 +932,9 @@ fn a_readonly_x_input_is_not_focused_by_a_tap() {
 
 /// The `-ng` aliases are the same fields, and an `x-textarea-ng` keeps its
 /// value within `maxlines` through the runtime: Enter on the second line is
-/// taken back and fires no `input`. The HTML names `input` and `textarea`
-/// build no field, so a tap there focuses nothing.
+/// taken back and fires no `input`.
 #[test]
-fn the_ng_aliases_are_fields_and_the_html_names_are_not() {
+fn the_ng_aliases_are_fields() {
     let mut engine = field_engine("x-textarea-ng", &[("maxlines", "2")], "");
     let mut states = States::default();
     engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
@@ -969,17 +968,63 @@ fn the_ng_aliases_are_fields_and_the_html_names_are_not() {
         ]
         .join("|"),
     );
+}
 
-    for tag in ["input", "textarea"] {
-        let mut engine = field_engine(tag, &[], "");
+/// The Lynx tags `input` and `textarea` create an `x-input` and an
+/// `x-textarea` (`tree::tag_map`, user ruling 2026-11-26): the element has
+/// the field's shadow root, a tap focuses its editor, a typed key reaches
+/// it and fires `input`, and `__GetTag` of the element, read in the
+/// `confirm` listener, answers the Lynx tag. The textarea confirms on Enter
+/// with `confirm-enter`, after the Enter's `input`.
+#[test]
+fn the_lynx_tags_input_and_textarea_are_the_fields() {
+    let input = |value: &str, at: u32| {
+        format!(
+            r#"input:{{"value":"{value}","textLength":{at},"cursor":{at},"isComposing":false,"selectionStart":{at},"selectionEnd":{at}}}"#
+        )
+    };
+    for (tag, document_tag, attributes, log) in [
+        (
+            "input",
+            "x-input",
+            &[][..],
+            vec![input("x", 1), r#"confirm:{"value":"x"}"#.to_owned()],
+        ),
+        (
+            "textarea",
+            "x-textarea",
+            &[("confirm-enter", "")][..],
+            vec![
+                input("x", 1),
+                input("x\\n", 2),
+                r#"confirm:{"value":"x\n"}"#.to_owned(),
+            ],
+        ),
+    ] {
+        let mut engine = field_engine(tag, attributes, "note('tag:' + __GetTag(field));");
+        let mut states = States::default();
         engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
         engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
+        let focused = states.wait(&mut engine, "focusing the editor", |state| {
+            state.host.is_some()
+        });
+        let (element_tag, shadow) = engine
+            .probe_document(|tree| {
+                let host = tree.get(node_id(HOST))?;
+                Some((host.tag_name()?.to_owned(), tree.shadow_root(node_id(HOST))))
+            })
+            .flatten()
+            .expect("the view answers with the element");
+        assert_eq!(element_tag, document_tag);
+        assert!(shadow.is_some(), "{tag}: the field's shadow root");
+        assert_ne!(focused.host, Some(node_id(HOST)), "{tag}: the editor");
         engine.dispatch_input(key("x"));
-        let (shadow, focused) = engine
-            .probe_document(|tree| (tree.shadow_root(node_id(HOST)), tree.focused()))
-            .expect("the view answers");
-        assert_eq!(shadow, None, "{tag}");
-        assert_eq!(focused, None, "{tag}");
+        states.wait(&mut engine, "with x", |state| state.value == "x");
+        engine.dispatch_input(enter());
+        let mut expected = vec![r#"focus:{"value":""}"#.to_owned()];
+        expected.extend(log);
+        expected.push(format!("tag:{tag}"));
+        wait_for_log(&mut engine, &expected.join("|"));
     }
 }
 

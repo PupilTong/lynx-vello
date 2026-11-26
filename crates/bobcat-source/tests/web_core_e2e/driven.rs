@@ -314,7 +314,7 @@ driven! {
         "folded-to-limit": [Tap(141.5, 450.0)],
     ],
     // `input.press('Enter')`, then `input.fill('foobar')`. The card's `<input>` is
-    // `<x-input>` here (vendored rewrite, see the fixtures README).
+    // the document's `x-input` (`bobcat-core`'s `tree/tag_map.rs`).
     "basic-element-input-bindinput" => [
         "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar")],
     ],

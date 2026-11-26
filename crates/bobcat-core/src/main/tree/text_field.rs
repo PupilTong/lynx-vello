@@ -4,13 +4,15 @@
 //! (`web-core/ts/constants.ts:105,107`), as Lynx elements over
 //! `terminus::link::editing` (`docs/editable-text-design.md`, E5).
 //!
-//! **Lynx tags only** (user ruling 2026-10-19). `input` and `textarea` are
-//! HTML element names, and an element with an HTML name follows HTML, which
-//! this component does not implement; so neither is defined here, though
-//! web-core maps both to its fields (`constants.ts:104,106`) and native Lynx
-//! registers its fields under them (`LynxUIInputAutoRegistry.m`,
-//! `LynxUITextAreaAutoRegistry.m`). An HTML `<input>`/`<textarea>` would be
-//! a separate element with HTML's semantics, not built.
+//! **The Lynx tags `input` and `textarea` are these fields** (user ruling
+//! 2026-11-26, reversing the ruling of 2026-10-19 that kept both as HTML
+//! names). They are mapped to the document tags `x-input` and `x-textarea`,
+//! as web-core's tag map maps them (`constants.ts:104,106`), so a page's
+//! `__CreateElement('input')` or `__CreateElement('textarea')` builds the
+//! field. The mapping is [`super::tag_map`]'s; the document tags `input` and
+//! `textarea` themselves define no field, and HTML's own form controls are
+//! not built. Native Lynx registers its fields under the same names
+//! (`LynxUIInputAutoRegistry.m`, `LynxUITextAreaAutoRegistry.m`).
 //!
 //! A Lynx-only component with no W3C equivalent, so `AGENTS.md`'s standards
 //! policy puts it in the second bucket; web-core's structure and behaviour
@@ -203,11 +205,13 @@ use super::text::TEXT_TAG;
 use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
 use crate::main::record::write_record_field;
 
-/// The single-line tags: web-core's element name and its `-ng` alias. Not
-/// the HTML name `input` (module documentation).
+/// The single-line tags: web-core's element name and its `-ng` alias. The
+/// Lynx tag `input` reaches the first through [`super::tag_map`]; the
+/// document tag `input` defines no field (module documentation).
 pub(super) const INPUT_TAGS: [&str; 2] = ["x-input", "x-input-ng"];
-/// The multi-line tags: web-core's element name and its `-ng` alias. Not
-/// the HTML name `textarea`.
+/// The multi-line tags: web-core's element name and its `-ng` alias. The
+/// Lynx tag `textarea` reaches the first through [`super::tag_map`]; the
+/// document tag `textarea` defines no field.
 pub(super) const TEXTAREA_TAGS: [&str; 2] = ["x-textarea", "x-textarea-ng"];
 
 const VALUE: &str = "value";
@@ -1502,10 +1506,12 @@ mod tests {
         }
     }
 
-    /// `input` and `textarea` are HTML names: no field is built under them
-    /// (user ruling 2026-10-19).
+    /// The document tags `input` and `textarea` define no field. `make`
+    /// creates document elements directly, past the Lynx tag map: the Lynx
+    /// tags `input` and `textarea` reach `x-input` and `x-textarea` through
+    /// `super::tag_map` (user ruling 2026-11-26).
     #[test]
-    fn the_html_names_are_not_text_fields() {
+    fn the_document_tags_input_and_textarea_are_not_text_fields() {
         for tag in ["input", "textarea"] {
             let (document, _, element) = make(tag, &[("placeholder", "p")]);
             assert_eq!(document.shadow_root(element), None, "{tag}");

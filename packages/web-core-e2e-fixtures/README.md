@@ -21,10 +21,10 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with ten
+The cards, their CSS and their assets are otherwise upstream's, with nine
 rewrites applied to the vendored text by user ruling (the first two on
 2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
-2026-10-16, the next four on 2026-10-20, the last on 2026-10-24):
+2026-10-16, the next three on 2026-10-20, the last on 2026-10-24):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -59,12 +59,6 @@ rewrites applied to the vendored text by user ruling (the first two on
   with `align-items: flex-start`, so the yellow box is as wide as the nested
   card's widest line.
 
-- **`<input>` becomes `<x-input>` in `basic-element-input-bindinput`** (1
-  file). web-core maps the JSX tag `input` to `x-input`; here `input` is an
-  HTML element name, and HTML's `<input>` is not a text field
-  (`docs/tracking/deviations.md`), so upstream's spelling gave the card no
-  field to fill.
-
 - **`basic-element-x-textarea-focus`'s block is 20% of the page, not 90%**
   (1 file). At 90% of the 1000px page the block was 900px tall and the
   three textareas the card is about lay below the viewport.
@@ -91,7 +85,7 @@ rewrites applied to the vendored text by user ruling (the first two on
   cards rendered differently there. Hiragino Sans GB is in
   `/System/Library/Fonts` on every Mac; Latin text keeps the generic family.
 
-All ten are recorded here rather than absorbed silently, because a re-sync
+All nine are recorded here rather than absorbed silently, because a re-sync
 from upstream will bring the original text back.
 
 ## Building

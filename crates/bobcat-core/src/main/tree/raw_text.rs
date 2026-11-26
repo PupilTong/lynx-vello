@@ -28,11 +28,11 @@ use std::sync::LazyLock;
 /// web-core's tag-map keys (`lynx-stack/packages/web-platform/web-core/ts/
 /// constants.ts:93-123`), and web-core's element names, which compiled cards
 /// write verbatim and this engine defines (`x-swiper`, `x-refresh-view`, …;
-/// `lynx-stack/packages/web-platform/web-elements/src/elements/`). Except
-/// `input` and `textarea`: HTML element names, which follow HTML here (user
-/// ruling 2026-10-19), so the text fields are `x-input` and `x-textarea`
-/// only (`super::text_field`). Every name here is a document tag, so Lynx's
-/// `svg` is listed as `lynx-svg`, the element it creates (`super::tag_map`).
+/// `lynx-stack/packages/web-platform/web-elements/src/elements/`). Every
+/// name here is a document tag, so Lynx's `svg` is listed as `lynx-svg` and
+/// Lynx's `input` and `textarea` as `x-input` and `x-textarea`, the elements
+/// they create (`super::tag_map`; `input` and `textarea` by user ruling
+/// 2026-11-26).
 const LYNX_TAGS: &[&str] = &[
     "blur-view",
     "component",

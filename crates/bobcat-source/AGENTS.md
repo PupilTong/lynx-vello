@@ -30,7 +30,8 @@ deserialized into an owned tree on that path. The lowering (`lower_style.rs`)
 writes a `Type` selector component through `bobcat_core::document_tag`, the
 one Lynx-to-document tag table (`bobcat-core`'s `tree/tag_map.rs`, kept there
 because this crate depends on `bobcat-core`): the Lynx `svg` is written as
-`lynx-svg`, as web-core's decoder writes `x-svg`. Every `StyleInfo` reaches it
+`lynx-svg`, as web-core's decoder writes `x-svg`, and `input` and `textarea`
+as `x-input` and `x-textarea`, as web-core's decoder writes them. Every `StyleInfo` reaches it
 as components, a `.lynx.bundle`'s CSS included (`native/style.rs`); selector
 text — a legacy JSON section's `selectorText`, a pseudo-class's argument —
 is not mapped. `PageSource::defer` scans only
