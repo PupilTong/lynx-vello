@@ -9,7 +9,9 @@ touching the crate.
 
 ## Tree, arenas and identity
 
-It owns a fixed-address boxed `TreeArenas<T>` containing one `Slab<Node<T>>`
+It owns a fixed-address `TreeArenas<T>`, held through a raw pointer
+(`ArenaBox`) that every node carries a copy of and every borrow of the arena
+set is derived from, containing one `Slab<Node<T>>`
 (slot zero is the real DOM Document node and carries its node-visible style
 context; later slots are element/text nodes). The embedder's `T` payload rides
 in its node (`None` for the nodes nobody hands out), and so do the flags that
@@ -69,10 +71,28 @@ document node's child list is structurally immutable after construction and no
 "empty document" path exists in flush, layout, visual or paint. Computed styles
 remain with the primary nodes; layout/text state does not.
 
-The crate's entire `unsafe` surface is two blocks — the arena backpointer deref
-and the `TElement::ensure_data` contract call — plus the `unsafe fn` signatures
-Stylo's traits mandate (all bodies safe). Both blocks carry a `SAFETY` comment
-stating the invariant they rest on, and a crate-local
+Every node carries the arena set's address (`Node::arenas`), because Stylo's
+traversal hands out a `&Node` and nothing else and walks the tree from it.
+Under Rust's aliasing model (Stacked Borrows and Tree Borrows alike) an address
+stays usable only while the borrow it was derived from does: one taken from a
+`&mut TreeArenas` is invalidated by the next write through a different
+`&mut TreeArenas`, and a `Box` holding the arena set is retagged whenever the
+`Document` moves. So `ArenaBox` (`tree/arena.rs`) takes the address once, from
+the allocation itself (`Box::leak`), keeps it as a `NonNull`, which no move
+retags, and frees it in `Drop`. Each node stores a copy (`ArenaPtr`, which only
+`ArenaBox` makes), and every `&TreeArenas` and `&mut TreeArenas` the document
+uses is derived from that same pointer through `Deref`/`DerefMut`, so writing
+through one leaves the nodes' copies usable. The `NonNull` is neither `Send`
+nor `Sync`, which keeps `Node` and `Document` on the thread that made them.
+Miri under Tree Borrows checks it (`cargo miri test -p terminus --lib --
+tree::`); vendored stylo's `servo_arc` currently stops every test that flushes
+styles before the rest of that test runs.
+
+The crate's entire `unsafe` surface is five blocks — `ArenaBox`'s shared lend,
+exclusive lend and free, the node backpointer deref through its copy, and the
+`TElement::ensure_data` contract call — plus the `unsafe fn` signatures Stylo's
+traits mandate (all bodies safe). Every block carries a `SAFETY` comment
+stating the invariant it rests on, and a crate-local
 `#![warn(clippy::undocumented_unsafe_blocks)]` keeps that true.
 
 The generic `T` payload remains associated with each element/text node, held
