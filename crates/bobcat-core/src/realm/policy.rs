@@ -48,6 +48,9 @@
 //! - [`Scene::Frame`]: the realm's animation-frame callbacks, on the painter's vsync.
 //! - [`Scene::HostCall`]: a call the host made into the realm. MTS: a page update, and a native
 //!   module's answer to a call the realm made. Worker: a native module's answer.
+//! - `Scene::Devtools`, with the `devtools` feature only: what a devtools request's script left
+//!   behind, returned by the realm checkpoint after it, in `serve_devtools` for the page and in
+//!   `deliver_devtools` for a worker.
 //! - [`Scene::ShadowRealm`]: a rejection a `ShadowRealm` child of the realm left unhandled, which
 //!   the epilogue reads once it has serviced the children — and one the realm itself left beside
 //!   them, read in the same step for a realm that has children, because a child's timer or module
@@ -105,6 +108,8 @@ pub(crate) enum Scene {
     Frame,
     HostCall,
     ShadowRealm,
+    #[cfg(feature = "devtools")]
+    Devtools,
 }
 
 pub(crate) struct Row<E> {
@@ -127,6 +132,12 @@ impl<E> Row<E> {
 }
 
 pub(crate) fn report<O: RealmOwner>(owner: &Rc<O>, scene: Scene, error: ScriptError) {
+    #[cfg(feature = "devtools")]
+    if let Some(console) = owner.console()
+        && console.is_on()
+    {
+        console.exception(&error);
+    }
     let row = O::row(scene);
     let event = row.event_for(error);
     if row.ends {
@@ -141,6 +152,12 @@ pub(crate) fn main_thread(scene: Scene) -> Row<EngineEvent> {
         Scene::Open => (|error| EngineEvent::StartupFailed(error.into()), true, None),
         Scene::Boot | Scene::Frame | Scene::HostCall => (EngineEvent::ScriptRunError, false, None),
         Scene::ShadowRealm => (EngineEvent::ScriptRunError, false, Some("in a ShadowRealm")),
+        #[cfg(feature = "devtools")]
+        Scene::Devtools => (
+            EngineEvent::ScriptRunError,
+            false,
+            Some("in a devtools request"),
+        ),
         Scene::Module => (
             EngineEvent::ScriptRunError,
             false,
@@ -194,6 +211,8 @@ pub(crate) fn worker(scene: Scene) -> Row<WorkerPayload> {
         Scene::Frame => "running animation callbacks",
         Scene::HostCall => "running a native module callback",
         Scene::ShadowRealm => "running a ShadowRealm job",
+        #[cfg(feature = "devtools")]
+        Scene::Devtools => "in a devtools request",
     };
     Row {
         event: WorkerPayload::Errored,
@@ -451,6 +470,28 @@ mod tests {
                 "the {name} row's message"
             );
         }
+    }
+
+    #[cfg(feature = "devtools")]
+    #[test]
+    fn the_devtools_rows_report_without_ending_the_owner() {
+        let row = main_thread(Scene::Devtools);
+        let event = row.event_for(error());
+        assert!(matches!(event, EngineEvent::ScriptRunError(_)), "{event:?}");
+        assert!(!row.ends);
+        assert_eq!(
+            engine_event_message(&event),
+            expected_message(Some("in a devtools request"))
+        );
+        let row = worker(Scene::Devtools);
+        assert!(!row.ends);
+        let WorkerPayload::Errored(error) = row.event_for(error()) else {
+            panic!("a worker's devtools row is Errored");
+        };
+        assert_eq!(
+            &*error.message,
+            expected_message(Some("in a devtools request"))
+        );
     }
 
     #[test]

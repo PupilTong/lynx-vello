@@ -1445,6 +1445,8 @@ impl MainThreadRuntime {
             RealmNames {
                 source: ScriptSource::Main,
                 opener: Opener::Realm(OpenerId::PAGE),
+                #[cfg(feature = "devtools")]
+                console: Rc::default(),
             },
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
             crate::canvas::CanvasHost::Document(

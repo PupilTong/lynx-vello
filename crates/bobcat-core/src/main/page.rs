@@ -203,6 +203,8 @@ pub(super) struct Page {
     resizes_posted: Cell<bool>,
     component_events_posted: Cell<bool>,
     lifetime: Lifetime,
+    #[cfg(feature = "devtools")]
+    console: std::cell::OnceCell<Rc<crate::devtools::runtime::ConsoleTap>>,
 }
 
 impl Page {
@@ -233,6 +235,8 @@ impl Page {
             resizes_posted: Cell::new(false),
             component_events_posted: Cell::new(false),
             lifetime,
+            #[cfg(feature = "devtools")]
+            console: std::cell::OnceCell::new(),
         })
     }
 
@@ -498,6 +502,8 @@ impl Page {
         }
         let checkpoints = js.checkpoints();
         self.lifetime.record_checkpoint(js.checkpoint_generation());
+        #[cfg(feature = "devtools")]
+        let _ = self.console.set(Rc::clone(&runtime.core().console));
         *self.realm.borrow_mut() = Some(Box::new(runtime));
         Some(Ok((worker_events, checkpoints)))
     }
@@ -597,6 +603,11 @@ impl Page {
 }
 
 impl RealmOwner for Page {
+    #[cfg(feature = "devtools")]
+    fn console(&self) -> Option<&crate::devtools::runtime::ConsoleTap> {
+        self.console.get().map(|console| &**console)
+    }
+
     type Realm = MainThreadRuntime;
     type Event = EngineEvent;
     const THREAD: JsThreadName = JsThreadName::Main;
@@ -908,8 +919,11 @@ async fn serve_devtools(
 ) {
     while let Some(text) = messages.recv().await {
         let outlet = Arc::clone(&outlet);
-        owner::queue(&page, JobKind::Devtools, move |runtime, _| {
-            runtime.devtools_message(&outlet, &text);
+        let reporting = Rc::clone(&page);
+        owner::queue(&page, JobKind::Devtools, move |runtime, js| {
+            if let Err(error) = runtime.devtools_message(js, &outlet, &text) {
+                policy::report(&reporting, Scene::Devtools, error);
+            }
         });
     }
     owner::queue(&page, JobKind::Devtools, move |runtime, _| {

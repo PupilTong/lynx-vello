@@ -111,8 +111,9 @@ jobs:
         # time. Both invocations select the same packages and features, so the
         # second builds nothing the first did not. The first runs the unit
         # tests whose path contains `devtools` or `highlight` (bobcat-core's
-        # `devtools::` modules, terminus's `paint::highlight` tests) and the
-        # highlight case of terminus's `tests/gpu_pixels.rs`; the second runs
+        # `devtools::` modules and the devtools row test in `realm::policy`,
+        # terminus's `paint::highlight` tests) and the highlight case of
+        # terminus's `tests/gpu_pixels.rs`; the second runs
         # quickjs-rust-bridge's `tests/devtools.rs` and terminus's
         # `tests/matched_styles.rs` in full. No coverage: the `test` shards
         # already measure these crates without the feature.
