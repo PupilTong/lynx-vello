@@ -53,6 +53,54 @@ past an intervening attribute. Where an unsafe site carries
 placing it above the attribute still trips the lint, and `cargo fmt` will not
 move it either way.
 
+## Sanitizers, Miri and fuzzing
+
+The QuickJS fork, `shim.c` and the bridge's `unsafe` are checked by tools as
+well as by review, in two CI jobs: `sanitizers` (macOS) and `leaks-miri-fuzz`
+(Ubuntu). How the bridge's build follows the instrumentation is in
+`crates/quickjs-rust-bridge/AGENTS.md`.
+
+- **AddressSanitizer and UBSan.** `-Zsanitizer=address` is the only switch.
+  Build in the `sanitize` profile (opt-level 1, the level AddressSanitizer is
+  meant for: unoptimised, the frames grow until the stack-depth tests no
+  longer describe the shipped engine), pass `--target` so build scripts and
+  proc macros stay uninstrumented, `--tests` because rustdoc builds doctests
+  without `RUSTFLAGS`, and set `CC` to LLVM's Clang:
+  `CC=$(brew --prefix llvm@22)/bin/clang RUSTFLAGS=-Zsanitizer=address cargo test
+  --profile sanitize --target aarch64-apple-darwin --tests -p
+  quickjs-rust-bridge`. The `sanitizers` job runs the bridge, `bobcat-core`
+  and `bobcat-resources` this way; macOS because their suites include GPU
+  screenshot cases. `leaks-miri-fuzz` runs the bridge again with its `devtools`
+  feature on Ubuntu, where LeakSanitizer is on too; macOS arm64 has none, so a
+  leak only shows there. A test that leaks on purpose keeps the allocation
+  reachable from a static.
+- **Miri** runs where the code under test is Rust all the way down. In the
+  bridge that is the C hooks it implements in Rust (`allocator`,
+  `platform_stdlib`), whose unit tests call them directly; the rest calls into
+  C, which Miri cannot run. `-Zmiri-deterministic-floats` is needed because
+  Miri perturbs `atanh`, whose test compares bits:
+  `MIRIFLAGS=-Zmiri-deterministic-floats cargo miri test -p
+  quickjs-rust-bridge --lib -- allocator:: platform_stdlib::`. In `terminus`
+  it is the arena tests, under Tree Borrows (`ArenaBox`,
+  `docs/terminus-architecture.md`): `MIRIFLAGS="-Zmiri-deterministic-floats
+  -Zmiri-tree-borrows" cargo miri test -p terminus --lib -- tree::arena::tests
+  --skip a_first_layout_files_its_entries_into_one_reservation`. The skipped
+  test and every other test that flushes styles stop in vendored stylo's
+  `servo_arc`, not in terminus code; under Stacked Borrows stylo stops even
+  earlier, building the initial font family.
+- **Fuzzing.** The targets are `crates/quickjs-rust-bridge/fuzz` (what each
+  does is in that crate's `AGENTS.md`). `./.github/scripts/fuzz-quickjs.sh
+  replay` runs every corpus and seed input once, without mutation;
+  `fuzz <seconds>` mutates for that long per target and adds what reaches new
+  code to `fuzz/corpus/<target>`. Pull requests replay the corpus main has
+  saved, which is deterministic; pushes to main fuzz five minutes per target,
+  save the corpus, and upload crashing inputs as `quickjs-fuzz-artifacts`.
+  Reproduce one from `crates/quickjs-rust-bridge` with
+  `cargo fuzz run <target> <file>`, `CC` and `CXX` set to LLVM's Clang. A
+  prebuilt Linux `cargo-fuzz` (what CI installs) is a musl build and targets
+  musl unless given `--target`, which AddressSanitizer cannot instrument; the
+  script passes rustc's host triple, and so should a manual run there.
+
 ## Benchmarks measure a debug-instrumented terminus
 
 Cargo unifies the features of a package's dev-dependencies into that package's
