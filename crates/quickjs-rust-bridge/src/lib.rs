@@ -82,6 +82,9 @@ mod implementation {
 
     use super::ffi;
 
+    #[cfg(feature = "devtools")]
+    pub(crate) mod devtools;
+
     const HOST_INLINE_ARGS: usize = 8;
 
     const CALL_INLINE_ARGS: usize = 32;
@@ -591,19 +594,21 @@ mod implementation {
         let table = unsafe { &*opaque.cast::<HostTable>() };
         let slot = unsafe { &*handler.cast::<HostSlot>() };
 
-        let called = catch_unwind(AssertUnwindSafe(|| {
-            let values = read_host_arguments(argument_count, arguments)?;
-            match slot {
-                HostSlot::Exclusive(handler) => {
-                    let Ok(mut handler) = handler.try_borrow_mut() else {
-                        return Err(HostFunctionError::new(
-                            "this host function cannot be called while it is already running",
-                        ));
-                    };
-                    handler(&values)
-                }
-                HostSlot::Reentrant(handler) => handler(&values),
+        let called = catch_unwind(AssertUnwindSafe(|| match slot {
+            HostSlot::Exclusive(handler) => {
+                let values = read_host_arguments(argument_count, arguments)?;
+                let Ok(mut handler) = handler.try_borrow_mut() else {
+                    return Err(HostFunctionError::new(
+                        "this host function cannot be called while it is already running",
+                    ));
+                };
+                handler(&values)
             }
+            HostSlot::Reentrant(handler) => {
+                handler(&read_host_arguments(argument_count, arguments)?)
+            }
+            #[cfg(feature = "devtools")]
+            HostSlot::Values(slot) => slot.dispatch(context, argument_count, arguments),
         }));
 
         let returned = match called {
@@ -994,6 +999,8 @@ mod implementation {
     enum HostSlot {
         Exclusive(RefCell<HostHandler>),
         Reentrant(ReentrantHostHandler),
+        #[cfg(feature = "devtools")]
+        Values(devtools::ValueSlot),
     }
 
     struct HostTable {
@@ -2270,12 +2277,7 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
-        pub fn set_property(
-            &mut self,
-            target: &Value,
-            name: &str,
-            value: &Value,
-        ) -> Result<(), Error> {
+        pub fn set_property(&self, target: &Value, name: &str, value: &Value) -> Result<(), Error> {
             self.reclaim();
             self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
             self.ensure_affinity(value, ErrorPhase::ConstructValue)?;
@@ -2297,7 +2299,7 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
-        pub fn property(&mut self, target: &Value, name: &str) -> Result<Value, Error> {
+        pub fn property(&self, target: &Value, name: &str) -> Result<Value, Error> {
             self.reclaim();
             self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
             let name = property_name(name)?;
@@ -2376,6 +2378,12 @@ mod implementation {
                 Some(index) => i32::try_from(index).map_err(int_conversion_error)?,
                 None => -1,
             };
+            #[cfg(feature = "devtools")]
+            let transfer_at = if matches!(slot, HostSlot::Values(_)) {
+                ffi::HOST_VALUES
+            } else {
+                transfer_at
+            };
             let slot = Box::into_raw(Box::new(slot));
             let raw = unsafe {
                 ffi::qjs_new_host_function(
@@ -2445,7 +2453,7 @@ mod implementation {
             })
         }
 
-        pub fn big_int_decimal(&mut self, decimal: &str) -> Result<Value, Error> {
+        pub fn big_int_decimal(&self, decimal: &str) -> Result<Value, Error> {
             if !is_canonical_big_int(decimal) {
                 return Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -2620,7 +2628,7 @@ mod implementation {
         }
 
         pub fn call(
-            &mut self,
+            &self,
             callable: &Value,
             this_value: Option<&Value>,
             arguments: &[Value],
@@ -3246,7 +3254,7 @@ mod implementation {
 
         #[test]
         fn evaluates_and_calls_functions() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let function = realm
                 .evaluate(
                     EvalSource::new("(left, right) => left + right"),
@@ -3654,7 +3662,7 @@ mod implementation {
 
         #[test]
         fn a_root_without_a_source_is_requested_and_resumed_by_its_completion() {
-            let (mut runtime, mut realm) = import_test_realm();
+            let (mut runtime, realm) = import_test_realm();
             let load = realm.load_module("app:///worker.js").unwrap();
             runtime.drain_pending_jobs(&realm).unwrap();
             assert!(
@@ -4963,7 +4971,7 @@ mod implementation {
 
         #[test]
         fn native_host_modules_export_rust_functions_without_globals() {
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .register_host_module_function("bobcat-internal:host", "add", 2, |arguments| {
                     let left = match arguments.first() {
@@ -5147,7 +5155,7 @@ mod implementation {
         #[test]
         fn times_out_infinite_call_and_reuses_realm() {
             let (kind, phase, reused) = run_with_watchdog(|| {
-                let (_runtime, mut realm) = timed_realm();
+                let (_runtime, realm) = timed_realm();
                 let callable = realm
                     .evaluate(
                         EvalSource::new("() => { while (true) {} }"),
@@ -5375,7 +5383,7 @@ mod implementation {
 
         #[test]
         fn rejects_cross_realm_calls() {
-            let (runtime, mut first) = runtime_and_realm();
+            let (runtime, first) = runtime_and_realm();
             let second = runtime.create_context().unwrap();
             let function = first
                 .evaluate(EvalSource::new("value => value"), EvalOptions::default())
@@ -5546,7 +5554,7 @@ mod implementation {
                     realm.property(&namespace, "second").unwrap().as_number(),
                     Some(2.0)
                 );
-                let mut text = |name: &str| {
+                let text = |name: &str| {
                     let value = realm.property(&namespace, name).unwrap();
                     String::from_utf16(&value.to_utf16().unwrap()).unwrap()
                 };
@@ -5917,7 +5925,7 @@ mod implementation {
                         .complete_module_with(name, name, text, ModuleCode::Compile)
                         .unwrap();
                 }
-                let mut realm = realm;
+                let realm = realm;
                 let namespace = settle_load(&mut runtime, &realm, "app:///root.mjs")
                     .unwrap_or_else(|error| panic!("{case}: {error:?}"));
                 assert_eq!(
@@ -5955,7 +5963,7 @@ mod implementation {
                 )
                 .unwrap();
             assert!(is_framed_bytecode(&bytecode));
-            let (mut runtime, mut realm) = runtime_and_realm();
+            let (mut runtime, realm) = runtime_and_realm();
             realm
                 .complete_module_with(
                     "app:///base.mjs",
@@ -6755,7 +6763,7 @@ mod implementation {
 
         #[test]
         fn arbitrary_big_int_is_canonical() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let decimal = "1234567890123456789012345678901234567890";
             let value = realm.big_int_decimal(decimal).unwrap();
 
@@ -7040,7 +7048,7 @@ mod implementation {
 
         #[test]
         fn set_property_rejects_a_value_from_another_realm() {
-            let mut realm = single_realm();
+            let realm = single_realm();
             let other = single_realm();
             let global = realm.global_object().unwrap();
             let foreign = other.number(1.0).unwrap();
@@ -8064,6 +8072,11 @@ mod implementation {
 }
 
 pub use ffi::MemoryUsage;
+#[cfg(feature = "devtools")]
+pub use implementation::devtools::{
+    DescribeLimits, ObjectClass, OwnKeys, OwnProperty, PromiseState, PropertyKey, PropertySlot,
+    Reflected,
+};
 pub use implementation::{
     CallOutcome, Compiled, CompiledKind, Context, Error, ErrorKind, ErrorPhase, EvalOptions,
     EvalSource, HostArgument, HostFunctionError, HostValue, InterruptHandle, Member, ModuleCode,

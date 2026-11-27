@@ -59,6 +59,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (devtools feature)
+        # No workspace member enables quickjs-rust-bridge's `devtools`
+        # feature, so the step above and the `test` shards never compile it.
+        run: cargo clippy -p quickjs-rust-bridge --features quickjs-rust-bridge/devtools --all-targets --no-deps -- -D warnings
+
       - name: APFS worktree cache hook
         run: python3 .github/scripts/test-worktree-cow.py -v
 
@@ -99,6 +104,13 @@ jobs:
 
       - name: Doctests
         run: cargo test --doc
+
+      - name: Devtools feature tests
+        # Only the feature's own tests, quickjs-rust-bridge's
+        # `tests/devtools.rs`, not the crate's whole suite a second time. No
+        # coverage: the `test` shards already measure the crate without the
+        # feature.
+        run: cargo test -p quickjs-rust-bridge --features quickjs-rust-bridge/devtools --test devtools
 
   # One runner used to do the lint builds, the instrumented build and every
   # test in sequence. The test run is dominated by two binaries, one in each

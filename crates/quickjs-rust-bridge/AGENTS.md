@@ -185,9 +185,9 @@ is refused rather than aliasing it; `function_reentrant` and
 `register_host_module_function_reentrant` take an `Fn` closure instead, which a
 nested call runs again (`bobcat-core`'s `dispatchEvent` is the one user). A
 `Context` is an `Rc` handle whose state is all interior, so the methods a
-call into a realm uses (`evaluate`, `module_namespace`, `member`,
-`call_member`, the module-loading members and the host-function
-registrations) take `&self`: a host function may call into any realm of the
+call into a realm uses (`evaluate`, `call`, `property`, `set_property`,
+`big_int_decimal`, `module_namespace`, `member`, `call_member`, the
+module-loading members and the host-function registrations) take `&self`: a host function may call into any realm of the
 runtime, its own included, while a call further up the stack holds that
 realm. A panicking callback becomes a JS exception and leaves the slot usable.
 
@@ -328,3 +328,66 @@ functions, or its own hook) is a cycle that leaks it. The token counts that
 `Runtime::run_gc` has collected it. The crate must remain
 independent of Bobcat, the DOM, resources, and runtime policy — it knows
 nothing about Lynx.
+
+**The `devtools` cargo feature adds debugger reflection**
+(`src/implementation/devtools.rs`, and the `QJS_BRIDGE_DEVTOOLS` block of
+`shim.c`, which `build.rs` defines only with the feature). Without it the
+crate has none of the code below. Five `Context` entries read a value and run
+no JavaScript for any input — no getter, no `Proxy` trap, no
+`toString`/`toJSON`, no global binding the realm's code can replace:
+
+- `object_class(value) -> Option<ObjectClass>`, tested in this order:
+  `Proxy`, `Array`, `Error`, `Promise(PromiseState)` (pending, or fulfilled or
+  rejected with the result read from the promise's slot, which marks no
+  rejection handled and reports none), then by class ID
+  `TypedArray { length }`, `Map`, `Set`, `Date` and `RegExp`, then `Function`
+  or `Object`; `None` for a primitive. A class ID is the engine's, so a
+  subclass instance is its base class and a prototype's `constructor.name`
+  changes nothing. A typed array's `length` is its element count, read with
+  `JS_GetTypedArrayBuffer` only once the class ID says it is one; a detached
+  or out-of-bounds view is 0, and the `TypeError` that reports it is cleared.
+- `own_properties(object, OwnKeys) -> Reflected<Vec<OwnProperty>>`: every own
+  string and symbol key, enumerable or not, with its flags and either its value
+  or its getter and setter as `Value`s. A symbol key carries the symbol and its
+  description text, empty for `Symbol()` as for `Symbol("")`, which the public
+  C API does not tell apart. `OwnKeys::NonIndexed` leaves out the canonical
+  array-index keys (`"0"` to `"4294967294"`): `JS_GetOwnPropertyNames` lists
+  them first, then string keys, then symbol keys, so the shim walks the key
+  table from its end and stops at the first index key, and no index key is
+  boxed, converted or read. `JS_GetOwnPropertyNames` itself still builds the
+  whole key table, one atom per element of an array or typed array.
+  `own_property(object, name)` reads one key, `None` when it is not an own
+  property.
+- `prototype(object) -> Reflected<Option<Value>>`.
+- `describe(value, DescribeLimits) -> String`: `JS_PrintValue`, which reads
+  object shapes, array storage and Map/Set records directly; a limit of 0 is
+  none.
+
+**A `Proxy` is recognised before anything reads it**, by its class ID, and the
+three object reads then answer `Reflected::Proxy`. `quickjs.h` does not export
+class IDs, so the shim reads them once per runtime, at the first of these calls
+(not at runtime or realm creation), off objects made in a temporary realm on
+the same runtime that no code has run in (`JS_NewContextRaw` with the `Proxy`,
+`Map`/`Set`, `Date`, `RegExp` and typed-array intrinsics): a `Proxy`, a `Map`,
+a `Set`, a `Date`, a `RegExp`, and a `Uint8ClampedArray` and a `Float64Array`,
+the first and last of the contiguous typed-array class range `quickjs.c` tests
+(`JS_CLASS_UINT8C_ARRAY` to `JS_CLASS_FLOAT64_ARRAY`). It then frees that realm
+and runs the collector. All of the IDs are recorded, or none. That realm has
+no context opaque, which the rejection tracker, the module loader and the host
+trampolines already treat as a released realm. Non-proxy exotic objects
+(arrays, typed arrays, String objects, module namespaces) are read through
+their native exotic methods.
+
+Three more entries run JavaScript by definition: `json_stringify(value) ->
+Option<String>` (`JS_JSONStringify`, the intrinsic, not the realm's `JSON`;
+`None` when the result is `undefined`), `json_parse(text) -> Value`
+(`JS_ParseJSON`), and `function_with_values(name, arity, handler)`, a host
+function whose `Fn(&Context, &[Value])` handler is handed its realm and
+the call's arguments as `Value`s through its own trampoline
+(`qjs_host_value_trampoline`, `QJS_ARG_VALUE`). The handler is re-entrant (a
+handler that needs state uses interior mutability) and can call a function
+`Value` through `Context::call` on the realm it is handed; a throw from that
+call is the handler's `Err`. Its slot holds the realm through a `Weak`, so the function
+makes no realm → function → handler → realm cycle; a handler that keeps a
+`Value` holds the realm through it, and a call that reaches it from another
+realm of the runtime throws.

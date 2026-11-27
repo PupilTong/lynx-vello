@@ -174,6 +174,12 @@ enum QjsHostArgKind {
        are the values the slots read as. Only ever an argument the host
        lends. */
     QJS_ARG_REVIVE = 11,
+#ifdef QJS_BRIDGE_DEVTOOLS
+    /* An argument of a value host function (`qjs_host_value_trampoline`):
+       `text` is a `QjsValue *` holding a new reference to the argument, which
+       the host takes ownership of. Only ever an argument the host is handed. */
+    QJS_ARG_VALUE = 12,
+#endif
 };
 
 /* Releases a `Box<[u8]>` the host handed over as `QJS_ARG_BYTES_OWNED`;
@@ -250,6 +256,21 @@ typedef struct QjsRuntime {
        `qjs_context_add_host_module_shared_object`. */
     JSValue shared_object;
     size_t shared_object_holders;
+#ifdef QJS_BRIDGE_DEVTOOLS
+    /* QuickJS's class IDs that quickjs.h does not export, read by
+       `qjs_devtools_read_classes` at the first reflection call; all
+       `JS_INVALID_CLASS_ID` until then. The typed-array classes are one
+       contiguous range, `Uint8ClampedArray` to `Float64Array`. */
+    struct {
+        JSClassID proxy;
+        JSClassID typed_array_first;
+        JSClassID typed_array_last;
+        JSClassID map;
+        JSClassID set;
+        JSClassID date;
+        JSClassID regexp;
+    } devtools_classes;
+#endif
 } QjsRuntime;
 
 
@@ -3772,6 +3793,578 @@ static JSValue qjs_host_transfer_trampoline(JSContext *raw_context,
    must sit inside the eight-bit length `JS_NewCFunctionData` keeps. */
 #define QJS_TRANSFER_AT_MAX (UINT8_MAX - 2)
 
+#ifdef QJS_BRIDGE_DEVTOOLS
+
+/* Debugger reflection. Every entry below except the value trampoline and the
+   two JSON entries runs no JavaScript for any input: a `Proxy` is recognised
+   by its class ID before anything reads it, and is then reported as one and
+   not read. What is read of any other object goes through QuickJS's own
+   shape and exotic methods, which are native code. */
+
+_Static_assert(JS_PROP_CONFIGURABLE == 1,
+               "Rust PROPERTY_CONFIGURABLE must match quickjs.h");
+_Static_assert(JS_PROP_WRITABLE == 2,
+               "Rust PROPERTY_WRITABLE must match quickjs.h");
+_Static_assert(JS_PROP_ENUMERABLE == 4,
+               "Rust PROPERTY_ENUMERABLE must match quickjs.h");
+_Static_assert(JS_PROP_GETSET == 16,
+               "Rust PROPERTY_GETSET must match quickjs.h");
+
+/* `transfer_at` of `qjs_new_host_function` that makes a value host
+   function. */
+#define QJS_HOST_VALUES (-2)
+
+enum QjsReflectStatus {
+    QJS_REFLECT_EXCEPTION = -1,
+    QJS_REFLECT_READ = 0,
+    QJS_REFLECT_PROXY = 1,
+    QJS_REFLECT_ABSENT = 2,
+};
+
+enum QjsObjectClass {
+    QJS_CLASS_PRIMITIVE = 0,
+    QJS_CLASS_PROXY = 1,
+    QJS_CLASS_ARRAY = 2,
+    QJS_CLASS_ERROR = 3,
+    QJS_CLASS_PROMISE = 4,
+    QJS_CLASS_FUNCTION = 5,
+    QJS_CLASS_OBJECT = 6,
+    QJS_CLASS_TYPED_ARRAY = 7,
+    QJS_CLASS_MAP = 8,
+    QJS_CLASS_SET = 9,
+    QJS_CLASS_DATE = 10,
+    QJS_CLASS_REGEXP = 11,
+};
+
+/* One own property. `name` is the key as a string, a symbol key's
+   description (empty when it has none); `symbol` is the symbol, or NULL for
+   a string key. A data property has `value`; an accessor (`JS_PROP_GETSET`
+   in `flags`) has `getter` and `setter`, each NULL when absent. The host
+   takes ownership of every non-NULL value and frees the array with
+   `qjs_devtools_own_properties_free`. */
+typedef struct QjsOwnProperty {
+    QjsValue *name;
+    QjsValue *symbol;
+    QjsValue *value;
+    QjsValue *getter;
+    QjsValue *setter;
+    int32_t flags;
+} QjsOwnProperty;
+
+/* Consumes `object`: its class ID, or `JS_INVALID_CLASS_ID` when making it
+   threw. */
+static JSClassID qjs_probe_class(JSContext *probe, JSValue object) {
+    JSClassID class_id =
+        JS_IsException(object) ? JS_INVALID_CLASS_ID : JS_GetClassID(object);
+
+    JS_FreeValue(probe, object);
+    return class_id;
+}
+
+static JSValue qjs_probe_construct(JSContext *probe, JSValueConst global,
+                                   const char *name, int argc,
+                                   JSValueConst *argv) {
+    JSValue constructor = JS_GetPropertyStr(probe, global, name);
+    JSValue made = JS_IsException(constructor)
+                       ? JS_EXCEPTION
+                       : JS_CallConstructor(probe, constructor, argc, argv);
+
+    JS_FreeValue(probe, constructor);
+    return made;
+}
+
+/* Records the runtime's class IDs for `Proxy`, `Map`, `Set`, `Date`,
+   `RegExp` and the first and last typed-array kinds from objects made in a
+   new realm on the same runtime, which no code has run in, so the
+   constructors it reads are the intrinsic ones. That realm has no context
+   opaque: the rejection tracker, the module loader and the host trampolines
+   treat it as a released realm, and nothing here loads a module or rejects a
+   promise. Its global object is cyclic, so the collector is what frees it.
+   All of the IDs are recorded, or none. */
+static int qjs_devtools_read_classes(QjsContext *context) {
+    QjsRuntime *runtime = context->runtime;
+    JSContext *probe = JS_NewContextRaw(runtime->raw);
+    JSValue global;
+    JSValue target;
+    JSValue handler;
+    JSValue pattern;
+    JSValueConst arguments[2];
+    JSClassID proxy = JS_INVALID_CLASS_ID;
+    JSClassID typed_array_first = JS_INVALID_CLASS_ID;
+    JSClassID typed_array_last = JS_INVALID_CLASS_ID;
+    JSClassID map = JS_INVALID_CLASS_ID;
+    JSClassID set = JS_INVALID_CLASS_ID;
+    JSClassID date = JS_INVALID_CLASS_ID;
+    JSClassID regexp = JS_INVALID_CLASS_ID;
+
+    if (probe == NULL) {
+        JS_ThrowOutOfMemory(context->raw);
+        return -1;
+    }
+    if (JS_AddIntrinsicProxy(probe) == 0 && JS_AddIntrinsicMapSet(probe) == 0 &&
+        JS_AddIntrinsicDate(probe) == 0 && JS_AddIntrinsicRegExp(probe) == 0 &&
+        JS_AddIntrinsicTypedArrays(probe) == 0) {
+        global = JS_GetGlobalObject(probe);
+        target = JS_NewObject(probe);
+        handler = JS_NewObject(probe);
+        pattern = JS_NewString(probe, "a");
+        if (!JS_IsException(target) && !JS_IsException(handler)) {
+            arguments[0] = target;
+            arguments[1] = handler;
+            proxy = qjs_probe_class(
+                probe, qjs_probe_construct(probe, global, "Proxy", 2, arguments));
+        }
+        arguments[0] = JS_UNDEFINED;
+        map = qjs_probe_class(
+            probe, qjs_probe_construct(probe, global, "Map", 1, arguments));
+        set = qjs_probe_class(
+            probe, qjs_probe_construct(probe, global, "Set", 1, arguments));
+        date = qjs_probe_class(probe, JS_NewDate(probe, 0));
+        if (!JS_IsException(pattern)) {
+            arguments[0] = pattern;
+            regexp = qjs_probe_class(
+                probe, qjs_probe_construct(probe, global, "RegExp", 1, arguments));
+        }
+        arguments[0] = JS_NewInt32(probe, 0);
+        typed_array_first = qjs_probe_class(
+            probe, JS_NewTypedArray(probe, 1, arguments, JS_TYPED_ARRAY_UINT8C));
+        typed_array_last = qjs_probe_class(
+            probe, JS_NewTypedArray(probe, 1, arguments, JS_TYPED_ARRAY_FLOAT64));
+        JS_FreeValue(probe, pattern);
+        JS_FreeValue(probe, handler);
+        JS_FreeValue(probe, target);
+        JS_FreeValue(probe, global);
+    }
+    JS_FreeValue(probe, JS_GetException(probe));
+    JS_FreeContext(probe);
+    JS_RunGC(runtime->raw);
+    if (proxy == JS_INVALID_CLASS_ID || typed_array_first == JS_INVALID_CLASS_ID ||
+        typed_array_last == JS_INVALID_CLASS_ID || map == JS_INVALID_CLASS_ID ||
+        set == JS_INVALID_CLASS_ID || date == JS_INVALID_CLASS_ID ||
+        regexp == JS_INVALID_CLASS_ID) {
+        JS_ThrowInternalError(context->raw, "could not read the engine's classes");
+        return -1;
+    }
+    runtime->devtools_classes.proxy = proxy;
+    runtime->devtools_classes.typed_array_first = typed_array_first;
+    runtime->devtools_classes.typed_array_last = typed_array_last;
+    runtime->devtools_classes.map = map;
+    runtime->devtools_classes.set = set;
+    runtime->devtools_classes.date = date;
+    runtime->devtools_classes.regexp = regexp;
+    return 0;
+}
+
+/* 1 for a proxy (revoked or not), 0 for anything else, -1 with an exception
+   pending when the classes could not be recorded. */
+static int qjs_devtools_is_proxy(QjsContext *context, JSValueConst value) {
+    if (!JS_IsObject(value)) {
+        return 0;
+    }
+    if (context->runtime->devtools_classes.proxy == JS_INVALID_CLASS_ID &&
+        qjs_devtools_read_classes(context) < 0) {
+        return -1;
+    }
+    return JS_GetClassID(value) == context->runtime->devtools_classes.proxy;
+}
+
+/* The element count of a typed array, read only once its class ID says it
+   is one; 0 when its buffer is detached or it is out of bounds, with the
+   `TypeError` that reports that cleared. */
+static size_t qjs_typed_array_length(JSContext *raw, JSValueConst value) {
+    size_t byte_length = 0;
+    size_t element_size = 1;
+    JSValue buffer =
+        JS_GetTypedArrayBuffer(raw, value, NULL, &byte_length, &element_size);
+
+    if (JS_IsException(buffer)) {
+        JS_FreeValue(raw, JS_GetException(raw));
+        return 0;
+    }
+    JS_FreeValue(raw, buffer);
+    return byte_length / element_size;
+}
+
+/* `*length` is set for `QJS_CLASS_TYPED_ARRAY` and 0 otherwise. */
+int qjs_devtools_classify(QjsContext *context, const QjsValue *value,
+                          size_t *length) {
+    JSValueConst raw = value->value;
+    const QjsRuntime *runtime = context->runtime;
+    JSClassID class_id;
+    int proxy;
+
+    *length = 0;
+    if (!JS_IsObject(raw)) {
+        return QJS_CLASS_PRIMITIVE;
+    }
+    proxy = qjs_devtools_is_proxy(context, raw);
+    if (proxy != 0) {
+        return proxy < 0 ? QJS_REFLECT_EXCEPTION : QJS_CLASS_PROXY;
+    }
+    /* Not a proxy, so `JS_IsArray` reads the class ID and cannot throw. */
+    if (JS_IsArray(context->raw, raw) > 0) {
+        return QJS_CLASS_ARRAY;
+    }
+    if (JS_IsError(context->raw, raw)) {
+        return QJS_CLASS_ERROR;
+    }
+    if ((int)JS_PromiseState(context->raw, raw) >= 0) {
+        return QJS_CLASS_PROMISE;
+    }
+    class_id = JS_GetClassID(raw);
+    if (class_id >= runtime->devtools_classes.typed_array_first &&
+        class_id <= runtime->devtools_classes.typed_array_last) {
+        *length = qjs_typed_array_length(context->raw, raw);
+        return QJS_CLASS_TYPED_ARRAY;
+    }
+    if (class_id == runtime->devtools_classes.map) {
+        return QJS_CLASS_MAP;
+    }
+    if (class_id == runtime->devtools_classes.set) {
+        return QJS_CLASS_SET;
+    }
+    if (class_id == runtime->devtools_classes.date) {
+        return QJS_CLASS_DATE;
+    }
+    if (class_id == runtime->devtools_classes.regexp) {
+        return QJS_CLASS_REGEXP;
+    }
+    if (JS_IsFunction(context->raw, raw)) {
+        return QJS_CLASS_FUNCTION;
+    }
+    return QJS_CLASS_OBJECT;
+}
+
+static void qjs_own_property_clear(QjsContext *context,
+                                   QjsOwnProperty *property) {
+    qjs_value_free(context, property->name);
+    qjs_value_free(context, property->symbol);
+    qjs_value_free(context, property->value);
+    qjs_value_free(context, property->getter);
+    qjs_value_free(context, property->setter);
+}
+
+/* Boxes `value` when it is not undefined; consumes it either way. 0, or -1
+   with an exception pending. */
+static int qjs_box_defined(JSContext *raw, JSValue value, QjsValue **out) {
+    if (JS_IsUndefined(value)) {
+        return 0;
+    }
+    *out = qjs_box(raw, value);
+    return *out == NULL ? -1 : 0;
+}
+
+/* Reads one own property of a non-proxy object: 1 found, 0 absent, -1 with
+   an exception pending (an allocation failure, or a module namespace binding
+   that is not initialized yet). */
+static int qjs_devtools_read_property(QjsContext *context, JSValueConst object,
+                                      JSAtom atom, QjsOwnProperty *property) {
+    JSContext *raw = context->raw;
+    JSPropertyDescriptor descriptor;
+    JSValue key;
+    int found;
+    int failed;
+
+    property->name = NULL;
+    property->symbol = NULL;
+    property->value = NULL;
+    property->getter = NULL;
+    property->setter = NULL;
+    property->flags = 0;
+    found = JS_GetOwnProperty(raw, &descriptor, object, atom);
+    if (found <= 0) {
+        return found;
+    }
+    property->flags = descriptor.flags;
+    key = JS_AtomToValue(raw, atom);
+    failed = JS_IsException(key);
+    if (!failed && JS_IsSymbol(key)) {
+        property->symbol = qjs_box(raw, key);
+        failed = property->symbol == NULL;
+    } else {
+        JS_FreeValue(raw, key);
+    }
+    if (!failed) {
+        property->name = qjs_box(raw, JS_AtomToString(raw, atom));
+        failed = property->name == NULL;
+    }
+    if (descriptor.flags & JS_PROP_GETSET) {
+        JS_FreeValue(raw, descriptor.value);
+        failed = failed ||
+                 qjs_box_defined(raw, JS_DupValue(raw, descriptor.getter),
+                                 &property->getter) < 0 ||
+                 qjs_box_defined(raw, JS_DupValue(raw, descriptor.setter),
+                                 &property->setter) < 0;
+        JS_FreeValue(raw, descriptor.getter);
+        JS_FreeValue(raw, descriptor.setter);
+    } else {
+        JS_FreeValue(raw, descriptor.getter);
+        JS_FreeValue(raw, descriptor.setter);
+        if (failed) {
+            JS_FreeValue(raw, descriptor.value);
+        } else {
+            property->value = qjs_box(raw, descriptor.value);
+            failed = property->value == NULL;
+        }
+    }
+    if (failed) {
+        qjs_own_property_clear(context, property);
+        return -1;
+    }
+    return 1;
+}
+
+/* Whether `atom` is a canonical array index, "0" to "4294967294": the keys
+   `JS_GetOwnPropertyNames` lists first, before string and then symbol keys.
+   1, 0, or -1 with an exception pending. */
+static int qjs_atom_is_array_index(JSContext *raw, JSAtom atom) {
+    JSValue key = JS_AtomToValue(raw, atom);
+    const char *text;
+    size_t length;
+    size_t position;
+    uint64_t value = 0;
+    int index;
+
+    if (JS_IsException(key)) {
+        return -1;
+    }
+    if (JS_IsSymbol(key)) {
+        JS_FreeValue(raw, key);
+        return 0;
+    }
+    text = JS_ToCStringLen(raw, &length, key);
+    JS_FreeValue(raw, key);
+    if (text == NULL) {
+        return -1;
+    }
+    index = length > 0 && length <= 10 && (text[0] != '0' || length == 1);
+    for (position = 0; index && position < length; ++position) {
+        index = text[position] >= '0' && text[position] <= '9';
+        value = value * 10 + (uint64_t)(text[position] - '0');
+    }
+    JS_FreeCString(raw, text);
+    return index && value <= UINT64_C(4294967294);
+}
+
+/* `non_indexed` leaves out the array-index keys: the key table is walked
+   from its end, past the symbol and string keys, and stops at the first
+   index, so no index key is boxed, converted or read. */
+int qjs_devtools_own_properties(QjsContext *context, const QjsValue *object,
+                                int non_indexed, QjsOwnProperty **properties,
+                                size_t *count) {
+    JSContext *raw = context->raw;
+    JSPropertyEnum *keys;
+    uint32_t length;
+    uint32_t first = 0;
+    uint32_t index;
+    QjsOwnProperty *read;
+    size_t filled = 0;
+    int status;
+
+    *properties = NULL;
+    *count = 0;
+    status = qjs_devtools_is_proxy(context, object->value);
+    if (status != 0) {
+        return status < 0 ? QJS_REFLECT_EXCEPTION : QJS_REFLECT_PROXY;
+    }
+    if (JS_GetOwnPropertyNames(raw, &keys, &length, object->value,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0) {
+        return QJS_REFLECT_EXCEPTION;
+    }
+    if (non_indexed) {
+        for (first = length; first > 0; --first) {
+            status = qjs_atom_is_array_index(raw, keys[first - 1].atom);
+            if (status < 0) {
+                JS_FreePropertyEnum(raw, keys, length);
+                return QJS_REFLECT_EXCEPTION;
+            }
+            if (status) {
+                break;
+            }
+        }
+    }
+    if ((size_t)(length - first) > SIZE_MAX / sizeof(*read)) {
+        read = NULL;
+    } else {
+        read = malloc((length == first ? 1 : (size_t)(length - first)) *
+                      sizeof(*read));
+    }
+    if (read == NULL) {
+        JS_FreePropertyEnum(raw, keys, length);
+        JS_ThrowOutOfMemory(raw);
+        return QJS_REFLECT_EXCEPTION;
+    }
+    for (index = first; index < length; ++index) {
+        status = qjs_devtools_read_property(context, object->value,
+                                            keys[index].atom, &read[filled]);
+        if (status < 0) {
+            while (filled > 0) {
+                qjs_own_property_clear(context, &read[--filled]);
+            }
+            free(read);
+            JS_FreePropertyEnum(raw, keys, length);
+            return QJS_REFLECT_EXCEPTION;
+        }
+        filled += (size_t)status;
+    }
+    JS_FreePropertyEnum(raw, keys, length);
+    *properties = read;
+    *count = filled;
+    return QJS_REFLECT_READ;
+}
+
+void qjs_devtools_own_properties_free(QjsOwnProperty *properties) {
+    free(properties);
+}
+
+int qjs_devtools_own_property(QjsContext *context, const QjsValue *object,
+                              const char *name, size_t length,
+                              QjsOwnProperty *property) {
+    JSAtom atom;
+    int status = qjs_devtools_is_proxy(context, object->value);
+
+    if (status != 0) {
+        return status < 0 ? QJS_REFLECT_EXCEPTION : QJS_REFLECT_PROXY;
+    }
+    atom = JS_NewAtomLen(context->raw, name, length);
+    if (atom == JS_ATOM_NULL) {
+        return QJS_REFLECT_EXCEPTION;
+    }
+    status = qjs_devtools_read_property(context, object->value, atom, property);
+    JS_FreeAtom(context->raw, atom);
+    if (status < 0) {
+        return QJS_REFLECT_EXCEPTION;
+    }
+    return status ? QJS_REFLECT_READ : QJS_REFLECT_ABSENT;
+}
+
+/* `*prototype` is NULL for a null prototype. */
+int qjs_devtools_prototype(QjsContext *context, const QjsValue *object,
+                           QjsValue **prototype) {
+    JSValue read;
+    int status = qjs_devtools_is_proxy(context, object->value);
+
+    *prototype = NULL;
+    if (status != 0) {
+        return status < 0 ? QJS_REFLECT_EXCEPTION : QJS_REFLECT_PROXY;
+    }
+    read = JS_GetPrototype(context->raw, object->value);
+    if (JS_IsException(read)) {
+        return QJS_REFLECT_EXCEPTION;
+    }
+    if (JS_IsNull(read)) {
+        return QJS_REFLECT_READ;
+    }
+    *prototype = qjs_box(context->raw, read);
+    return *prototype == NULL ? QJS_REFLECT_EXCEPTION : QJS_REFLECT_READ;
+}
+
+/* `JS_PrintValue`, which reads shapes, array storage and Map and Set
+   records directly and runs no JavaScript. A limit of 0 is no limit (the
+   depth is then QuickJS's own maximum). */
+void qjs_devtools_describe(QjsContext *context, const QjsValue *value,
+                           uint32_t depth, uint32_t string_length,
+                           uint32_t item_count, JSPrintValueWrite *write,
+                           void *opaque) {
+    JSPrintValueOptions options;
+
+    JS_PrintValueSetDefaultOptions(&options);
+    options.max_depth = depth;
+    options.max_string_length = string_length;
+    options.max_item_count = item_count;
+    JS_PrintValue(context->raw, write, opaque, value->value, &options);
+}
+
+/* `JSON.stringify(value)` through the intrinsic: runs `toJSON` methods and
+   getters. Undefined when the value has no JSON text. */
+QjsValue *qjs_devtools_json_stringify(QjsContext *context,
+                                      const QjsValue *value) {
+    return qjs_box(context->raw, JS_JSONStringify(context->raw, value->value,
+                                                  JS_UNDEFINED, JS_UNDEFINED));
+}
+
+/* `text[length]` must be NUL. */
+QjsValue *qjs_devtools_json_parse(QjsContext *context, const char *text,
+                                  size_t length) {
+    return qjs_box(context->raw,
+                   JS_ParseJSON(context->raw, text, length, "<json>"));
+}
+
+/* A host function whose handler is handed its arguments as values: each is
+   a new reference in a `QjsValue`, `QJS_ARG_VALUE`, which the host owns from
+   the dispatch on, whatever the dispatch answers. */
+static JSValue qjs_host_value_trampoline(JSContext *raw_context,
+                                         JSValueConst this_value, int argc,
+                                         JSValueConst *argv, int magic,
+                                         JSValue *func_data) {
+    QjsContext *context = JS_GetContextOpaque(raw_context);
+    QjsRuntime *runtime;
+    QjsHostArg inline_arguments[QJS_HOST_INLINE_ARGS];
+    QjsHostArg *arguments = inline_arguments;
+    QjsHostOwner *owner;
+    QjsHostResult result;
+    QjsValue *boxed;
+    int count;
+    int status;
+
+    (void)this_value;
+    (void)magic;
+    if (context == NULL) {
+        return JS_ThrowInternalError(raw_context, "this realm is being released");
+    }
+    runtime = context->runtime;
+    if (runtime->host_dispatch == NULL) {
+        return JS_ThrowInternalError(raw_context, "no host dispatch is installed");
+    }
+    owner = JS_GetOpaque(func_data[0], runtime->host_owner_class_id);
+    if (owner == NULL || owner->handler == NULL) {
+        return JS_ThrowInternalError(raw_context, "this host function was released");
+    }
+    if (argc > QJS_HOST_INLINE_ARGS) {
+        if ((size_t)argc > SIZE_MAX / sizeof(*arguments)) {
+            return JS_ThrowRangeError(raw_context, "too many call arguments");
+        }
+        arguments = malloc((size_t)argc * sizeof(*arguments));
+        if (arguments == NULL) {
+            JS_ThrowOutOfMemory(raw_context);
+            return JS_EXCEPTION;
+        }
+    }
+    for (count = 0; count < argc; ++count) {
+        boxed = qjs_box(raw_context, JS_DupValue(raw_context, argv[count]));
+        if (boxed == NULL) {
+            while (count > 0) {
+                qjs_value_free(context, (QjsValue *)arguments[--count].text);
+            }
+            if (arguments != inline_arguments) {
+                free(arguments);
+            }
+            return JS_EXCEPTION;
+        }
+        arguments[count].kind = QJS_ARG_VALUE;
+        arguments[count].number = 0.0;
+        arguments[count].text = (const uint8_t *)boxed;
+        arguments[count].text_len = 0;
+    }
+
+    result.kind = QJS_ARG_UNDEFINED;
+    result.number = 0.0;
+    result.text = NULL;
+    result.text_len = 0;
+    status = runtime->host_dispatch(runtime->host_opaque, context,
+                                    owner->handler, (size_t)argc, arguments,
+                                    &result);
+    if (arguments != inline_arguments) {
+        free(arguments);
+    }
+    if (status != 0) {
+        return JS_EXCEPTION;
+    }
+    return qjs_host_build(raw_context, &result);
+}
+
+#endif
+
 /* `transfer_at` < 0 makes an ordinary host function; otherwise its argument
    `transfer_at` is a message and `transfer_at + 1` that message's transfer
    list (`qjs_host_transfer_trampoline`). */
@@ -3799,6 +4392,12 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
     }
     JS_SetOpaque(data, owner);
 
+#ifdef QJS_BRIDGE_DEVTOOLS
+    if (transfer_at == QJS_HOST_VALUES) {
+        function = JS_NewCFunctionData(raw_context, qjs_host_value_trampoline,
+                                       length, 0, 1, &data);
+    } else
+#endif
     if (transfer_at < 0) {
         function = JS_NewCFunctionData(raw_context, qjs_host_trampoline, length,
                                        0, 1, &data);

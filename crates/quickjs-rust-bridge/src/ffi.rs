@@ -370,3 +370,97 @@ unsafe extern "C" {
         transfer_at: c_int,
     ) -> *mut QjsValue;
 }
+
+#[cfg(feature = "devtools")]
+pub(crate) use devtools::*;
+
+#[cfg(feature = "devtools")]
+mod devtools {
+    use std::ffi::{c_char, c_int, c_void};
+
+    use super::{QjsContext, QjsValue};
+
+    pub(crate) const HOST_ARG_VALUE: i32 = 12;
+    pub(crate) const HOST_VALUES: c_int = -2;
+
+    pub(crate) const REFLECT_READ: c_int = 0;
+    pub(crate) const REFLECT_PROXY: c_int = 1;
+    pub(crate) const REFLECT_ABSENT: c_int = 2;
+
+    pub(crate) const CLASS_PRIMITIVE: c_int = 0;
+    pub(crate) const CLASS_PROXY: c_int = 1;
+    pub(crate) const CLASS_ARRAY: c_int = 2;
+    pub(crate) const CLASS_ERROR: c_int = 3;
+    pub(crate) const CLASS_PROMISE: c_int = 4;
+    pub(crate) const CLASS_FUNCTION: c_int = 5;
+    pub(crate) const CLASS_OBJECT: c_int = 6;
+    pub(crate) const CLASS_TYPED_ARRAY: c_int = 7;
+    pub(crate) const CLASS_MAP: c_int = 8;
+    pub(crate) const CLASS_SET: c_int = 9;
+    pub(crate) const CLASS_DATE: c_int = 10;
+    pub(crate) const CLASS_REGEXP: c_int = 11;
+
+    pub(crate) const PROPERTY_CONFIGURABLE: i32 = 1;
+    pub(crate) const PROPERTY_WRITABLE: i32 = 2;
+    pub(crate) const PROPERTY_ENUMERABLE: i32 = 4;
+    pub(crate) const PROPERTY_GETSET: i32 = 16;
+
+    #[repr(C)]
+    pub(crate) struct QjsOwnProperty {
+        pub(crate) name: *mut QjsValue,
+        pub(crate) symbol: *mut QjsValue,
+        pub(crate) value: *mut QjsValue,
+        pub(crate) getter: *mut QjsValue,
+        pub(crate) setter: *mut QjsValue,
+        pub(crate) flags: i32,
+    }
+
+    pub(crate) type DescribeWrite =
+        unsafe extern "C" fn(opaque: *mut c_void, bytes: *const c_char, length: usize);
+
+    unsafe extern "C" {
+        pub(crate) fn qjs_devtools_classify(
+            context: *mut QjsContext,
+            value: *const QjsValue,
+            length: *mut usize,
+        ) -> c_int;
+        pub(crate) fn qjs_devtools_own_properties(
+            context: *mut QjsContext,
+            object: *const QjsValue,
+            non_indexed: c_int,
+            properties: *mut *mut QjsOwnProperty,
+            count: *mut usize,
+        ) -> c_int;
+        pub(crate) fn qjs_devtools_own_properties_free(properties: *mut QjsOwnProperty);
+        pub(crate) fn qjs_devtools_own_property(
+            context: *mut QjsContext,
+            object: *const QjsValue,
+            name: *const c_char,
+            length: usize,
+            property: *mut QjsOwnProperty,
+        ) -> c_int;
+        pub(crate) fn qjs_devtools_prototype(
+            context: *mut QjsContext,
+            object: *const QjsValue,
+            prototype: *mut *mut QjsValue,
+        ) -> c_int;
+        pub(crate) fn qjs_devtools_describe(
+            context: *mut QjsContext,
+            value: *const QjsValue,
+            depth: u32,
+            string_length: u32,
+            item_count: u32,
+            write: DescribeWrite,
+            opaque: *mut c_void,
+        );
+        pub(crate) fn qjs_devtools_json_stringify(
+            context: *mut QjsContext,
+            value: *const QjsValue,
+        ) -> *mut QjsValue;
+        pub(crate) fn qjs_devtools_json_parse(
+            context: *mut QjsContext,
+            text: *const c_char,
+            length: usize,
+        ) -> *mut QjsValue;
+    }
+}
