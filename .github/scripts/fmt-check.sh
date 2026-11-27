@@ -33,3 +33,11 @@ echo "format-checking workspace members:$packages"
 # Word splitting is the point here: $packages is a flag list, not a filename.
 # shellcheck disable=SC2086
 cargo fmt --check $packages "$@"
+
+# Fuzz targets are Cargo workspaces of their own (`cargo fuzz`'s layout, a
+# crate's `fuzz/` directory), so the member list above never names them.
+for manifest in crates/*/fuzz/Cargo.toml; do
+  [ -f "$manifest" ] || continue
+  echo "format-checking $manifest"
+  cargo fmt --check --manifest-path "$manifest" "$@"
+done

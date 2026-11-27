@@ -1,0 +1,44 @@
+[package]
+name = "quickjs-rust-bridge-fuzz"
+description = "libFuzzer targets for the QuickJS fork and the bridge's C shim"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+quickjs-rust-bridge = { path = ".." }
+
+# A workspace of its own: these binaries take their `main` from libFuzzer and
+# their instrumentation from `cargo fuzz`, so no ordinary build or test of the
+# repository's workspace may compile them.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "script"
+path = "fuzz_targets/script.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modules"
+path = "fuzz_targets/modules.rs"
+test = false
+doc = false
+bench = false
+
+# `cargo fuzz` builds this profile. `opt-level = 1` is AddressSanitizer's level,
+# as the repository's `sanitize` profile says: at 3, the loop vectorizer turns
+# `resolve_labels`'s jump-slot loop (`quickjs.c`, after a jump is shortened)
+# into code the sanitizer reports as reading 64 bytes past `jump_slots`, on
+# QuickJS's own `examples/pi_bigint.js`. The uninstrumented opt-level 3 build
+# reads nothing past that block (it runs clean under macOS's Guard Malloc), and
+# at 1 the report is gone.
+[profile.release]
+opt-level = 1

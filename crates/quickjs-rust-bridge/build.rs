@@ -172,6 +172,53 @@ fn define_shim_features(build: &mut cc::Build) -> &mut cc::Build {
     build
 }
 
+struct Instrumentation {
+    sanitizers: Vec<String>,
+    fuzzing: bool,
+}
+
+impl Instrumentation {
+    fn from_cargo() -> Self {
+        let sanitizers: Vec<String> = env::var("CARGO_CFG_SANITIZE")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for name in &sanitizers {
+            assert!(
+                matches!(
+                    name.as_str(),
+                    "address" | "hwaddress" | "leak" | "memory" | "thread"
+                ),
+                "-Zsanitizer={name} has no Clang counterpart for the QuickJS C sources"
+            );
+        }
+        Self {
+            sanitizers,
+            fuzzing: env::var_os("CARGO_CFG_FUZZING").is_some(),
+        }
+    }
+
+    fn apply(&self, build: &mut cc::Build) {
+        for name in &self.sanitizers {
+            build.flag(format!("-fsanitize={name}"));
+        }
+        if self.sanitizers.iter().any(|name| name == "address") {
+            build
+                .flag("-fsanitize=undefined")
+                .flag("-fno-sanitize=function")
+                .flag("-fno-sanitize-recover=undefined");
+        }
+        if !self.sanitizers.is_empty() {
+            build.flag("-fno-omit-frame-pointer");
+        }
+        if self.fuzzing {
+            build.flag("-fsanitize=fuzzer-no-link");
+        }
+    }
+}
+
 fn assert_supported_target(target_os: &str, target_env: &str) {
     assert!(
         target_os != "windows" || target_env == "gnu",
@@ -180,6 +227,7 @@ fn assert_supported_target(target_os: &str, target_env: &str) {
 }
 
 fn configure_target(build: &mut cc::Build, target: &str, clang_target_feature_flags: &[String]) {
+    Instrumentation::from_cargo().apply(build);
     build.flag_if_supported("-fwrapv");
     if target == "wasm32-unknown-unknown" {
         for flag in clang_target_feature_flags {

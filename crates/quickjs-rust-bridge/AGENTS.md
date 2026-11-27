@@ -391,3 +391,48 @@ call is the handler's `Err`. Its slot holds the realm through a `Weak`, so the f
 makes no realm → function → handler → realm cycle; a handler that keeps a
 `Value` holds the realm through it, and a call that reaches it from another
 realm of the runtime throws.
+
+**The C build follows the Rust build's instrumentation** (`Instrumentation`
+in `build.rs`), so a sanitized or fuzzing build passes no C flags of its own.
+`-Zsanitizer=<name>` sets `cfg(sanitize = "<name>")` and links that
+sanitizer's runtime; `build.rs` reads `CARGO_CFG_SANITIZE` and compiles the
+QuickJS C, `shim.c` and the printf unit with `-fsanitize=<name>` and
+`-fno-omit-frame-pointer`, refusing a sanitizer with no Clang counterpart.
+Under `address` it adds UBSan for the C (`-fsanitize=undefined
+-fno-sanitize-recover=undefined`), because rustc's ASan runtime carries the
+UBSan handlers and Rust has no UBSan of its own. `function` is left out:
+QuickJS calls `js_realloc_rt`, which takes a `JSRuntime *`, as a
+`DynBufReallocFunc`, which takes a `void *`, and that check fires on the first
+test. Clang defines `__SANITIZE_ADDRESS__`, and QuickJS then gives every
+allocation to the host allocator instead of carving small ones out of its
+4 KiB arenas, so the sanitizer sees each object's bounds; a realm's baseline
+drops from 150 KB to 96 KB, which is why a test that needs an allocation to
+fail asks for more than the whole memory limit. `cargo fuzz` builds with
+`--cfg fuzzing` (`CARGO_CFG_FUZZING`), and `build.rs` adds
+`-fsanitize=fuzzer-no-link` so libFuzzer steers by the engine's branches. `CC`
+must be LLVM's Clang: Apple's Clang names a runtime of its own in every
+instrumented object (`__asan_version_mismatch_check_apple_clang_*`), which
+rustc's runtime does not define, so nothing it instruments links. `build.rs`
+is part of `QJS_ENGINE_SOURCES_DIGEST`, so changing it changes
+`bytecode_engine_id` and drops every code-cache entry once.
+
+**`fuzz/` is a `cargo fuzz` workspace of its own**, with its own
+`Cargo.lock`: its binaries take `main` from libFuzzer, so no build of the
+repository's workspace compiles them. Update the lockfile when the bridge's
+dependencies change; CI checks it with `cargo fetch --locked`. `script` runs
+the input as a classic script. `modules` splits it at NUL bytes into up to
+eight modules, `fuzz:0` to `fuzz:7`, loads each twice through the host loader
+with `ModuleCode::Capture` (so a graph that failed to link is linked again),
+then hands the captured bytecode to a fresh runtime as `ModuleCode::Cached` and
+loads them again — the code cache's write and read. Every input runs on its
+own runtime with a 64 MiB memory limit and a 25 ms execution timeout, and
+dropping the runtime is part of the run: `JS_FreeRuntime`'s assertion turns a
+leaked reference into a crash. Seeds are QuickJS's `tests/` and `examples/`
+plus `fuzz/seeds/modules`; `fuzz/js.dict` is a JavaScript token dictionary.
+The fuzz profile is opt-level 1: at 3, AddressSanitizer reports a 64-byte read
+past `jump_slots` in `resolve_labels` (`quickjs.c`, the loop that shifts later
+jump slots after a jump is shortened) on QuickJS's own `examples/pi_bigint.js`,
+from vectorized code only; it is gone with `-fno-vectorize`, and the
+uninstrumented opt-level 3 build reads nothing past that block under macOS's
+Guard Malloc. Running them is in `docs/testing.md`, "Sanitizers, Miri and
+fuzzing".

@@ -333,6 +333,9 @@ The rest is in `docs/testing.md`; read the part that matches the work:
 - **Input robustness at the external-byte boundaries** — before touching
   `bobcat-source`'s parsers.
 - **The unsafe floor** — before writing `unsafe`.
+- **Sanitizers, Miri and fuzzing** — before changing the QuickJS C build, its
+  `unsafe` or the fuzz targets, and to reproduce what the `sanitizers` or
+  `leaks-miri-fuzz` CI job reports.
 - **Benchmarks measure a debug-instrumented terminus** and **Benchmarks are
   only the `benches/` targets** — before changing a bench target, a `bench`
   key in a manifest, or a dev-dependency feature.
