@@ -52,6 +52,7 @@ Most files use a table with these columns:
 | [css-visual.md](css-visual.md) | Color, background, border, shadow, filter, transform, opacity |
 | [css-text.md](css-text.md) | Font/text properties relevant to `parley` shaping/layout |
 | [web-text-test-replication.md](web-text-test-replication.md) | **Status tracker**, not research: the native port of `lynx-stack`'s web-platform text tests, the gaps it exposes, and the native ↔ `web-core` conflicts behind them |
+| [wpt-coverage.md](wpt-coverage.md) | **Generated status report**, not research: `terminus`'s web-platform-tests coverage for flexbox, grid, grid-lanes and css-animations, with the causes behind the failures (`WPT_UPDATE=1 cargo test -p terminus --test wpt` rewrites it) |
 | [css-animation.md](css-animation.md) | Transitions, `@keyframes`, timing functions, JS `animate()` API |
 | [css-selectors-cascade.md](css-selectors-cascade.md) | Selector matching, pseudo-classes/elements, specificity/cascade, custom properties (`var()`) |
 | [css-at-rules.md](css-at-rules.md) | `@media`, `@font-face`, `@supports` |

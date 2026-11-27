@@ -328,6 +328,8 @@ The rest is in `docs/testing.md`; read the part that matches the work:
 
 - **Screenshot tests** — before running, adding or accepting a golden
   (`PRIME_RADIANT_UPDATE_SNAPSHOTS`, the CSS paint atlas workflow).
+- **web-platform-tests** — before a layout, style or animation change, which
+  can move a WPT result (`cargo test -p terminus --test wpt`, `WPT_UPDATE=1`).
 - **The Element PAPI and TypeScript suites** — when TypeScript changed
   (`pnpm test:type`, `pnpm --filter bobcat-element test`).
 - **Input robustness at the external-byte boundaries** — before touching

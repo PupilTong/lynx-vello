@@ -215,6 +215,28 @@ role, so all 22 negative-z probes are Chromium-owned exact matches. The CSS
 paint matrix records the exact capture, update, and full-browser-audit workflow
 in `docs/css-paint-screenshot-matrix.md`.
 
+## web-platform-tests
+
+`cargo test -p terminus --test wpt` runs WPT's `css/css-flexbox`, `css/css-grid`
+(with `grid-lanes/`) and `css/css-animations` over `terminus` alone, in about
+40 s. The files are vendored under `crates/terminus/tests/wpt/suite/` at the
+commit `tests/wpt/WPT_COMMIT` names (refresh with `tests/wpt/sync.py <wpt
+checkout>`; no script is vendored). The runner executes check-layout pages,
+the CSS parsing and computed-value helpers, reftests (both sides rendered by
+the engine), crashtests, and straight-line DOM-change scripts; it reports every
+other file with the reason it does not run. Its harness sheet lays HTML block
+elements out as `display: linear`, because the engine has no block flow
+(`crates/terminus/tests/wpt/loader.rs`). Results must equal
+`tests/wpt/expectations.tsv`: a regression and an unrecorded pass both fail.
+After a change that moves results, run `WPT_UPDATE=1 cargo test -p terminus
+--test wpt`, which rewrites that file and the coverage report
+`docs/tracking/wpt-coverage.md`; `WPT_FILTER=<path substring>` runs a subset and
+prints each result, and `WPT_DUMP=<dir>` writes both renders of each failing
+reftest. The css-animations testharness files need the Web Animations API, so
+the portable ones are ported by hand in
+`crates/terminus/tests/wpt_css_animations.rs` and listed in
+`tests/wpt/ported.tsv`, which the report counts.
+
 ## CI shards
 
 CI splits its two longest jobs across runners, and
