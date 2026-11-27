@@ -66,6 +66,8 @@ impl WorkerFactory {
             outbox,
             events,
             routes: RefCell::default(),
+            #[cfg(feature = "devtools")]
+            devtools: RefCell::default(),
         });
         (view, incoming)
     }
@@ -76,6 +78,8 @@ pub(super) struct ViewWorkers {
     outbox: ViewOutbox,
     events: mpsc::UnboundedSender<WorkerEvent>,
     routes: RefCell<FxHashMap<WorkerKey, Weak<WorkerOwner>>>,
+    #[cfg(feature = "devtools")]
+    devtools: RefCell<Option<crate::devtools::target::AutoAttach>>,
 }
 
 impl ViewWorkers {
@@ -209,6 +213,8 @@ impl WorkerOwner {
             });
             let started = factory.commands.send(WorkerCommand::Start(start));
             if started.is_ok() {
+                #[cfg(feature = "devtools")]
+                self.devtools_started(key, &messages);
                 self.live.borrow_mut().insert(key, messages);
                 return;
             }
@@ -228,6 +234,8 @@ impl WorkerOwner {
     }
 
     fn terminate(&self, key: WorkerKey) {
+        #[cfg(feature = "devtools")]
+        self.devtools_ended(key);
         self.let_go(key);
         if let Some(messages) = self.live.borrow_mut().remove(&key) {
             let _ = messages.send(WorkerMessage::Terminate);
@@ -243,6 +251,8 @@ impl WorkerOwner {
     }
 
     pub(super) fn forget(&self, key: WorkerKey) {
+        #[cfg(feature = "devtools")]
+        self.devtools_ended(key);
         self.live.borrow_mut().remove(&key);
         self.let_go(key);
     }
@@ -259,6 +269,51 @@ impl WorkerOwner {
 
     pub(super) fn live_workers(&self) -> usize {
         self.live.borrow().len()
+    }
+}
+
+#[cfg(feature = "devtools")]
+impl WorkerOwner {
+    pub(super) fn devtools_auto_attach(
+        &self,
+    ) -> &RefCell<Option<crate::devtools::target::AutoAttach>> {
+        &self.view.devtools
+    }
+
+    pub(super) fn devtools_live_workers(&self) -> Vec<crate::devtools::target::LiveWorker> {
+        let mut workers = Vec::new();
+        let mut add = |owner: &Self, key: WorkerKey| {
+            if let (Some(messages), Some(ScriptSource::Worker { url, .. })) = (
+                owner.live.borrow().get(&key),
+                owner.sources.borrow().get(&key),
+            ) {
+                workers.push((key, Arc::clone(url), messages.clone()));
+            }
+        };
+        for &key in self.live.borrow().keys() {
+            add(self, key);
+        }
+        for (&key, owner) in self.view.routes.borrow().iter() {
+            if let Some(owner) = owner.upgrade() {
+                add(&owner, key);
+            }
+        }
+        workers.sort_unstable_by_key(|(key, ..)| *key);
+        workers
+    }
+
+    fn devtools_started(&self, key: WorkerKey, messages: &mpsc::UnboundedSender<WorkerMessage>) {
+        if let Some(attached) = self.view.devtools.borrow().as_ref()
+            && let Some(ScriptSource::Worker { url, .. }) = self.sources.borrow().get(&key)
+        {
+            attached.worker_started(key, url, messages);
+        }
+    }
+
+    fn devtools_ended(&self, key: WorkerKey) {
+        if let Some(attached) = self.view.devtools.borrow().as_ref() {
+            attached.worker_ended(key);
+        }
     }
 }
 

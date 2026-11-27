@@ -580,6 +580,8 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
 
 const INLINE_DECLARATIONS: usize = 16;
 
+#[cfg(feature = "devtools")]
+pub(crate) mod devtools;
 mod editing;
 mod pipelines;
 mod style_sheets;
@@ -1382,6 +1384,8 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
 }
 
 pub(crate) struct MainThreadRuntime {
+    #[cfg(feature = "devtools")]
+    devtools: Option<Rc<devtools::PageSession>>,
     core: Rc<RealmCore>,
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
@@ -1468,6 +1472,8 @@ impl MainThreadRuntime {
         let _ = document.realms.set(Rc::downgrade(&core));
         Ok((
             Self {
+                #[cfg(feature = "devtools")]
+                devtools: None,
                 core,
                 workers,
                 slot,

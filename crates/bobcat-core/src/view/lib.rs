@@ -91,6 +91,12 @@ pub enum EngineError {
     DuplicateNativeModule(String),
     #[error("the ES module of native module `{0}` is not bytecode this build of the engine wrote")]
     InvalidNativeModuleEsm(String),
+    #[cfg(feature = "devtools")]
+    #[error("this view was created without `ViewSources::devtools`")]
+    DevtoolsDisabled,
+    #[cfg(feature = "devtools")]
+    #[error("a devtools session is already attached to this view")]
+    DevtoolsAttached,
 }
 
 impl From<PainterError> for EngineError {
@@ -240,6 +246,8 @@ pub struct ViewSources {
     pub global_props: Option<String>,
     pub initial_processor: String,
     pub screen: ScreenMetrics,
+    #[cfg(feature = "devtools")]
+    pub devtools: bool,
 }
 
 impl ViewSources {
@@ -265,6 +273,8 @@ impl ViewSources {
             global_props: None,
             initial_processor: String::new(),
             screen,
+            #[cfg(feature = "devtools")]
+            devtools: false,
         }
     }
 }
@@ -357,6 +367,10 @@ impl LynxGroup {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one construction, read top to bottom"
+    )]
     pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
@@ -374,6 +388,8 @@ impl LynxGroup {
         let registry = Arc::new(PipelineRegistry::new(time_origin));
         let (table, native_esms) = read_native_modules(&native_modules)?;
         let base_url = Arc::new(resolve_startup_urls(&mut sources)?);
+        #[cfg(feature = "devtools")]
+        let devtools = sources.devtools.then(RefCell::default);
         let worker_fonts = Arc::new(WorkerFonts::of(&sources));
         let default_font_family = sources.default_font_family.take();
         let text_context = stage_text_context(
@@ -465,6 +481,8 @@ impl LynxGroup {
             timeline_epoch: time_origin.instant().instant(),
             time_origin,
             performance_generation: 0,
+            #[cfg(feature = "devtools")]
+            devtools,
             group: Rc::clone(&self.inner),
         })
     }
@@ -510,6 +528,8 @@ pub struct LynxView<F: ResourceFetcher> {
     timeline_epoch: ClockInstant,
     time_origin: TimeOrigin,
     performance_generation: u64,
+    #[cfg(feature = "devtools")]
+    devtools: Option<RefCell<std::sync::Weak<crate::devtools::Outlet>>>,
     #[expect(dead_code, reason = "held to keep the group's thread alive")]
     group: Rc<GroupInner>,
 }
@@ -612,6 +632,35 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             .commands
             .send(ToMain::TextInputSource(source))
             .map_err(|_| EngineError::NotReady)
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn devtools_attach(
+        &self,
+        sink: Arc<dyn crate::devtools::DevtoolsSink>,
+    ) -> Result<crate::devtools::DevtoolsSession, EngineError> {
+        let current = self
+            .devtools
+            .as_ref()
+            .ok_or(EngineError::DevtoolsDisabled)?;
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::NotReady);
+        }
+        if current
+            .borrow()
+            .upgrade()
+            .is_some_and(|outlet| outlet.is_open())
+        {
+            return Err(EngineError::DevtoolsAttached);
+        }
+        let (session, attach) = crate::devtools::DevtoolsSession::new(sink);
+        if let Err(refused) = self.seat.commands.send(ToMain::Devtools(attach)) {
+            drop(session);
+            drop(refused);
+            return Err(EngineError::NotReady);
+        }
+        *current.borrow_mut() = session.outlet();
+        Ok(session)
     }
 
     fn send_page_update(&self, update: crate::link::PageUpdate) -> Result<(), EngineError> {

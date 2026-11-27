@@ -99,6 +99,8 @@ pub enum JobKind {
     Performance,
     Memory,
     Release,
+    #[cfg(feature = "devtools")]
+    Devtools,
 }
 
 impl JobKind {
@@ -124,6 +126,8 @@ impl JobKind {
             Self::Performance => "performance",
             Self::Memory => "memory",
             Self::Release => "release",
+            #[cfg(feature = "devtools")]
+            Self::Devtools => "devtools",
         }
     }
 }

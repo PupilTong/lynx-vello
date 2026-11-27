@@ -195,11 +195,16 @@ pub(crate) enum ToMain {
         card: crate::performance::OpenerId,
         json: String,
     },
+    #[cfg(feature = "devtools")]
+    Devtools(Box<crate::devtools::Attach>),
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
     #[cfg(test)]
     Trap(std::sync::mpsc::Sender<bool>),
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<ToMain>() <= 96);
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InputEventPayload {

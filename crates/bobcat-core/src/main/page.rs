@@ -410,6 +410,15 @@ impl Page {
                     policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
+            #[cfg(feature = "devtools")]
+            ToMain::Devtools(attach) => {
+                let crate::devtools::Attach {
+                    messages,
+                    attachment,
+                } = *attach;
+                let outlet = runtime.devtools_attach(attachment);
+                owner::spawn(self, serve_devtools(Rc::clone(self), messages, outlet));
+            }
             ToMain::StartMonitorTask(task) => {
                 let page = Rc::clone(self);
                 owner::spawn(
@@ -732,6 +741,8 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         initial_processor,
         global_props,
         screen,
+        #[cfg(feature = "devtools")]
+            devtools: _,
     } = sources;
     let ingredients = DocumentIngredients {
         viewport,
@@ -887,6 +898,23 @@ async fn consume_worker_events(page: Rc<Page>) {
         })
         .await;
     }
+}
+
+#[cfg(feature = "devtools")]
+async fn serve_devtools(
+    page: Rc<Page>,
+    mut messages: mpsc::UnboundedReceiver<String>,
+    outlet: Arc<crate::devtools::Outlet>,
+) {
+    while let Some(text) = messages.recv().await {
+        let outlet = Arc::clone(&outlet);
+        owner::queue(&page, JobKind::Devtools, move |runtime, _| {
+            runtime.devtools_message(&outlet, &text);
+        });
+    }
+    owner::queue(&page, JobKind::Devtools, move |runtime, _| {
+        runtime.devtools_end(&outlet);
+    });
 }
 
 async fn request_source(

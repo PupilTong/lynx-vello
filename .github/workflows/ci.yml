@@ -60,12 +60,10 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Clippy (devtools feature)
-        # No workspace member enables the `devtools` features of terminus and
-        # quickjs-rust-bridge, so the step above and the `test` shards never
-        # compile them. bobcat-core is named without a feature of its own: its
-        # dev-dependencies turn on `terminus/painter-test-utils`, which the
-        # step above also lints terminus with.
-        run: cargo clippy -p bobcat-core -p terminus -p quickjs-rust-bridge --features terminus/devtools,quickjs-rust-bridge/devtools --all-targets --no-deps -- -D warnings
+        # No workspace member enables `devtools`, so the step above and the
+        # `test` shards never compile it. The three crates are named with
+        # their own feature each; bobcat-core's implies the other two.
+        run: cargo clippy -p bobcat-core -p terminus -p quickjs-rust-bridge --features bobcat-core/devtools,terminus/devtools,quickjs-rust-bridge/devtools --all-targets --no-deps -- -D warnings
 
       - name: APFS worktree cache hook
         run: python3 .github/scripts/test-worktree-cow.py -v
@@ -109,17 +107,18 @@ jobs:
         run: cargo test --doc
 
       - name: Devtools feature tests
-        # Only the features' own tests, not the crates' whole suites a second
+        # Only the feature's own tests, not the crates' whole suites a second
         # time. Both invocations select the same packages and features, so the
-        # second builds nothing the first did not. The first runs terminus's
-        # `paint::highlight` unit tests and the highlight case of its
-        # `tests/gpu_pixels.rs`; the second runs quickjs-rust-bridge's
-        # `tests/devtools.rs` and terminus's `tests/matched_styles.rs` in
-        # full. No coverage: the `test` shards already measure these crates
-        # without the features.
+        # second builds nothing the first did not. The first runs the unit
+        # tests whose path contains `devtools` or `highlight` (bobcat-core's
+        # `devtools::` modules, terminus's `paint::highlight` tests) and the
+        # highlight case of terminus's `tests/gpu_pixels.rs`; the second runs
+        # quickjs-rust-bridge's `tests/devtools.rs` and terminus's
+        # `tests/matched_styles.rs` in full. No coverage: the `test` shards
+        # already measure these crates without the feature.
         run: |
-          select="-p terminus -p quickjs-rust-bridge --features terminus/devtools,quickjs-rust-bridge/devtools"
-          cargo test $select --lib --test gpu_pixels -- highlight
+          select="-p bobcat-core -p terminus -p quickjs-rust-bridge --features bobcat-core/devtools,terminus/devtools,quickjs-rust-bridge/devtools"
+          cargo test $select --lib --test gpu_pixels -- devtools highlight
           cargo test $select --test devtools --test matched_styles
 
   # One runner used to do the lint builds, the instrumented build and every

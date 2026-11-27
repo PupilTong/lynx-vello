@@ -14,6 +14,9 @@ publish = false
 # only the `benches/` targets").
 bench = false
 
+[features]
+devtools = ["serde_json/raw_value", "terminus/devtools", "quickjs-rust-bridge/devtools"]
+
 [dependencies]
 # The type a document request's bytes travel in, from the document to the
 # host (`ResourceFetcher::request_document`).
