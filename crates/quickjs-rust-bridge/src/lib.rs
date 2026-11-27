@@ -5479,6 +5479,7 @@ mod implementation {
         }
 
         fn compiled_module(name: &str, source: &str) -> &'static [u8] {
+            static KEPT: std::sync::Mutex<Vec<&'static [u8]>> = std::sync::Mutex::new(Vec::new());
             let compiler = Runtime::with_options(RuntimeOptions {
                 strip_source: true,
                 ..RuntimeOptions::default()
@@ -5486,7 +5487,9 @@ mod implementation {
             .unwrap();
             let scratch = compiler.create_context().unwrap();
             let bytecode = scratch.compile_module_bytecode(name, source).unwrap();
-            Box::leak(bytecode.into_boxed_slice())
+            let bytecode: &'static [u8] = Box::leak(bytecode.into_boxed_slice());
+            KEPT.lock().unwrap().push(bytecode);
+            bytecode
         }
 
         #[test]

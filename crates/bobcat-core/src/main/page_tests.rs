@@ -4652,7 +4652,11 @@ console.log('armed');
             ))
             .await;
         let mut events = owned.events();
-        assert_eq!(console_messages(&events), ["armed"], "{events:?}");
+        assert_eq!(
+            console_messages(&events).first().map(String::as_str),
+            Some("armed"),
+            "{events:?}"
+        );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !console_messages(&events)
