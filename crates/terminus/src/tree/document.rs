@@ -70,6 +70,8 @@ pub struct Document<T> {
     pub(crate) container_roots: crate::visual::container_timing::ContainerRoots,
     pub(crate) svg_roots: crate::svg::present::SvgRoots,
     pub(crate) animated_images: crate::svg::image::AnimatedImages,
+    #[cfg(feature = "devtools")]
+    pub(crate) node_highlight: Option<crate::paint::highlight::NodeHighlight>,
     visual_dirty: bool,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -126,6 +128,8 @@ impl<T> Document<T> {
             container_roots: crate::visual::container_timing::ContainerRoots::default(),
             svg_roots: crate::svg::present::SvgRoots::default(),
             animated_images: crate::svg::image::AnimatedImages::default(),
+            #[cfg(feature = "devtools")]
+            node_highlight: None,
             visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,

@@ -14,6 +14,7 @@ rust-version.workspace = true
 bench = false
 
 [features]
+devtools = []
 layout-test-utils = ["seldon/layout-test-utils"]
 # The presenting painter's test surface: a painter with no draw target, a
 # pinnable frame clock, and read access to its gesture router and scroll

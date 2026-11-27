@@ -90,6 +90,45 @@ fn plain_background_covers_the_box() {
     );
 }
 
+#[cfg(feature = "devtools")]
+#[test]
+fn a_node_highlight_fills_its_four_areas_over_later_content() {
+    let mut gpu = headless("a_node_highlight_fills_its_four_areas_over_later_content");
+    let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
+        .box { position: absolute; left: 20px; top: 10px; width: 80px; height: 60px;
+               box-sizing: border-box; border: 4px solid black; padding: 8px; margin: 6px; }
+        .over { position: absolute; z-index: 5; left: 0px; top: 0px;
+                width: 200px; height: 100px; background-color: white; }";
+    let mut doc = Doc::with_css_sized(css, 200.0, 100.0);
+    let root = doc.root;
+    let target = doc.el(root, "box");
+    doc.el(root, "over");
+    doc.dom
+        .set_node_highlight(Some(terminus::link::NodeHighlight {
+            node: target,
+            content: Color::from_rgba8(0, 0, 255, 255),
+            padding: Color::from_rgba8(0, 255, 0, 255),
+            border: Color::from_rgba8(255, 255, 0, 255),
+            margin: Color::from_rgba8(255, 128, 0, 255),
+        }));
+
+    doc.dom.render();
+    let scene = doc.dom.scene(&terminus::link::NoImages);
+    let pixels = gpu
+        .render(&scene, 200, 100, Color::BLACK)
+        .expect("headless render");
+
+    assert_eq!(pixel(&pixels, 200, 60, 40), BLUE, "content box");
+    assert_eq!(pixel(&pixels, 200, 33, 40), [0, 255, 0, 255], "padding");
+    assert_eq!(pixel(&pixels, 200, 28, 40), [255, 255, 0, 255], "border");
+    assert_eq!(pixel(&pixels, 200, 23, 40), [255, 128, 0, 255], "margin");
+    assert_eq!(
+        pixel(&pixels, 200, 150, 90),
+        WHITE,
+        "the later page content"
+    );
+}
+
 #[test]
 fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let mut gpu = headless("gradient_color_fills_glyph_ink_from_the_padding_box");

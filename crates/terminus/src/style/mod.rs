@@ -14,6 +14,8 @@ pub(crate) mod device;
 pub(crate) mod engine;
 pub(crate) mod flush;
 mod invalidation;
+#[cfg(feature = "devtools")]
+pub(crate) mod matched;
 pub(crate) mod pool;
 pub(crate) mod query;
 pub(crate) mod timeline;

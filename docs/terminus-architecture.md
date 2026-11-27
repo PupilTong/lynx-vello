@@ -294,6 +294,24 @@ of mutations pays one spine walk. Equivalence tests
 root-reaching — to the geometry of a fresh document built directly in the final
 state.
 
+With the `devtools` cargo feature, `Document::matched_styles(element)`
+(`src/style/matched.rs`) answers what the cascade applied to an element for a
+developer-tools backend: the element's inline block, its presentational hints,
+and the style rules that matched, lowest cascade priority first. It reads the
+rule node chain of the element's last computed style
+(`ComputedValues::rules()`), keeps each declaration block once, recognises the
+node's own inline and presentational blocks by pointer, and maps every other
+block back to its style rule by pointer equality over a walk of every rule in
+the `Stylist`'s sheets and in the shadow roots of the element and of its
+shadow-including ancestors, nested rules included; a block found in no sheet
+(animations, transitions) is left out. Each selector of a rule is serialised by
+stylo and matched against the element with the host of the sheet's shadow root
+as the matching context's shadow host; a nested rule's selector is reported as
+written and matched with `&` replaced by its parent's selectors. Declarations
+are the block's longhands and custom properties in block order, without the
+fork's internal longhands. Nothing is cached or stored: each call walks all the
+rules again. A never-styled element, a text node and a stale id answer `None`.
+
 ## SVG-namespace elements
 
 `crates/terminus/src/svg/` puts SVG content in the document as real element
@@ -1057,6 +1075,21 @@ Device supplies viewport/DPR so paint cannot disagree with layout. The
 authoritative paint limits are recorded in `crates/terminus/src/paint/painter.rs`;
 DOM-aware paint tests and the paint benchmark live under `crates/terminus/tests` and
 `crates/terminus/benches`.
+
+With the `devtools` cargo feature, `Document::set_node_highlight` stores one
+`NodeHighlight` (a node and four colours) and marks the document as needing a
+render when the value changes. `walk_within` (`paint/walker.rs`), after it has
+closed every scope and popped every clip, finds the node's `ElementBox` item by
+a linear scan of the paint order and `paint/highlight.rs` records up to four
+fills: the content box, then the padding, border and margin areas as even-odd
+rings, each skipped when its colour's alpha is zero or the area is empty, the
+margin box built from the rounded layout's margins with negative margins taken
+as zero. The fills go into the item's own compose space under the device
+pixel ratio times the item's matrix, so painter-side scrolling and exported
+animations move them with the box; no ancestor clip applies to them. They are
+in no paint item, so hit testing, content detection and container timing do
+not see them. A node with no `ElementBox` item draws nothing. Without the
+feature the field and its check do not exist.
 
 The crate also owns the DOM-free render floor absorbed from the former `pulsar`
 crate (2026-08-04): the `render` module holds the `FrameImages` trait

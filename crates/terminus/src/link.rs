@@ -25,6 +25,8 @@ pub use crate::paint::compose::FilterGroup;
 pub use crate::paint::display_list::{
     DisplayList, DrawGlyphs, Embolden, Glyph, ImagePixels, ImageRef, NormalizedCoord, Texture,
 };
+#[cfg(feature = "devtools")]
+pub use crate::paint::highlight::NodeHighlight;
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImage, FrameImages, ImageDescriptor, ImageEvent,
     ImageInbox, ImageReports, ImageResidency, ImageSizeHint, ImageStatus, MAX_RENDERABLE_DIMENSION,
@@ -43,6 +45,8 @@ pub use crate::style::engine::{
     CssDeclaration, CssKeyframe, CssRule, FontFaceRequest, FontFaceSource, ShadowSheet,
     StylesheetOrigin, UserAgentStylesheet,
 };
+#[cfg(feature = "devtools")]
+pub use crate::style::matched::{MatchedDeclaration, MatchedRule, MatchedSelector, MatchedStyles};
 pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
 pub use crate::style::query::InvalidSelector;
 pub use crate::svg::image::VectorDocument;

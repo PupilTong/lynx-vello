@@ -17,6 +17,8 @@ pub(crate) mod display_list;
 #[cfg(test)]
 pub(crate) mod equivalence;
 pub(crate) mod filters;
+#[cfg(feature = "devtools")]
+pub(crate) mod highlight;
 pub(crate) mod mask;
 pub(crate) mod painter;
 mod shadow;
