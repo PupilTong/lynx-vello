@@ -156,6 +156,35 @@ would host it:
   implemented — `lynx.fetchBundle` plus `lynx.loadScript` on both threads,
   registered by the same `ContainerSources` a page is — and so is
   `require`'s own `.json` parse.
+- **Devtools.** A first Chrome DevTools Protocol backend exists behind the
+  `devtools` features of `crates/bobcat-core`, `crates/terminus` and
+  `crates/quickjs-rust-bridge` (`docs/devtools-design.md`; the code is
+  described in `crates/bobcat-core/docs/devtools.md`). Not built yet:
+  - Transports and adapters (Chrome DevTools over WebSocket, Lynx DevTool over
+    DebugRouter): the embedders', `crates/bobcat-cli` and `crates/bobcat-wasm`.
+    No embedder enables the feature yet.
+  - Screenshot, screencast and input injection: they need the `Painter` on
+    the embedder thread, which the backend does not reach.
+  - Breakpoints: the pinned QuickJS (`vendor/quickjs`) has no debugger API.
+  - `awaitPromise` and side-effect-free evaluation (`throwOnSideEffect`) in
+    `Runtime.evaluate` and `Runtime.callFunctionOn`
+    (`crates/bobcat-core/src/devtools/runtime.rs`).
+  - A Proxy's target and handler, and Map and Set entries, as structured
+    data: they need a function in the QuickJS fork, exposed by
+    `crates/quickjs-rust-bridge/src/implementation/devtools.rs`.
+  - Editing the document or styles from the frontend
+    (`crates/bobcat-core/src/devtools/dom.rs`, `devtools/css.rs`).
+  - Style sheets announced as `CSS.styleSheetAdded`, with style sheet ids and
+    source ranges on rules (`devtools/css.rs`, over
+    `crates/terminus/src/style/matched.rs`).
+  - Console messages produced before attach or before `Runtime.enable`, kept
+    and replayed (the realm's `ConsoleTap`, `devtools/runtime.rs`).
+  - Interrupting running script (`Runtime.terminateExecution`), through the
+    bridge's `InterruptHandle`.
+  - `ShadowRealm` child realms as separate execution contexts; they share
+    their parent's `ConsoleTap` (`crates/bobcat-core/src/realm/child.rs`).
+  - The Network, Performance, Memory and Application panels: further domain
+    files under `crates/bobcat-core/src/devtools/`.
 
 See `docs/tracking/` for the behavior surface each of these is scoped against,
 and `.claude/agents/` for the subsystem-scoped agent personas set up for this

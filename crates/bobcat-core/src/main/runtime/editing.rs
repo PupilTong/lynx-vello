@@ -208,6 +208,10 @@ impl MainThreadRuntime {
         payload: &InputEventPayload,
         release: Option<terminus::link::NodeId>,
     ) -> Vec<MainThreadError> {
+        #[cfg(feature = "devtools")]
+        if self.devtools_takes_input(target, name, payload) {
+            return Vec::new();
+        }
         let mut failures = Vec::new();
         if let Some(release) = release {
             self.dispatch_input_event(
