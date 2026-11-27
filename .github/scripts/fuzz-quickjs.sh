@@ -31,7 +31,12 @@ rm -rf "$seeds"
 mkdir -p "$seeds"
 cp ../../vendor/quickjs/tests/*.js ../../vendor/quickjs/examples/*.js "$seeds/"
 
-cargo fuzz build
+# The target rustc builds for, named explicitly: `cargo fuzz` otherwise uses
+# the triple its own binary was built for, and a prebuilt Linux cargo-fuzz is
+# a musl build, which AddressSanitizer cannot instrument.
+target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+
+cargo fuzz build --target "$target_triple"
 
 for target in script modules; do
   corpus="fuzz/corpus/$target"
@@ -45,7 +50,7 @@ for target in script modules; do
   # New inputs go to the first directory, the corpus. Word splitting of
   # `$run_flags` and `$extra_seeds` is intended: each is one flag or none.
   # shellcheck disable=SC2086
-  cargo fuzz run "$target" "$corpus" "$seeds" $extra_seeds -- \
+  cargo fuzz run --target "$target_triple" "$target" "$corpus" "$seeds" $extra_seeds -- \
     -dict=fuzz/js.dict \
     -timeout=10 \
     -rss_limit_mb=4096 \

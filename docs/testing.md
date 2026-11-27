@@ -96,7 +96,10 @@ well as by review, in two CI jobs: `sanitizers` (macOS) and `leaks-miri-fuzz`
   saved, which is deterministic; pushes to main fuzz five minutes per target,
   save the corpus, and upload crashing inputs as `quickjs-fuzz-artifacts`.
   Reproduce one from `crates/quickjs-rust-bridge` with
-  `cargo fuzz run <target> <file>`, `CC` and `CXX` set to LLVM's Clang.
+  `cargo fuzz run <target> <file>`, `CC` and `CXX` set to LLVM's Clang. A
+  prebuilt Linux `cargo-fuzz` (what CI installs) is a musl build and targets
+  musl unless given `--target`, which AddressSanitizer cannot instrument; the
+  script passes rustc's host triple, and so should a manual run there.
 
 ## Benchmarks measure a debug-instrumented terminus
 
