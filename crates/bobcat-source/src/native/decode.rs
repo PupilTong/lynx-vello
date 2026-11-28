@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Map, Value as JsonValue};
 
 use super::ConvertError;
-use super::reader::Reader;
+use super::reader::{PREALLOCATED_ELEMENTS, Reader};
 use super::style::{CssOptions, decode_fragment};
 use crate::web::style_info::StyleSheet;
 
@@ -661,7 +661,7 @@ fn decode_custom_headers(reader: &mut Reader<'_>) -> Result<Vec<CustomHeader>, C
         ));
     }
 
-    let mut headers = Vec::with_capacity(count);
+    let mut headers = Vec::with_capacity(count.min(PREALLOCATED_ELEMENTS));
     for _ in 0..count {
         let name = reader.string("custom-section name")?;
         let header = decode_value(reader, 0)?;
@@ -872,7 +872,7 @@ pub(crate) fn decode_value(
                     "Lepus array size exceeds the remaining input",
                 ));
             }
-            let mut array = Vec::with_capacity(count);
+            let mut array = Vec::with_capacity(count.min(PREALLOCATED_ELEMENTS));
             for _ in 0..count {
                 array.push(decode_value(reader, depth + 1)?);
             }
@@ -1005,5 +1005,59 @@ fn add_header_config(
         config
             .entry("templateDebugUrl".to_owned())
             .or_insert_with(|| JsonValue::String(value.to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod preallocation_regressions {
+    use super::*;
+
+    const DECLARED: u32 = 1 << 20;
+
+    fn le(value: u32) -> [u8; 4] {
+        value.to_le_bytes()
+    }
+
+    fn fragment(head: &[&[u8]], filler: u8, filler_len: usize) -> Vec<u8> {
+        let mut bytes: Vec<u8> = head.concat();
+        bytes.resize(bytes.len() + filler_len, filler);
+        bytes
+    }
+
+    fn options() -> CssOptions {
+        CssOptions {
+            target_version: Version::V2_8,
+            enable_css_parser: false,
+            enable_css_selector: true,
+            enable_css_variable: false,
+        }
+    }
+
+    fn huge() -> usize {
+        usize::try_from(DECLARED).unwrap()
+    }
+
+    #[test]
+    fn a_huge_flattened_selector_count_stops_at_the_first_value() {
+        let bytes = fragment(&[&le(0), &le(0), &le(1), &le(DECLARED)], 0xFF, huge());
+        let error = decode_fragment(&bytes, options()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Lepus value type 255"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_huge_lepus_array_count_stops_at_the_first_element() {
+        let bytes = fragment(&[&[5], &le(DECLARED)], 0xFF, huge());
+        let error = decode_value(&mut Reader::new(&bytes), 0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Lepus value type 255"),
+            "{error}"
+        );
     }
 }

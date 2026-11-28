@@ -40,7 +40,7 @@ impl FontBlob {
         let blob = Blob::new(Arc::new(data));
         let (payload, id) = blob.clone().into_raw_parts();
         shared.push(Shared {
-            address,
+            address: blob.as_ref().as_ptr().addr(),
             len,
             payload: Arc::downgrade(&payload),
             id,
@@ -126,5 +126,14 @@ mod tests {
         let first = FontBlob::new(Arc::clone(&shared)).id();
 
         assert_ne!(FontBlob::new(shared).id(), first);
+    }
+
+    #[test]
+    fn inline_payloads_with_different_bytes_are_different_blobs() {
+        let blobs: Vec<FontBlob> = (0..4_u8).map(|byte| FontBlob::new([byte; 4])).collect();
+
+        for (byte, blob) in (0..4_u8).zip(&blobs) {
+            assert_eq!(blob.as_ref(), [byte; 4]);
+        }
     }
 }

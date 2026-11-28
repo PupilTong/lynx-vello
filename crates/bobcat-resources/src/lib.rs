@@ -1045,6 +1045,7 @@ fn preprocess_fetched(
         fetched.bytes.clone(),
         fetched.media_type.as_ref(),
         Some(url),
+        mime::SniffContext::Other,
     )
     .map_err(|error| {
         vant::error::Failure::new(

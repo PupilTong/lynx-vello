@@ -713,18 +713,22 @@ impl CommittedFrame {
             })
             .collect();
         let spaces = self.order.spaces();
-        self.order.items().iter().rev().find_map(|item| {
-            let node = self.order.item_hit(item, point, &samples).or_else(|| {
-                seams
-                    .iter()
-                    .filter(|(slot, _)| super::space::rides(spaces, item.space, *slot))
-                    .find_map(|(_, seam)| self.order.item_hit(item, point, seam))
-            })?;
-            Some(HitTarget {
-                node,
-                scroll: item.slot,
+        self.order
+            .hit_testable_items()
+            .iter()
+            .rev()
+            .find_map(|item| {
+                let node = self.order.item_hit(item, point, &samples).or_else(|| {
+                    seams
+                        .iter()
+                        .filter(|(slot, _)| super::space::rides(spaces, item.space, *slot))
+                        .find_map(|(_, seam)| self.order.item_hit(item, point, seam))
+                })?;
+                Some(HitTarget {
+                    node,
+                    scroll: item.slot,
+                })
             })
-        })
     }
 
     #[must_use]

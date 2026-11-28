@@ -491,6 +491,26 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     assert!(!probe("app:///page/module.js"));
 }
 
+#[tokio::test]
+async fn a_script_that_starts_with_bmp_magic_decodes_with_replacement() {
+    let resources = resources();
+    resources
+        .register(
+            "app:///page/map.js",
+            b"BMap.x = '\xFF';".to_vec(),
+            Some("text/javascript"),
+        )
+        .unwrap();
+
+    match result(load(&resources, "app:///page/map.js", SourceKind::Script))
+        .await
+        .unwrap()
+    {
+        LoadedSource::Module { source, .. } => assert_eq!(source, "BMap.x = '\u{FFFD}';"),
+        source => panic!("expected a module, got {source:?}"),
+    }
+}
+
 #[test]
 fn the_style_sheet_probe_answers_from_the_registry_alone() {
     let resources = resources();

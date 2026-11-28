@@ -91,8 +91,8 @@ async fn fetch(request: &Request) -> Result<Response, Failure> {
     )
     .await
     .map_err(|error| js_failure(ResourceErrorPhase::ReadBody, &error))?;
-    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-    if bytes.len() > request.max_body {
+    let array = js_sys::Uint8Array::new(&buffer);
+    if usize::try_from(array.length()).unwrap_or(usize::MAX) > request.max_body {
         return Err(Failure::new(
             ResourceErrorKind::ResponseTooLarge,
             ResourceErrorPhase::ReadBody,
@@ -103,7 +103,7 @@ async fn fetch(request: &Request) -> Result<Response, Failure> {
         url,
         status,
         headers,
-        body: Bytes::from(bytes),
+        body: Bytes::from(array.to_vec()),
     })
 }
 

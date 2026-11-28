@@ -329,6 +329,18 @@ functions, or its own hook) is a cycle that leaks it. The token counts that
 independent of Bobcat, the DOM, resources, and runtime policy — it knows
 nothing about Lynx.
 
+A host function, a module normalizer or a require loader may drop the last
+handle of the realm it is running in. After such a closure returns, the bridge
+reads only the raw `JSContext`: a host function's failure is handed back in
+its result and thrown by the trampoline (`qjs_host_failure`), and the two
+module callbacks hold a strong count across the closure and answer a static
+message when the realm is gone. Three C frames that hold a `QjsContext *`
+across author code read the context opaque again before using it:
+`qjs_require_evaluate` after the evaluation, `qjs_require_module` after its
+linked compile fails and after the evaluation, and the transfer trampoline
+after it has read its transfer list. A NULL opaque there is the exception
+`"this realm is being released"`, with nothing of the freed realm read.
+
 **The `devtools` cargo feature adds debugger reflection**
 (`src/implementation/devtools.rs`, and the `QJS_BRIDGE_DEVTOOLS` block of
 `shim.c`, which `build.rs` defines only with the feature). Without it the

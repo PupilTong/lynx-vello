@@ -108,7 +108,7 @@ fn frame_size_applies_the_device_scale_once() {
 #[test]
 fn frame_size_rejects_unbounded_targets() {
     let error = FrameSize::for_viewport(20_000.0, 100.0, 1.0).unwrap_err();
-    assert!(error.to_string().contains("16384"));
+    assert!(error.to_string().contains("8192"));
 }
 
 #[test]

@@ -40,12 +40,12 @@ use super::util::{
     accumulate_scrollable_overflow, apply_aspect_ratio, apply_box_sizing, axis_has_intrinsic_style,
     box_inset_size, clamp, clamp_axis, container_content_independence, is_scroll_container,
     item_end_margin, item_value_stability, normalize_content_alignment,
-    normalize_item_alignment_with_last_baseline, own_scrollable_overflow, resolve_container_box,
-    resolve_gap, resolve_insets, resolve_item_geometry, resolve_max_sizes,
+    normalize_item_alignment_with_last_baseline, own_scrollable_overflow, relative_offset,
+    resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry, resolve_max_sizes,
     resolve_quantitative_max_sizes, resolve_quantitative_sizes, sort_and_assign_layout_order,
     style_size_behaves_auto,
 };
-use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_subtree};
+use super::{AbsoluteContainingBlock, compute_absolute_layout_in, hide_child_at_order};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::contained_axes;
 use crate::style::{Contain, CoreStyle, Display, GridStyle, Overflow};
@@ -913,10 +913,7 @@ where
         return Point::ZERO;
     }
     let inset = resolve_insets(tree.style(item.key.node).inset(), basis);
-    Point::new(
-        inset.left.unwrap_or_else(|| -inset.right.unwrap_or(0.0)),
-        inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0)),
-    )
+    relative_offset(inset, item.direction)
 }
 
 fn item_area_geometry<N>(
@@ -1889,12 +1886,8 @@ where
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
-            hide_subtree(tree, state, child);
-            tree.set_unrounded_layout(
-                state,
-                child,
-                Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-            );
+            let order = u32::try_from(document_index).unwrap_or(u32::MAX);
+            hide_child_at_order(tree, state, child, order);
         }
         let absolute = absolute.expect("commit keeps out-of-flow grid items");
         let absolute_content_size =

@@ -467,11 +467,18 @@ impl<T> TreeArenas<T> {
 
     #[inline]
     pub(crate) fn id_at_arena_key(&self, key: usize) -> Option<NodeId> {
-        self.nodes.get(key).map(Node::id)
+        self.nodes
+            .get(key)
+            .map(Node::id)
+            .filter(|id| id.arena_key() == key)
     }
 
     pub(crate) fn ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes.iter().skip(1).map(|(_, node)| node.id())
+        self.nodes
+            .iter()
+            .map(|(key, node)| (key, node.id()))
+            .filter(|&(key, id)| id.arena_key() == key)
+            .map(|(_, id)| id)
     }
 
     #[expect(
@@ -507,11 +514,31 @@ impl<T> TreeArenas<T> {
             .try_remove(id.arena_key())
             .expect("a current handle always selects its node");
         self.live_elements -= usize::from(node.is_element());
-        self.generations[id.arena_key()] = self.generations[id.arena_key()].wrapping_add(1);
-        self.relevance.reset(id.arena_key());
-        self.committed_boxes.reset(id.arena_key());
+        let key = id.arena_key();
+        let generation = self.generations[key] + 1;
+        self.generations[key] = generation;
+        if generation == 1 << GENERATION_BITS {
+            self.retire_key(key, node.owner());
+        }
+        self.relevance.reset(key);
+        self.committed_boxes.reset(key);
         self.anchors.forget(id);
         node
+    }
+
+    #[cold]
+    fn retire_key(&mut self, key: usize, owner: ArenaPtr<T>) {
+        let placeholder = if key == DOCUMENT_NODE_ID.arena_key() {
+            DOCUMENT_ELEMENT_NODE_ID
+        } else {
+            DOCUMENT_NODE_ID
+        };
+        assert_eq!(self.nodes.vacant_key(), key);
+        assert_eq!(
+            self.nodes
+                .insert(Node::new_text(owner, placeholder, Box::default())),
+            key
+        );
     }
 }
 
@@ -917,6 +944,46 @@ mod tests {
             "a freed scroll container's offset leaves with it"
         );
         assert!(layout.scroll_reaches.is_empty(), "and so does its reach");
+    }
+
+    #[test]
+    fn a_removed_node_frees_its_key_for_the_next_generation() {
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
+        arenas.insert_node(text(0));
+        let first = arenas.insert_node(text(1));
+        arenas.remove_node(first);
+        let next = arenas.insert_node(text(2));
+        assert_eq!(next.arena_key(), first.arena_key());
+        assert_eq!(next.generation(), first.generation() + 1);
+        assert_eq!(NodeId::from_bits(next.to_bits()), Some(next));
+    }
+
+    #[test]
+    fn a_key_at_the_last_generation_is_retired_on_removal() {
+        let mut arenas: ArenaBox<u32> = ArenaBox::new();
+        let kept = arenas.insert_node(text(0));
+        let probe = arenas.insert_node(text(1));
+        let retired = probe.arena_key();
+        arenas.remove_node(probe);
+        arenas.generations[retired] = (1 << GENERATION_BITS) - 1;
+
+        let last = arenas.insert_node(text(2));
+        assert_eq!(last.arena_key(), retired);
+        assert_eq!(NodeId::from_bits(last.to_bits()), Some(last));
+        assert!(arenas.contains(last));
+
+        arenas.remove_node(last);
+        assert!(!arenas.contains(last));
+        assert!(!arenas.slot_is_current(last));
+        let after = arenas.insert_node(text(3));
+        assert_ne!(after.arena_key(), retired);
+        assert_eq!(NodeId::from_bits(after.to_bits()), Some(after));
+        assert_eq!(arenas.get(after).map(Node::payload), Some(&3));
+        assert!(arenas.ids().all(|id| id.arena_key() != retired));
+        assert_eq!(arenas.ids().collect::<Vec<_>>(), vec![kept, after]);
+        assert_eq!(arenas.id_at_arena_key(retired), None);
+        assert_eq!(arenas.id_at_arena_key(RESERVED), None);
+        assert_eq!(arenas.id_at_arena_key(kept.arena_key()), Some(kept));
     }
 
     #[test]

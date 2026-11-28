@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::ConvertError;
 use super::decode::{LepusValue, Version, decode_value};
-use super::reader::Reader;
+use super::reader::{PREALLOCATED_ELEMENTS, Reader};
 use super::tokenize::value_tokens;
 use crate::web::style_info::{
     CssProperty, DeclarationBlock, ParsedDeclaration, Rule, RuleKind, RulePrelude, Selector,
@@ -67,14 +67,14 @@ pub(crate) fn decode_fragment(
 
     let selector_count_raw = reader.u32()?;
     let selector_count = checked_count(&reader, selector_count_raw, 4, "selector")?;
-    let mut rules = Vec::with_capacity(selector_count);
+    let mut rules = Vec::with_capacity(selector_count.min(PREALLOCATED_ELEMENTS));
     for _ in 0..selector_count {
         let flattened_size_raw = reader.u32()?;
         let flattened_size = checked_count(&reader, flattened_size_raw, 1, "flattened selector")?;
         if flattened_size == 0 {
             continue;
         }
-        let mut native_selectors = Vec::with_capacity(flattened_size);
+        let mut native_selectors = Vec::with_capacity(flattened_size.min(PREALLOCATED_ELEMENTS));
         for _ in 0..flattened_size {
             let value = decode_value(&mut reader, 0)?;
             native_selectors.push(decode_selector(&value)?);
@@ -165,7 +165,7 @@ fn decode_attributes(
 ) -> Result<Vec<ParsedDeclaration>, ConvertError> {
     let count_raw = reader.u32()?;
     let count = checked_count(reader, count_raw, 5, "CSS declaration")?;
-    let mut declarations = Vec::with_capacity(count);
+    let mut declarations = Vec::with_capacity(count.min(PREALLOCATED_ELEMENTS));
     for _ in 0..count {
         let property_id = reader.u32()?;
         let property = CssProperty::from_u32(property_id).ok_or_else(|| {
@@ -314,7 +314,7 @@ fn decode_keyframes(
 ) -> Result<Rule, ConvertError> {
     let count_raw = reader.u32()?;
     let count = checked_count(reader, count_raw, 8, "keyframe")?;
-    let mut children = Vec::with_capacity(count);
+    let mut children = Vec::with_capacity(count.min(PREALLOCATED_ELEMENTS));
     for _ in 0..count {
         let key_text = reader.string("keyframe selector")?;
         let declarations = decode_attributes(reader, options, false)?;
@@ -338,7 +338,7 @@ fn decode_keyframes(
 fn decode_font_face(reader: &mut Reader<'_>) -> Result<Rule, ConvertError> {
     let count_raw = reader.u32()?;
     let count = checked_count(reader, count_raw, 8, "font-face declaration")?;
-    let mut declarations = Vec::with_capacity(count);
+    let mut declarations = Vec::with_capacity(count.min(PREALLOCATED_ELEMENTS));
     for _ in 0..count {
         let name = reader.string("font-face descriptor name")?;
         let value = reader.string("font-face descriptor value")?;

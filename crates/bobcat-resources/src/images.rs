@@ -82,7 +82,7 @@ use vant::image::residency::{Decoded, Described, Refinement, ViewKey};
 
 use crate::animation::{Animations, FrameDecode, Job};
 use crate::image_header::ImageHeader;
-use crate::mime::ImageFormat;
+use crate::mime::{ImageFormat, SniffContext};
 use crate::preprocess::{self, Payload};
 use crate::{FrameOf, Resources, Shared, SharedHandle};
 
@@ -592,9 +592,13 @@ fn prepare<P: Platform>(shared: &Shared<P>, source: &str, url: &Url) -> Result<P
         )
         .map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
-    let preprocessed =
-        preprocess::preprocess(fetched.bytes, fetched.media_type.as_ref(), Some(url))
-            .map_err(|error| error.to_string())?;
+    let preprocessed = preprocess::preprocess(
+        fetched.bytes,
+        fetched.media_type.as_ref(),
+        Some(url),
+        SniffContext::Image,
+    )
+    .map_err(|error| error.to_string())?;
     let Payload::Image { format, header } = preprocessed.payload else {
         return Err(format!(
             "`{source}` is {}, not an image",
@@ -772,9 +776,13 @@ async fn load_async<P: Platform>(
 ) -> Result<LoadOutcome<FrameOf<P>>, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
-    let preprocessed =
-        preprocess::preprocess(fetched.bytes, fetched.media_type.as_ref(), Some(url))
-            .map_err(|error| error.to_string())?;
+    let preprocessed = preprocess::preprocess(
+        fetched.bytes,
+        fetched.media_type.as_ref(),
+        Some(url),
+        SniffContext::Image,
+    )
+    .map_err(|error| error.to_string())?;
     let Payload::Image { format, header } = preprocessed.payload else {
         return Err(format!(
             "`{}` is {}, not an image",

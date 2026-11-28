@@ -2276,3 +2276,31 @@ fn stacking_axis_percentages_resolve_against_the_content_box() {
     assert_size(tree.layout(half).size, Size::new(50.0, 20.0));
     assert_size(tree.layout(content_sized).size, Size::new(10.0, 20.0));
 }
+
+#[test]
+fn display_none_child_stays_hidden_at_its_document_order_after_commit() {
+    let mut tree = TestTree::default();
+    let first = fixed(&mut tree, 10.0, 20.0);
+    let hidden = styled(
+        &mut tree,
+        TestStyle {
+            display: Display::None,
+            ..leaf_style(10.0, 90.0)
+        },
+        10.0,
+        90.0,
+    );
+    let second = fixed(&mut tree, 10.0, 10.0);
+    let root = tree.push_grid_lanes(
+        lanes_style(&[px(50.0), px(50.0)], &[]),
+        vec![first, hidden, second],
+    );
+
+    auto_layout(&tree, root);
+
+    let hidden_mark = tree.with_layout_state(true, |tree, state| {
+        LayoutTree::layout(tree, state, tree.node(hidden)).is_hidden()
+    });
+    assert!(hidden_mark);
+    assert_eq!(tree.layout(hidden), Layout::with_order(1));
+}

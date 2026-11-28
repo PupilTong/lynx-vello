@@ -212,6 +212,10 @@ typedef struct QjsRevival {
 } QjsRevival;
 
 
+/* Nonzero is a failure, whose message the result's `text` holds
+   NUL-terminated (or NULL). The handler may release the realm, so after the
+   call the trampoline reads only its raw context and throws that message on
+   it (`qjs_host_failure`). */
 typedef int QjsHostDispatch(void *opaque, QjsContext *context, void *handler,
                             size_t argument_count, const QjsHostArg *arguments,
                             QjsHostResult *result);
@@ -1249,6 +1253,7 @@ int qjs_context_complete_module_code(QjsContext *context, const char *name,
    wrapper's bytecode is of no use here, and the text compiles with its
    bytecode kept instead. */
 static int qjs_require_module_source(QjsContext *context, const char *name) {
+    JSContext *raw = context->raw;
     QjsRequiredSource loaded;
     QjsModuleSource *source;
     int usable;
@@ -1259,8 +1264,9 @@ static int qjs_require_module_source(QjsContext *context, const char *name) {
     if (context->require_load(context->require_opaque, name, NULL, &loaded) !=
         0) {
         /* An import whose source cannot be had is unresolvable, which is
-           what a `ReferenceError` says here and in QuickJS's own loader. */
-        JS_ThrowReferenceError(context->raw, "%s", loaded.error);
+           what a `ReferenceError` says here and in QuickJS's own loader.
+           The loader may have released the realm, so only `raw` is read. */
+        JS_ThrowReferenceError(raw, "%s", loaded.error);
         return -1;
     }
     /* -5 is this name having been answered already, which is the host's own
@@ -2319,20 +2325,34 @@ static void qjs_rejections_forget_since(QjsRuntime *runtime,
 
    A module that got as far as being evaluated is remembered as evaluated
    whichever of the three it was: QuickJS answers a second evaluation of it
-   from the first one's outcome rather than running the body again. */
+   from the first one's outcome rather than running the body again.
+
+   A body may release the realm. Then `context`, `instance` and `url` are
+   freed, and the answer is an exception whatever the body did, with nothing
+   of them read. Both callers rely on that: `qjs_require_instance` returns on
+   an exception without reading `context`, and `qjs_require_module` reads the
+   context opaque again before it does. */
 static JSValue qjs_require_evaluate(QjsContext *context,
                                     QjsModuleInstance *instance,
                                     const char *url) {
     JSContext *raw = context->raw;
+    QjsRuntime *runtime = context->runtime;
     JSValue promise;
     JSValue reason;
-    uint64_t since = context->runtime->rejection_serial;
+    uint64_t since = runtime->rejection_serial;
     int state;
 
-    context->runtime->evaluation_depth += 1;
+    runtime->evaluation_depth += 1;
     promise = JS_EvalFunction(
         raw, JS_DupValue(raw, JS_MKPTR(JS_TAG_MODULE, instance->definition)));
-    context->runtime->evaluation_depth -= 1;
+    runtime->evaluation_depth -= 1;
+    if (JS_GetContextOpaque(raw) == NULL) {
+        if (!JS_IsException(promise)) {
+            JS_FreeValue(raw, promise);
+            JS_ThrowInternalError(raw, "this realm is being released");
+        }
+        return JS_EXCEPTION;
+    }
     /* Whatever came of it, this module is past re-entry: evaluated, awaiting
        its own top-level await, or — if linking is what failed — back to
        unlinked. None of the three is a body part-way through. */
@@ -2343,7 +2363,7 @@ static JSValue qjs_require_evaluate(QjsContext *context,
     state = JS_PromiseState(raw, promise);
     if (state == JS_PROMISE_REJECTED) {
         reason = JS_PromiseResult(raw, promise);
-        qjs_rejections_forget_since(context->runtime, context, since, reason);
+        qjs_rejections_forget_since(runtime, context, since, reason);
         JS_FreeValue(raw, promise);
         return JS_Throw(raw, reason);
     }
@@ -2440,6 +2460,11 @@ static JSValue qjs_require_module(QjsContext *context, const char *requested,
     context->synchronous_compile += 1;
     context->link_mark = context->instance_serial;
     if (qjs_compile_module_source(context, source, 1) == NULL) {
+        /* The linked compile ran the host's loader, which may have released
+           the realm. */
+        if (JS_GetContextOpaque(raw) == NULL) {
+            return JS_EXCEPTION;
+        }
         result = JS_EXCEPTION;
     } else {
         instance = qjs_find_module_instance(context, source);
@@ -2451,6 +2476,9 @@ static JSValue qjs_require_module(QjsContext *context, const char *requested,
                      ? JS_ThrowInternalError(raw, "module '%s' was not compiled",
                                              requested)
                      : qjs_require_evaluate(context, instance, source->url);
+        if (JS_GetContextOpaque(raw) == NULL) {
+            return JS_EXCEPTION;
+        }
         context->synchronous_compile += 1;
         if (!JS_IsException(result)) {
             /* The whole graph ran, so every module this link compiled is
@@ -3172,8 +3200,12 @@ QjsValue *qjs_global_object(QjsContext *context) {
     return qjs_box(context->raw, JS_GetGlobalObject(context->raw));
 }
 
-void qjs_throw_error(QjsContext *context, const char *message) {
-    JS_ThrowInternalError(context->raw, "%s", message);
+static JSValue qjs_host_failure(JSContext *raw_context,
+                                const QjsHostResult *result) {
+    if (result->text != NULL) {
+        JS_ThrowInternalError(raw_context, "%s", (const char *)result->text);
+    }
+    return JS_EXCEPTION;
 }
 
 void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
@@ -3610,8 +3642,7 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
     }
 
     if (status != 0) {
-
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     returned = qjs_host_build(raw_context, &result);
     return returned;
@@ -3717,6 +3748,17 @@ static JSValue qjs_host_transfer_trampoline(JSContext *raw_context,
                 }
             }
         }
+        /* Reading the list may have run the realm's code, which may have
+           released the realm. */
+        context = JS_GetContextOpaque(raw_context);
+        if (context == NULL) {
+            for (index = 0; index < transfer_len; ++index) {
+                JS_FreeValue(raw_context, transfer[index]);
+            }
+            js_free(raw_context, transfer);
+            return JS_ThrowInternalError(raw_context,
+                                         "this realm is being released");
+        }
     }
 
     if (count > QJS_HOST_INLINE_ARGS) {
@@ -3783,7 +3825,7 @@ static JSValue qjs_host_transfer_trampoline(JSContext *raw_context,
         free(arguments);
     }
     if (status != 0) {
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     return qjs_host_build(raw_context, &result);
 }
@@ -4358,7 +4400,7 @@ static JSValue qjs_host_value_trampoline(JSContext *raw_context,
         free(arguments);
     }
     if (status != 0) {
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     return qjs_host_build(raw_context, &result);
 }
@@ -4372,6 +4414,7 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
                                 int length, void *handler, int transfer_at) {
     JSContext *raw_context = context->raw;
     QjsHostOwner *owner;
+    QjsValue *boxed;
     JSValue data;
     JSValue function;
     JSValue function_name;
@@ -4434,7 +4477,18 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
         JS_FreeValue(raw_context, function);
         return NULL;
     }
-    return qjs_box(raw_context, function);
+    /* Boxed here rather than by `qjs_box`, so that a failed allocation
+       clears the handler before the function is freed: on every NULL return
+       the host still owns the handler and frees it itself. */
+    boxed = malloc(sizeof(*boxed));
+    if (boxed == NULL) {
+        owner->handler = NULL;
+        JS_FreeValue(raw_context, function);
+        JS_ThrowOutOfMemory(raw_context);
+        return NULL;
+    }
+    boxed->value = function;
+    return boxed;
 }
 
 

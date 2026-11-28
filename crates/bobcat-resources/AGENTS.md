@@ -67,8 +67,12 @@ else here stays on the embedder's thread — on wasm32 the shared handle is an
 new scope gets a fresh one, like the fresh registry beside it; a failed fetch
 and a failed install are never in it.
 
-**A MIME-keyed preprocessing pipeline**: every payload is sniffed (image magic
-beats the label, a label beats a byte scan, a BOM names a charset), classified,
+**A MIME-keyed preprocessing pipeline**: every payload is sniffed under the
+context it is loaded as (`mime::SniffContext`, after WHATWG mimesniff's
+context-specific sniffing: `images.rs` passes `Image`, where image magic beats
+the label; `preprocess_fetched` passes `Other`, where a specific label is
+trusted and image magic is read only for an unlabelled or placeholder-labelled
+payload; in both a label beats a byte scan and a BOM names a charset), classified,
 and treated by class — text transcoded to UTF-8 with its BOM removed so the
 engine's strict validation sees what a browser's decoder would have produced,
 JSON validated, images container-sniffed and header-probed for their intrinsic
@@ -179,9 +183,10 @@ and `knows_image` stays false; a fetched document leaves only the
 residency's parsed marker, so the URL stays known while a later request fetches
 and parses it again. `is_resident` is false, `read` answers `None` (so the
 memory tier, refinement and restore never see a document), and
-`memory_used_bytes` counts no document. A document labelled with a specific
-non-SVG type such as `text/plain` is trusted as that type and is not an
-image (`mime::sniff`).
+`memory_used_bytes` counts no document. An image load sniffs in
+`SniffContext::Image`, where SVG text labelled with a specific non-SVG type
+such as `text/plain` is trusted as that type and is not an image
+(`mime::sniff`).
 
 `images.rs` is the pipeline's IO alone: what a request, a describe or a want
 means is the residency's answer, every report is sent by `ImageResidency`, and

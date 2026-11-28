@@ -148,6 +148,11 @@ type and depends only on `bytes`, `http`, `url`, `serde_json`, `thiserror`,
   `target_size`, `wants_refinement`, `bounded`), and `error`
   (`ResourceError`, `ResourceErrorKind`, `ResourceErrorPhase`, `RetryAdvice`,
   `Failure`), which `bobcat-core` and `terminus` re-export at their old paths.
+  `mime::sniff` and `preprocess::preprocess` take a `mime::SniffContext`
+  (WHATWG mimesniff §8): under `Image`, raster image magic overrides any
+  label, and SVG text is typed SVG only when no specific label or
+  `image/svg+xml` was declared; under `Other`, a specific (non-placeholder)
+  label is returned without reading image magic.
 
 Not here: the load orchestration (the IO of `images.rs`, `sources.rs`, the
 background install holds), which is `bobcat-resources`'s, the dispatch of

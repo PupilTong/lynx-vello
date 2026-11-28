@@ -24,14 +24,18 @@ leaves out, so the engine never writes a box for it — never does. `Document::l
 index to the arena's slot bound in one resize, and a covered key with no entry
 reads as "never laid out" (an empty layout cache).
 
-Identity and storage are deliberately split (`tree/arena.rs`): a `NodeId`
-indexes `TreeArenas::slots`, a `Vec<Option<NodeSlot>>` holding the arena slot
-the node's state occupies. Ids only count upward and a freed one is never
-reissued, so a `NodeId` names one node for the document's life and a stale id
-resolves to nothing rather than to a stranger — hence no generation counters,
-no epoch gate on the retained frame, and the same number handed to script as
-Lynx's element `unique_id`. The arena slot *is* recycled; only the four-byte
-table entry leaks, per node ever created. The raw slabs are private to
+Identity and storage share one slab (`tree/arena.rs`): a `NodeId` is one
+53-bit value, the node's slab key in the low 32 bits and a 21-bit generation
+above them, so it fits a JavaScript safe integer and `NodeId::from_bits`
+rejects anything wider. A freed key is reused with the next generation, and a
+lookup compares the stored node's whole id, so a stale id resolves to nothing
+rather than to a stranger. A key whose generations are used up is retired:
+`retire_key` files a placeholder node in it, as key zero is reserved, so the
+slab never hands it out again, and `ids()` and `id_at_arena_key()` skip both
+placeholders. An id value is therefore never reissued and names one node for
+the document's life — hence no epoch gate on the retained frame, and the same
+number handed to script as Lynx's element `unique_id`. Each key keeps a
+four-byte generation for the document's life. The raw slabs are private to
 `tree/arena.rs`, so nothing else can index one with a `NodeId`. Stylo's
 per-element style data (the upstream `ElementDataWrapper`, no outer cell) and
 its traversal/invalidation flags live inline on `Node` (bench-defended

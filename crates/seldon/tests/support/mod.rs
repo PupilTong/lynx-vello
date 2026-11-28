@@ -1218,7 +1218,7 @@ impl LayoutTree for TestTree {
         ) {
             self.out_of_flow_writes.borrow_mut().push(node.index);
         }
-        state.slots[node.index].unrounded = layout;
+        state.slots[node.index].set_unrounded(layout);
     }
 
     fn hoisted_children(
