@@ -8004,6 +8004,240 @@ mod implementation {
         }
 
         #[test]
+        fn a_child_released_by_a_nested_require_load_fails_the_require() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .register_synchronous_loader(
+                            "bobcat:module",
+                            "loadModuleSync",
+                            move |url| {
+                                if url == "app:///a.mjs" {
+                                    return Ok(RequiredSource {
+                                        url: "app:///a.mjs".to_owned(),
+                                        text: "import 'app:///b.mjs'; export const a = 1;"
+                                            .to_owned(),
+                                        kind: RequiredKind::Module,
+                                    });
+                                }
+                                if let Some(realms) = releasing.upgrade() {
+                                    drop(mem::take(&mut *realms.borrow_mut()));
+                                }
+                                Ok(RequiredSource {
+                                    url: url.to_owned(),
+                                    text: "export const b = 2;".to_owned(),
+                                    kind: RequiredKind::Module,
+                                })
+                            },
+                        )
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 globalThis.outcome = 'pending';
+                 r.importValue('bobcat:module', 'loadModuleSync').then((load) => {
+                     globalThis.outcome = thrown(() => load('app:///a.mjs', ''));
+                 });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            let outcome = run_text(&mut parent, "outcome");
+            assert_eq!(
+                outcome,
+                "TypeError: the host released this realm during its require loader"
+            );
+            assert!(realms.borrow().is_empty());
+            assert_eq!(run_text(&mut parent, "String(1 + 1)"), "2");
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
+        fn a_child_released_by_a_required_module_body_fails_the_require() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .define_global_function("release", 0, move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                drop(mem::take(&mut *realms.borrow_mut()));
+                            }
+                            Ok(HostValue::Undefined)
+                        })
+                        .map_err(|error| error.message)?;
+                    child
+                        .register_synchronous_loader("bobcat:module", "loadModuleSync", |url| {
+                            Ok(RequiredSource {
+                                url: url.to_owned(),
+                                text: "release(); export const a = 1;".to_owned(),
+                                kind: RequiredKind::Module,
+                            })
+                        })
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 globalThis.outcome = 'pending';
+                 r.importValue('bobcat:module', 'loadModuleSync').then((load) => {
+                     globalThis.outcome = thrown(() => load('app:///a.mjs', ''));
+                 });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            let outcome = run_text(&mut parent, "outcome");
+            assert_eq!(outcome, "TypeError: this realm is being released");
+            assert!(realms.borrow().is_empty());
+            assert_eq!(run_text(&mut parent, "String(1 + 1)"), "2");
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
+        fn a_child_released_by_a_compiled_module_it_requires_fails_the_require() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .define_global_function("release", 0, move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                drop(mem::take(&mut *realms.borrow_mut()));
+                            }
+                            Ok(HostValue::Undefined)
+                        })
+                        .map_err(|error| error.message)?;
+                    child
+                        .register_synchronous_loader("bobcat:module", "loadModuleSync", |url| {
+                            let text = match url {
+                                "app:///a.mjs" => "import 'app:///b.mjs'; import 'app:///c.mjs';",
+                                "app:///b.mjs" => "release(); export const b = 1;",
+                                _ => return Err("refused".to_owned()),
+                            };
+                            Ok(RequiredSource {
+                                url: url.to_owned(),
+                                text: text.to_owned(),
+                                kind: RequiredKind::Module,
+                            })
+                        })
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 r.importValue('bobcat:module', 'loadModuleSync').then((load) => {
+                     globalThis.load = load;
+                 });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => load('app:///a.mjs', ''))"),
+                "TypeError: cannot load 'app:///c.mjs': refused"
+            );
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => load('app:///b.mjs', ''))"),
+                "TypeError: this realm is being released"
+            );
+            assert!(realms.borrow().is_empty());
+            assert_eq!(run_text(&mut parent, "String(1 + 1)"), "2");
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
+        fn a_child_released_by_its_transfer_list_fails_the_call() {
+            let runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .define_global_function("release", 0, move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                drop(mem::take(&mut *realms.borrow_mut()));
+                            }
+                            Ok(HostValue::Undefined)
+                        })
+                        .map_err(|error| error.message)?;
+                    let post = child
+                        .function_with_transfer("post", 2, 0, |_| Ok(HostValue::Undefined))
+                        .map_err(|error| error.message)?;
+                    let global = child.global_object().map_err(|error| error.message)?;
+                    child
+                        .set_property(&global, "post", &post)
+                        .map_err(|error| error.message)?;
+                    drop((post, global));
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            let outcome = run_text(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 thrown(() => r.evaluate(`() => {
+                     const list = new Proxy([], {
+                         get(target, key, receiver) {
+                             if (key === 'length') { release(); return 0; }
+                             return Reflect.get(target, key, receiver);
+                         },
+                     });
+                     post('message', list);
+                 }`)())",
+            );
+            assert_eq!(outcome, "TypeError: this realm is being released");
+            assert!(realms.borrow().is_empty());
+            assert_eq!(run_text(&mut parent, "String(1 + 1)"), "2");
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
         fn a_child_outlives_its_released_parent() {
             let (mut runtime, mut parent, realms) = shadow_parent();
             run(
