@@ -212,6 +212,10 @@ typedef struct QjsRevival {
 } QjsRevival;
 
 
+/* Nonzero is a failure, whose message the result's `text` holds
+   NUL-terminated (or NULL). The handler may release the realm, so after the
+   call the trampoline reads only its raw context and throws that message on
+   it (`qjs_host_failure`). */
 typedef int QjsHostDispatch(void *opaque, QjsContext *context, void *handler,
                             size_t argument_count, const QjsHostArg *arguments,
                             QjsHostResult *result);
@@ -1249,6 +1253,7 @@ int qjs_context_complete_module_code(QjsContext *context, const char *name,
    wrapper's bytecode is of no use here, and the text compiles with its
    bytecode kept instead. */
 static int qjs_require_module_source(QjsContext *context, const char *name) {
+    JSContext *raw = context->raw;
     QjsRequiredSource loaded;
     QjsModuleSource *source;
     int usable;
@@ -1259,8 +1264,9 @@ static int qjs_require_module_source(QjsContext *context, const char *name) {
     if (context->require_load(context->require_opaque, name, NULL, &loaded) !=
         0) {
         /* An import whose source cannot be had is unresolvable, which is
-           what a `ReferenceError` says here and in QuickJS's own loader. */
-        JS_ThrowReferenceError(context->raw, "%s", loaded.error);
+           what a `ReferenceError` says here and in QuickJS's own loader.
+           The loader may have released the realm, so only `raw` is read. */
+        JS_ThrowReferenceError(raw, "%s", loaded.error);
         return -1;
     }
     /* -5 is this name having been answered already, which is the host's own
@@ -3172,8 +3178,12 @@ QjsValue *qjs_global_object(QjsContext *context) {
     return qjs_box(context->raw, JS_GetGlobalObject(context->raw));
 }
 
-void qjs_throw_error(QjsContext *context, const char *message) {
-    JS_ThrowInternalError(context->raw, "%s", message);
+static JSValue qjs_host_failure(JSContext *raw_context,
+                                const QjsHostResult *result) {
+    if (result->text != NULL) {
+        JS_ThrowInternalError(raw_context, "%s", (const char *)result->text);
+    }
+    return JS_EXCEPTION;
 }
 
 void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
@@ -3610,8 +3620,7 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
     }
 
     if (status != 0) {
-
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     returned = qjs_host_build(raw_context, &result);
     return returned;
@@ -3783,7 +3792,7 @@ static JSValue qjs_host_transfer_trampoline(JSContext *raw_context,
         free(arguments);
     }
     if (status != 0) {
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     return qjs_host_build(raw_context, &result);
 }
@@ -4358,7 +4367,7 @@ static JSValue qjs_host_value_trampoline(JSContext *raw_context,
         free(arguments);
     }
     if (status != 0) {
-        return JS_EXCEPTION;
+        return qjs_host_failure(raw_context, &result);
     }
     return qjs_host_build(raw_context, &result);
 }
@@ -4372,6 +4381,7 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
                                 int length, void *handler, int transfer_at) {
     JSContext *raw_context = context->raw;
     QjsHostOwner *owner;
+    QjsValue *boxed;
     JSValue data;
     JSValue function;
     JSValue function_name;
@@ -4434,7 +4444,18 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
         JS_FreeValue(raw_context, function);
         return NULL;
     }
-    return qjs_box(raw_context, function);
+    /* Boxed here rather than by `qjs_box`, so that a failed allocation
+       clears the handler before the function is freed: on every NULL return
+       the host still owns the handler and frees it itself. */
+    boxed = malloc(sizeof(*boxed));
+    if (boxed == NULL) {
+        owner->handler = NULL;
+        JS_FreeValue(raw_context, function);
+        JS_ThrowOutOfMemory(raw_context);
+        return NULL;
+    }
+    boxed->value = function;
+    return boxed;
 }
 
 

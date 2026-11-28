@@ -355,7 +355,6 @@ unsafe extern "C" {
         value: *const QjsValue,
     ) -> c_int;
     pub(crate) fn qjs_global_object(context: *mut QjsContext) -> *mut QjsValue;
-    pub(crate) fn qjs_throw_error(context: *mut QjsContext, message: *const c_char);
     pub(crate) fn qjs_runtime_set_host_dispatch(
         runtime: *mut QjsRuntime,
         dispatch: Option<HostDispatch>,

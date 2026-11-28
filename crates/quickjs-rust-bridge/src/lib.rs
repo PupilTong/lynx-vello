@@ -568,14 +568,6 @@ mod implementation {
         }
     }
 
-    fn throw_host_error(context: *mut ffi::QjsContext, message: &str) {
-        let sanitized: String = message.chars().filter(|&byte| byte != '\0').collect();
-        let Ok(message) = CString::new(sanitized) else {
-            return;
-        };
-        unsafe { ffi::qjs_throw_error(context, message.as_ptr()) };
-    }
-
     unsafe extern "C" fn host_release(opaque: *mut c_void, handler: *mut c_void) {
         let table = unsafe { &*opaque.cast::<HostTable>() };
         let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -585,6 +577,7 @@ mod implementation {
 
     unsafe extern "C" fn host_dispatch(
         opaque: *mut c_void,
+        #[cfg_attr(not(feature = "devtools"), expect(unused_variables))]
         context: *mut ffi::QjsContext,
         handler: *mut c_void,
         argument_count: usize,
@@ -611,20 +604,20 @@ mod implementation {
             HostSlot::Values(slot) => slot.dispatch(context, argument_count, arguments),
         }));
 
-        let returned = match called {
-            Ok(Ok(value)) => value,
+        match called {
+            Ok(Ok(value)) => {
+                table.write_result(value, unsafe { &mut *result });
+                0
+            }
             Ok(Err(error)) => {
-                throw_host_error(context, &error.message);
-                return 1;
+                table.write_failure(&error.message, unsafe { &mut *result });
+                1
             }
             Err(_) => {
-                throw_host_error(context, "the host function panicked");
-                return 1;
+                table.write_failure("the host function panicked", unsafe { &mut *result });
+                1
             }
-        };
-
-        table.write_result(returned, unsafe { &mut *result });
-        0
+        }
     }
 
     fn interrupt_error(reason: InterruptReason, phase: ErrorPhase) -> Error {
@@ -1059,6 +1052,17 @@ mod implementation {
                     out.text = Box::into_raw(bytes).cast::<u8>();
                 }
             }
+        }
+
+        fn write_failure(&self, message: &str, out: &mut ffi::QjsHostResult) {
+            let mut text: Vec<u8> = message.bytes().filter(|&byte| byte != 0).collect();
+            text.push(0);
+            let mut parked = self.return_bytes.borrow_mut();
+            let bytes = parked.insert(text);
+            out.kind = ffi::HOST_ARG_STRING;
+            out.number = 0.0;
+            out.text = bytes.as_ptr();
+            out.text_len = bytes.len() - 1;
         }
 
         fn note_released(&self, slot: *mut HostSlot) {
@@ -1670,11 +1674,15 @@ mod implementation {
         name: *const c_char,
         error: *mut c_int,
     ) -> *const c_char {
+        let context = opaque.cast::<ContextInner>().cast_const();
         // SAFETY: the shim calls on this context's owner thread, with valid
-        // C strings, and only while its stable Rc allocation is alive.
+        // C strings, and only while its stable Rc allocation is alive. Taking
+        // a strong count of our own keeps it alive across the normalizer,
+        // which may drop every handle the host had.
         let (context, base, name) = unsafe {
+            Rc::increment_strong_count(context);
             (
-                &*opaque.cast::<ContextInner>(),
+                Rc::from_raw(context),
                 CStr::from_ptr(base),
                 CStr::from_ptr(name),
             )
@@ -1684,6 +1692,13 @@ mod implementation {
             normalize(&base.to_string_lossy(), &name.to_string_lossy())
         }))
         .unwrap_or_else(|_| Err("module normalizer panicked".to_owned()));
+        if Rc::strong_count(&context) == 1 {
+            // SAFETY: the caller supplied the writable flag.
+            unsafe {
+                *error = 1;
+            }
+            return c"the host released this realm during its module normalizer".as_ptr();
+        }
         let (failed, message) = match result {
             Ok(name) => (false, name),
             Err(message) => (true, message),
@@ -1707,12 +1722,16 @@ mod implementation {
         parameters: *const c_char,
         source: *mut ffi::QjsRequiredSource,
     ) -> c_int {
+        let context = opaque.cast::<ContextInner>().cast_const();
         // SAFETY: the shim calls on this context's owner thread, with valid
         // C strings (`parameters` possibly null) and out-parameter, and only
-        // while its stable Rc allocation is alive.
+        // while its stable Rc allocation is alive. Taking a strong count of
+        // our own keeps it alive across the loader, which may drop every
+        // handle the host had.
         let (context, url, parameters) = unsafe {
+            Rc::increment_strong_count(context);
             (
-                &*opaque.cast::<ContextInner>(),
+                Rc::from_raw(context),
                 CStr::from_ptr(url).to_string_lossy(),
                 if parameters.is_null() {
                     "".into()
@@ -1728,6 +1747,14 @@ mod implementation {
             loader.as_mut().expect("registered loader")(&url, &parameters)
         }))
         .unwrap_or_else(|_| Err("the require loader panicked".to_owned()));
+        if Rc::strong_count(&context) == 1 {
+            // SAFETY: the out-parameter is the shim's, valid for this call.
+            unsafe {
+                (*source).error =
+                    c"the host released this realm during its require loader".as_ptr();
+            }
+            return -1;
+        }
         let loaded = loaded.and_then(|loaded| {
             CString::new(loaded.source.url)
                 .map(|url| {
@@ -7820,6 +7847,159 @@ mod implementation {
             assert_eq!(
                 run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
                 "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        fn releasing_parent(
+            fail: fn() -> Result<HostValue, HostFunctionError>,
+        ) -> (Context, Realms) {
+            let runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .define_global_function("release", 0, move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                drop(mem::take(&mut *realms.borrow_mut()));
+                            }
+                            fail()
+                        })
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            (parent, realms)
+        }
+
+        #[test]
+        fn a_child_released_by_a_failing_call_into_it_throws_the_failure() {
+            let (mut parent, realms) =
+                releasing_parent(|| Err(HostFunctionError::new("released, then refused")));
+            assert_eq!(
+                run_text(
+                    &mut parent,
+                    "globalThis.r = new ShadowRealm();
+                     thrown(() => r.evaluate('() => release()')())",
+                ),
+                "TypeError: released, then refused"
+            );
+            assert!(realms.borrow().is_empty());
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
+        fn a_child_released_by_a_panicking_call_into_it_throws_the_panic() {
+            let (mut parent, realms) = releasing_parent(|| panic!("released, then panicked"));
+            assert_eq!(
+                run_text(
+                    &mut parent,
+                    "globalThis.r = new ShadowRealm();
+                     thrown(() => r.evaluate('() => release()')())",
+                ),
+                "TypeError: the host function panicked"
+            );
+            assert!(realms.borrow().is_empty());
+        }
+
+        #[test]
+        fn a_child_released_by_its_require_loader_fails_the_load() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .register_synchronous_loader("bobcat:module", "loadModuleSync", move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                drop(mem::take(&mut *realms.borrow_mut()));
+                            }
+                            Ok(RequiredSource {
+                                url: "app:///a.js".to_owned(),
+                                text: "module.exports = 1;".to_owned(),
+                                kind: RequiredKind::CommonJs,
+                            })
+                        })
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 r.importValue('bobcat:module', 'loadModuleSync').then((load) => {
+                     globalThis.outcome = thrown(() => load('app:///a.js', ''));
+                 });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_eq!(
+                run_text(&mut parent, "outcome"),
+                "TypeError: the host released this realm during its require loader"
+            );
+            assert!(realms.borrow().is_empty());
+        }
+
+        thread_local! {
+            static NORMALIZER_RELEASES: RefCell<Option<Realms>> = const { RefCell::new(None) };
+        }
+
+        #[test]
+        fn a_child_released_by_its_module_normalizer_fails_the_import() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            NORMALIZER_RELEASES.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realms)));
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    child.enable_module_loading(|_, _| {
+                        let released = NORMALIZER_RELEASES.with(|slot| {
+                            slot.borrow()
+                                .as_ref()
+                                .map(|realms| mem::take(&mut *realms.borrow_mut()))
+                        });
+                        drop(released);
+                        Ok("app:///never.js".to_owned())
+                    });
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 globalThis.outcome = 'pending';
+                 r.importValue('./x.js', 'x').then(
+                     () => { globalThis.outcome = 'fulfilled'; },
+                     (e) => { globalThis.outcome = e.constructor.name + ': ' + e.message; });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            NORMALIZER_RELEASES.with(|slot| slot.borrow_mut().take());
+            assert!(realms.borrow().is_empty());
+            assert_eq!(
+                run_text(&mut parent, "outcome"),
+                "TypeError: the host released this realm during its module normalizer"
             );
         }
 
