@@ -57,7 +57,8 @@
 //! mounted (`docs/tracking/deviations.md`).
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
 use bobcat_core::{
     PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, document_tag,
@@ -96,25 +97,35 @@ fn fragment_order(style_info: &impl StyleInfoRead) -> Vec<i32> {
     let mut ids: Vec<i32> = style_info.sheets().map(|(id, _)| id).collect();
     ids.sort_unstable();
 
-    let mut blocking: HashMap<i32, BTreeSet<i32>> = ids
-        .iter()
-        .map(|id| (*id, live_imports(style_info, *id).collect()))
-        .collect();
-
-    let mut ordered = Vec::with_capacity(ids.len());
-    let mut emitted: HashSet<i32> = HashSet::new();
-    while let Some(id) = ids
-        .iter()
-        .copied()
-        .find(|id| !emitted.contains(id) && blocking[id].is_empty())
-    {
-        emitted.insert(id);
-        ordered.push(id);
-        for waiting in blocking.values_mut() {
-            waiting.remove(&id);
+    let mut blocking: HashMap<i32, usize> = HashMap::with_capacity(ids.len());
+    let mut dependents: HashMap<i32, Vec<i32>> = HashMap::new();
+    for &id in &ids {
+        let imports: BTreeSet<i32> = live_imports(style_info, id).collect();
+        blocking.insert(id, imports.len());
+        for import in imports {
+            dependents.entry(import).or_default().push(id);
         }
     }
-    ordered.extend(ids.into_iter().filter(|id| !emitted.contains(id)));
+
+    let mut ready: BinaryHeap<Reverse<i32>> = blocking
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| Reverse(*id))
+        .collect();
+    let mut ordered = Vec::with_capacity(ids.len());
+    while let Some(Reverse(id)) = ready.pop() {
+        ordered.push(id);
+        for dependent in dependents.remove(&id).unwrap_or_default() {
+            let count = blocking
+                .get_mut(&dependent)
+                .expect("every dependent is a fragment");
+            *count -= 1;
+            if *count == 0 {
+                ready.push(Reverse(dependent));
+            }
+        }
+    }
+    ordered.extend(ids.into_iter().filter(|id| blocking[id] != 0));
     ordered
 }
 
@@ -822,6 +833,52 @@ mod tests {
         ]);
 
         assert_eq!(to_preparsed_style_sheet(&info).rules.len(), 1);
+    }
+
+    fn order_of(fragments: &[(i32, &[i32])]) -> Vec<i32> {
+        let info = style_info(
+            fragments
+                .iter()
+                .map(|(id, imports)| (*id, sheet(imports.to_vec(), vec![])))
+                .collect(),
+        );
+        fragment_order(&info)
+    }
+
+    #[test]
+    fn fragment_order_is_pinned_on_each_shape() {
+        assert_eq!(order_of(&[(0, &[1]), (1, &[2]), (2, &[])]), [2, 1, 0]);
+        assert_eq!(
+            order_of(&[(4, &[2, 3]), (2, &[1]), (3, &[1]), (1, &[])]),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(order_of(&[(5, &[]), (3, &[]), (9, &[])]), [3, 5, 9]);
+        assert_eq!(order_of(&[(1, &[2]), (2, &[]), (3, &[])]), [2, 1, 3]);
+        assert_eq!(order_of(&[(5, &[]), (1, &[5]), (3, &[])]), [3, 5, 1]);
+        assert_eq!(
+            order_of(&[(1, &[2]), (2, &[1]), (3, &[1]), (0, &[]), (4, &[])]),
+            [0, 4, 1, 2, 3]
+        );
+        assert_eq!(order_of(&[(7, &[7, 99]), (6, &[7])]), [7, 6]);
+        assert_eq!(
+            order_of(&[(0, &[1, 1, 2, 2]), (2, &[1]), (1, &[])]),
+            [1, 2, 0]
+        );
+    }
+
+    #[test]
+    fn a_long_import_chain_is_ordered_base_first() {
+        let count = 20_000;
+        let fragments: Vec<(i32, Vec<i32>)> = (0..count)
+            .map(|id| (id, if id + 1 < count { vec![id + 1] } else { vec![] }))
+            .collect();
+        let info = style_info(
+            fragments
+                .into_iter()
+                .map(|(id, imports)| (id, sheet(imports, vec![])))
+                .collect(),
+        );
+        assert_eq!(fragment_order(&info), (0..count).rev().collect::<Vec<_>>());
     }
 
     #[test]

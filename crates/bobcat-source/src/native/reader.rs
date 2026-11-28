@@ -1,5 +1,7 @@
 use super::ConvertError;
 
+pub(crate) const PREALLOCATED_ELEMENTS: usize = 64;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
