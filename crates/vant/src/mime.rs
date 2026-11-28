@@ -2,11 +2,17 @@
 //! a payload *is* before anything downstream trusts its label.
 //!
 //! The preprocessing pipeline is keyed on the media type, so the type has to
-//! be right more often than servers are: a PNG labelled `text/plain` must
-//! still decode as an image, and a `Content-Type` that is missing outright
-//! must not turn every script into an opaque blob. [`sniff`] is the narrowed
-//! WHATWG mimesniff rule that gives that answer — image magic beats any
-//! label, a label beats a byte scan, and the scan is the last resort.
+//! be right more often than servers are: a PNG labelled `text/plain` and
+//! loaded as an image must still decode as an image, and a `Content-Type`
+//! that is missing outright must not turn every script into an opaque blob.
+//! [`sniff`] is a narrowed WHATWG mimesniff rule that depends on what the
+//! resource is loaded as (mimesniff §8, context-specific sniffing). In
+//! [`SniffContext::Image`], image magic beats any label except that SVG text
+//! is typed as SVG only when no specific type, or `image/svg+xml`, was
+//! declared. In [`SniffContext::Other`], a specific declared type is returned
+//! as it is, and image magic is read only when there is none. In both
+//! contexts a specific label beats a byte scan, and the scan is the last
+//! resort.
 
 use std::fmt;
 use std::str::FromStr;
@@ -327,9 +333,20 @@ pub fn from_extension(path: &str) -> Option<MediaType> {
     MediaType::parse(value)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SniffContext {
+    Image,
+    Other,
+}
+
 #[must_use]
-pub fn sniff(bytes: &[u8], declared: Option<&MediaType>) -> MediaType {
+pub fn sniff(bytes: &[u8], declared: Option<&MediaType>, context: SniffContext) -> MediaType {
     let specific = declared.filter(|declared| !declared.is_placeholder());
+    if context == SniffContext::Other
+        && let Some(declared) = specific
+    {
+        return declared.clone();
+    }
     if let Some(format) = image_header::detect_format(bytes) {
         let declared_svg = specific.is_some_and(|declared| declared.essence() == "image/svg+xml");
         if format != ImageFormat::Svg || specific.is_none() || declared_svg {
@@ -492,54 +509,128 @@ mod tests {
     }
 
     #[test]
-    fn image_magic_beats_any_label() {
+    fn image_magic_beats_any_label_in_the_image_context() {
         let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
         let declared = parse("text/plain");
-        assert_eq!(sniff(&png, Some(&declared)).essence(), "image/png");
-        assert_eq!(sniff(&png, None).essence(), "image/png");
-        assert_eq!(sniff(b"\xFF\xD8\xFF\xE0", None).essence(), "image/jpeg");
-        assert_eq!(sniff(b"GIF89a\x01\x00", None).essence(), "image/gif");
         assert_eq!(
-            sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 ", None).essence(),
+            sniff(&png, Some(&declared), SniffContext::Image).essence(),
+            "image/png"
+        );
+        assert_eq!(
+            sniff(&png, None, SniffContext::Image).essence(),
+            "image/png"
+        );
+        assert_eq!(
+            sniff(b"\xFF\xD8\xFF\xE0", None, SniffContext::Image).essence(),
+            "image/jpeg"
+        );
+        assert_eq!(
+            sniff(b"GIF89a\x01\x00", None, SniffContext::Image).essence(),
+            "image/gif"
+        );
+        assert_eq!(
+            sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 ", None, SniffContext::Image).essence(),
             "image/webp"
         );
-        assert_eq!(sniff(b"BM\x00\x00", None).essence(), "image/bmp");
+        assert_eq!(
+            sniff(b"BM\x00\x00", None, SniffContext::Image).essence(),
+            "image/bmp"
+        );
     }
 
     #[test]
     fn a_specific_label_is_trusted_and_a_placeholder_is_not() {
-        let css = parse("text/css; charset=utf-8");
-        assert_eq!(sniff(b"body{}", Some(&css)), css);
-        let octet = parse("application/octet-stream");
-        assert_eq!(sniff(b"body{}", Some(&octet)).essence(), "text/plain");
+        for context in [SniffContext::Image, SniffContext::Other] {
+            let css = parse("text/css; charset=utf-8");
+            assert_eq!(sniff(b"body{}", Some(&css), context), css);
+            let octet = parse("application/octet-stream");
+            assert_eq!(
+                sniff(b"body{}", Some(&octet), context).essence(),
+                "text/plain"
+            );
+            assert_eq!(
+                sniff(b"\x00\x01\x02", Some(&octet), context).essence(),
+                "application/octet-stream"
+            );
+            assert_eq!(sniff(b"", None, context).essence(), "text/plain");
+        }
+    }
+
+    #[test]
+    fn outside_the_image_context_a_specific_label_is_not_checked_for_image_magic() {
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
+        let plain = parse("text/plain");
         assert_eq!(
-            sniff(b"\x00\x01\x02", Some(&octet)).essence(),
-            "application/octet-stream"
+            sniff(&png, Some(&plain), SniffContext::Other).essence(),
+            "text/plain"
         );
-        assert_eq!(sniff(b"", None).essence(), "text/plain");
+        let script = parse("text/javascript");
+        assert_eq!(
+            sniff(b"BMap.init();", Some(&script), SniffContext::Other).essence(),
+            "text/javascript"
+        );
+        assert_eq!(
+            sniff(b"BMap.init();", Some(&script), SniffContext::Image).essence(),
+            "image/bmp"
+        );
+        assert_eq!(
+            sniff(&png, None, SniffContext::Other).essence(),
+            "image/png"
+        );
+        let octet = parse("application/octet-stream");
+        assert_eq!(
+            sniff(&png, Some(&octet), SniffContext::Other).essence(),
+            "image/png"
+        );
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        assert_eq!(
+            sniff(svg, None, SniffContext::Other).essence(),
+            "image/svg+xml"
+        );
     }
 
     #[test]
     fn svg_is_recognised_only_where_nothing_specific_was_declared() {
         let svg = b"<?xml version=\"1.0\"?>\n<!-- c --><svg xmlns=\"http://www.w3.org/2000/svg\"/>";
-        assert_eq!(sniff(svg, None).essence(), "image/svg+xml");
-        let octet = parse("application/octet-stream");
-        assert_eq!(sniff(svg, Some(&octet)).essence(), "image/svg+xml");
-        let xml = parse("text/xml");
-        assert_eq!(sniff(svg, Some(&xml)).essence(), "text/xml");
-        let declared_svg = parse("image/svg+xml");
-        assert_eq!(sniff(svg, Some(&declared_svg)).essence(), "image/svg+xml");
         assert_eq!(
-            sniff(b"<html>", Some(&declared_svg)).essence(),
+            sniff(svg, None, SniffContext::Image).essence(),
+            "image/svg+xml"
+        );
+        let octet = parse("application/octet-stream");
+        assert_eq!(
+            sniff(svg, Some(&octet), SniffContext::Image).essence(),
+            "image/svg+xml"
+        );
+        let xml = parse("text/xml");
+        assert_eq!(
+            sniff(svg, Some(&xml), SniffContext::Image).essence(),
+            "text/xml"
+        );
+        let declared_svg = parse("image/svg+xml");
+        assert_eq!(
+            sniff(svg, Some(&declared_svg), SniffContext::Image).essence(),
+            "image/svg+xml"
+        );
+        assert_eq!(
+            sniff(b"<html>", Some(&declared_svg), SniffContext::Image).essence(),
             "image/svg+xml"
         );
     }
 
     #[test]
     fn a_bom_names_the_charset_of_unlabelled_text() {
-        assert_eq!(sniff(b"\xEF\xBB\xBFhello", None).charset(), Some("utf-8"));
-        assert_eq!(sniff(b"\xFF\xFEh\x00", None).charset(), Some("utf-16le"));
-        assert_eq!(sniff(b"\xFE\xFF\x00h", None).charset(), Some("utf-16be"));
-        assert_eq!(sniff(b"hello", None).charset(), None);
+        assert_eq!(
+            sniff(b"\xEF\xBB\xBFhello", None, SniffContext::Other).charset(),
+            Some("utf-8")
+        );
+        assert_eq!(
+            sniff(b"\xFF\xFEh\x00", None, SniffContext::Other).charset(),
+            Some("utf-16le")
+        );
+        assert_eq!(
+            sniff(b"\xFE\xFF\x00h", None, SniffContext::Other).charset(),
+            Some("utf-16be")
+        );
+        assert_eq!(sniff(b"hello", None, SniffContext::Other).charset(), None);
     }
 }

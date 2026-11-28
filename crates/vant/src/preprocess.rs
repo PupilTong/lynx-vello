@@ -3,7 +3,9 @@
 //!
 //! Every resource goes through the same three steps. Its media type is
 //! settled by [`mime::sniff`], from the label it came with, the extension of
-//! its URL, or its own bytes. That type classifies it. The class then picks
+//! its URL, or its own bytes, under the [`SniffContext`] the caller loads it
+//! as: only in the image context do image bytes override a specific label.
+//! That type classifies it. The class then picks
 //! the treatment: text is transcoded to UTF-8 with its BOM removed, so the
 //! fetcher's strict UTF-8 validation of a script or stylesheet only ever sees
 //! what a browser's decoder would have produced; JSON is text that must also
@@ -18,7 +20,7 @@ use bytes::Bytes;
 use url::Url;
 
 use crate::image_header::{self, ImageHeader};
-use crate::mime::{self, ImageFormat, MediaType, ResourceClass};
+use crate::mime::{self, ImageFormat, MediaType, ResourceClass, SniffContext};
 
 #[derive(Clone, Debug)]
 pub enum Payload {
@@ -50,10 +52,11 @@ pub fn preprocess(
     bytes: Bytes,
     declared: Option<&MediaType>,
     url: Option<&Url>,
+    context: SniffContext,
 ) -> Result<Preprocessed, PreprocessError> {
     let from_extension =
         url.and_then(|url| mime::from_extension(url.path()).filter(|_| declared.is_none()));
-    let media_type = mime::sniff(&bytes, declared.or(from_extension.as_ref()));
+    let media_type = mime::sniff(&bytes, declared.or(from_extension.as_ref()), context);
     match media_type.class() {
         ResourceClass::Text => {
             let (text, bytes) = decode_text(bytes, media_type.charset())?;
@@ -169,8 +172,13 @@ mod tests {
     #[test]
     fn utf8_text_passes_through_the_same_allocation() {
         let bytes = Bytes::from_static(b"body { color: red }");
-        let result =
-            preprocess(bytes.clone(), Some(&media_type("text/css")), None).expect("preprocess");
+        let result = preprocess(
+            bytes.clone(),
+            Some(&media_type("text/css")),
+            None,
+            SniffContext::Other,
+        )
+        .expect("preprocess");
         assert!(matches!(&result.payload, Payload::Text(text) if &**text == "body { color: red }"));
         assert_eq!(result.media_type.to_string(), "text/css; charset=utf-8");
         assert_eq!(result.bytes.as_ptr(), bytes.as_ptr(), "no copy was made");
@@ -182,6 +190,7 @@ mod tests {
             Bytes::from_static(b"\xEF\xBB\xBFlet x = 1;"),
             Some(&media_type("text/javascript; charset=latin1")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert_eq!(&result.bytes[..], b"let x = 1;");
@@ -189,6 +198,7 @@ mod tests {
             Bytes::from_static(b"\xFF\xFEh\x00i\x00"),
             Some(&media_type("text/plain")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert_eq!(&result.bytes[..], b"hi");
@@ -200,6 +210,7 @@ mod tests {
             Bytes::from_static(b"caf\xE9 \x80"),
             Some(&media_type("text/plain; charset=ISO-8859-1")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert!(matches!(&result.payload, Payload::Text(text) if &**text == "café €"));
@@ -209,6 +220,7 @@ mod tests {
             Bytes::from_static(b"\x00h\x00i\x00"),
             Some(&media_type("text/plain; charset=utf-16be")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert!(
@@ -220,6 +232,7 @@ mod tests {
             Bytes::from_static(b"x"),
             Some(&media_type("text/plain; charset=shift_jis")),
             None,
+            SniffContext::Other,
         )
         .expect_err("unsupported");
         assert!(
@@ -228,11 +241,25 @@ mod tests {
     }
 
     #[test]
+    fn text_that_starts_with_bmp_magic_is_transcoded_outside_the_image_context() {
+        let result = preprocess(
+            Bytes::from_static(b"BMap = 'caf\xE9';"),
+            Some(&media_type("text/javascript; charset=windows-1252")),
+            None,
+            SniffContext::Other,
+        )
+        .expect("preprocess");
+        assert_eq!(result.media_type.essence(), "text/javascript");
+        assert!(matches!(&result.payload, Payload::Text(text) if &**text == "BMap = 'café';"));
+    }
+
+    #[test]
     fn invalid_utf8_decodes_with_replacement_like_a_browser() {
         let result = preprocess(
             Bytes::from_static(b"a\xFFb"),
             Some(&media_type("text/javascript")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert_eq!(&result.bytes[..], "a\u{FFFD}b".as_bytes());
@@ -244,6 +271,7 @@ mod tests {
             Bytes::from_static(b"{\"a\": [1, 2]}"),
             Some(&media_type("application/json")),
             None,
+            SniffContext::Other,
         )
         .expect("preprocess");
         assert!(matches!(result.payload, Payload::Json(_)));
@@ -251,6 +279,7 @@ mod tests {
             Bytes::from_static(b"{\"a\": "),
             Some(&media_type("application/ld+json")),
             None,
+            SniffContext::Other,
         )
         .expect_err("truncated JSON");
         assert!(matches!(error, PreprocessError::Json(_)));
@@ -263,8 +292,13 @@ mod tests {
         png.extend_from_slice(&32_u32.to_be_bytes());
         png.extend_from_slice(&[8, 6, 0, 0, 0]);
         let bytes = Bytes::from(png);
-        let result =
-            preprocess(bytes.clone(), Some(&media_type("text/plain")), None).expect("preprocess");
+        let result = preprocess(
+            bytes.clone(),
+            Some(&media_type("text/plain")),
+            None,
+            SniffContext::Image,
+        )
+        .expect("preprocess");
         assert_eq!(
             result.media_type.essence(),
             "image/png",
@@ -293,6 +327,7 @@ mod tests {
             Bytes::from_static(b"\x00\x00\x00\x1cftypavif"),
             Some(&media_type("image/avif")),
             None,
+            SniffContext::Image,
         )
         .expect("preprocess");
         assert!(matches!(
@@ -307,19 +342,31 @@ mod tests {
     #[test]
     fn the_url_extension_labels_unlabelled_bytes_and_binary_passes_through() {
         let url = Url::parse("file:///cards/app/main.js").expect("a URL");
-        let result =
-            preprocess(Bytes::from_static(b"1 + 1"), None, Some(&url)).expect("preprocess");
+        let result = preprocess(
+            Bytes::from_static(b"1 + 1"),
+            None,
+            Some(&url),
+            SniffContext::Other,
+        )
+        .expect("preprocess");
         assert_eq!(result.media_type.essence(), "text/javascript");
         assert!(matches!(result.payload, Payload::Text(_)));
 
         let url = Url::parse("file:///cards/app/font.woff2").expect("a URL");
         let bytes = Bytes::from_static(b"wOF2\x00\x01");
-        let result = preprocess(bytes.clone(), None, Some(&url)).expect("preprocess");
+        let result =
+            preprocess(bytes.clone(), None, Some(&url), SniffContext::Other).expect("preprocess");
         assert!(matches!(result.payload, Payload::Binary));
         assert_eq!(result.media_type.essence(), "font/woff2");
         assert_eq!(result.bytes.as_ptr(), bytes.as_ptr());
 
-        let result = preprocess(Bytes::from_static(b"\x00\x01"), None, None).expect("preprocess");
+        let result = preprocess(
+            Bytes::from_static(b"\x00\x01"),
+            None,
+            None,
+            SniffContext::Other,
+        )
+        .expect("preprocess");
         assert_eq!(result.media_type.essence(), "application/octet-stream");
         assert!(matches!(result.payload, Payload::Binary));
     }
