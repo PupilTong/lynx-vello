@@ -485,6 +485,9 @@ impl ImageSource {
                 (&raw const max_pixel).cast::<c_void>(),
             )
         });
+        if max_pixel_number.0.is_null() {
+            return Err(DecodeError::Malformed("CFNumberCreate failed".to_owned()));
+        }
         // SAFETY: the keys and `kCFBooleanTrue` are framework-exported
         // constants, the arrays are three live values each, and the CFType
         // callbacks retain them for the dictionary's life.

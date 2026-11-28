@@ -57,11 +57,11 @@ impl StoredResponse {
         if directives.no_store {
             return false;
         }
-        !self
-            .headers
-            .get_all(VARY)
-            .iter()
-            .any(|value| value.to_str().is_ok_and(|value| value.trim() == "*"))
+        !self.headers.get_all(VARY).iter().any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| value.split(',').any(|member| member.trim() == "*"))
+        })
     }
 
     #[must_use]
@@ -183,7 +183,8 @@ impl StoredResponse {
                 headers.append(name, header_value);
             }
         }
-        let stored_at = UNIX_EPOCH + Duration::from_secs(value.get("stored_at")?.as_u64()?);
+        let stored_at =
+            UNIX_EPOCH.checked_add(Duration::from_secs(value.get("stored_at")?.as_u64()?))?;
         Some((
             Self {
                 status,
@@ -435,6 +436,14 @@ mod tests {
     }
 
     #[test]
+    fn a_vary_list_with_a_star_member_varies_on_everything() {
+        assert!(!stored(200, &[("vary", "Accept-Encoding, *")], 0).is_storable());
+        assert!(!stored(200, &[("vary", "*, Accept")], 0).is_storable());
+        assert!(!stored(200, &[("vary", "Accept"), ("vary", " * ")], 0).is_storable());
+        assert!(stored(200, &[("vary", "Accept, Accept-Encoding")], 0).is_storable());
+    }
+
+    #[test]
     fn max_age_beats_expires_and_is_measured_from_the_date_header() {
         let response = stored(
             200,
@@ -635,6 +644,14 @@ mod tests {
             None,
             "`stored_at` is required"
         );
+    }
+
+    #[test]
+    fn a_record_whose_stored_at_overflows_the_clock_is_unreadable() {
+        let record = json!({
+            "media_type": null, "status": 200, "headers": [], "stored_at": u64::MAX,
+        });
+        assert_eq!(StoredResponse::from_record(&record), None);
     }
 
     #[test]

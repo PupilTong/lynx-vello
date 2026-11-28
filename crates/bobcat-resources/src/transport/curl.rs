@@ -505,10 +505,16 @@ unsafe extern "C" fn write_callback(
     nmemb: usize,
     userdata: *mut c_void,
 ) -> usize {
-    let total = size.saturating_mul(nmemb);
+    let Some(total) = size.checked_mul(nmemb) else {
+        return 0;
+    };
+    if total == 0 || ptr.is_null() {
+        return 0;
+    }
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: libcurl passes the `Transfer` registered as `WRITEDATA`,
-        // which outlives the transfer, and `total` bytes readable at `ptr`.
+        // which outlives the transfer, and `total` bytes readable at `ptr`,
+        // which is non-null and `total` nonzero, both checked above.
         let (transfer, chunk) = unsafe {
             (
                 &mut *userdata.cast::<Transfer>(),
@@ -531,9 +537,15 @@ unsafe extern "C" fn header_callback(
     nmemb: usize,
     userdata: *mut c_void,
 ) -> usize {
-    let total = size.saturating_mul(nmemb);
+    let Some(total) = size.checked_mul(nmemb) else {
+        return 0;
+    };
+    if total == 0 || ptr.is_null() {
+        return 0;
+    }
     catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: as for `write_callback`, with `HEADERDATA`.
+        // SAFETY: as for `write_callback`, with `HEADERDATA`; `ptr` is
+        // non-null and `total` nonzero, both checked above.
         let (transfer, line) = unsafe {
             (
                 &mut *userdata.cast::<Transfer>(),

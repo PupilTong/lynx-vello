@@ -312,28 +312,35 @@ fn load_pixbuf<'a>(
 
 fn read_pixels(pixbuf: &Ref<'_>) -> Result<Vec<u8>, DecodeError> {
     let symbols = pixbuf.symbols;
-    // SAFETY: accessors on a live pixbuf; the pixel pointer is valid for
-    // `rowstride * (height - 1) + width * channels` bytes, and the slice
-    // taken covers exactly the rows and channels the accessors report.
-    let packed = unsafe {
-        let width = usize::try_from((symbols.get_width)(pixbuf.object)).unwrap_or(0);
-        let height = usize::try_from((symbols.get_height)(pixbuf.object)).unwrap_or(0);
-        let stride = usize::try_from((symbols.get_rowstride)(pixbuf.object)).unwrap_or(0);
-        let channels = usize::try_from((symbols.get_n_channels)(pixbuf.object)).unwrap_or(0);
-        let pixels = (symbols.get_pixels)(pixbuf.object);
-        if width == 0 || height == 0 || pixels.is_null() || !(3..=4).contains(&channels) {
-            return Err(DecodeError::Malformed(
-                "the decoded image has no pixels".to_owned(),
-            ));
-        }
-        let length = stride * (height - 1) + width * channels;
-        pack_rgba(
-            std::slice::from_raw_parts(pixels, length),
-            width,
-            height,
-            stride,
-            channels,
+    // SAFETY: accessors on a live pixbuf, which take no other argument.
+    let (width, height, stride, channels, pixels) = unsafe {
+        (
+            usize::try_from((symbols.get_width)(pixbuf.object)).unwrap_or(0),
+            usize::try_from((symbols.get_height)(pixbuf.object)).unwrap_or(0),
+            usize::try_from((symbols.get_rowstride)(pixbuf.object)).unwrap_or(0),
+            usize::try_from((symbols.get_n_channels)(pixbuf.object)).unwrap_or(0),
+            (symbols.get_pixels)(pixbuf.object),
         )
     };
-    packed.ok_or_else(|| DecodeError::Malformed("the decoded rows are inconsistent".to_owned()))
+    if width == 0 || height == 0 || pixels.is_null() || !(3..=4).contains(&channels) {
+        return Err(DecodeError::Malformed(
+            "the decoded image has no pixels".to_owned(),
+        ));
+    }
+    let inconsistent = || DecodeError::Malformed("the decoded rows are inconsistent".to_owned());
+    let row = width.checked_mul(channels).ok_or_else(inconsistent)?;
+    if stride < row {
+        return Err(inconsistent());
+    }
+    let length = stride
+        .checked_mul(height - 1)
+        .and_then(|rows| rows.checked_add(row))
+        .filter(|&length| isize::try_from(length).is_ok())
+        .ok_or_else(inconsistent)?;
+    // SAFETY: `pixels` is non-null and, for a live pixbuf, valid for
+    // `rowstride * (height - 1) + width * channels` bytes; that length was
+    // computed above without overflow and fits in `isize`, with `height`
+    // nonzero and `rowstride` at least one row of `width * channels` bytes.
+    let pixels = unsafe { std::slice::from_raw_parts(pixels, length) };
+    pack_rgba(pixels, width, height, stride, channels).ok_or_else(inconsistent)
 }

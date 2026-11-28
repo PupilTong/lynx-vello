@@ -467,6 +467,10 @@ impl Reader {
                 outputSettings: &*video_settings
             ];
             let video = video.ok_or_else(|| failed("no video output".to_owned()))?;
+            let addable: Bool = msg_send![&*reader, canAddOutput: &*video];
+            if !addable.as_bool() {
+                return Err(failed("the video output cannot be added".to_owned()));
+            }
             let _: () = msg_send![&*reader, addOutput: &*video];
             let audio = match &asset.audio {
                 Some(track) => {

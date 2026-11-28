@@ -234,7 +234,8 @@ fn parse_meta(value: &Value) -> Option<Meta> {
     Some(Meta {
         key: value.get("key")?.as_str()?.to_owned(),
         len: value.get("len")?.as_u64()?,
-        last_used: UNIX_EPOCH + Duration::from_secs(value.get("last_used")?.as_u64()?),
+        last_used: UNIX_EPOCH
+            .checked_add(Duration::from_secs(value.get("last_used")?.as_u64()?))?,
         record: value.get("record")?.clone(),
     })
 }
@@ -476,6 +477,22 @@ mod tests {
         });
         fs::write(dir.file(key, "json"), flat.to_string()).expect("old record");
         fs::write(dir.file(key, "bin"), b"old").expect("old body");
+        assert!(store.scan().expect("scan").is_empty());
+        assert_eq!(fs::read_dir(&dir.0).expect("dir").count(), 0);
+    }
+
+    #[test]
+    fn a_record_whose_last_use_overflows_the_clock_is_corrupt_and_removed_at_scan() {
+        let dir = TempDir::new();
+        let store = FsStore::open(&dir.0).expect("open");
+        let key = "https://a.test/far";
+        let record = json!({
+            "key": key, "len": 3, "last_used": u64::MAX,
+            "record": { "media_type": null, "status": 200, "headers": [], "stored_at": 1 },
+        });
+        fs::write(dir.file(key, "json"), record.to_string()).expect("record");
+        fs::write(dir.file(key, "bin"), b"far").expect("body");
+        assert!(matches!(store.get_meta(key), Err(StoreError::Corrupt(_))));
         assert!(store.scan().expect("scan").is_empty());
         assert_eq!(fs::read_dir(&dir.0).expect("dir").count(), 0);
     }
