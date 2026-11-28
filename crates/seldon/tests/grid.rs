@@ -3815,3 +3815,45 @@ fn a_definite_preferred_size_is_the_content_based_minimum() {
     assert_point(tree.layout(children[0]).location, Point::new(0.0, 0.0));
     assert_point(tree.layout(children[1]).location, Point::new(0.0, 40.0));
 }
+
+#[test]
+fn display_none_child_stays_hidden_at_its_document_order_after_commit() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 10.0, 10.0);
+    let mut hidden_style = fixed_leaf_style(10.0, 10.0);
+    hidden_style.display = Display::None;
+    let hidden = tree.push_leaf(hidden_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let second = fixed_leaf(&mut tree, 10.0, 10.0);
+    let root = tree.push_grid(
+        grid_style(&[px(50.0), px(50.0)], &[px(20.0)]),
+        vec![first, hidden, second],
+    );
+
+    definite_layout(&tree, root, 100.0, 20.0);
+
+    let hidden_mark = tree.with_layout_state(true, |tree, state| {
+        LayoutTree::layout(tree, state, tree.node(hidden)).is_hidden()
+    });
+    assert!(hidden_mark);
+    assert_eq!(tree.layout(hidden), Layout::with_order(1));
+}
+
+#[test]
+fn relative_item_with_left_and_right_uses_right_in_rtl_and_left_in_ltr() {
+    for (direction, expected) in [(direction::T::Ltr, 10.0), (direction::T::Rtl, -20.0)] {
+        let mut tree = TestTree::default();
+        let mut item_style = fixed_leaf_style(20.0, 10.0);
+        item_style.position = PositionProperty::Relative;
+        item_style.inset.left = inset_px(10.0);
+        item_style.inset.right = inset_px(20.0);
+        item_style.direction = direction;
+        let item = tree.push_leaf(item_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+        let mut style = grid_style(&[px(20.0)], &[px(10.0)]);
+        style.direction = direction;
+        let root = tree.push_grid(style, vec![item]);
+
+        definite_layout(&tree, root, 20.0, 10.0);
+
+        assert_point(tree.layout(item).location, Point::new(expected, 0.0));
+    }
+}

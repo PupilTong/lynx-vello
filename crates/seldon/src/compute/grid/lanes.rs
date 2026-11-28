@@ -52,7 +52,7 @@ use super::{
     layout_absolute_items, refresh_item_basis, relative_item_offset, resolve_grid_item,
     span_is_fixed,
 };
-use crate::compute::hide_subtree;
+use crate::compute::hide_child_at_order;
 use crate::compute::single_axis::flow_to_physical;
 use crate::compute::util::{
     accumulate_scrollable_overflow, container_content_independence, is_scroll_container,
@@ -1023,12 +1023,8 @@ where
             tree.set_sticky_containing_block(state, placed.node, sticky_area);
         }
         for (document_index, child) in hidden.expect("commit keeps hidden grid-lanes items") {
-            hide_subtree(tree, state, child);
-            tree.set_unrounded_layout(
-                state,
-                child,
-                Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-            );
+            let order = u32::try_from(document_index).unwrap_or(u32::MAX);
+            hide_child_at_order(tree, state, child, order);
         }
         let stacking_tracks = TrackSet {
             tracks: vec![Track {

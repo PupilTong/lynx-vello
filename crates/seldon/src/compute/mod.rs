@@ -1536,13 +1536,12 @@ fn aligned_margin_box_start(axis: AlignedAxis, subject: f32) -> f32 {
     }
     let imcb_end = imcb_start + imcb_size;
     if subject <= imcb_size {
-        return desired.clamp(imcb_start, imcb_end - subject);
+        return clamp(desired, Some(imcb_start), Some(imcb_end - subject));
     }
     let (limit_start, limit_end) = (limit.0.min(imcb_start), limit.1.max(imcb_end));
     if subject <= limit_end - limit_start {
-        return desired
-            .clamp(imcb_end - subject, imcb_start)
-            .clamp(limit_start, limit_end - subject);
+        let within_imcb = clamp(desired, Some(imcb_end - subject), Some(imcb_start));
+        return clamp(within_imcb, Some(limit_start), Some(limit_end - subject));
     }
     if containing_rtl {
         limit_end - subject
@@ -2214,5 +2213,46 @@ mod tests {
             "end inset": (end) => 67.0;
             "prefer end with both insets": (prefer_end) => 67.0;
         }
+    }
+
+    fn start_aligned_axis(imcb_start: f32, imcb_size: f32, limit: (f32, f32)) -> AlignedAxis {
+        AlignedAxis {
+            imcb_start,
+            imcb_size,
+            alignment: AxisAlignment::of(AlignFlags::START),
+            limit,
+            containing_rtl: false,
+            self_rtl: false,
+            horizontal: true,
+        }
+    }
+
+    #[test]
+    fn a_fitting_subject_survives_bounds_inverted_by_rounding() {
+        let (imcb_start, imcb_size, subject) = (0.1_f32, 100.0, 100.0);
+        assert!(imcb_start + imcb_size - subject < imcb_start);
+        let axis = start_aligned_axis(imcb_start, imcb_size, (imcb_start, imcb_start + imcb_size));
+        assert_eq!(aligned_margin_box_start(axis, subject), imcb_start);
+    }
+
+    #[test]
+    fn an_overflowing_subject_survives_inverted_imcb_bounds() {
+        let (imcb_start, imcb_size, subject) = (1.999_999_9_f32, 0.01, 0.010_000_001);
+        assert!(subject > imcb_size);
+        assert!(imcb_start + imcb_size - subject > imcb_start);
+        let axis = start_aligned_axis(imcb_start, imcb_size, (0.0, 10.0));
+        assert_eq!(
+            aligned_margin_box_start(axis, subject),
+            imcb_start + imcb_size - subject
+        );
+    }
+
+    #[test]
+    fn an_overflowing_subject_survives_inverted_limit_bounds() {
+        let (limit_start, limit_end, subject) = (1986.4_f32, 8127.4, 6141.0);
+        assert!(subject <= limit_end - limit_start);
+        assert!(limit_end - subject < limit_start);
+        let axis = start_aligned_axis(limit_start, 690.42, (limit_start, limit_end));
+        assert_eq!(aligned_margin_box_start(axis, subject), limit_start);
     }
 }
