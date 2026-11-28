@@ -661,7 +661,7 @@ fn wheel_delta_css(delta: MouseScrollDelta, scale_factor: f64) -> (f32, f32) {
 #[allow(
     clippy::cast_possible_truncation,
     reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \
-              16384px target cap are far inside f32's useful range"
+              device texture limit are far inside f32's useful range"
 )]
 fn screen_metrics(monitor: &MonitorHandle) -> ScreenMetrics {
     let size = monitor.size();
@@ -675,7 +675,7 @@ fn screen_metrics(monitor: &MonitorHandle) -> ScreenMetrics {
 #[allow(
     clippy::cast_possible_truncation,
     reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \
-              16384px target cap are far inside f32's useful range"
+              device texture limit are far inside f32's useful range"
 )]
 fn viewport_metrics(size: PhysicalSize<u32>, scale_factor: f64) -> (f32, f32, f32) {
     (

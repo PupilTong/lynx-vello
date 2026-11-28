@@ -21,7 +21,7 @@ import type {
   WheelMessage,
 } from './protocol.d.ts'
 
-const MAX_RENDER_DIMENSION = 16_384
+const MAX_RENDER_DIMENSION = 8_192
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
 const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
 

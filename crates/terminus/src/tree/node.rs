@@ -326,6 +326,11 @@ impl<T> Node<T> {
     }
 
     #[inline]
+    pub(crate) const fn owner(&self) -> ArenaPtr<T> {
+        self.owner
+    }
+
+    #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
         &self.styling
     }

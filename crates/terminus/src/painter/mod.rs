@@ -50,7 +50,7 @@ use crate::clock::ClockInstant;
 use crate::input::{InputEvent, InputKind, PointerId};
 use crate::paint::display_list::{DisplayList, ImageRef, Texture};
 use crate::peniko::Color;
-use crate::render::gpu::Headless;
+use crate::render::gpu::{Headless, SharedGpu};
 use crate::render::image::FrameImages;
 use crate::scroll::{
     AutoScrollRequest, ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain,
@@ -130,7 +130,7 @@ impl FrameSize {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "finite positive values were bounded to 16384 immediately above"
+            reason = "finite positive values were bounded to the device texture limit immediately above"
         )]
         Ok(Self {
             width: physical_width.round().max(1.0) as u32,
@@ -160,7 +160,7 @@ impl fmt::Debug for DrawTarget {
     }
 }
 
-const MAX_RENDER_DIMENSION: u32 = 16_384;
+const MAX_RENDER_DIMENSION: u32 = SharedGpu::LIMITS.max_texture_dimension_2d;
 
 #[derive(Clone)]
 pub struct Screenshot {
@@ -281,6 +281,24 @@ mod clock_tests {
     }
 }
 
+#[cfg(test)]
+mod frame_size_tests {
+    use super::{FrameSize, MAX_RENDER_DIMENSION};
+
+    #[test]
+    fn the_render_target_is_bounded_by_the_device_texture_limit() {
+        assert_eq!(MAX_RENDER_DIMENSION, 8192);
+        let edge = FrameSize::for_viewport(4096.0, 100.0, 2.0).expect("at the limit");
+        assert_eq!((edge.width, edge.height), (8192, 200));
+        let tall = FrameSize::for_viewport(100.0, 8192.0, 1.0).expect("at the limit");
+        assert_eq!(tall.height, 8192);
+        for (width, height, ratio) in [(8193.0, 100.0, 1.0), (100.0, 4097.0, 2.0)] {
+            let error = FrameSize::for_viewport(width, height, ratio).unwrap_err();
+            assert!(error.to_string().contains("8192"), "{error}");
+        }
+    }
+}
+
 const CANVAS: Color = Color::WHITE;
 
 enum Output {
@@ -332,7 +350,7 @@ impl Output {
             reason = "only the test-only target has no stack"
         )
     )]
-    fn gpu(&self) -> Option<&Arc<crate::render::gpu::SharedGpu>> {
+    fn gpu(&self) -> Option<&Arc<SharedGpu>> {
         match self {
             #[cfg(feature = "painter-test-utils")]
             Self::None => None,

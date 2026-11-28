@@ -3395,6 +3395,46 @@ fn the_inert_floor_is_set_only_while_an_entry_blocks_the_document() {
 }
 
 #[test]
+fn a_seam_pass_hit_stops_at_the_inert_floor() {
+    use crate::visual::ScrollSlot;
+
+    let mut h = top_layer_harness(
+        ".scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px; }
+         .card { flex-shrink: 0; width: 200px; height: 200px; }
+         .dialog { left: 400px; top: 400px; width: 50px; height: 50px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let first = h.el(scroller, "view.card");
+    h.el(scroller, "view.card");
+    let dialog = h.el(root, "dialog.modal.dialog");
+    let hit = |frame: &crate::visual::CommittedFrame, x: f32, y: f32| {
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(euclid::default::Vector2D::new(0.0, 300.0))
+        };
+        frame
+            .hit(euclid::default::Point2D::new(x, y), &offset_of, None)
+            .map(|target| target.node)
+    };
+
+    let frame = h.doc.dom.commit();
+    assert_eq!(hit(&frame, 100.0, 150.0), Some(first));
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    let frame = h.doc.dom.commit();
+    assert!(
+        frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize]
+            .wrap_period()
+            .1
+            .is_some()
+    );
+    assert_eq!(hit(&frame, 100.0, 150.0), None);
+    assert_eq!(hit(&frame, 425.0, 425.0), Some(dialog));
+}
+
+#[test]
 fn a_non_blocking_entry_above_a_blocking_one_stays_hit_testable() {
     let mut h = top_layer_harness(
         ".dialog { left: 0; top: 0; width: 100px; height: 100px; }
