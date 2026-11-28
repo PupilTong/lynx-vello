@@ -531,8 +531,11 @@ Rulings and limits to know before touching it:
   exclusive lend and free, the node backpointer deref, `ensure_data`), each
   with a `SAFETY` comment kept honest by
   `#![warn(clippy::undocumented_unsafe_blocks)]`.
-- A `NodeId` is never reissued (no generation counters, no epoch gate on the
-  retained frame) and the document element is permanent and pre-created.
+- A `NodeId` value is never reissued: a freed slab key comes back with the
+  next 21-bit generation, a key with no generation left is retired with a
+  placeholder node (`retire_key`), and a stale id resolves to nothing, so the
+  retained frame needs no epoch gate. The document element is permanent and
+  pre-created.
 - `overflow: auto` stays out (user decision, 2026-07-29) and a `visible` axis
   pairs into `hidden`; only `scroll` is user-scrollable, `hidden` is a scroll
   container only script moves, and `clip` is no container at all. A scroll
